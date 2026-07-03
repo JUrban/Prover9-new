@@ -132,6 +132,15 @@ void setup_timeout_signal(int seconds)
 
   /* Always install SIGTERM handler for graceful shutdown. */
   sigaction(SIGTERM, &sa, NULL);
+
+#ifdef SIGXCPU
+  /* Single-core path: a competition CPU-limit kill arrives as SIGXCPU.
+     timeout_handler maps anything other than SIGTERM to "Timeout", so
+     registering it here makes the single-core prover report a status on
+     a CPU-limit kill instead of dying silently.  (In -cores mode the
+     parent's own death handler overrides this, which is intended.) */
+  sigaction(SIGXCPU, &sa, NULL);
+#endif
 }  /* setup_timeout_signal */
 
 /*************

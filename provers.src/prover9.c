@@ -56,6 +56,42 @@
 #define MAX_CHILD_PIDS 128
 static volatile pid_t Child_pids[MAX_CHILD_PIDS];
 
+/* Async-signal-safe SZS status for the parent death handler.  When the
+   competition infrastructure kills the parent externally (SIGXCPU on the
+   CPU limit, SIGTERM on the wall limit), the parent must still report a
+   status instead of exiting silently.  The line is pre-formatted here in
+   normal context; the signal handler only write()s it (async-safe). */
+static char Death_szs_line[300];
+static volatile sig_atomic_t Death_szs_len   = 0;
+static volatile sig_atomic_t Death_stdout_fd = -1;
+static volatile sig_atomic_t Szs_emitted     = 0;  /* single-status guard */
+
+/* Pre-format the death-handler status line.  Call before the poll loop
+   installs the death handler, once saved_stdout and the problem name are
+   known.  fd is the real stdout (the parent redirects nothing, but a dup
+   is safe).  A non-TPTP run emits no SZS line. */
+static void cores_arm_death_status(int fd, BOOL tptp, const char *pname)
+{
+  Death_stdout_fd = fd;
+  if (tptp) {
+    int n;
+    if (pname && pname[0])
+      n = snprintf(Death_szs_line, sizeof(Death_szs_line),
+                   "\n%% SZS status Timeout for %s\n", pname);
+    else
+      n = snprintf(Death_szs_line, sizeof(Death_szs_line),
+                   "\n%% SZS status Timeout\n");
+    if (n < 0)
+      n = 0;
+    else if (n > (int) sizeof(Death_szs_line))
+      n = (int) sizeof(Death_szs_line);
+    Death_szs_len = n;
+  }
+  else {
+    Death_szs_len = 0;
+  }
+}
+
 static void track_child(pid_t pid)
 {
   int i;
@@ -90,7 +126,17 @@ static void parent_death_handler(int sig)
       kill(Child_pids[i], SIGKILL);
     }
   }
-  _exit(1);
+  /* Report a timeout status so an external kill (CPU/wall limit) is never
+     silent.  Children write to /dev/null, so only the parent emits; the
+     Szs_emitted guard prevents a double status if cores_emit_no_proof was
+     already mid-write.  write() and _exit() are async-signal-safe. */
+  if (!Szs_emitted && Death_szs_len > 0 && Death_stdout_fd >= 0) {
+    ssize_t wr;
+    Szs_emitted = 1;
+    wr = write((int) Death_stdout_fd, Death_szs_line, (size_t) Death_szs_len);
+    (void) wr;
+  }
+  _exit(MAX_SECONDS_EXIT);
 }
 
 static void install_parent_death_handler(void)
@@ -724,6 +770,10 @@ void cores_emit_no_proof(int saved_stdout, int best_code,
   const char *szs;
   FILE *fp;
 
+  /* Claim the single-status slot so a concurrent external-kill signal
+     does not also emit via parent_death_handler. */
+  Szs_emitted = 1;
+
   if (best_code < 0)
     best_code = MAX_SECONDS_EXIT;
 
@@ -1229,6 +1279,9 @@ void cores_search(Prover_input input, const short *ml_ranking,
     setitimer(ITIMER_REAL, &disarm, NULL);
   }
 
+  cores_arm_death_status(saved_stdout, flag(input->options->tptp_output),
+                         input->problem_name);
+
   result = cores_poll_loop(N, order, num_strats, phase1_limit, per_child_sec,
                            saved_stdout, input, NULL,
                            total_time + 2,
@@ -1365,6 +1418,8 @@ void cores_from_scan(Prover_scan_result psr, const short *ml_ranking,
     memset(&disarm, 0, sizeof(disarm));
     setitimer(ITIMER_REAL, &disarm, NULL);
   }
+
+  cores_arm_death_status(saved_stdout, flag(psr->options->tptp_output), pname);
 
   result = cores_poll_loop(N, order, num_strats, phase1_limit, per_child_sec,
                            saved_stdout, NULL, psr,
