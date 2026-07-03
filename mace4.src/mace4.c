@@ -361,6 +361,10 @@ int main(int argc, char **argv)
         Mace4_problem_name = problem_name;
       }
     }
+    /* Also route fatal_error() through SZS, so a bad include / syntax error
+       / unreadable file during scan/parse reports "% SZS status Error for
+       <name>" instead of a bare "Fatal error" with no status line. */
+    set_fatal_tptp_mode(TRUE, Mace4_problem_name);
   }
 
   init_standard_ladr();

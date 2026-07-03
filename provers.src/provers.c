@@ -790,6 +790,30 @@ Prover_input std_prover_init_and_input(int argc, char **argv,
     if (!opts.ladr_out) {
       set_flag(pi->options->tptp_output, FALSE);  // FALSE = no echo
       set_tptp_mode_for_sig();
+      /* Enable SZS output in fatal_error() BEFORE the scan/parse below, so
+         a bad include, syntax error, or unreadable file reports
+         "% SZS status Error for <name>" instead of exiting silently.
+         The name comes from the -f path (known now); the canonical
+         pi->problem_name is set again later with the same value. */
+      {
+        const char *path = opts.tptp_file;
+        char *nm = NULL;
+        if (path != NULL) {
+          const char *base = strrchr(path, '/');
+          int len;
+          base = (base != NULL) ? base + 1 : path;
+          len = (int) strlen(base);
+          if (len >= 2 && strcmp(base + len - 2, ".p") == 0)
+            len -= 2;
+          if (len > 0) {
+            nm = safe_malloc(len + 1);
+            memcpy(nm, base, len);
+            nm[len] = '\0';
+          }
+        }
+        pi->problem_name = nm;
+        set_fatal_tptp_mode(TRUE, nm);
+      }
     }
     set_flag(pi->options->multi_order_trial, FALSE);  // auto-enable for TPTP
 
@@ -1614,8 +1638,32 @@ Prover_scan_result std_prover_init_and_scan(int argc, char **argv)
   process_command_line_args_1(opts, options);
 
   /* Auto-enable TPTP mode flags */
-  if (!opts.ladr_out)
+  if (!opts.ladr_out) {
     set_flag(options->tptp_output, FALSE);
+    set_tptp_mode_for_sig();
+    /* Enable SZS output in fatal_error() BEFORE the scan below, so a bad
+       include / syntax error / unreadable file in this two-phase (-casc)
+       path reports "% SZS status Error for <name>" instead of exiting
+       silently. */
+    {
+      const char *path = opts.tptp_file;
+      char *nm = NULL;
+      if (path != NULL) {
+        const char *base = strrchr(path, '/');
+        int len;
+        base = (base != NULL) ? base + 1 : path;
+        len = (int) strlen(base);
+        if (len >= 2 && strcmp(base + len - 2, ".p") == 0)
+          len -= 2;
+        if (len > 0) {
+          nm = safe_malloc(len + 1);
+          memcpy(nm, base, len);
+          nm[len] = '\0';
+        }
+      }
+      set_fatal_tptp_mode(TRUE, nm);
+    }
+  }
   set_flag(options->multi_order_trial, FALSE);
 
   echo = flag(options->echo_input);
