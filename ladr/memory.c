@@ -18,6 +18,7 @@
 
 #include "memory.h"
 #include "string.h"
+#include "fatal.h"
 #include <unistd.h>
 #include <string.h>
 
@@ -418,10 +419,18 @@ void *alloc_retry_loop(void *(*alloc_func)(size_t), size_t n, const char *func_n
 static
 void *alloc_retry_loop(void *(*alloc_func)(size_t), size_t n, const char *func_name)
 {
+  static char msg[128];
   (void) alloc_func;
   fprintf(stderr, "%s: out of memory (allocation of %lu bytes failed)\n",
           func_name, (unsigned long)n);
-  exit(3);
+  /* Report a status before dying: in TPTP mode fatal_error() prints the
+     SZS line, so a memory-limited competition run is never silent.
+     MemoryOut is the SZS ResourceOut value for memory exhaustion.
+     Nothing on this path allocates. */
+  set_fatal_szs_status("MemoryOut");
+  snprintf(msg, sizeof(msg), "%s: out of memory (%lu bytes)",
+           func_name, (unsigned long) n);
+  fatal_error(msg);
   return NULL;  /* unreachable, silence compiler warning */
 }  /* alloc_retry_loop */
 
