@@ -4002,7 +4002,8 @@ void infer_outside_loop(Topform c)
     cl_process(c);
   }
   else {
-    assign_clause_id(c);
+    if (c->id == 0)   /* see the guard note in the Usable loop */
+      assign_clause_id(c);
     copy->justification->u.id = c->id;
     clist_append(c, Glob.disabled);
     cl_process(copy);  /* This re-simplifies, but that's ok. */
@@ -4738,7 +4739,11 @@ void index_and_process_initial_clauses(void)
 
   for (p = Glob.usable->first; p != NULL; p = p->next) {
     Topform c = p->c;
-    assign_clause_id(c);
+    /* Guard: with -cores the parent runs predicate elimination after
+     clausification, so the shared input can contain derived clauses
+     that already carry IDs; children must not re-assign them (fatal). */
+    if (c->id == 0)
+      assign_clause_id(c);
     mark_maximal_literals(c->literals);
     mark_selected_literals(c->literals, stringparm1(Opt->literal_selection));
     if (flag(Opt->dont_flip_input))
@@ -4765,7 +4770,8 @@ void index_and_process_initial_clauses(void)
 
   for (p = Glob.demods->first; p != NULL; p = p->next) {
     Topform c = p->c;
-    assign_clause_id(c);
+    if (c->id == 0)   /* see the guard note in the Usable loop above */
+      assign_clause_id(c);
     if (flag(Opt->eval_rewrite)) {
       if (c->is_formula) {
 	/* make it into a pseudo-clause */
@@ -4889,7 +4895,8 @@ void index_and_process_initial_clauses(void)
       }
       else {
 	// Simplification occurs, so make it a child of the parent.
-	assign_clause_id(c);
+	if (c->id == 0)   /* see the guard note in the Usable loop */
+	  assign_clause_id(c);
 	new->justification->u.id = c->id;
 	// Copy SInE depth attribute from parent (not inheritable).
 	new->attributes = copy_int_attribute(c->attributes,
