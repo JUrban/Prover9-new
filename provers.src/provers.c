@@ -78,7 +78,9 @@ void clear_checkpoint_request(void) { }
  *   async-signal-safe per POSIX).
  *
  *   SIGALRM -> "Timeout" (exit MAX_SECONDS_EXIT)
- *   SIGTERM -> "User"    (exit SIGTERM_EXIT)
+ *   SIGTERM -> "Timeout" (exit SIGTERM_EXIT) -- the competition
+ *              infrastructure kills with SIGTERM at the wall limit, so in
+ *              TPTP mode it reports Timeout; a user ^C is SIGINT.
  *
  *************/
 
@@ -87,11 +89,11 @@ void timeout_handler(int sig)
 {
   ssize_t wr;
   if (No_kill) { Pending_kill = (sig == SIGTERM ? 2 : 1); return; }
-  if (Tptp_mode_for_sig) {
-    if (sig == SIGTERM)
-      wr = write(STDOUT_FILENO, "\n% SZS status User\n", 19);
-    else
-      wr = write(STDOUT_FILENO, "\n% SZS status Timeout\n", 22);
+  if (Tptp_mode_for_sig && !Szs_line_written) {
+    /* SIGALRM (internal limit) and SIGTERM (external wall-limit kill)
+       both report Timeout. */
+    Szs_line_written = 1;
+    wr = write(STDOUT_FILENO, "\n% SZS status Timeout\n", 22);
     (void) wr;
   }
   _exit(sig == SIGTERM ? SIGTERM_EXIT : MAX_SECONDS_EXIT);
@@ -188,15 +190,20 @@ void clear_no_kill_and_check(void)
   }
 #endif
   if (pk == 2) {
-    if (Tptp_mode_for_sig) {
-      ssize_t wr = write(STDOUT_FILENO, "\n% SZS status User\n", 19);
+    if (Tptp_mode_for_sig && !Szs_line_written) {
+      /* Deferred external SIGTERM (wall-limit kill) -> Timeout. */
+      ssize_t wr;
+      Szs_line_written = 1;
+      wr = write(STDOUT_FILENO, "\n% SZS status Timeout\n", 22);
       (void) wr;
     }
     _exit(SIGTERM_EXIT);
   }
   else if (pk) {
-    if (Tptp_mode_for_sig) {
-      ssize_t wr = write(STDOUT_FILENO, "\n% SZS status Timeout\n", 22);
+    if (Tptp_mode_for_sig && !Szs_line_written) {
+      ssize_t wr;
+      Szs_line_written = 1;
+      wr = write(STDOUT_FILENO, "\n% SZS status Timeout\n", 22);
       (void) wr;
     }
     _exit(MAX_SECONDS_EXIT);
@@ -598,6 +605,20 @@ void prover_sig_handler(int condition)
 {
   static volatile sig_atomic_t in_handler = 0;
 
+  /* A crash must never leave the run silent: report the status FIRST,
+     with only async-signal-safe write(), BEFORE any of the stdio
+     diagnostics below (which can fault again in a corrupted process --
+     observed as a status-less "Segmentation fault" on StarExec).  The
+     shared guard keeps the later exit path from printing a second
+     line. */
+  if ((condition == SIGSEGV || condition == SIGBUS) &&
+      Tptp_mode_for_sig && !Szs_line_written) {
+    ssize_t wr;
+    Szs_line_written = 1;
+    wr = write(STDOUT_FILENO, "\n% SZS status Error\n", 20);
+    (void) wr;
+  }
+
   /* Prevent recursive entry (e.g., SIGSEGV during SIGINT handler) */
   if (in_handler) {
     _exit(condition == SIGSEGV ? SIGSEGV_EXIT : 1);
@@ -837,6 +858,7 @@ Prover_input std_prover_init_and_input(int argc, char **argv,
     if (parm(pi->options->definitional_cnf) == 0)
       assign_parm(pi->options->definitional_cnf, 1000, FALSE);
     set_cnf_def_threshold(parm(pi->options->definitional_cnf));
+    set_mark_clausal_fofs(TRUE);  /* TSTP fof-leaf + clausify(thm) marker */
 
     {
       /* Use command-line -t if given (parm not set until process_command_line_args_2). */
@@ -1683,6 +1705,7 @@ Prover_scan_result std_prover_init_and_scan(int argc, char **argv)
   if (parm(options->definitional_cnf) == 0)
     assign_parm(options->definitional_cnf, 1000, FALSE);
   set_cnf_def_threshold(parm(options->definitional_cnf));
+  set_mark_clausal_fofs(TRUE);  /* TSTP fof-leaf + clausify(thm) marker */
 
   {
     /* Use command-line -t if given (parm not set until later). */

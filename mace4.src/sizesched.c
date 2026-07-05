@@ -70,6 +70,133 @@ static void sizesched_sig_handler(int sig)
   Deadline_hit = 1;
 }
 
+/* ---- Async-safe external-kill reporting --------------------------------
+   The competition infrastructure kills the whole process group with
+   SIGTERM (or SIGXCPU) and follows with SIGKILL after a short grace.
+   With 8 busy children the job's CPU budget is spent at ~1/8 the wall
+   rate, so this arrives long before the internal wall timer.  Deferring
+   the report to the main loop (the Deadline_hit path) loses the race:
+   by the time the loop runs, the SIGKILL may have landed -- that was
+   669 silent no-status outputs in one StarExec run.  Instead everything
+   the handler needs is pre-rendered in normal context, and the handler
+   only kill()s, write()s, and _exit()s (all async-signal-safe).
+   If a best model has been retained it is published (model text +
+   CounterSatisfiable/Satisfiable); otherwise a Timeout line.  A non-TPTP
+   run pre-renders nothing and just exits. */
+
+#define MAX_KIDS_TRACK 64
+static volatile pid_t Sched_kid_pids[MAX_KIDS_TRACK];
+
+static char *Death_buf = NULL;              /* pre-rendered output+status */
+static volatile sig_atomic_t Death_len = 0;
+static char  Death_line[300];               /* pre-rendered status line only */
+static volatile sig_atomic_t Death_line_len = 0;
+static volatile sig_atomic_t Death_exit_code = 0;
+static volatile sig_atomic_t Publish_started = 0;  /* graceful path owns output */
+
+static void sched_track_kid(pid_t pid)
+{
+  int i;
+  for (i = 0; i < MAX_KIDS_TRACK; i++)
+    if (Sched_kid_pids[i] == 0) { Sched_kid_pids[i] = pid; return; }
+}
+
+static void sched_untrack_kid(pid_t pid)
+{
+  int i;
+  for (i = 0; i < MAX_KIDS_TRACK; i++)
+    if (Sched_kid_pids[i] == pid) { Sched_kid_pids[i] = 0; return; }
+}
+
+/* Pre-render what the death handler should write.  model_text == NULL
+   means no model retained yet (render a Timeout line).  Swap order keeps
+   the handler safe at every interleaving: it reads Death_len first, and
+   the pointer is already valid whenever the length is nonzero. */
+static void arm_death_output(String_buf model_text)
+{
+  char *old = Death_buf;
+  char *nb;
+  int n = 0;
+  char line[300];
+  int linelen;
+  const char *szs;
+
+  if (!Mace4_tptp_mode) {
+    Death_len = 0;
+    return;
+  }
+  szs = model_text ? (Mace4_has_goals ? "CounterSatisfiable" : "Satisfiable")
+                   : "Timeout";
+  if (Mace4_problem_name && Mace4_problem_name[0])
+    linelen = snprintf(line, sizeof(line), "\n%% SZS status %s for %s\n",
+                       szs, Mace4_problem_name);
+  else
+    linelen = snprintf(line, sizeof(line), "\n%% SZS status %s\n", szs);
+  if (linelen < 0) linelen = 0;
+  else if (linelen > (int) sizeof(line)) linelen = (int) sizeof(line);
+
+  if (model_text != NULL) {
+    char *mt = sb_to_malloc_string(model_text);
+    int mlen = (int) strlen(mt);
+    nb = safe_malloc(mlen + linelen + 1);
+    memcpy(nb, mt, mlen);
+    memcpy(nb + mlen, line, linelen);
+    n = mlen + linelen;
+    safe_free(mt);
+  }
+  else {
+    nb = safe_malloc(linelen + 1);
+    memcpy(nb, line, linelen);
+    n = linelen;
+  }
+
+  Death_len = 0;          /* handler now skips writing */
+  Death_buf = nb;         /* pointer valid before length is set */
+  Death_len = n;
+  memcpy(Death_line, line, linelen);
+  Death_line_len = linelen;
+  Death_exit_code = model_text ? MAX_MODELS_EXIT : MAX_SEC_NO_EXIT;
+  if (old != NULL)
+    safe_free(old);
+}
+
+/* Retry-safe raw write for the handler. */
+static void death_write(const char *buf, int len)
+{
+  int off = 0;
+  while (off < len) {
+    ssize_t w = write(STDOUT_FILENO, buf + off, (size_t) (len - off));
+    if (w <= 0) break;
+    off += (int) w;
+  }
+}
+
+static void sizesched_death_handler(int sig)
+{
+  int i;
+  (void) sig;
+  for (i = 0; i < MAX_KIDS_TRACK; i++) {
+    if (Sched_kid_pids[i] > 0) {
+      kill(Sched_kid_pids[i], SIGCONT);
+      kill(Sched_kid_pids[i], SIGKILL);
+    }
+  }
+  /* Three states, exactly one status line in every interleaving:
+       (a) publish not started: write the pre-rendered output
+           (model text + status, or the Timeout line);
+       (b) publish under way but the graceful status has not been
+           printed yet (killed mid-relay or before mace4_exit): the
+           model text is partially out -- add ONLY the status line;
+       (c) status already printed by mace4_exit: write nothing. */
+  if (!Mace4_szs_printed) {
+    if (!Publish_started)
+      death_write(Death_buf, (int) Death_len);
+    else
+      death_write(Death_line, (int) Death_line_len);
+  }
+  _exit((int) Death_exit_code);
+}
+
 /* One running child. */
 struct kid {
   pid_t pid;
@@ -147,6 +274,7 @@ static void kill_kid(struct kid *k)
   if (k->pid > 0 && !k->done) {
     kill(k->pid, SIGKILL);
     waitpid(k->pid, NULL, 0);
+    sched_untrack_kid(k->pid);
   }
   if (k->fd >= 0) { close(k->fd); k->fd = -1; }
   k->done = 1;
@@ -172,15 +300,20 @@ Mace_results mace4_parallel(Plist clauses, Mace_options opt, int ncores)
   if (ncores > MAX_KIDS) ncores = MAX_KIDS;
   if (ncores < 1) ncores = 1;
 
-  /* Parent owns the deadline.  mace4.c armed SIGALRM/SIGXCPU from -t /
-     max_seconds; install our handler so they set Deadline_hit instead of
-     calling mace4_exit (which would print from the parent prematurely). */
+  /* Parent owns the deadline.  SIGALRM (our internal wall timer) and
+     SIGINT (interactive) set Deadline_hit and let the main loop publish
+     gracefully.  SIGTERM/SIGXCPU are the competition infrastructure's
+     kill -- typically followed quickly by SIGKILL -- so they must be
+     answered inside the handler (see sizesched_death_handler). */
   signal(SIGALRM, sizesched_sig_handler);
-  signal(SIGTERM, sizesched_sig_handler);
   signal(SIGINT,  sizesched_sig_handler);
+  signal(SIGTERM, sizesched_death_handler);
 #ifdef SIGXCPU
-  signal(SIGXCPU, sizesched_sig_handler);
+  signal(SIGXCPU, sizesched_death_handler);
 #endif
+  memset((void *) Sched_kid_pids, 0, sizeof(Sched_kid_pids));
+  Publish_started = 0;
+  arm_death_output(NULL);   /* Timeout line until a model is retained */
 
   while (!Deadline_hit) {
     /* Launch the smallest still-useful sizes into idle slots. */
@@ -192,6 +325,7 @@ Mace_results mace4_parallel(Plist clauses, Mace_options opt, int ncores)
       int fd = -1;
       pid_t pid = fork_size_child(clauses, next, &fd);
       if (pid < 0) break;                    /* fork failed; try later */
+      sched_track_kid(pid);
       kids[nkids].pid = pid;
       kids[nkids].size = next;
       kids[nkids].fd = fd;
@@ -244,6 +378,7 @@ Mace_results mace4_parallel(Plist clauses, Mace_options opt, int ncores)
       if (w == kids[i].pid) {
         /* Child exited: final drain to capture trailing output. */
         drain_kid(&kids[i]);
+        sched_untrack_kid(kids[i].pid);
         kids[i].exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
         close(kids[i].fd); kids[i].fd = -1;
         kids[i].done = 1;
@@ -259,6 +394,9 @@ Mace_results mace4_parallel(Plist clauses, Mace_options opt, int ncores)
             if (best_text) zap_string_buf(best_text);
             best_text = kids[i].buf;
             kids[i].buf = NULL;              /* ownership moved to best_text */
+            /* Keep the death handler's pre-rendered output current, so an
+               external kill from here on publishes this model. */
+            arm_death_output(best_text);
           }
         }
         else if (code == MACE_CELLS_OVERFLOW_EXIT) {
@@ -306,6 +444,7 @@ Mace_results mace4_parallel(Plist clauses, Mace_options opt, int ncores)
   results->user_seconds = user_seconds() - t0;
 
   if (best_text != NULL) {
+    Publish_started = 1;   /* death handler must not also write */
     /* Relay the winning child's captured model output verbatim.
        Use fprint_sb (walks the chunk list once, O(n)); a per-index
        sb_char loop would be O(n^2) and can take tens of seconds on

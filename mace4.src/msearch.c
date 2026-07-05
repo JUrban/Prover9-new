@@ -37,6 +37,7 @@
 /* TPTP mode globals (set by mace4.c main) */
 
 BOOL  Mace4_tptp_mode = FALSE;
+volatile sig_atomic_t Mace4_szs_printed = 0;  /* one-status guard, see sizesched.c */
 BOOL  Mace4_ladr_output = FALSE;
 BOOL  Mace4_has_goals = FALSE;
 char *Mace4_problem_name = NULL;
@@ -302,7 +303,7 @@ char *mace4_szs_status(int exit_code)
   case MAX_SEC_NO_EXIT:      return "Timeout";
   case MAX_MEGS_NO_EXIT:     return "MemoryOut";
   case MACE_SIGINT_EXIT:     return "User";
-  case MACE_SIGTERM_EXIT:    return "User";
+  case MACE_SIGTERM_EXIT:    return "Timeout";  /* external wall-limit kill */
   case MACE_SIGSEGV_EXIT:    return "Error";
   case MACE_CHECKPOINT_EXIT: return "User";  /* checkpoint is user-initiated */
   default:                   return "Error";
@@ -318,13 +319,17 @@ char *mace4_szs_status(int exit_code)
 void mace4_exit(int exit_code)
 {
   if (Mace4_tptp_mode) {
-    /* SZS status line */
-    const char *szs = mace4_szs_status(exit_code);
-    if (Mace4_problem_name)
-      printf("\n%% SZS status %s for %s\n", szs, Mace4_problem_name);
-    else
-      printf("\n%% SZS status %s\n", szs);
-    fflush(stdout);
+    /* SZS status line -- exactly one per run: the async handlers
+       (mace4.c, sizesched.c) may already have written it. */
+    if (!Mace4_szs_printed) {
+      const char *szs = mace4_szs_status(exit_code);
+      Mace4_szs_printed = 1;
+      if (Mace4_problem_name)
+        printf("\n%% SZS status %s for %s\n", szs, Mace4_problem_name);
+      else
+        printf("\n%% SZS status %s\n", szs);
+      fflush(stdout);
+    }
 
     /* Print memory logging summary if logging was enabled */
     memory_logging_summary(stderr);

@@ -189,6 +189,43 @@ struct child_output {
   char buf[CHILD_OUTPUT_BUFSZ - 4];
 };
 
+#ifndef NO_OPEN_MEMSTREAM
+/* Re-arm the death-handler line with the WINNER's own status line,
+   extracted from its captured output (its status is the last line of the
+   buffer).  From this point a kill landing before or during the relay
+   yields exactly one, correct status: pre-relay or mid-relay the handler
+   writes this line (the buffer's own copy has not been written yet --
+   it is at the very end); after the relay Szs_emitted suppresses the
+   handler entirely.  Falls back to the armed Timeout line if the buffer
+   has no status (non-TPTP run). */
+static void cores_arm_death_from_winner(struct child_output *out)
+{
+  int len = out->output_len;
+  const char *b = out->buf;
+  int i, start = -1, end, n;
+  if (len > (int) sizeof(((struct child_output *)0)->buf))
+    len = (int) sizeof(((struct child_output *)0)->buf);
+  for (i = 0; i + 12 <= len; i++)
+    if (memcmp(b + i, "% SZS status", 12) == 0)
+      start = i;                       /* last occurrence wins */
+  if (start < 0)
+    return;
+  end = start;
+  while (end < len && b[end] != '\n')
+    end++;
+  n = end - start;
+  if (n > (int) sizeof(Death_szs_line) - 3)
+    n = (int) sizeof(Death_szs_line) - 3;
+  Death_szs_len = 0;
+  Death_szs_line[0] = '\n';
+  memcpy(Death_szs_line + 1, b + start, n);
+  Death_szs_line[n + 1] = '\n';
+  Death_szs_len = n + 2;
+}
+
+#endif /* !NO_OPEN_MEMSTREAM */
+
+
 /* Shared-memory progress hints for sleep/wake scheduler.
    One slot per possible child.  128 bytes = 2 Apple Silicon cache lines,
    avoids false sharing between adjacent child slots.
@@ -788,8 +825,9 @@ void cores_emit_no_proof(int saved_stdout, int best_code,
   case MAX_MEGS_EXIT:
     szs = "MemoryOut"; break;
   case SIGINT_EXIT:
-  case SIGTERM_EXIT:
     szs = "User"; break;
+  case SIGTERM_EXIT:
+    szs = "Timeout"; break;   /* external wall-limit kill */
   default:
     szs = "Error"; break;
   }
@@ -1079,8 +1117,11 @@ int cores_poll_loop(int N, int *order, int num_strats, int phase1_limit,
             kill_child(suspended[j].pid);
           n_suspended = 0;
 
-          if (output_shm)
+          if (output_shm) {
+            cores_arm_death_from_winner(&output_shm[i]);
             write_shm_to_fd(&output_shm[i], saved_stdout);
+            Szs_emitted = 1;   /* relay complete: handler adds nothing */
+          }
 
 #ifdef DEBUG
           fprintf(stderr, "%% Cores winner: slot %d (%s)\n",

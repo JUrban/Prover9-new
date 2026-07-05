@@ -1135,6 +1135,18 @@ input formula.  Registered lazily.
 */
 
 /* PUBLIC */
+/* The clausal_fof marker exists solely so TSTP output can emit a
+   documented fof leaf + clausify(thm) step for an already-clausal fof
+   axiom.  It must NOT be attached outside TPTP mode: the attribute
+   prints in native LADR proofs ("# clausal_fof(1)") and downstream
+   LADR consumers (prooftrans) reject unknown attribute names. */
+static BOOL Mark_clausal_fofs = FALSE;
+
+void set_mark_clausal_fofs(BOOL flag)
+{
+  Mark_clausal_fofs = flag;
+}  /* set_mark_clausal_fofs */
+
 int get_clausal_fof_attr(void)
 {
   if (Clausal_fof_attr < 0)
@@ -1167,9 +1179,11 @@ Plist process_input_formulas(Plist formulas, BOOL echo)
     if (clausal_formula(tf->formula)) {
       /* Mark it: this fof axiom is already in clause form, so clausify() is a
          no-op and no fof-leaf + clausify node would otherwise be emitted.  The
-         marker lets TSTP output emit a documented fof leaf + clausify(thm). */
-      tf->attributes = set_int_attribute(tf->attributes,
-					 get_clausal_fof_attr(), 1);
+         marker lets TSTP output emit a documented fof leaf + clausify(thm).
+         TPTP mode only (see Mark_clausal_fofs). */
+      if (Mark_clausal_fofs)
+        tf->attributes = set_int_attribute(tf->attributes,
+					   get_clausal_fof_attr(), 1);
       /* just make it into a clause data structure and use the same Topform */
       tf->literals = formula_to_literals(tf->formula);
       upward_clause_links(tf);

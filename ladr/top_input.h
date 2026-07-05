@@ -84,6 +84,8 @@ Formula find_full_clausification_skolem(int parent_id);
 
 Plist find_full_clausification_skmap(int parent_id);
 
+void set_mark_clausal_fofs(BOOL flag);
+
 int get_clausal_fof_attr(void);
 
 Term read_commands(FILE *fin, FILE *fout, BOOL echo, int unknown_action);

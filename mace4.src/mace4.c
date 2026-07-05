@@ -65,6 +65,71 @@ void init_attrs(void)
 
 /*************
  *
+ *   mace4_async_status()
+ *
+ *   Async-signal-safe SZS status reporting for the signal handler.
+ *   The line is pre-formatted in normal context (mace4_arm_async_status,
+ *   called once the problem name is known); here we only write() it.
+ *   Respects the one-status guard shared with mace4_exit.
+ *
+ *************/
+
+static char Async_szs_line[300];
+static volatile sig_atomic_t Async_szs_len = 0;
+
+void mace4_arm_async_status(void)
+{
+  int n;
+  if (!Mace4_tptp_mode) { Async_szs_len = 0; return; }
+  if (Mace4_problem_name && Mace4_problem_name[0])
+    n = snprintf(Async_szs_line, sizeof(Async_szs_line),
+                 "\n%% SZS status %%s for %s\n", Mace4_problem_name);
+  else
+    n = snprintf(Async_szs_line, sizeof(Async_szs_line),
+                 "\n%% SZS status %%s\n");
+  (void) n;
+  Async_szs_len = 1;  /* armed: format string ready */
+}
+
+static void mace4_async_status(const char *token)
+{
+  /* Substitute the token into the pre-formatted line without snprintf
+     (not async-signal-safe everywhere): find the %s and splice. */
+  char out[340];
+  int oi = 0, i;
+  if (!Mace4_tptp_mode || Mace4_szs_printed)
+    return;
+  Mace4_szs_printed = 1;
+  if (!Async_szs_len) {
+    /* Not armed yet (killed before the problem name was parsed). */
+    const char *fallback = "\n% SZS status ";
+    for (i = 0; fallback[i] && oi < (int) sizeof(out) - 1; i++) out[oi++] = fallback[i];
+    for (i = 0; token[i] && oi < (int) sizeof(out) - 1; i++) out[oi++] = token[i];
+    if (oi < (int) sizeof(out) - 1) out[oi++] = '\n';
+  }
+  else {
+    for (i = 0; Async_szs_line[i] && oi < (int) sizeof(out) - 1; i++) {
+      if (Async_szs_line[i] == '%' && Async_szs_line[i+1] == 's') {
+        int j;
+        for (j = 0; token[j] && oi < (int) sizeof(out) - 1; j++) out[oi++] = token[j];
+        i++;  /* skip the 's' */
+      }
+      else
+        out[oi++] = Async_szs_line[i];
+    }
+  }
+  {
+    int off = 0;
+    while (off < oi) {
+      ssize_t w = write(STDOUT_FILENO, out + off, (size_t) (oi - off));
+      if (w <= 0) break;
+      off += (int) w;
+    }
+  }
+}
+
+/*************
+ *
  *   mace4_sig_handler()
  *
  *************/
@@ -79,10 +144,16 @@ void mace4_sig_handler(int condition)
   switch (condition) {
   case SIGALRM:
     /* Wall-clock timeout -- fires asynchronously regardless of where
-       mace4 is (clausification, propagation, etc.). */
+       mace4 is (clausification, propagation, etc.).  Status first
+       (async-safe); the stats in mace4_exit are best-effort. */
+    mace4_async_status("Timeout");
     mace4_exit(MAX_SEC_NO_EXIT);
     break;
   case SIGSEGV:
+    /* Report the status FIRST with async-safe write() -- the stdio
+       diagnostics below can fault again in a corrupted process and
+       leave the run status-less. */
+    mace4_async_status("Error");
     p_stats();
     mace4_exit(MACE_SIGSEGV_EXIT);
     break;
@@ -91,7 +162,11 @@ void mace4_sig_handler(int condition)
     mace4_exit(MACE_SIGINT_EXIT);
     break;
   case SIGTERM:
-    mace4_exit(MACE_SIGTERM_EXIT);
+    /* External wall-limit kill (competition infrastructure), often
+       followed quickly by SIGKILL: answer inside the handler with
+       async-safe write() only, then exit. */
+    mace4_async_status("Timeout");
+    _exit(MACE_SIGTERM_EXIT);
     break;
   case SIGUSR1:
     p_stats();
@@ -103,7 +178,9 @@ void mace4_sig_handler(int condition)
     break;
 #ifdef SIGXCPU
   case SIGXCPU:
-    mace4_exit(MAX_SEC_NO_EXIT);
+    /* CPU-limit kill: same treatment as SIGTERM. */
+    mace4_async_status("Timeout");
+    _exit(MAX_SEC_NO_EXIT);
     break;
 #endif
   default: fatal_error("mace4_sig_handler, unknown signal");
@@ -359,6 +436,7 @@ int main(int argc, char **argv)
         memcpy(problem_name, base, len);
         problem_name[len] = '\0';
         Mace4_problem_name = problem_name;
+        mace4_arm_async_status();
       }
     }
     /* Also route fatal_error() through SZS, so a bad include / syntax error
@@ -520,16 +598,22 @@ int main(int argc, char **argv)
     goals_list = process_goal_formulas(goals_list, FALSE);
     clauses = plist_cat(assumptions, goals_list);
 
-    /* Check for empty clauses ($false): trivially unsatisfiable */
+    /* Check for empty clauses ($false): trivially unsatisfiable.
+       SZS semantics: with a conjecture present the clause set is
+       Ax + ~C, and its unsatisfiability establishes the THEOREM;
+       "Unsatisfiable" would assert that Ax + C has no model, which is
+       FALSE for a true theorem with consistent axioms.  Only a
+       conjecture-free problem is reported Unsatisfiable. */
     {
       Plist pp;
       for (pp = clauses; pp; pp = pp->next) {
         Topform tf = pp->v;
         if (tf->literals == NULL) {
+          const char *szs = has_goals ? "Theorem" : "Unsatisfiable";
           if (Mace4_problem_name)
-            printf("%% SZS status Unsatisfiable for %s\n", Mace4_problem_name);
+            printf("%% SZS status %s for %s\n", szs, Mace4_problem_name);
           else
-            printf("%% SZS status Unsatisfiable\n");
+            printf("%% SZS status %s\n", szs);
           printf("\n%% Input contains the empty clause ($false).\n");
           exit(0);
         }

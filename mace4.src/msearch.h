@@ -19,6 +19,8 @@
 #define PROGRAM_NAME     "Mace4"
 #include "../VERSION_DATE.h"
 
+#include <signal.h>   /* sig_atomic_t (Mace4_szs_printed) */
+
 /*********************************************** LADR includes */
 
 #include "../ladr/header.h"
@@ -236,6 +238,7 @@ int mace4n_resume(Plist clauses, int order,
 /* TPTP mode globals (set by mace4.c, used by msearch.c and print.c) */
 
 extern BOOL  Mace4_tptp_mode;
+extern volatile sig_atomic_t Mace4_szs_printed;
 extern BOOL  Mace4_ladr_output;  /* -ladr_out: LADR model format with TPTP input */
 extern BOOL  Mace4_has_goals;
 extern char *Mace4_problem_name;

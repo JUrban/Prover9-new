@@ -364,6 +364,7 @@ int main(int argc, char **argv)
   answer_attr = register_attribute("answer", TERM_ATTRIBUTE);
   (void) register_attribute("props", TERM_ATTRIBUTE);
   (void) register_attribute("bsub_hint_wt", INT_ATTRIBUTE);
+  (void) register_attribute("clausal_fof",  INT_ATTRIBUTE);
   (void) register_attribute("action",       TERM_ATTRIBUTE);
   (void) register_attribute("action2",      TERM_ATTRIBUTE);
   (void) register_attribute("sine_depth",   INT_ATTRIBUTE);

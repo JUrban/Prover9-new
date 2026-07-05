@@ -71,6 +71,9 @@ void fprint_all_stats(FILE *fp, char *stats_level);
 
 void print_exit_message(FILE *fp, int code);
 
+#include <signal.h>
+extern volatile sig_atomic_t Szs_line_written;  /* one-status guard */
+
 void exit_with_message(FILE *fp, int code);
 
 void report(FILE *fp, char *level);

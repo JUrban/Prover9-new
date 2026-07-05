@@ -879,8 +879,10 @@ char *szs_status_string(int code)
   case FATAL_EXIT:
     return "Error";
   case SIGINT_EXIT:
-  case SIGTERM_EXIT:
     return "User";
+  case SIGTERM_EXIT:
+    /* External wall-limit kill (competition infrastructure). */
+    return "Timeout";
   case CHECKPOINT_EXIT:
     return "Unknown";
   default:
@@ -2387,17 +2389,26 @@ void fprint_proof_tptp(FILE *fp, Plist proof)
  *************/
 
 /* PUBLIC */
+/* One-SZS-status-line guard, shared with the async signal handlers
+   (provers.c): whoever prints or write()s a status line first sets it,
+   and everyone else checks it, so an interrupted run never emits two
+   status lines (competition graders require exactly one). */
+volatile sig_atomic_t Szs_line_written = 0;
+
 void print_exit_message(FILE *fp, int code)
 {
   int proofs = Glob.initialized ? Stats.proofs : -1;
 
   if (Opt && flag(Opt->tptp_output)) {
     /* TPTP/SZS output mode */
-    if (Glob.problem_name)
-      fprintf(fp, "\n%% SZS status %s for %s\n",
-	      szs_status_string(code), Glob.problem_name);
-    else
-      fprintf(fp, "\n%% SZS status %s\n", szs_status_string(code));
+    if (!Szs_line_written) {
+      Szs_line_written = 1;
+      if (Glob.problem_name)
+        fprintf(fp, "\n%% SZS status %s for %s\n",
+	        szs_status_string(code), Glob.problem_name);
+      else
+        fprintf(fp, "\n%% SZS status %s\n", szs_status_string(code));
+    }
 
     if (!Opt || !flag(Opt->quiet)) {
       fflush(stdout);
