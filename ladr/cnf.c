@@ -1330,6 +1330,22 @@ int and_clause_count(Formula f)
  *
  *************/
 
+/* Replace every occurrence of variable term oldv with constant newv in
+   the atoms of a (quantifier-free) formula.  Used by introduce_definition
+   to move the recorded definition into the named-variable world. */
+static
+Formula subst_var_const_formula(Formula f, Term oldv, Term newv)
+{
+  if (f->type == ATOM_FORM)
+    f->atom = subst_term(f->atom, oldv, newv);
+  else {
+    int i;
+    for (i = 0; i < f->arity; i++)
+      f->kids[i] = subst_var_const_formula(f->kids[i], oldv, newv);
+  }
+  return f;
+}
+
 static
 Formula introduce_definition(Formula sub, Plist *defs)
 {
@@ -1375,9 +1391,35 @@ Formula introduce_definition(Formula sub, Plist *defs)
     iff = formula_get(2, IFF_FORM);
     iff->kids[0] = pos;
     iff->kids[1] = formula_copy(sub);
+    /* Close the record explicitly over seen[].  At this stage of
+       clausification the variables are real VARIABLE terms
+       (remove_universal_quantifiers converted them), so the
+       named-variable helper universal_closure()/free_vars() must NOT
+       be used here: free_vars_term() fatals on VARIABLE nodes, which
+       killed every strategy on problems big enough to arm definitional
+       CNF (StarExec GRP+4/ITP+4 class).  Each variable gets a globally
+       fresh lowercase name from gen_new_symbol, the same convention
+       unique_quantified_vars uses for the recorded NNF/Skolem forms,
+       so emit_definition_leaves' existing x-style-to-X<n> rename
+       handles binder and body occurrences uniformly at print time.
+       sub is quantifier-free here, so there is no capture. */
+    for (v = MAX_VARS - 1; v >= 0; v--) {
+      if (seen[v]) {
+        int vsn = gen_new_symbol("x", 0, NULL);
+        char *vname = sn_to_str(vsn);
+        Term oldv, newv;
+        oldv = get_variable_term(v);
+        newv = get_rigid_term(vname, 0);
+        iff->kids[0]->atom = subst_term(iff->kids[0]->atom, oldv, newv);
+        iff->kids[1] = subst_var_const_formula(iff->kids[1], oldv, newv);
+        iff = get_quant_form(ALL_FORM, vname, iff);
+        zap_term(oldv);
+        zap_term(newv);
+      }
+    }
     r = (struct defn_record *) safe_malloc(sizeof(struct defn_record));
     r->symnum = sn;
-    r->defn = universal_closure(iff);
+    r->defn = iff;
     Defn_records = plist_append(Defn_records, r);
   }
 
