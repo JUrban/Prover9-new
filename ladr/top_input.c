@@ -1013,7 +1013,10 @@ void check_formula_attributes(Formula f)
 
 struct full_cnf {
   int parent_id;
-  Formula conj;   /* conjunction of the universally closed clauses */
+  Formula conj;        /* conjunction of the universally closed clauses (CNF) */
+  Formula nnf_form;    /* NNF form, before Skolemization (thm), or NULL */
+  Formula skolem_form; /* Skolemized form, before CNF distribution (esa), or NULL */
+  Plist skolem_map;    /* Plist of skolemize(Var,Term) record Terms, or NULL */
 };
 
 static Plist Full_cnf_records = NULL;
@@ -1048,7 +1051,9 @@ Formula find_full_clausification(int parent_id)
 }  /* find_full_clausification */
 
 static
-void record_full_clausification(Topform tf, Plist clauses)
+void record_full_clausification(Topform tf, Plist clauses,
+				Formula nnf_form, Formula skolem_form,
+				Plist skolem_map)
 {
   Plist fs = NULL;
   Plist p;
@@ -1060,9 +1065,82 @@ void record_full_clausification(Topform tf, Plist clauses)
   r = (struct full_cnf *) safe_malloc(sizeof(struct full_cnf));
   r->parent_id = tf->id;
   r->conj = formulas_to_conjunction(fs);
+  r->nnf_form = nnf_form;        /* owned by the registry (may be NULL) */
+  r->skolem_form = skolem_form;  /* owned by the registry (may be NULL) */
+  r->skolem_map = skolem_map;    /* owned by the registry (may be NULL) */
   zap_plist(fs);
   Full_cnf_records = plist_append(Full_cnf_records, r);
 }  /* record_full_clausification */
+
+/* DOCUMENTATION
+Return the recorded skolemize(Var,Term) map (a Plist of record Terms) of the
+input formula with the given clause ID, or NULL.  Owned by the registry.
+*/
+
+/* PUBLIC */
+Plist find_full_clausification_skmap(int parent_id)
+{
+  Plist p;
+  for (p = Full_cnf_records; p; p = p->next) {
+    struct full_cnf *r = (struct full_cnf *) p->v;
+    if (r->parent_id == parent_id)
+      return r->skolem_map;
+  }
+  return NULL;
+}  /* find_full_clausification_skmap */
+
+/* DOCUMENTATION
+Return the recorded NNF form (before Skolemization) of the input formula with
+the given clause ID, or NULL.  Owned by the registry; do not zap.
+*/
+
+/* PUBLIC */
+Formula find_full_clausification_nnf(int parent_id)
+{
+  Plist p;
+  for (p = Full_cnf_records; p; p = p->next) {
+    struct full_cnf *r = (struct full_cnf *) p->v;
+    if (r->parent_id == parent_id)
+      return r->nnf_form;
+  }
+  return NULL;
+}  /* find_full_clausification_nnf */
+
+/* DOCUMENTATION
+Return the recorded Skolemized form (before CNF distribution) of the input
+formula with the given clause ID, or NULL.  Owned by the registry; do not zap.
+*/
+
+/* PUBLIC */
+Formula find_full_clausification_skolem(int parent_id)
+{
+  Plist p;
+  for (p = Full_cnf_records; p; p = p->next) {
+    struct full_cnf *r = (struct full_cnf *) p->v;
+    if (r->parent_id == parent_id)
+      return r->skolem_form;
+  }
+  return NULL;
+}  /* find_full_clausification_skolem */
+
+/* Attribute marking a clause that was a CLAUSAL fof input formula (already in
+   clause form, so clausify() is a no-op).  Set on the input Topform so TSTP
+   output can emit a fof leaf + clausify(thm) step rather than a bare cnf leaf
+   citing the file -- an otherwise UNDOCUMENTED fof-to-cnf translation. */
+static int Clausal_fof_attr = -1;
+
+/* DOCUMENTATION
+Return the attribute id used to mark a clause that came from a clausal fof
+input formula.  Registered lazily.
+*/
+
+/* PUBLIC */
+int get_clausal_fof_attr(void)
+{
+  if (Clausal_fof_attr < 0)
+    Clausal_fof_attr = register_attribute("clausal_fof", INT_ATTRIBUTE);
+  return Clausal_fof_attr;
+}  /* get_clausal_fof_attr */
 
 /*************
  *
@@ -1087,6 +1165,11 @@ Plist process_input_formulas(Plist formulas, BOOL echo)
   for (p = formulas; p; p = p->next) {
     Topform tf = p->v;
     if (clausal_formula(tf->formula)) {
+      /* Mark it: this fof axiom is already in clause form, so clausify() is a
+         no-op and no fof-leaf + clausify node would otherwise be emitted.  The
+         marker lets TSTP output emit a documented fof leaf + clausify(thm). */
+      tf->attributes = set_int_attribute(tf->attributes,
+					 get_clausal_fof_attr(), 1);
       /* just make it into a clause data structure and use the same Topform */
       tf->literals = formula_to_literals(tf->formula);
       upward_clause_links(tf);
@@ -1100,9 +1183,11 @@ Plist process_input_formulas(Plist formulas, BOOL echo)
       /* Clausify, collecting new Topforms to be returned. */
       Formula f2;
       Plist clauses, p;
+      Formula nnf_form = NULL, skolem_form = NULL;
+      Plist skolem_map = NULL;
       assign_clause_id(tf);
       f2 = universal_closure(formula_copy(tf->formula));
-      clauses = clausify_formula(f2);
+      clauses = clausify_formula_cap(f2, &nnf_form, &skolem_form, &skolem_map);
       if (clauses == NULL) {
 	if (cnf_timeout_was_hit()) {
 	  set_fatal_szs_status("Timeout");
@@ -1114,7 +1199,8 @@ Plist process_input_formulas(Plist formulas, BOOL echo)
 		      " (exponential CNF blowup)");
 	/* Otherwise the formula simplified to TRUE (0 clauses) -- skip it. */
       }
-      record_full_clausification(tf, clauses);
+      record_full_clausification(tf, clauses, nnf_form, skolem_form,
+				 skolem_map);
       for (p = clauses; p; p = p->next) {
 	Topform c = p->v;
 	c->attributes = copy_attributes(tf->attributes);
@@ -1195,6 +1281,8 @@ Plist process_goal_formulas(Plist formulas, BOOL echo)
     Topform tf = p->v;
     Formula f2;
     Plist clauses, q;
+    Formula nnf_form = NULL, skolem_form = NULL;
+    Plist skolem_map = NULL;
 
     f2 = universal_closure(formula_copy(tf->formula));
 
@@ -1205,7 +1293,7 @@ Plist process_goal_formulas(Plist formulas, BOOL echo)
     }
 
     f2 = negate(f2);
-    clauses = clausify_formula(f2);
+    clauses = clausify_formula_cap(f2, &nnf_form, &skolem_form, &skolem_map);
     if (clauses == NULL) {
       if (cnf_timeout_was_hit()) {
 	set_fatal_szs_status("Timeout");
@@ -1218,7 +1306,8 @@ Plist process_goal_formulas(Plist formulas, BOOL echo)
       /* Otherwise the formula simplified to TRUE (0 clauses) -- skip it. */
     }
     assign_clause_id(tf);
-    record_full_clausification(tf, clauses);
+    record_full_clausification(tf, clauses, nnf_form, skolem_form,
+			       skolem_map);
     for (q = clauses; q; q = q->next) {
       Topform c = q->v;
       c->attributes = copy_attributes(tf->attributes);

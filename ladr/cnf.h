@@ -41,11 +41,16 @@ Formula dnf(Formula f);
 
 Formula skolemize(Formula f);
 
+Formula skolemize_cap(Formula f, Plist *sk_map);
+
 Formula unique_quantified_vars(Formula f);
 
 Formula remove_universal_quantifiers(Formula f);
 
 Formula clausify_prepare(Formula f);
+
+Formula clausify_prepare_cap(Formula f, Formula *nnf_out, Formula *skolem_out,
+			     Plist *skmap_out);
 
 Formula miniscope(Formula f);
 

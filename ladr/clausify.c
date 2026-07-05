@@ -145,12 +145,13 @@ Formula f is not changed.
 */
 
 /* PUBLIC */
-Plist clausify_formula(Formula f)
+Plist clausify_formula_cap(Formula f, Formula *nnf_out, Formula *skolem_out,
+			   Plist *skmap_out)
 {
   Formula g;
   Plist clauses, p;
 
-  g = clausify_prepare(formula_copy(f));
+  g = clausify_prepare_cap(formula_copy(f), nnf_out, skolem_out, skmap_out);
 
   if (g == NULL)
     return NULL;  /* CNF clause limit exceeded */
@@ -163,6 +164,11 @@ Plist clausify_formula(Formula f)
   }
   zap_formula(g);
   return clauses;
+}  /* clausify_formula_cap */
+
+Plist clausify_formula(Formula f)
+{
+  return clausify_formula_cap(f, NULL, NULL, NULL);
 }  /* clausify_formula */
 
 /*************

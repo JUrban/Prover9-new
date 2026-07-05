@@ -829,6 +829,12 @@ Formula dnf(Formula f)
  *
  *************/
 
+/* Accumulator for the existential-var -> Skolem-term map, filled by skolem()
+   while Skolem_map_recording is set (see skolemize_cap).  Single-threaded and
+   non-reentrant: skolemize is never called concurrently or recursively. */
+static Plist Skolem_map_accum = NULL;
+static BOOL Skolem_map_recording = FALSE;
+
 static
 Formula skolem(Formula f, Ilist uvars)
 {
@@ -911,6 +917,15 @@ restart:
       ARG(sk,i) = get_rigid_term(sn_to_str(p->i), 0);
 
     subst_free_var(cur->kids[0], evar, sk);
+    /* Record the existential-variable -> Skolem-term map (var, sk) for the
+       TSTP skolemize(Var, Term) record the ProoVer format / a strict checker
+       needs.  sk is still live here (zapped just below). */
+    if (Skolem_map_recording) {
+      Term rec = get_rigid_term("skolemize", 2);
+      ARG(rec, 0) = get_rigid_term(cur->qvar, 0);
+      ARG(rec, 1) = copy_term(sk);
+      Skolem_map_accum = plist_append(Skolem_map_accum, rec);
+    }
     zap_term(sk);
     zap_term(evar);
 
@@ -992,6 +1007,21 @@ Formula skolemize(Formula f)
   f = skolem(f, NULL);
   return f;
 }  /* skolemize */
+
+/* Like skolemize(), but also returns via *sk_map (may be NULL) a Plist of
+   "skolemize(Var, Term)" record Terms -- the existential-variable-to-Skolem-
+   term map -- for the TSTP skolemize step's inference-info list. */
+Formula skolemize_cap(Formula f, Plist *sk_map)
+{
+  Skolem_map_accum = NULL;
+  Skolem_map_recording = (sk_map != NULL);
+  f = skolem(f, NULL);
+  Skolem_map_recording = FALSE;
+  if (sk_map)
+    *sk_map = Skolem_map_accum;
+  Skolem_map_accum = NULL;
+  return f;
+}  /* skolemize_cap */
 
 /*************
  *
@@ -1533,14 +1563,27 @@ A good way to call is <TT>f = clausify_prepare(f)</TT>
 */
 
 /* PUBLIC */
-Formula clausify_prepare(Formula f)
+Formula clausify_prepare_cap(Formula f, Formula *nnf_out, Formula *skolem_out,
+			     Plist *skmap_out)
 {
   int return_code;
+
+  if (nnf_out)    *nnf_out = NULL;
+  if (skolem_out) *skolem_out = NULL;
+  if (skmap_out)  *skmap_out = NULL;
 
   formula_canon_eq(f);
   f = nnf(f);
   f = unique_quantified_vars(f);
-  f = skolemize(f);
+  /* Capture the NNF form (equivalence-preserving, thm) BEFORE Skolemization,
+     so the TSTP derivation can emit fof_nnf(thm) -> skolemize(esa) -> cnf(thm)
+     as separate documented steps instead of one collapsed clausify(esa) node. */
+  if (nnf_out) *nnf_out = formula_copy(f);
+  f = skolemize_cap(f, skmap_out);
+  /* Capture the Skolemized form (equisatisfiable, esa) with the ACTUAL Skolem
+     symbols, so the skolemize step's body is a PLAIN Skolemization (not the
+     distributed CNF) that a strict structural skolemize check can verify. */
+  if (skolem_out) *skolem_out = formula_copy(f);
   f = remove_universal_quantifiers(f);
   f = formula_flatten(f);
 
@@ -1590,6 +1633,11 @@ Formula clausify_prepare(Formula f)
     f = cnf(f);
   }
   return f;
+}  /* clausify_prepare_cap */
+
+Formula clausify_prepare(Formula f)
+{
+  return clausify_prepare_cap(f, NULL, NULL, NULL);
 }  /* clausify_prepare */
 
 /*************

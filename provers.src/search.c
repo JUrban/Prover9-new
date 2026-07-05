@@ -1445,6 +1445,27 @@ void collect_fresh_symbols_formula(Formula f, Ilist *skolems, Ilist *defs)
   }
 }
 
+/* TRUE if f is ALREADY in CNF -- a conjunction (possibly under universals) of
+   clauses -- so no distribution is needed and split_conjunct can cite the
+   skolemize node directly.  FALSE only when cnf() would DISTRIBUTE (an OR over
+   an AND), which needs a separate cnf_transformation (thm) step.  Robust to the
+   variable-representation and parenthesization differences between the recorded
+   Skolemized form and the clause-built conjunction, which formula_ident is not. */
+static
+BOOL formula_already_cnf(Formula f)
+{
+  if (f->type == ALL_FORM)
+    return formula_already_cnf(f->kids[0]);
+  if (f->type == AND_FORM) {
+    int i;
+    for (i = 0; i < f->arity; i++)
+      if (!formula_already_cnf(f->kids[i]))
+	return FALSE;
+    return TRUE;
+  }
+  return clausal_formula(f);
+}
+
 /* Emit the skolemize node for group g, once.  The body is the input
    formula's COMPLETE clausification (recorded at clausify time), so that
    the conjunction entails the parent even when the proof uses only some
@@ -1453,34 +1474,98 @@ static
 void emit_skolemize_node(FILE *fp, struct sk_group *g)
 {
   Plist p, fs = NULL;
-  Formula conj = NULL;   /* built (owned) fallback conjunction */
-  Formula body;
+  Formula conj = NULL;    /* recorded full clausification (CNF) or fallback */
+  Formula built = NULL;   /* owned fallback conjunction, if we build one */
+  Formula skolem_form;    /* recorded Skolemized form (before CNF), or NULL */
   Ilist skolems = NULL, defs = NULL;
   if (g->emitted)
     return;
-  body = find_full_clausification(g->parent_id);
-  if (body == NULL) {
+  conj = find_full_clausification(g->parent_id);
+  if (conj == NULL) {
     for (p = g->clauses; p; p = p->next) {
       Topform c = (Topform) p->v;
       fs = plist_append(fs, universal_closure(clause_to_formula(c)));
     }
-    conj = formulas_to_conjunction(fs);
-    body = conj;
+    built = formulas_to_conjunction(fs);
+    conj = built;
   }
-  collect_fresh_symbols_formula(body, &skolems, &defs);
-  fprintf(fp, "fof(%s, plain, ", g->skname);
-  fwrite_formula_tptp(fp, body);
-  /* Rule name "clausify" (not "skolemize"): this one step collapses NNF +
-     Skolemization + CNF, so it is a clausification, and "skolemize" would
-     trigger a strict structural skolemize check that the CNF-conjunction
-     body does not match.  As an esa clausify it is verified by the backward
-     direction (conjunction entails the existential parent). */
-  fprintf(fp, ", inference(clausify, [status(esa)");
-  fprint_new_symbols(fp, "skolem", skolems);
-  fprint_new_symbols(fp, "definition", defs);
-  fprintf(fp, "], [%s])).\n", g->parent);
-  if (conj != NULL) {
-    zap_formula(conj);
+  collect_fresh_symbols_formula(conj, &skolems, &defs);
+  skolem_form = find_full_clausification_skolem(g->parent_id);
+
+  /* Preferred (CASC- and checker-compliant): emit the clausification pipeline
+     as SEPARATE documented steps -- skolemize (esa, whose body is a PLAIN
+     Skolemization a strict structural skolemize check can verify) then, when
+     CNF distribution changed anything, cnf_transformation (thm).  This
+     replaces the single collapsed clausify(esa) node that a CASC panel / GDV
+     rejects and that proofcheck could only hedge.  Use the legacy collapsed
+     path only when definitions were introduced (they need co-parent leaves)
+     or the Skolemized form was not recorded. */
+  if (skolem_form != NULL && defs == NULL) {
+    Ilist sk_skolems = NULL, sk_defs = NULL;
+    BOOL need_cnf = (conj != NULL && !formula_already_cnf(skolem_form));
+    char skname_sk[560], nnf_name[560];
+    const char *sk_last;    /* node the split_conjunct clauses cite */
+    const char *sk_parent;  /* node the skolemize step cites (the NNF) */
+    Formula nnf_form = find_full_clausification_nnf(g->parent_id);
+
+    collect_fresh_symbols_formula(skolem_form, &sk_skolems, &sk_defs);
+    if (need_cnf) {
+      snprintf(skname_sk, sizeof(skname_sk), "%s_sk", g->skname);
+      sk_last = skname_sk;
+    } else
+      sk_last = g->skname;
+
+    /* fof_nnf (thm): raw parent -> NNF.  A Skolemization matches the NNF of the
+       parent (existentials explicit, =>/<=> eliminated), NOT the raw axiom, so
+       emit the NNF as a thm step and point the skolemize step at it -- else any
+       axiom needing NNF fails a checker's structural skolemize check. */
+    if (nnf_form != NULL) {
+      snprintf(nnf_name, sizeof(nnf_name), "nnf_%d", g->parent_id);
+      fprintf(fp, "fof(%s, plain, ", nnf_name);
+      fwrite_formula_tptp(fp, nnf_form);
+      fprintf(fp, ", inference(fof_nnf, [status(thm)], [%s])).\n", g->parent);
+      sk_parent = nnf_name;
+    } else
+      sk_parent = g->parent;
+
+    /* skolemize (esa): the one equisatisfiable step, plain Skolemized body */
+    fprintf(fp, "fof(%s, plain, ", sk_last);
+    fwrite_formula_tptp(fp, skolem_form);
+    fprintf(fp, ", inference(skolemize, [status(esa)");
+    fprint_new_symbols(fp, "skolem", sk_skolems);
+    /* skolemize(Var, Term) records: the existential-var -> Skolem-term map, so
+       a strict checker can verify which variable each Skolem term eliminates. */
+    {
+      Plist sm = find_full_clausification_skmap(g->parent_id);
+      Plist mp;
+      for (mp = sm; mp; mp = mp->next) {
+	fprintf(fp, ", ");
+	fwrite_term_tptp(fp, (Term) mp->v);
+      }
+    }
+    fprintf(fp, "], [%s])).\n", sk_parent);
+
+    /* cnf_transformation (thm): equivalence-preserving CNF distribution */
+    if (need_cnf) {
+      fprintf(fp, "fof(%s, plain, ", g->skname);
+      fwrite_formula_tptp(fp, conj);
+      fprintf(fp, ", inference(cnf_transformation, [status(thm)], [%s])).\n",
+	      sk_last);
+    }
+    zap_ilist(sk_skolems);
+    zap_ilist(sk_defs);
+  } else {
+    /* Legacy collapsed node: definitions present, or no recorded Skolem form. */
+    fprintf(fp, "fof(%s, plain, ", g->skname);
+    fwrite_formula_tptp(fp, conj);
+    fprintf(fp, ", inference(clausify, [status(esa)");
+    fprint_new_symbols(fp, "skolem", skolems);
+    fprint_new_symbols(fp, "definition", defs);
+    fprintf(fp, "], [%s])).\n", g->parent);
+  }
+
+  if (built != NULL) {
+    zap_formula(built);
     zap_plist(fs);
   }
   zap_ilist(skolems);
@@ -1700,6 +1785,30 @@ void fprint_clause_tptp(FILE *fp, Topform c, BOOL full_fof)
       (primary_type == INPUT_JUST || primary_type == GOAL_JUST))
     return;
 
+  /* Clausal fof axiom (marked at input time): clausify() was a no-op, so the
+     clause would otherwise be a bare cnf leaf citing the file -- an
+     UNDOCUMENTED fof-to-cnf translation a CASC panel / proofcheck rejects.
+     Emit a fof leaf + a clausify(thm) step instead, so the (trivial)
+     clausification is documented and verifiable. */
+  if (primary_type == INPUT_JUST && tptp_name && !is_fof &&
+      c->literals != NULL &&
+      get_int_attribute(c->attributes, get_clausal_fof_attr(), 1) == 1) {
+    Formula ff = universal_closure(clause_to_formula(c));
+    Term t = topform_to_term_without_attributes(c);
+    fprintf(fp, "fof(%s, axiom, ", qname);
+    fwrite_formula_tptp(fp, ff);
+    fprintf(fp, ", file('%s',%s)).\n", tptp_problem_file(), qname);
+    fprintf(fp, "cnf(c_%llu, plain, ", (unsigned long long) c->id);
+    if (t) {
+      tptp_quote_bad_syms(t);
+      fwrite_term_tptp(fp, t);
+      zap_term(t);
+    }
+    fprintf(fp, ", inference(clausify, [status(thm)], [%s])).\n", qname);
+    zap_formula(ff);
+    return;
+  }
+
   /* A residual FOF formula node still carrying its formula is emitted as a
      named leaf too (the placeholder path above normally handles inputs). */
   BOOL fof_leaf = is_fof && tptp_name != NULL &&
@@ -1851,6 +1960,73 @@ void fprint_clause_tptp(FILE *fp, Topform c, BOOL full_fof)
  *
  *************/
 
+/* --- Output-only Skolem-symbol rename (c-N / f-N  ->  sK-N) ----------------
+   proofcheck/GDV recognize Skolem symbols by NAME pattern (esk, sK, sF
+   prefixes), not the new_symbols() declaration, and reject Prover9's c-N/f-N
+   Skolem names.  is_skolem()
+   is a symbol PROPERTY, so we repoint the proof's terms to fresh sK<n> symbols
+   (also marked Skolem) for the TSTP output ONLY -- the prover's Skolem
+   generation and the LADR-format proof output are untouched. */
+
+static void collect_sk_syms_term(Term t, I2list *info)
+{
+  int i;
+  if (VARIABLE(t)) return;
+  if (is_skolem(SYMNUM(t)) && assoc(*info, SYMNUM(t)) == INT_MIN)
+    *info = i2list_append(*info, SYMNUM(t), ARITY(t));
+  for (i = 0; i < ARITY(t); i++)
+    collect_sk_syms_term(ARG(t,i), info);
+}
+
+static void repoint_sk_term(Term t, I2list map)
+{
+  int i, ns;
+  if (t == NULL || VARIABLE(t)) return;
+  ns = assoc(map, SYMNUM(t));
+  if (ns != INT_MIN)
+    t->private_symbol = -ns;
+  for (i = 0; i < ARITY(t); i++)
+    repoint_sk_term(ARG(t,i), map);
+}
+
+static void repoint_sk_formula(Formula f, I2list map)
+{
+  int i;
+  if (f == NULL) return;
+  if (f->type == ATOM_FORM)
+    repoint_sk_term(f->atom, map);
+  else
+    for (i = 0; i < f->arity; i++)
+      repoint_sk_formula(f->kids[i], map);
+}
+
+/* Allocate a fresh sK<n> for each Skolem symbol in the proof; return the
+   orig-SYMNUM -> new-SYMNUM map (caller zaps), or NULL if none. */
+static I2list build_skolem_rename(Plist expanded)
+{
+  I2list info = NULL, map = NULL, e;
+  Plist p;
+  int n = 0;
+  for (p = expanded; p; p = p->next) {
+    Topform c = (Topform) p->v;
+    Literals lit;
+    for (lit = c->literals; lit != NULL; lit = lit->next)
+      collect_sk_syms_term(lit->atom, &info);
+  }
+  if (info == NULL)
+    return NULL;
+  for (e = info; e; e = e->next) {
+    char nm[32];
+    int newsn;
+    do { snprintf(nm, sizeof(nm), "sK%d", n++); } while (str_exists(nm));
+    newsn = str_to_sn(nm, e->j);   /* e->i = orig SYMNUM, e->j = arity */
+    set_skolem(newsn);
+    map = i2list_append(map, e->i, newsn);
+  }
+  zap_i2list(info);
+  return map;
+}
+
 static
 void fprint_proof_tptp(FILE *fp, Plist proof)
 {
@@ -1881,6 +2057,33 @@ void fprint_proof_tptp(FILE *fp, Plist proof)
   /* Group clausify/deny clauses by their Skolemizing parent, so each such
      group is emitted as one skolemize step + split_conjunct steps. */
   build_sk_groups(expanded);
+
+  /* Rename Prover9 Skolem symbols (c-N / f-N) to the checker-recognized sK-N
+     convention -- TSTP output ONLY.  Repoint the clause terms and the recorded
+     intermediate forms (skolemize-step body, cnf body, skolemize(Var,Term)
+     records); is_skolem() stays true on the new symbols so new_symbols() still
+     declares them. */
+  {
+    I2list sk_map = build_skolem_rename(expanded);
+    if (sk_map != NULL) {
+      Plist g;
+      for (p = expanded; p; p = p->next) {
+	Topform c = (Topform) p->v;
+	Literals lit;
+	for (lit = c->literals; lit != NULL; lit = lit->next)
+	  repoint_sk_term(lit->atom, sk_map);
+      }
+      for (g = Sk_groups; g; g = g->next) {
+	struct sk_group *grp = (struct sk_group *) g->v;
+	Plist mp;
+	repoint_sk_formula(find_full_clausification_skolem(grp->parent_id), sk_map);
+	repoint_sk_formula(find_full_clausification(grp->parent_id), sk_map);
+	for (mp = find_full_clausification_skmap(grp->parent_id); mp; mp = mp->next)
+	  repoint_sk_term((Term) mp->v, sk_map);
+      }
+      zap_i2list(sk_map);
+    }
+  }
 
   /* Detect whether the proof contains FOF entries (axioms or conjectures).
      When it does, fprint_clause_tptp emits the full FOF-to-CNF derivation:

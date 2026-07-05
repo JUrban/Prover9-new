@@ -78,6 +78,14 @@ void set_record_full_clausifications(BOOL flag);
 
 Formula find_full_clausification(int parent_id);
 
+Formula find_full_clausification_nnf(int parent_id);
+
+Formula find_full_clausification_skolem(int parent_id);
+
+Plist find_full_clausification_skmap(int parent_id);
+
+int get_clausal_fof_attr(void);
+
 Term read_commands(FILE *fin, FILE *fout, BOOL echo, int unknown_action);
 
 Plist embed_formulas_in_topforms(Plist formulas, BOOL assumption);

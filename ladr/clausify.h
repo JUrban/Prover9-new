@@ -41,6 +41,9 @@ Plist formula_to_clauses(Formula f);
 
 Plist clausify_formula(Formula f);
 
+Plist clausify_formula_cap(Formula f, Formula *nnf_out, Formula *skolem_out,
+			   Plist *skmap_out);
+
 Formula clause_to_formula(Topform c);
 
 #endif  /* conditional compilation of whole file */
