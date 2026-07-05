@@ -105,7 +105,7 @@ Topform xx_res2(Topform c, int n)
  *************/
 
 static
-void xx_simp2(Topform c, int n)
+BOOL xx_simp2(Topform c, int n)
 {
   Literals lit = ith_literal(c->literals, n);
   Term a = lit->atom;
@@ -116,11 +116,12 @@ void xx_simp2(Topform c, int n)
     lit->atom = NULL;
     c->literals = remove_null_literals(c->literals);
     c->justification = append_just(c->justification, xx_just(n));
+    return TRUE;
   }
   else {
-    printf("\nERROR, literal %d in clause cannot be removed: ", n);
-    fprint_clause(stdout, c);
-    fatal_error("xx_simp2, bad literal");
+    fprintf(stderr, "xx_simp2: literal %d in clause cannot be removed: ", n);
+    fprint_clause(stderr, c);
+    return FALSE;
   }
 }  /* xx_simp2 */
 
@@ -168,7 +169,7 @@ Topform factor(Topform c, int n1, int n2)
  *************/
 
 static
-void merge1(Topform c, int n)
+BOOL merge1(Topform c, int n)
 {
   Literals target = ith_literal(c->literals, n);
   Literals prev = ith_literal(c->literals, n-1);
@@ -181,11 +182,14 @@ void merge1(Topform c, int n)
     else
       lit = lit->next;
   }
-  if (lit == target)
-    fatal_error("merge1, literal does not merge");
+  if (lit == target) {
+    fprintf(stderr, "merge1, literal does not merge\n");
+    return FALSE;
+  }
   prev->next = target->next;
   zap_literal(target);
   c->justification = append_just(c->justification, merge_just(n));
+  return TRUE;
 }  /* merge1 */
 
 /*************
@@ -248,6 +252,10 @@ proof corresponds to the 4th substep in expanding step 23 of the old proof.
 
 Clauses in the new proof that match clauses in the old proof retain
 the IDs from the old proof, and there is no entry in the map for them.
+
+If a replay operation fails or a replayed step does not reproduce the
+recorded clause, NULL is returned (with *pmap set to NULL) and a
+diagnostic goes to stderr; callers should fall back to the given proof.
 */
 
 /* PUBLIC */
@@ -368,9 +376,12 @@ Plist expand_proof(Plist proof, I3list *pmap)
 	    }
 	    resolvent = resolve2(c1, n1, c2, n2, TRUE);
 	    if (resolvent == NULL) {
-	      printf("Lit %d: ",n1); fprint_clause(stdout, c1);
-	      printf("Lit %d: ",n2); fprint_clause(stdout, c2);
-	      fatal_error("expand_step, clauses don't resolve");
+	      fprintf(stderr, "expand_step: Lit %d: ", n1);
+	      fprint_clause(stderr, c1);
+	      fprintf(stderr, "expand_step: Lit %d: ", n2);
+	      fprint_clause(stderr, c2);
+	      fprintf(stderr, "expand_step, clauses don't resolve\n");
+	      goto expand_failed;
 	    }
 	  }
 	  map = alist2_insert(map, next_id, old_id, old_id_n++);
@@ -399,6 +410,10 @@ Plist expand_proof(Plist proof, I3list *pmap)
 	int lit2 = p->next->next->i;
 
 	current = factor(parent, lit1, lit2);
+	if (current == NULL) {
+	  fprintf(stderr, "expand_step, clauses don't factor\n");
+	  goto expand_failed;
+	}
 	map = alist2_insert(map, next_id, old_id, old_id_n++);
 	current->id = next_id++;
 	new_proof = plist_prepend(new_proof, current);
@@ -409,6 +424,10 @@ Plist expand_proof(Plist proof, I3list *pmap)
 	int lit = p->next->i;
 
 	current = xx_res2(parent, lit);
+	if (current == NULL) {
+	  fprintf(stderr, "expand_step, xx resolution does not replay\n");
+	  goto expand_failed;
+	}
 	map = alist2_insert(map, next_id, old_id, old_id_n++);
 	current->id = next_id++;
 	new_proof = plist_prepend(new_proof, current);
@@ -418,12 +437,16 @@ Plist expand_proof(Plist proof, I3list *pmap)
 	/* Assume EQ unit with right side constant. */
 	int sn = SYMNUM(ARG(c->literals->atom,1));
 	current = new_constant(parent, sn);
+	if (current == NULL) {
+	  fprintf(stderr, "expand_step, new_constant does not replay\n");
+	  goto expand_failed;
+	}
 	map = alist2_insert(map, next_id, old_id, old_id_n++);
 	current->id = next_id++;
 	new_proof = plist_prepend(new_proof, current);
       }
       else {
-	printf("expand_step, unknown primary justification\n");
+	fprintf(stderr, "expand_step, unknown primary justification\n");
 	new_proof = plist_prepend(new_proof, copy_clause_ija(c));
       }
 
@@ -445,8 +468,9 @@ Plist expand_proof(Plist proof, I3list *pmap)
 	    Topform work = copy_clause(current);
 	    map = alist2_insert(map, next_id, old_id, old_id_n++);
 	    work->id = next_id++;
-	    particular_demod(work, demod, position, direction,
-			     &from_pos, &into_pos);
+	    if (!particular_demod(work, demod, position, direction,
+				  &from_pos, &into_pos))
+	      goto expand_failed;
 	    work->justification = para_just(PARA_JUST,
 					    demod, from_pos,
 					    current, into_pos);
@@ -465,8 +489,10 @@ Plist expand_proof(Plist proof, I3list *pmap)
 	  map = alist2_insert(map, next_id, old_id, old_id_n++);
 	  current->id = next_id++;
 	  atom = ith_literal(current->literals, n)->atom;
-	  if (!eq_term(atom))
-	    fatal_error("expand_step, cannot flip nonequality");
+	  if (!eq_term(atom)) {
+	    fprintf(stderr, "expand_step, cannot flip nonequality\n");
+	    goto expand_failed;
+	  }
 	  flip_eq(atom, n);  /* updates justification */
 	  new_proof = plist_prepend(new_proof, current);
 #ifdef DEBUG_EXPAND
@@ -479,7 +505,8 @@ Plist expand_proof(Plist proof, I3list *pmap)
 	  current = work;
 	  map = alist2_insert(map, next_id, old_id, old_id_n++);
 	  current->id = next_id++;
-	  merge1(current, n);  /* updates justification */
+	  if (!merge1(current, n))  /* updates justification */
+	    goto expand_failed;
 	  new_proof = plist_prepend(new_proof, current);
 #ifdef DEBUG_EXPAND
 	  printf("merge: "); fprint_clause(stdout, current);
@@ -492,9 +519,12 @@ Plist expand_proof(Plist proof, I3list *pmap)
 	  Topform unit = proof_id_to_clause(proof, p->next->i);
 	  Topform work = resolve2(unit, 1,current, n, TRUE);
 	  if (work == NULL) {
-	    printf("Lit %d: ",n); fprint_clause(stdout, current);
-	    printf("Lit %d: ",1); fprint_clause(stdout, unit);
-	    fatal_error("expand_step, clauses don't unit_del");
+	    fprintf(stderr, "expand_step: Lit %d: ", n);
+	    fprint_clause(stderr, current);
+	    fprintf(stderr, "expand_step: Lit %d: ", 1);
+	    fprint_clause(stderr, unit);
+	    fprintf(stderr, "expand_step, clauses don't unit_del\n");
+	    goto expand_failed;
 	  }
 	  current = work;
 	  map = alist2_insert(map, next_id, old_id, old_id_n++);
@@ -511,7 +541,8 @@ Plist expand_proof(Plist proof, I3list *pmap)
 	  current = work;
 	  map = alist2_insert(map, next_id, old_id, old_id_n++);
 	  current->id = next_id++;
-	  xx_simp2(current,n);
+	  if (!xx_simp2(current,n))
+	    goto expand_failed;
 	  new_proof = plist_prepend(new_proof, current);
 	  xx_simplify++;
 #ifdef DEBUG_EXPAND
@@ -519,7 +550,7 @@ Plist expand_proof(Plist proof, I3list *pmap)
 #endif
 	}
 	else {
-	  printf("expand_step, unknown secondary justification\n");
+	  fprintf(stderr, "expand_step, unknown secondary justification\n");
 	  new_proof = plist_prepend(new_proof, current);
 	}
       }
@@ -534,12 +565,15 @@ Plist expand_proof(Plist proof, I3list *pmap)
 
     /* Okay.  Now current should be identical to c. */
     
-    if (current == c)
-      fatal_error("expand_proof, current == c");
+    if (current == c) {
+      fprintf(stderr, "expand_proof, current == c\n");
+      goto expand_failed;
+    }
     else if (!clause_ident(current->literals, c->literals)) {
-      fprint_clause(stdout, c);
-      fprint_clause(stdout, current);
-      fatal_error("expand step, result is not identical");
+      fprint_clause(stderr, c);
+      fprint_clause(stderr, current);
+      fprintf(stderr, "expand step, result is not identical\n");
+      goto expand_failed;
     }
     else {
       /* Now we undo the numbering of the last substep (including
@@ -563,6 +597,16 @@ Plist expand_proof(Plist proof, I3list *pmap)
   new_proof = reverse_plist(new_proof);
   check_parents_and_uplinks_in_proof(new_proof);
   return new_proof;
+
+ expand_failed:
+  /* An expansion replay diverged from the recorded justification (or a
+     replay operation failed).  Report on stderr and return NULL; callers
+     fall back to the unexpanded proof, whose compound justifications are
+     still well-formed output.  The partially built expansion is abandoned
+     rather than freed: this path is rare and the caller is finishing its
+     proof output. */
+  *pmap = NULL;
+  return NULL;
 }  /* expand_proof */
 
 /*************

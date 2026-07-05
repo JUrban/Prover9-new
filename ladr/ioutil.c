@@ -584,10 +584,10 @@ void sb_tstp_write_clause_jmap(String_buf sb, Topform c, I3list map)
   /* source annotation */
   if (primary_type == INPUT_JUST || promote_to_axiom ||
       promote_to_neg_conj) {
-    sb_append(sb, ", introduced(assumption,[])).\n");
+    sb_append(sb, ", introduced(assumption,[],[])).\n");
   }
   else if (primary_type == GOAL_JUST) {
-    sb_append(sb, ", introduced(conjecture,[])).\n");
+    sb_append(sb, ", introduced(conjecture,[],[])).\n");
   }
   else {
     const char *rule = tptp_rule_name(primary_type);

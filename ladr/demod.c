@@ -629,7 +629,7 @@ and into terms.
 */
 
 /* PUBLIC */
-void particular_demod(Topform c, Topform demodulator, int target, int direction,
+BOOL particular_demod(Topform c, Topform demodulator, int target, int direction,
 		      Ilist *fpos, Ilist *ipos)
 {
   Literals lit;
@@ -641,13 +641,16 @@ void particular_demod(Topform c, Topform demodulator, int target, int direction,
     part_recurse(lit->atom, lit->atom, demodulator, target, direction, &sequence, ipos);
   }
 
-  if (*ipos == NULL)
-    fatal_error("particular_demod, clause not rewritable");
+  if (*ipos == NULL) {
+    fprintf(stderr, "particular_demod, clause not rewritable\n");
+    return FALSE;
+  }
   else {
     *fpos = ilist_prepend(NULL, direction);  /* side of demodulator */
     *fpos = ilist_prepend(*fpos, 1);  /* literal number */
     *ipos = ilist_prepend(*ipos, n);  /* literal number */
     upward_clause_links(c);
+    return TRUE;
   }
 }  /* particular_demod */
 

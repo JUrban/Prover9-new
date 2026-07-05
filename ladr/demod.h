@@ -49,7 +49,7 @@ void demod1(Topform c, Topform demodulator, int direction,
 	    Ilist *fpos, Ilist *ipos,
 	    BOOL lex_order_vars);
 
-void particular_demod(Topform c, Topform demodulator, int target, int direction,
+BOOL particular_demod(Topform c, Topform demodulator, int target, int direction,
 		      Ilist *fpos, Ilist *ipos);
 
 #endif  /* conditional compilation of whole file */

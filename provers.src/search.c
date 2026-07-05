@@ -908,70 +908,100 @@ char *szs_status_string(int code)
  *
  *************/
 
-/* Quote symbol names that aren't valid TPTP identifiers.
+/* Quote ONE symbol occurrence if its name isn't a valid TPTP identifier.
    E.g., + becomes '+', >= becomes '>=', ==> becomes '==>'.
    This also forces arrange_term() to use prefix notation for
    these symbols, since quoted names aren't registered as infix. */
 static
+void tptp_quote_bad_sym_node(Term t)
+{
+  char *s = sn_to_str(SYMNUM(t));
+  /* Restore distinct objects: do_foo -> "foo" */
+  if (is_distinct_object(SYMNUM(t))) {
+    const char *base = s + 3;  /* skip "do_" prefix */
+    int n = strlen(base);
+    char *new_str = safe_malloc(n + 3);
+    new_str[0] = '"';
+    strcpy(new_str + 1, base);
+    new_str[n + 1] = '"';
+    new_str[n + 2] = '\0';
+    int new_sn = str_to_sn(new_str, sn_to_arity(SYMNUM(t)));
+    safe_free(new_str);
+    t->private_symbol = -(new_sn);
+    return;
+  }
+  /* Check if symbol needs quoting: not already quoted, not a $keyword,
+     not a LADR built-in connective (=, |, -, #), and not matching
+     [a-z][a-zA-Z0-9_]* (valid TPTP lower_word). */
+  BOOL bad = FALSE;
+  if (s[0] != '\'' && s[0] != '$' &&
+      strcmp(s, "=") != 0 && strcmp(s, "!=") != 0 &&
+      strcmp(s, "|") != 0 && strcmp(s, "-") != 0 &&
+      strcmp(s, "#") != 0) {
+    if (!(s[0] >= 'a' && s[0] <= 'z'))
+      bad = TRUE;
+    else {
+      int k;
+      for (k = 1; s[k]; k++) {
+        char c = s[k];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '_'))
+          { bad = TRUE; break; }
+      }
+    }
+  }
+  if (bad) {
+    /* Build quoted version: '+' etc. */
+    char *escaped = escape_char(s, '\'');
+    int n = strlen(escaped);
+    char *new_str = safe_malloc(n + 3);
+    new_str[0] = '\'';
+    strcpy(new_str + 1, escaped);
+    new_str[n + 1] = '\'';
+    new_str[n + 2] = '\0';
+    int new_sn = str_to_sn(new_str, sn_to_arity(SYMNUM(t)));
+    safe_free(new_str);
+    safe_free(escaped);
+    t->private_symbol = -(new_sn);
+  }
+}
+
+static
 void tptp_quote_bad_syms(Term t)
 {
   int i;
-  if (t == NULL) return;
-  if (!VARIABLE(t)) {
-    char *s = sn_to_str(SYMNUM(t));
-    /* Restore distinct objects: do_foo -> "foo" */
-    if (is_distinct_object(SYMNUM(t))) {
-      const char *base = s + 3;  /* skip "do_" prefix */
-      int n = strlen(base);
-      char *new_str = safe_malloc(n + 3);
-      new_str[0] = '"';
-      strcpy(new_str + 1, base);
-      new_str[n + 1] = '"';
-      new_str[n + 2] = '\0';
-      int new_sn = str_to_sn(new_str, sn_to_arity(SYMNUM(t)));
-      safe_free(new_str);
-      t->private_symbol = -(new_sn);
-      for (i = 0; i < ARITY(t); i++)
-        tptp_quote_bad_syms(ARG(t, i));
-      return;
-    }
-    /* Check if symbol needs quoting: not already quoted, not a $keyword,
-       not a LADR built-in connective (=, |, -, #), and not matching
-       [a-z][a-zA-Z0-9_]* (valid TPTP lower_word). */
-    BOOL bad = FALSE;
-    if (s[0] != '\'' && s[0] != '$' &&
-        strcmp(s, "=") != 0 && strcmp(s, "!=") != 0 &&
-        strcmp(s, "|") != 0 && strcmp(s, "-") != 0 &&
-        strcmp(s, "#") != 0) {
-      if (!(s[0] >= 'a' && s[0] <= 'z'))
-        bad = TRUE;
-      else {
-        int k;
-        for (k = 1; s[k]; k++) {
-          char c = s[k];
-          if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                (c >= '0' && c <= '9') || c == '_'))
-            { bad = TRUE; break; }
-        }
-      }
-    }
-    if (bad) {
-      /* Build quoted version: '+' etc. */
-      char *escaped = escape_char(s, '\'');
-      int n = strlen(escaped);
-      char *new_str = safe_malloc(n + 3);
-      new_str[0] = '\'';
-      strcpy(new_str + 1, escaped);
-      new_str[n + 1] = '\'';
-      new_str[n + 2] = '\0';
-      int new_sn = str_to_sn(new_str, sn_to_arity(SYMNUM(t)));
-      safe_free(new_str);
-      safe_free(escaped);
-      t->private_symbol = -(new_sn);
-    }
-    for (i = 0; i < ARITY(t); i++)
-      tptp_quote_bad_syms(ARG(t, i));
-  }
+  if (t == NULL || VARIABLE(t))
+    return;
+  tptp_quote_bad_sym_node(t);
+  for (i = 0; i < ARITY(t); i++)
+    tptp_quote_bad_syms(ARG(t, i));
+}
+
+/* TRUE if s is the name of one of the quantified variables in names. */
+static
+BOOL qvar_name_member(Plist names, const char *s)
+{
+  Plist p;
+  for (p = names; p; p = p->next)
+    if (str_ident((char *) p->v, (char *) s))
+      return TRUE;
+  return FALSE;
+}
+
+/* Like tptp_quote_bad_syms, but skip arity-0 terms whose name is a
+   quantified variable of the enclosing formula: in a Formula atom a bound
+   variable is an arity-0 rigid term, indistinguishable from a constant
+   except by its enclosing quantifier, and it must print unquoted. */
+static
+void tptp_quote_bad_syms_skip_qvars(Term t, Plist qvars)
+{
+  int i;
+  if (t == NULL || VARIABLE(t))
+    return;
+  if (!(ARITY(t) == 0 && qvar_name_member(qvars, sn_to_str(SYMNUM(t)))))
+    tptp_quote_bad_sym_node(t);
+  for (i = 0; i < ARITY(t); i++)
+    tptp_quote_bad_syms_skip_qvars(ARG(t, i), qvars);
 }
 
 static
@@ -1027,50 +1057,72 @@ void fwrite_term_tptp(FILE *fp, Term t)
  *************/
 
 static
-void fwrite_formula_tptp(FILE *fp, Formula f);   /* forward decl */
+void fwrite_formula_tptp2(FILE *fp, Formula f, Plist qvars);   /* forward decl */
+
+/* Collect the quantified-variable names of f (interned strings, no
+   duplicates) so the atom printer can tell variables from constants. */
+static
+void collect_qvar_names(Formula f, Plist *names)
+{
+  int i;
+  if (f == NULL)
+    return;
+  if (quant_form(f) && !qvar_name_member(*names, f->qvar))
+    *names = plist_append(*names, f->qvar);
+  for (i = 0; i < f->arity; i++)
+    collect_qvar_names(f->kids[i], names);
+}
 
 /* Flatten a nested same-type disjunction/conjunction while printing, so a
    left-nested OR/AND tree prints as the canonical flat (a | b | c) rather
    than ((a | b) | c).  Operands of a different type print via
-   fwrite_formula_tptp, which parenthesizes binary connectives as needed. */
+   fwrite_formula_tptp2, which parenthesizes binary connectives as needed. */
 static
-void fwrite_disj_operands(FILE *fp, Formula f, BOOL *first)
+void fwrite_disj_operands(FILE *fp, Formula f, BOOL *first, Plist qvars)
 {
   if (f->type == OR_FORM) {
     int i;
     for (i = 0; i < f->arity; i++)
-      fwrite_disj_operands(fp, f->kids[i], first);
+      fwrite_disj_operands(fp, f->kids[i], first, qvars);
   }
   else {
     if (!*first) fprintf(fp, " | ");
     *first = FALSE;
-    fwrite_formula_tptp(fp, f);
+    fwrite_formula_tptp2(fp, f, qvars);
   }
 }
 
 static
-void fwrite_conj_operands(FILE *fp, Formula f, BOOL *first)
+void fwrite_conj_operands(FILE *fp, Formula f, BOOL *first, Plist qvars)
 {
   if (f->type == AND_FORM) {
     int i;
     for (i = 0; i < f->arity; i++)
-      fwrite_conj_operands(fp, f->kids[i], first);
+      fwrite_conj_operands(fp, f->kids[i], first, qvars);
   }
   else {
     if (!*first) fprintf(fp, " & ");
     *first = FALSE;
-    fwrite_formula_tptp(fp, f);
+    fwrite_formula_tptp2(fp, f, qvars);
   }
 }
 
-void fwrite_formula_tptp(FILE *fp, Formula f)
+static
+void fwrite_formula_tptp2(FILE *fp, Formula f, Plist qvars)
 {
   if (f->type == ATOM_FORM) {
-    fwrite_term_tptp(fp, f->atom);
+    /* Print via a copy with non-TPTP symbol names quoted ('+', '0', ...);
+       quantified variables are skipped (they must print unquoted).  Quoting
+       repoints to fresh symbols with no parse type, so quoted operators
+       also print in prefix form. */
+    Term a = copy_term(f->atom);
+    tptp_quote_bad_syms_skip_qvars(a, qvars);
+    fwrite_term_tptp(fp, a);
+    zap_term(a);
   }
   else if (f->type == NOT_FORM) {
     fprintf(fp, "~ (");
-    fwrite_formula_tptp(fp, f->kids[0]);
+    fwrite_formula_tptp2(fp, f->kids[0], qvars);
     fprintf(fp, ")");
   }
   else if (f->type == AND_FORM) {
@@ -1079,7 +1131,7 @@ void fwrite_formula_tptp(FILE *fp, Formula f)
     else {
       BOOL first = TRUE;
       fprintf(fp, "(");
-      fwrite_conj_operands(fp, f, &first);
+      fwrite_conj_operands(fp, f, &first, qvars);
       fprintf(fp, ")");
     }
   }
@@ -1089,29 +1141,29 @@ void fwrite_formula_tptp(FILE *fp, Formula f)
     else {
       BOOL first = TRUE;
       fprintf(fp, "(");
-      fwrite_disj_operands(fp, f, &first);
+      fwrite_disj_operands(fp, f, &first, qvars);
       fprintf(fp, ")");
     }
   }
   else if (f->type == IMP_FORM) {
     fprintf(fp, "(");
-    fwrite_formula_tptp(fp, f->kids[0]);
+    fwrite_formula_tptp2(fp, f->kids[0], qvars);
     fprintf(fp, " => ");
-    fwrite_formula_tptp(fp, f->kids[1]);
+    fwrite_formula_tptp2(fp, f->kids[1], qvars);
     fprintf(fp, ")");
   }
   else if (f->type == IMPBY_FORM) {
     fprintf(fp, "(");
-    fwrite_formula_tptp(fp, f->kids[1]);
+    fwrite_formula_tptp2(fp, f->kids[1], qvars);
     fprintf(fp, " => ");
-    fwrite_formula_tptp(fp, f->kids[0]);
+    fwrite_formula_tptp2(fp, f->kids[0], qvars);
     fprintf(fp, ")");
   }
   else if (f->type == IFF_FORM) {
     fprintf(fp, "(");
-    fwrite_formula_tptp(fp, f->kids[0]);
+    fwrite_formula_tptp2(fp, f->kids[0], qvars);
     fprintf(fp, " <=> ");
-    fwrite_formula_tptp(fp, f->kids[1]);
+    fwrite_formula_tptp2(fp, f->kids[1], qvars);
     fprintf(fp, ")");
   }
   else if (f->type == ALL_FORM) {
@@ -1128,7 +1180,7 @@ void fwrite_formula_tptp(FILE *fp, Formula f)
       body = body->kids[0];
     }
     fprintf(fp, "] : ");
-    fwrite_formula_tptp(fp, body);
+    fwrite_formula_tptp2(fp, body, qvars);
   }
   else if (f->type == EXISTS_FORM) {
     /* Collect consecutive existential quantifiers (see ALL_FORM). */
@@ -1142,8 +1194,19 @@ void fwrite_formula_tptp(FILE *fp, Formula f)
       body = body->kids[0];
     }
     fprintf(fp, "] : ");
-    fwrite_formula_tptp(fp, body);
+    fwrite_formula_tptp2(fp, body, qvars);
   }
+}
+
+/* Print a Formula in TPTP syntax (see fwrite_formula_tptp2), quoting
+   non-TPTP symbol names but never the formula's own quantified variables. */
+static
+void fwrite_formula_tptp(FILE *fp, Formula f)
+{
+  Plist qvars = NULL;
+  collect_qvar_names(f, &qvars);
+  fwrite_formula_tptp2(fp, f, qvars);
+  zap_plist(qvars);
 }
 
 /*************
@@ -1219,9 +1282,10 @@ void collect_fresh_symbols(Term t, Ilist *skolems, Ilist *defs)
     if (!ilist_member(*skolems, sn))
       *skolems = ilist_append(*skolems, sn);
   }
-  else {
-    char *nm = sn_to_str(sn);
-    if (nm != NULL && strncmp(nm, "defn_", 5) == 0 && !ilist_member(*defs, sn))
+  else if (find_introduced_definition(sn) != NULL) {
+    /* A recorded introduced definition -- a name test would also catch
+       problem symbols that happen to start with defn_. */
+    if (!ilist_member(*defs, sn))
       *defs = ilist_append(*defs, sn);
   }
   for (i = 0; i < ARITY(t); i++)
@@ -1277,6 +1341,8 @@ void fprint_clausify_status(FILE *fp, Topform c, const char *st)
 }
 
 static void make_neg_name(char *buf, size_t bufsz, const char *tptp_name);
+static void emit_definition_leaves(FILE *fp, Ilist syms);
+static void rename_bad_qvars_formula(Formula f, I2list *map);
 
 /*************
  *
@@ -1498,11 +1564,13 @@ void emit_skolemize_node(FILE *fp, struct sk_group *g)
      CNF distribution changed anything, cnf_transformation (thm).  This
      replaces the single collapsed clausify(esa) node that a CASC panel / GDV
      rejects and that proofcheck could only hedge.  Use the legacy collapsed
-     path only when definitions were introduced (they need co-parent leaves)
-     or the Skolemized form was not recorded. */
-  if (skolem_form != NULL && defs == NULL) {
+     path only when the Skolemized form was not recorded. */
+  if (skolem_form != NULL) {
     Ilist sk_skolems = NULL, sk_defs = NULL;
-    BOOL need_cnf = (conj != NULL && !formula_already_cnf(skolem_form));
+    /* Definitional (Tseitin) predicates are introduced during distribution,
+       so their presence means distribution changed something. */
+    BOOL need_cnf = (conj != NULL &&
+                     (defs != NULL || !formula_already_cnf(skolem_form)));
     char skname_sk[560], nnf_name[560];
     const char *sk_last;    /* node the split_conjunct clauses cite */
     const char *sk_parent;  /* node the skolemize step cites (the NNF) */
@@ -1545,17 +1613,29 @@ void emit_skolemize_node(FILE *fp, struct sk_group *g)
     }
     fprintf(fp, "], [%s])).\n", sk_parent);
 
-    /* cnf_transformation (thm): equivalence-preserving CNF distribution */
+    /* cnf_transformation (thm): equivalence-preserving CNF distribution.
+       Definitional clauses are not consequences of the Skolemized form
+       alone, so each introduced definition is emitted as an
+       introduced(definition) leaf and cited as a co-parent, keeping the
+       step thm. */
     if (need_cnf) {
+      if (defs != NULL)
+        emit_definition_leaves(fp, defs);
       fprintf(fp, "fof(%s, plain, ", g->skname);
       fwrite_formula_tptp(fp, conj);
-      fprintf(fp, ", inference(cnf_transformation, [status(thm)], [%s])).\n",
+      fprintf(fp, ", inference(cnf_transformation, [status(thm)], [%s",
 	      sk_last);
+      {
+        Ilist q;
+        for (q = defs; q; q = q->next)
+          fprintf(fp, ", def_%s", sn_to_str(q->i));
+      }
+      fprintf(fp, "])).\n");
     }
     zap_ilist(sk_skolems);
     zap_ilist(sk_defs);
   } else {
-    /* Legacy collapsed node: definitions present, or no recorded Skolem form. */
+    /* Legacy collapsed node: no recorded Skolem form. */
     fprintf(fp, "fof(%s, plain, ", g->skname);
     fwrite_formula_tptp(fp, conj);
     fprintf(fp, ", inference(clausify, [status(esa)");
@@ -1623,12 +1703,23 @@ void emit_definition_leaves(FILE *fp, Ilist syms)
   Ilist q;
   for (q = syms; q; q = q->next) {
     char *nm;
+    Formula defn;
     if (ilist_member(Emitted_defn_syms, q->i))
       continue;
     nm = sn_to_str(q->i);
+    defn = find_introduced_definition(q->i);
+    /* The stored definition can quantify clausify-renamed (x0-style)
+       variables; rename them to valid TPTP variables before printing. */
+    {
+      I2list qm = NULL;
+      rename_bad_qvars_formula(defn, &qm);
+      if (qm != NULL)
+        zap_i2list(qm);
+    }
     fprintf(fp, "fof(def_%s, definition, ", nm);
-    fwrite_formula_tptp(fp, find_introduced_definition(q->i));
-    fprintf(fp, ", introduced(definition, [new_symbols(definition, [%s])])).\n",
+    fwrite_formula_tptp(fp, defn);
+    fprintf(fp,
+            ", introduced(definition, [new_symbols(definition, [%s])], [])).\n",
             nm);
     Emitted_defn_syms = ilist_append(Emitted_defn_syms, q->i);
     if (!ilist_member(Declared_fresh_syms, q->i))
@@ -1857,9 +1948,9 @@ void fprint_clause_tptp(FILE *fp, Topform c, BOOL full_fof)
     if (tptp_name)
       fprintf(fp, ", file('%s',%s)).\n", tptp_problem_file(), qname);
     else if (primary_type == GOAL_JUST)
-      fprintf(fp, ", introduced(conjecture,[])).\n");
+      fprintf(fp, ", introduced(conjecture,[],[])).\n");
     else
-      fprintf(fp, ", introduced(assumption,[])).\n");
+      fprintf(fp, ", introduced(assumption,[],[])).\n");
   }
   else if (primary_type == CLAUSIFY_JUST) {
     /* If this clause is part of a Skolemizing group, its skolemize node was
@@ -2000,18 +2091,107 @@ static void repoint_sk_formula(Formula f, I2list map)
       repoint_sk_formula(f->kids[i], map);
 }
 
+/* --- Output-only bound-variable rename (x<n> -> fresh upper word) ----------
+   unique_quantified_vars() (cnf.c) renames clashing quantified variables to
+   x0, x1, ... during clausification, and those names survive in the recorded
+   NNF / Skolemized forms, the skolemize(Var,Term) records, and introduced
+   definitions.  A lower_word is not a TPTP <variable>, so an emitted fof
+   body quantifying one would be ill-formed.  Rename each such variable to a
+   fresh upper word (X<n>), consistently across a group's recorded forms, at
+   TSTP-emit time only. */
+
+/* TRUE if s is a syntactically valid TPTP variable: [A-Z][a-zA-Z0-9_]* */
+static
+BOOL tptp_valid_var_name(const char *s)
+{
+  int k;
+  if (s == NULL || !(s[0] >= 'A' && s[0] <= 'Z'))
+    return FALSE;
+  for (k = 1; s[k]; k++) {
+    char c = s[k];
+    if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+          (c >= '0' && c <= '9') || c == '_'))
+      return FALSE;
+  }
+  return TRUE;
+}
+
+/* The (fresh upper word) rename target for old_sn, added to *map if new. */
+static
+int bad_qvar_target(I2list *map, int old_sn)
+{
+  int ns = assoc(*map, old_sn);
+  if (ns == INT_MIN) {
+    char nm[32];
+    int n = 0;
+    do { snprintf(nm, sizeof(nm), "X%d", n++); } while (str_exists(nm));
+    ns = str_to_sn(nm, 0);
+    *map = i2list_append(*map, old_sn, ns);
+  }
+  return ns;
+}
+
+/* Rename TPTP-invalid quantified variables of f to fresh upper words,
+   extending *map (old SYMNUM -> new SYMNUM) so the same variable renames
+   identically across the recorded forms it appears in.  Quantified names
+   are unique within a recorded formula (unique_quantified_vars) and
+   globally fresh, so occurrences can be repointed by symbol alone. */
+static
+void rename_bad_qvars_formula(Formula f, I2list *map)
+{
+  int i;
+  if (f == NULL)
+    return;
+  if (f->type == ATOM_FORM) {
+    repoint_sk_term(f->atom, *map);
+    return;
+  }
+  if (quant_form(f) && !tptp_valid_var_name(f->qvar)) {
+    int old_sn = str_to_sn(f->qvar, 0);
+    f->qvar = sn_to_str(bad_qvar_target(map, old_sn));
+  }
+  for (i = 0; i < f->arity; i++)
+    rename_bad_qvars_formula(f->kids[i], map);
+}
+
+static void collect_sk_syms_formula(Formula f, I2list *info)
+{
+  int i;
+  if (f == NULL) return;
+  if (f->type == ATOM_FORM)
+    collect_sk_syms_term(f->atom, info);
+  else
+    for (i = 0; i < f->arity; i++)
+      collect_sk_syms_formula(f->kids[i], info);
+}
+
 /* Allocate a fresh sK<n> for each Skolem symbol in the proof; return the
-   orig-SYMNUM -> new-SYMNUM map (caller zaps), or NULL if none. */
+   orig-SYMNUM -> new-SYMNUM map (caller zaps), or NULL if none.  Symbols
+   are collected from the proof clauses AND from the groups' recorded
+   Skolemized / complete-clausification forms and skolemize(Var,Term)
+   records: the skolemize node body is the COMPLETE clausification, so it
+   can contain Skolem symbols that occur in no proof clause, and an
+   unrenamed one would print under its internal c<n>/f<n> name --
+   indistinguishable from a problem constant. */
 static I2list build_skolem_rename(Plist expanded)
 {
   I2list info = NULL, map = NULL, e;
-  Plist p;
+  Plist p, g;
   int n = 0;
   for (p = expanded; p; p = p->next) {
     Topform c = (Topform) p->v;
     Literals lit;
     for (lit = c->literals; lit != NULL; lit = lit->next)
       collect_sk_syms_term(lit->atom, &info);
+  }
+  for (g = Sk_groups; g; g = g->next) {
+    struct sk_group *grp = (struct sk_group *) g->v;
+    Plist mp;
+    collect_sk_syms_formula(find_full_clausification_skolem(grp->parent_id),
+			    &info);
+    collect_sk_syms_formula(find_full_clausification(grp->parent_id), &info);
+    for (mp = find_full_clausification_skmap(grp->parent_id); mp; mp = mp->next)
+      collect_sk_syms_term((Term) mp->v, &info);
   }
   if (info == NULL)
     return NULL;
@@ -2053,6 +2233,11 @@ void fprint_proof_tptp(FILE *fp, Plist proof)
      make compound steps un-verifiable. */
   I3list jmap = NULL;
   Plist expanded = expand_proof(proof, &jmap);
+  if (expanded == NULL)
+    /* Replay failure (see expand_proof): print the original steps.
+       Compound justifications stay collapsed, but the output is complete
+       and well-formed. */
+    expanded = proof;
 
   /* Group clausify/deny clauses by their Skolemizing parent, so each such
      group is emitted as one skolemize step + split_conjunct steps. */
@@ -2081,8 +2266,53 @@ void fprint_proof_tptp(FILE *fp, Plist proof)
 	for (mp = find_full_clausification_skmap(grp->parent_id); mp; mp = mp->next)
 	  repoint_sk_term((Term) mp->v, sk_map);
       }
+      /* Introduced definitions can name subformulas containing Skolem
+	 terms (definitional renaming runs after Skolemization), so their
+	 recorded bodies need the same repointing.  Their symbols are
+	 collected from each group's recorded full clausification: a proof
+	 can cite a definition leaf whose predicate occurs in no proof
+	 clause (the complete-clausification cnf body cites it). */
+      for (g = Sk_groups; g; g = g->next) {
+	struct sk_group *grp = (struct sk_group *) g->v;
+	Ilist sks = NULL, dfs = NULL, q;
+	collect_fresh_symbols_formula(find_full_clausification(grp->parent_id),
+				      &sks, &dfs);
+	for (q = dfs; q; q = q->next)
+	  repoint_sk_formula(find_introduced_definition(q->i), sk_map);
+	zap_ilist(sks);
+	zap_ilist(dfs);
+      }
+      /* Definitional clauses outside a Skolemizing group cite definition
+	 leaves too; collect their symbols from the proof clauses. */
+      for (p = expanded; p; p = p->next) {
+	Ilist ds = clause_defn_syms((Topform) p->v);
+	Ilist q;
+	for (q = ds; q; q = q->next)
+	  repoint_sk_formula(find_introduced_definition(q->i), sk_map);
+	zap_ilist(ds);
+      }
       zap_i2list(sk_map);
     }
+  }
+
+  /* Rename TPTP-invalid bound variable names (x0-style, introduced by
+     unique_quantified_vars) in the recorded NNF / Skolemized forms and
+     skolemize(Var,Term) records to fresh upper words.  One map across
+     groups: the generated names are globally fresh, so a shared old name
+     denotes the same interned symbol wherever it appears. */
+  {
+    I2list qmap = NULL;
+    Plist g;
+    for (g = Sk_groups; g; g = g->next) {
+      struct sk_group *grp = (struct sk_group *) g->v;
+      Plist mp;
+      rename_bad_qvars_formula(find_full_clausification_nnf(grp->parent_id), &qmap);
+      rename_bad_qvars_formula(find_full_clausification_skolem(grp->parent_id), &qmap);
+      for (mp = find_full_clausification_skmap(grp->parent_id); mp; mp = mp->next)
+	repoint_sk_term((Term) mp->v, qmap);
+    }
+    if (qmap != NULL)
+      zap_i2list(qmap);
   }
 
   /* Detect whether the proof contains FOF entries (axioms or conjectures).
@@ -2137,7 +2367,8 @@ void fprint_proof_tptp(FILE *fp, Plist proof)
   }
 
   reset_sk_groups();
-  delete_clauses(expanded);
+  if (expanded != proof)
+    delete_clauses(expanded);
   zap_i3list(jmap);
   set_variable_style(orig_style);
   if (Glob.problem_name)
@@ -2702,6 +2933,10 @@ void handle_proof_and_maybe_exit(Topform empty_clause)
       I3list jmap = NULL;
       if (flag(Opt->print_expanded_proof)) {
         proof_to_print = expand_proof(proof, &jmap);
+        if (proof_to_print == NULL)
+          /* Replay failure (see expand_proof): print the unexpanded proof. */
+          proof_to_print = proof;
+        else {
         /* Restore original goal/input bodies - expand_proof may rewrite
            a goal body as a side effect of CNF processing.  Deep-copy
            literals/formula so renumber_proof's uplink check stays
@@ -2725,6 +2960,7 @@ void handle_proof_and_maybe_exit(Topform empty_clause)
         /* Sequential numbering from 1 so intermediate steps don't get
            awkward high IDs (12, 13 inserted between 6 and 7). */
         renumber_proof(proof_to_print, 1);
+        }
       }
       if (flag(Opt->print_substitutions))
         set_para_subst_proof(proof_to_print);
