@@ -1403,19 +1403,31 @@ Formula introduce_definition(Formula sub, Plist *defs)
        so emit_definition_leaves' existing x-style-to-X<n> rename
        handles binder and body occurrences uniformly at print time.
        sub is quantifier-free here, so there is no capture. */
-    for (v = MAX_VARS - 1; v >= 0; v--) {
-      if (seen[v]) {
-        int vsn = gen_new_symbol("x", 0, NULL);
-        char *vname = sn_to_str(vsn);
-        Term oldv, newv;
-        oldv = get_variable_term(v);
-        newv = get_rigid_term(vname, 0);
-        iff->kids[0]->atom = subst_term(iff->kids[0]->atom, oldv, newv);
-        iff->kids[1] = subst_var_const_formula(iff->kids[1], oldv, newv);
-        iff = get_quant_form(ALL_FORM, vname, iff);
-        zap_term(oldv);
-        zap_term(newv);
+    {
+      /* body stays pinned to the IFF_FORM: after the first wrap iff is
+         a quantifier node, so substituting through iff->kids[0] again
+         would read ->atom of a non-atom (multi-variable definitions
+         crashed; single-variable ones masked this). */
+      Formula body = iff;
+      Ilist used = NULL;   /* symbols chosen so far (gen_new_symbol only
+                              avoids what is passed in) */
+      for (v = MAX_VARS - 1; v >= 0; v--) {
+        if (seen[v]) {
+          int vsn = gen_new_symbol("x", 0, used);
+          char *vname = sn_to_str(vsn);
+          Term oldv, newv;
+          oldv = get_variable_term(v);
+          newv = get_rigid_term(vname, 0);
+          body->kids[0]->atom = subst_term(body->kids[0]->atom, oldv, newv);
+          body->kids[1] = subst_var_const_formula(body->kids[1], oldv, newv);
+          iff = get_quant_form(ALL_FORM, vname, iff);
+          used = ilist_prepend(used, vsn);
+          zap_term(oldv);
+          zap_term(newv);
+        }
       }
+      if (used != NULL)
+        zap_ilist(used);
     }
     r = (struct defn_record *) safe_malloc(sizeof(struct defn_record));
     r->symnum = sn;
