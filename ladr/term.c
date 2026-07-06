@@ -858,8 +858,12 @@ Term replacement.  Free all of the replaced terms;
 /* PUBLIC */
 Term subst_term(Term t, Term target, Term replacement)
 {
-  /* Iterative in-place substitution using parent stack. */
-  struct { Term t; int child; } stack[1000];
+  /* Iterative in-place substitution using parent stack.
+     Growable (safe_realloc doubling): a fixed array here silently
+     corrupts memory on very deep terms. */
+  typedef struct { Term t; int child; } Sframe;
+  int cap = 1000;
+  Sframe *stack;
   int top = 0;
 
   /* Check root */
@@ -867,6 +871,7 @@ Term subst_term(Term t, Term target, Term replacement)
     zap_term(t);
     return copy_term(replacement);
   }
+  stack = safe_malloc(cap * sizeof(Sframe));
   stack[top].t = t; stack[top].child = 0; top++;
   while (top > 0) {
     int idx = top - 1;
@@ -882,10 +887,15 @@ Term subst_term(Term t, Term target, Term replacement)
         ARG(s,c) = copy_term(replacement);
       }
       else if (ARITY(ARG(s,c)) > 0) {
+        if (top >= cap) {
+          cap *= 2;
+          stack = safe_realloc(stack, cap * sizeof(Sframe));
+        }
         stack[top].t = ARG(s,c); stack[top].child = 0; top++;
       }
     }
   }
+  safe_free(stack);
   return t;
 }  /* subst_term */
 
@@ -2492,23 +2502,34 @@ Plist free_vars_term(Term t, Plist vars)
   if (VARIABLE(t))
     fatal_error("free_vars_term, VARIABLE term");
 
-  Term stack[1000];
+  /* Growable stack (safe_realloc doubling, the cnf.c walker pattern):
+     a fixed array here silently corrupts memory on very deep terms. */
+  int cap = 1000;
+  Term *stack = safe_malloc(cap * sizeof(Term));
   int top = 0;
   stack[top++] = t;
   while (top > 0) {
     Term s = stack[--top];
-    if (VARIABLE(s))
+    if (VARIABLE(s)) {
+      safe_free(stack);
       fatal_error("free_vars_term, VARIABLE term");
+    }
     if (ARITY(s) == 0) {
       if (variable_name(sn_to_str(SYMNUM(s))) && !tlist_member(s, vars))
         vars = plist_append(vars, copy_term(s));
     }
     else {
       int i;
+      if (top + ARITY(s) > cap) {
+        while (top + ARITY(s) > cap)
+          cap *= 2;
+        stack = safe_realloc(stack, cap * sizeof(Term));
+      }
       for (i = ARITY(s) - 1; i >= 0; i--)
         stack[top++] = ARG(s,i);
     }
   }
+  safe_free(stack);
   return vars;
 }  /* free_vars_term */
 

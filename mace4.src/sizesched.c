@@ -120,11 +120,21 @@ static void arm_death_output(String_buf model_text)
   char line[300];
   int linelen;
   const char *szs;
+  sigset_t block_set, old_set;
 
   if (!Mace4_tptp_mode) {
     Death_len = 0;
     return;
   }
+  /* Block the kill signals for the duration: a SIGTERM/SIGXCPU landing
+     mid-swap would find Death_len == 0 and the handler would write
+     nothing -- a blank, the exact defect this machinery prevents. */
+  sigemptyset(&block_set);
+  sigaddset(&block_set, SIGTERM);
+#ifdef SIGXCPU
+  sigaddset(&block_set, SIGXCPU);
+#endif
+  sigprocmask(SIG_BLOCK, &block_set, &old_set);
   szs = model_text ? (Mace4_has_goals ? "CounterSatisfiable" : "Satisfiable")
                    : "Timeout";
   if (Mace4_problem_name && Mace4_problem_name[0])
@@ -158,6 +168,7 @@ static void arm_death_output(String_buf model_text)
   Death_exit_code = model_text ? MAX_MODELS_EXIT : MAX_SEC_NO_EXIT;
   if (old != NULL)
     safe_free(old);
+  sigprocmask(SIG_SETMASK, &old_set, NULL);
 }
 
 /* Retry-safe raw write for the handler. */

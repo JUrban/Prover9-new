@@ -1256,8 +1256,14 @@ void collect_vars_in_formula(Formula f, BOOL *seen)
     ftop--;
 
     if (cur->type == ATOM_FORM) {
-      /* Walk the atom term tree to find variables. */
-      struct { Term t; int child; } tstack[200];
+      /* Walk the atom term tree to find variables.  Growable stack:
+         the old fixed tstack[200] SKIPPED pushes when full, silently
+         failing to collect variables nested deeper than 200 -- which
+         would build a definitional-CNF definition with missing
+         arguments (unintended free variables in the def clauses). */
+      typedef struct { Term t; int child; } Tvframe;
+      int tcap = 200;
+      Tvframe *tstack = safe_malloc(tcap * sizeof(Tvframe));
       int ttop = 0;
       tstack[ttop].t = cur->atom;
       tstack[ttop].child = 0;
@@ -1277,13 +1283,16 @@ void collect_vars_in_formula(Formula f, BOOL *seen)
         }
         else {
           tstack[idx].child = c + 1;
-          if (ttop < 200) {
-            tstack[ttop].t = ARG(s, c);
-            tstack[ttop].child = 0;
-            ttop++;
+          if (ttop >= tcap) {
+            tcap *= 2;
+            tstack = safe_realloc(tstack, tcap * sizeof(Tvframe));
           }
+          tstack[ttop].t = ARG(s, c);
+          tstack[ttop].child = 0;
+          ttop++;
         }
       }
+      safe_free(tstack);
     }
     else if (cur->type == NOT_FORM || cur->type == AND_FORM || cur->type == OR_FORM) {
       int i;
