@@ -309,13 +309,16 @@ void child_exit(int code)
 static
 void kill_child(pid_t pid)
 {
+  /* Straight SIGKILL: kill_child is only ever used on LOSERS (the
+     winner is never killed), whose captured output is discarded -- so
+     the old SIGTERM + 100ms "proof flush" grace bought nothing and
+     cost two things: ~100ms per loser of publish latency, and a
+     handler execution in any child still inside its startup window
+     (the Job7086 double-status race).  SIGKILL runs no handler, so a
+     loser can never write anything, at any scheduling. */
   kill(pid, SIGCONT);   /* wake if stopped, no-op if running */
-  kill(pid, SIGTERM);
-  usleep(100000);  /* 100ms grace for proof flush */
-  if (waitpid(pid, NULL, WNOHANG) == 0) {
-    kill(pid, SIGKILL);
-    waitpid(pid, NULL, 0);
-  }
+  kill(pid, SIGKILL);
+  waitpid(pid, NULL, 0);
   untrack_child(pid);
 }  /* kill_child */
 
@@ -694,12 +697,32 @@ pid_t spawn_child(int slot, int si, int order_idx, int slice_sec,
                   struct child_hints *hints_shm)
 {
   pid_t cpid;
+  sigset_t fork_block, fork_old;
 
   fflush(stdout);
   fflush(stderr);
 
+  /* Block the status-writing signals across the fork.  Resetting the
+     handlers as the child's first instruction (below) is NOT enough:
+     a SIGTERM delivered between fork() and the child first being
+     scheduled fires the INHERITED handler, which writes a Timeout line
+     to fd 1 -- still the real stdout at that point.  On a loaded node
+     the fork-to-schedule window is milliseconds wide (StarExec Job7086:
+     3 of 158 MGT pairs doubled that way).  With the mask inherited
+     blocked, such a signal stays pending until the child has installed
+     SIG_DFL and unblocks -- and then it just dies, silently. */
+  sigemptyset(&fork_block);
+  sigaddset(&fork_block, SIGTERM);
+  sigaddset(&fork_block, SIGALRM);
+  sigaddset(&fork_block, SIGINT);
+#ifdef SIGXCPU
+  sigaddset(&fork_block, SIGXCPU);
+#endif
+  sigprocmask(SIG_BLOCK, &fork_block, &fork_old);
+
   cpid = fork();
   if (cpid < 0) {
+    sigprocmask(SIG_SETMASK, &fork_old, NULL);
     fprintf(stderr, "%% Cores: fork failed for slot %d\n", slot);
     return 0;
   }
@@ -724,6 +747,9 @@ pid_t spawn_child(int slot, int si, int order_idx, int slice_sec,
 #ifdef SIGXCPU
     signal(SIGXCPU, SIG_DFL);
 #endif
+    /* Only now deliver anything that arrived during the window: the
+       dispositions are default, so a pending kill terminates silently. */
+    sigprocmask(SIG_SETMASK, &fork_old, NULL);
     close(saved_stdout);
 
     /* Redirect fd 1 to /dev/null as safety net for stray raw writes */
@@ -805,6 +831,7 @@ pid_t spawn_child(int slot, int si, int order_idx, int slice_sec,
   }
 
   /* Parent */
+  sigprocmask(SIG_SETMASK, &fork_old, NULL);
   return cpid;
 }  /* spawn_child */
 

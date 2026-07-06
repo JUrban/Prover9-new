@@ -240,12 +240,28 @@ static pid_t fork_size_child(Plist clauses, int size, int *out_fd)
 {
   int pfd[2];
   pid_t pid;
+  sigset_t fork_block, fork_old;
 
   if (pipe(pfd) != 0)
     return -1;
 
+  /* Block the status-writing signals across the fork: a group-kill
+     SIGTERM delivered before the child is first scheduled would fire
+     the INHERITED sizesched_death_handler with fd 1 still the real
+     stdout, adding a second status line next to the parent's (the
+     prover9 Job7086 double-status race; same window here). */
+  sigemptyset(&fork_block);
+  sigaddset(&fork_block, SIGTERM);
+  sigaddset(&fork_block, SIGALRM);
+  sigaddset(&fork_block, SIGINT);
+#ifdef SIGXCPU
+  sigaddset(&fork_block, SIGXCPU);
+#endif
+  sigprocmask(SIG_BLOCK, &fork_block, &fork_old);
+
   pid = fork();
   if (pid < 0) {
+    sigprocmask(SIG_SETMASK, &fork_old, NULL);
     close(pfd[0]); close(pfd[1]);
     return -1;
   }
@@ -259,6 +275,8 @@ static pid_t fork_size_child(Plist clauses, int size, int *out_fd)
 #ifdef SIGXCPU
     signal(SIGXCPU, SIG_DFL);
 #endif
+    /* Deliver anything pending only now that dispositions are default. */
+    sigprocmask(SIG_SETMASK, &fork_old, NULL);
     /* Redirect stdout to the pipe so the model we print is captured. */
     close(pfd[0]);
     dup2(pfd[1], STDOUT_FILENO);
@@ -270,6 +288,7 @@ static pid_t fork_size_child(Plist clauses, int size, int *out_fd)
   }
 
   /* ---- parent ---- */
+  sigprocmask(SIG_SETMASK, &fork_old, NULL);
   close(pfd[1]);
   /* non-blocking reads so drain_kid never blocks */
   {
