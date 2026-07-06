@@ -707,6 +707,23 @@ pid_t spawn_child(int slot, int si, int order_idx, int slice_sec,
   if (cpid == 0) {
     /* ---- Child process ---- */
     int devnull_fd;
+    /* FIRST: drop the inherited signal handlers.  The parent kills
+       losing children with SIGTERM, and the inherited timeout_handler
+       answers it by WRITING a Timeout status line to fd 1 -- which, in
+       the window before the /dev/null redirect below, is still the
+       REAL stdout.  On tiny problems whose winner finishes while
+       siblings are still being spawned, that emitted a spurious second
+       status line (StarExec Job7072: four MGT pairs with "Timeout"
+       followed by the winner's real status).  Default disposition is
+       to die silently: losers' output is discarded anyway, and
+       arm_suspend_timer installs the child's own SIGALRM handler
+       further down.  (mace4's fork_size_child has always done this.) */
+    signal(SIGTERM, SIG_DFL);
+    signal(SIGALRM, SIG_DFL);
+    signal(SIGINT,  SIG_DFL);
+#ifdef SIGXCPU
+    signal(SIGXCPU, SIG_DFL);
+#endif
     close(saved_stdout);
 
     /* Redirect fd 1 to /dev/null as safety net for stray raw writes */
