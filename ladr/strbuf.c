@@ -433,12 +433,27 @@ char *sb_to_malloc_string(String_buf sb)
   if (s == NULL)
     return NULL;
   else {
-    int j = 0;  /* index for new string */
-    int i;      /* index for Str_buf */
-    for (i = 0; i < sb->size; i++) {
-      char c = sb_char(sb, i);
-      if (c != '\0')
-	s[j++] = c;
+    /* Walk the chunk list once (O(n)).  The old per-index sb_char()
+       loop re-walked the list from the head on every character --
+       O(n^2), tens of SECONDS on a multi-megabyte buffer.  In the
+       mace4 -cores scheduler that stall sat inside a signal-blocked
+       window while the children burned the CPU budget, so the
+       external kill became SIGKILL before the handler could run:
+       13 model-carrying runs on StarExec ended with no SZS status
+       and the found models lost.  Skips embedded NULs, as before. */
+    int j = 0;
+    int remaining = sb->size;
+    Chunk p = sb->first;
+    while (p != NULL && remaining > 0) {
+      int n = remaining < CHUNK_SIZE ? remaining : CHUNK_SIZE;
+      int i;
+      for (i = 0; i < n; i++) {
+        char c = p->s[i];
+        if (c != '\0')
+          s[j++] = c;
+      }
+      remaining -= n;
+      p = p->next;
     }
     s[j] = '\0';
     return s;
