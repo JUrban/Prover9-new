@@ -42,6 +42,9 @@ BOOL  Mace4_ladr_output = FALSE;
 BOOL  Mace4_has_goals = FALSE;
 char *Mace4_problem_name = NULL;
 BOOL  Mace4_quiet = FALSE;     /* -quiet: suppress per-domain status (TPTP only) */
+volatile sig_atomic_t Mace4_cores_child = 0;  /* set in a -cores forked child:
+   the child prints only the model to its pipe; the -cores parent owns the
+   SZS status line (see sizesched.c), so possible_model must not emit it. */
 Ilist Input_fsyms = NULL;      /* pre-clausification function symbols */
 Ilist Input_rsyms = NULL;      /* pre-clausification relation symbols */
 
@@ -640,6 +643,40 @@ int possible_model(void)
       Interp model = compile_interp(modelterm, FALSE);
       zap_term(modelterm);
       Models = plist_append(Models, model);
+    }
+
+    /* CASC requires the SZS status line to PRECEDE the SZS output block, so
+       a solve is credited even if the model print is truncated by a kill.
+       Emit it here, before the model.  Guarded by Mace4_szs_printed (so
+       mace4_exit and the async handlers add no second line) and skipped in a
+       -cores child, where the parent owns the status (see sizesched.c).
+       The kill signals are blocked across "set guard + write" so an
+       asynchronous timeout cannot squeeze a duplicate or a blank in. */
+    if (Mace4_tptp_mode && !Mace4_ladr_output &&
+        !Mace4_cores_child && !Mace4_szs_printed) {
+      const char *szs = Mace4_has_goals ? "CounterSatisfiable" : "Satisfiable";
+#ifndef __EMSCRIPTEN__
+      sigset_t block_set, old_set;
+      sigemptyset(&block_set);
+      sigaddset(&block_set, SIGALRM);
+      sigaddset(&block_set, SIGINT);
+      sigaddset(&block_set, SIGTERM);
+#ifdef SIGXCPU
+      sigaddset(&block_set, SIGXCPU);
+#endif
+      sigprocmask(SIG_BLOCK, &block_set, &old_set);
+#endif
+      if (!Mace4_szs_printed) {
+        Mace4_szs_printed = 1;
+        if (Mace4_problem_name)
+          printf("\n%% SZS status %s for %s\n", szs, Mace4_problem_name);
+        else
+          printf("\n%% SZS status %s\n", szs);
+        fflush(stdout);
+      }
+#ifndef __EMSCRIPTEN__
+      sigprocmask(SIG_SETMASK, &old_set, NULL);
+#endif
     }
 
     if (Mace4_tptp_mode && !Mace4_ladr_output)

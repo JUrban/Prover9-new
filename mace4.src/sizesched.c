@@ -146,11 +146,21 @@ static void arm_death_output(String_buf model_text)
   else if (linelen > (int) sizeof(line)) linelen = (int) sizeof(line);
 
   if (model_text != NULL) {
+    /* Status-first for the SZS FiniteModel path: the status line precedes
+       the model, so a kill that truncates the (possibly multi-megabyte)
+       model relay still shows the solve.  -ladr_out has no SZS block, so it
+       keeps the status last, matching its non-killed output. */
     char *mt = sb_to_malloc_string(model_text);
     int mlen = (int) strlen(mt);
     nb = safe_malloc(mlen + linelen + 1);
-    memcpy(nb, mt, mlen);
-    memcpy(nb + mlen, line, linelen);
+    if (Mace4_ladr_output) {
+      memcpy(nb, mt, mlen);
+      memcpy(nb + mlen, line, linelen);
+    }
+    else {
+      memcpy(nb, line, linelen);
+      memcpy(nb + linelen, mt, mlen);
+    }
     n = mlen + linelen;
     safe_free(mt);
   }
@@ -193,12 +203,13 @@ static void sizesched_death_handler(int sig)
     }
   }
   /* Three states, exactly one status line in every interleaving:
-       (a) publish not started: write the pre-rendered output
-           (model text + status, or the Timeout line);
+       (a) publish not started: write the pre-rendered output, status
+           line FIRST then the model (or just the Timeout line);
        (b) publish under way but the graceful status has not been
-           printed yet (killed mid-relay or before mace4_exit): the
-           model text is partially out -- add ONLY the status line;
-       (c) status already printed by mace4_exit: write nothing. */
+           printed yet (killed in the tiny window after Publish_started
+           but before the status write): emit ONLY the status line;
+       (c) status already printed (by the publish path or mace4_exit):
+           write nothing -- the model relay may be truncated, harmlessly. */
   if (!Mace4_szs_printed) {
     if (!Publish_started)
       death_write(Death_buf, (int) Death_len);
@@ -281,6 +292,10 @@ static pid_t fork_size_child(Plist clauses, int size, int *out_fd)
     close(pfd[0]);
     dup2(pfd[1], STDOUT_FILENO);
     close(pfd[1]);
+
+    /* This child prints only the model to the pipe; the parent emits the
+       SZS status line, status-first, when it publishes the winner. */
+    Mace4_cores_child = 1;
 
     int code = mace4_one_size_exit_code(clauses, size);
     fflush(stdout);
@@ -474,7 +489,38 @@ Mace_results mace4_parallel(Plist clauses, Mace_options opt, int ncores)
   results->user_seconds = user_seconds() - t0;
 
   if (best_text != NULL) {
-    Publish_started = 1;   /* death handler must not also write */
+    Publish_started = 1;   /* death handler switches to status-line-only */
+    /* Emit the SZS status line FIRST, then relay the model.  The winning
+       child printed only the model to its pipe (Mace4_cores_child suppressed
+       its status), so the parent owns the status here.  Claim the one-status
+       slot (Mace4_szs_printed) under a signal block so a concurrent external
+       kill neither doubles the status nor blanks it; afterwards mace4_exit
+       and the death handler add nothing.  Status-first means a truncated
+       model relay still credits the solve. */
+    /* Only the SZS FiniteModel output path is status-first; -ladr_out emits
+       a LADR-format model with no SZS block, so it keeps the status at the
+       end via mace4_exit (Mace4_szs_printed stays clear here). */
+    if (!Mace4_ladr_output) {
+      const char *szs = Mace4_has_goals ? "CounterSatisfiable" : "Satisfiable";
+      sigset_t block_set, old_set;
+      sigemptyset(&block_set);
+      sigaddset(&block_set, SIGTERM);
+      sigaddset(&block_set, SIGINT);
+      sigaddset(&block_set, SIGALRM);
+#ifdef SIGXCPU
+      sigaddset(&block_set, SIGXCPU);
+#endif
+      sigprocmask(SIG_BLOCK, &block_set, &old_set);
+      if (!Mace4_szs_printed) {
+        Mace4_szs_printed = 1;
+        if (Mace4_problem_name)
+          printf("\n%% SZS status %s for %s\n", szs, Mace4_problem_name);
+        else
+          printf("\n%% SZS status %s\n", szs);
+        fflush(stdout);
+      }
+      sigprocmask(SIG_SETMASK, &old_set, NULL);
+    }
     /* Relay the winning child's captured model output verbatim.
        Use fprint_sb (walks the chunk list once, O(n)); a per-index
        sb_char loop would be O(n^2) and can take tens of seconds on

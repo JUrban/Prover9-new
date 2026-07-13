@@ -223,6 +223,73 @@ static void cores_arm_death_from_winner(struct child_output *out)
   Death_szs_len = n + 2;
 }
 
+/* Retry-safe blocking write of a byte range to a descriptor. */
+static void fd_write_all(int fd, const char *b, int n)
+{
+  int off = 0;
+  while (off < n) {
+    ssize_t w = write(fd, b + off, (size_t) (n - off));
+    if (w <= 0)
+      break;
+    off += (int) w;
+  }
+}
+
+/* Publish the winning child's captured output to the real stdout, SZS
+   status line first.  search.c now writes the child's status line ahead of
+   the proof body, so the buffer already begins with it.  We publish the
+   status prefix (everything up to and including that line) under a signal
+   block, claiming the single-status slot (Szs_emitted) so a concurrent
+   external kill cannot emit a second status line; then we relay the proof
+   body.  A kill during the body relay finds Szs_emitted set and adds
+   nothing -- the status is already out, which is the point of status-first:
+   the solve is credited even if the (possibly large) proof print is cut
+   off.  A kill before the block is handled by parent_death_handler, which
+   emits the status armed by cores_arm_death_from_winner. */
+static void cores_publish_winner(struct child_output *out, int fd)
+{
+  int len = out->output_len;
+  const char *b = out->buf;
+  int cap = (int) sizeof(((struct child_output *)0)->buf);
+  int i, sstart = -1, send, prefix;
+  sigset_t block, old;
+
+  if (len > cap)
+    len = cap;
+
+  for (i = 0; i + 12 <= len; i++)
+    if (memcmp(b + i, "% SZS status", 12) == 0) { sstart = i; break; }
+
+  if (sstart < 0) {
+    /* No status line (non-TPTP run): relay verbatim, claim the slot. */
+    Szs_emitted = 1;
+    fd_write_all(fd, b, len);
+    return;
+  }
+
+  send = sstart;
+  while (send < len && b[send] != '\n')
+    send++;
+  if (send < len)
+    send++;                       /* include the status line's newline */
+  prefix = send;
+
+  sigemptyset(&block);
+  sigaddset(&block, SIGTERM);
+  sigaddset(&block, SIGINT);
+#ifdef SIGXCPU
+  sigaddset(&block, SIGXCPU);
+#endif
+  sigprocmask(SIG_BLOCK, &block, &old);
+  if (!Szs_emitted) {
+    Szs_emitted = 1;
+    fd_write_all(fd, b, prefix);
+  }
+  sigprocmask(SIG_SETMASK, &old, NULL);
+
+  fd_write_all(fd, b + prefix, len - prefix);
+}
+
 #endif /* !NO_OPEN_MEMSTREAM */
 
 
@@ -401,28 +468,6 @@ void shm_progress_update(int stage, int given, int kept,
     my_hints->megs_used   = megs;
   }
 }  /* shm_progress_update */
-
-/*************
- *
- *   write_shm_to_fd()
- *
- *   Parent helper: write child's shared-memory output buffer to a
- *   file descriptor (typically saved_stdout).  Retry-safe write loop.
- *
- *************/
-
-static
-void write_shm_to_fd(struct child_output *out, int fd)
-{
-  int total = out->output_len;
-  int written = 0;
-  while (written < total) {
-    ssize_t w = write(fd, out->buf + written, total - written);
-    if (w <= 0)
-      break;
-    written += (int) w;
-  }
-}  /* write_shm_to_fd */
 
 /*************
  *
@@ -1162,9 +1207,11 @@ int cores_poll_loop(int N, int *order, int num_strats, int phase1_limit,
           n_suspended = 0;
 
           if (output_shm) {
+            /* Arm the death handler with the winner's own status line so a
+               kill landing before the publish below still emits the correct
+               status; then publish status-first (see cores_publish_winner). */
             cores_arm_death_from_winner(&output_shm[i]);
-            write_shm_to_fd(&output_shm[i], saved_stdout);
-            Szs_emitted = 1;   /* relay complete: handler adds nothing */
+            cores_publish_winner(&output_shm[i], saved_stdout);
           }
 
 #ifdef DEBUG

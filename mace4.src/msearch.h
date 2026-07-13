@@ -243,6 +243,7 @@ extern BOOL  Mace4_ladr_output;  /* -ladr_out: LADR model format with TPTP input
 extern BOOL  Mace4_has_goals;
 extern char *Mace4_problem_name;
 extern BOOL  Mace4_quiet;        /* -quiet: suppress per-domain status (TPTP only) */
+extern volatile sig_atomic_t Mace4_cores_child;  /* set in -cores forked child */
 
 /* from util.c */
 

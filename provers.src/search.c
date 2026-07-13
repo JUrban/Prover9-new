@@ -2866,7 +2866,22 @@ void handle_proof_and_maybe_exit(Topform empty_clause)
   set_no_kill();
   fflush(stderr);
   if (flag(Opt->tptp_output)) {
-    /* TSTP format proof output - always printed in TPTP mode */
+    /* TSTP format proof output - always printed in TPTP mode.
+       CASC requires the SZS status line to PRECEDE the SZS output block
+       (https://tptp.org/CASC/J13/Design.html#SystemProperties), so a solve
+       is credited even if the proof print is later truncated by a
+       wall-clock / CPU-limit kill.  Emit it here, once: the Szs_line_written
+       guard makes print_exit_message and the async signal handlers skip a
+       second one.  set_no_kill() above has already deferred termination, so
+       this status line and the proof body that follows go out as a unit. */
+    if (!Szs_line_written) {
+      Szs_line_written = 1;
+      if (Glob.problem_name)
+        printf("\n%% SZS status %s for %s\n",
+               szs_status_string(MAX_PROOFS_EXIT), Glob.problem_name);
+      else
+        printf("\n%% SZS status %s\n", szs_status_string(MAX_PROOFS_EXIT));
+    }
     printf("\n%% Proof %s at %.2f (+ %.2f) seconds.\n",
 	   comma_num(Stats.proofs), user_seconds(), system_seconds());
     printf("%% Length of proof is %d.\n", proof_length(proof));
