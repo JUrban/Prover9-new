@@ -56,6 +56,27 @@ In single-strategy mode, LADR-2026 is fully deterministic: identical inputs and 
 
 In multi-tasking mode, multiple search configurations execute in parallel. In this mode, proof selection may be influenced by process scheduling; repeated runs may produce different (but independently verifiable) proofs. This does not alter calculus semantics or soundness. All reported benchmark results specify the execution mode used.
 
+## Disabled-clause memory option
+
+Long searches can retain many clauses solely as proof ancestors. Add
+`set(compress_disabled).` to compact the literal/term bodies of those cold
+clauses after they leave every active index. IDs, justifications, attributes,
+flags, and proof/checkpoint behavior are preserved; bodies are materialized
+temporarily for printing, proof expansion, or checkpoint serialization. The
+option is exact (it does not make search incomplete) and is currently default
+off.
+
+Normal statistics report compression attempts, successes, skips,
+materializations and recompressions, along with active/full/compact logical
+body bytes, allocator-reserved bytes, and live/peak FPA node/list counts.
+Logical bytes are not process RSS: the early-phase allocator reuses its 20 MB
+slabs but does not return them to the operating system.
+
+Run `make memory-tests` for the focused format and FPA lifecycle regression.
+`benchmarks/run-memory-benchmarks.sh smoke` runs the bounded proof and
+disabled-heavy comparisons; `... all` also runs the two capped AIM cases when
+the supplied AIM corpus is available.
+
 ---
 
 ## Availability & Positioning
@@ -64,4 +85,3 @@ LADR-2026 is an implementation-level modernization of a historically significant
 
 - **License:** Open source under GPLv2, consistent with the original LADR license.
 - **Artifacts:** Source code and build instructions are included in each release.
-

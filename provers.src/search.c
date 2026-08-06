@@ -288,6 +288,7 @@ Prover_options init_prover_options(void)
   p->lex_order_vars         = init_flag("lex_order_vars",         FALSE);
   p->comma_stats            = init_flag("comma_stats",            FALSE);
   p->report_index_stats     = init_flag("report_index_stats",     FALSE);
+  p->compress_disabled      = init_flag("compress_disabled",      FALSE);
 
   p->checkpoint_exit        = init_flag("checkpoint_exit",        FALSE);
   p->checkpoint_ancestors   = init_flag("checkpoint_ancestors",    TRUE);
@@ -676,6 +677,76 @@ int get_attrib_id(char *str)
  *************/
 
 static
+unsigned long long clist_body_bytes(Clist list)
+{
+  unsigned long long bytes = 0;
+  Clist_pos p;
+  if (list == NULL)
+    return 0;
+  for (p = list->first; p != NULL; p = p->next)
+    bytes += clause_body_storage_bytes(p->c);
+  return bytes;
+}  /* clist_body_bytes */
+
+static
+void update_memory_stats(void)
+{
+  struct clause_compression_stats cs = clause_compression_get_stats();
+  Clist_pos p;
+
+  Stats.compression_attempted = cs.attempted;
+  Stats.compression_successful = cs.successful;
+  Stats.compression_skipped = cs.skipped;
+  Stats.compression_materialized = cs.materialized;
+  Stats.compression_recompressed = cs.recompressed;
+
+  Stats.active_body_bytes = clist_body_bytes(Glob.usable) +
+                            clist_body_bytes(Glob.sos) +
+                            clist_body_bytes(Glob.limbo);
+  if (Glob.demods != NULL) {
+    for (p = Glob.demods->first; p != NULL; p = p->next) {
+      Topform c = p->c;
+      if ((Glob.usable == NULL || !clist_member(c, Glob.usable)) &&
+          (Glob.sos == NULL || !clist_member(c, Glob.sos)) &&
+          (Glob.limbo == NULL || !clist_member(c, Glob.limbo)))
+        Stats.active_body_bytes += clause_body_storage_bytes(c);
+    }
+  }
+  Stats.hint_body_bytes = clist_body_bytes(Glob.hints);
+
+  Stats.disabled_full_body_bytes = 0;
+  Stats.disabled_compressed_bytes = 0;
+  Stats.disabled_estimated_uncompressed_bytes = 0;
+  Stats.disabled_full_clauses = 0;
+  Stats.disabled_compressed_clauses = 0;
+  if (Glob.disabled != NULL) {
+    for (p = Glob.disabled->first; p != NULL; p = p->next) {
+      Topform c = p->c;
+      if (c->compressed != NULL) {
+        Stats.disabled_compressed_clauses++;
+        Stats.disabled_compressed_bytes += c->compressed_size;
+        Stats.disabled_estimated_uncompressed_bytes +=
+          c->uncompressed_body_bytes;
+      }
+      else {
+        unsigned long long bytes = clause_body_storage_bytes(c);
+        Stats.disabled_full_clauses++;
+        Stats.disabled_full_body_bytes += bytes;
+        Stats.disabled_estimated_uncompressed_bytes += bytes;
+      }
+    }
+  }
+
+  Stats.allocator_reserved_kbytes =
+    (unsigned long long) megs_malloced() * 1024;
+  Stats.palloc_cumulative_bytes = bytes_palloced();
+  Stats.fpa_live_nodes = fpa_live_trie_nodes();
+  Stats.fpa_peak_nodes = fpa_peak_trie_nodes();
+  Stats.fpa_live_lists = fpalist_live_lists();
+  Stats.fpa_peak_lists = fpalist_peak_lists();
+}  /* update_memory_stats */
+
+static
 void update_stats(void)
 {
   Stats.demod_attempts = demod_attempts() + fdemod_attempts();
@@ -693,6 +764,7 @@ void update_stats(void)
   Stats.disabled_size = Glob.disabled ? Glob.disabled->length : 0;
   Stats.hints_size = Glob.hints ? Glob.hints->length : 0;
   Stats.kbyte_usage = bytes_palloced() / 1000;
+  update_memory_stats();
 }  /* update_stats */
 
 /*************
@@ -745,6 +817,31 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
 
   fprintf(fp,"Max_Clause_ID=%s.\n", comma_num(clause_ids_assigned()));
   fprintf(fp,"Megabytes=%.2f.\n", s.kbyte_usage / 1000.0);
+
+  fprintf(fp,
+          "Disabled_compression: attempted=%s, successful=%s, skipped=%s, "
+          "materialized=%s, recompressed=%s.\n",
+          comma_num(s.compression_attempted),
+          comma_num(s.compression_successful),
+          comma_num(s.compression_skipped),
+          comma_num(s.compression_materialized),
+          comma_num(s.compression_recompressed));
+  fprintf(fp,
+          "Clause_body_bytes: active=%s, hints=%s, disabled_full=%s (%s clauses), "
+          "disabled_compressed=%s (%s clauses), disabled_estimated_full=%s.\n",
+          comma_num(s.active_body_bytes), comma_num(s.hint_body_bytes),
+          comma_num(s.disabled_full_body_bytes),
+          comma_num(s.disabled_full_clauses),
+          comma_num(s.disabled_compressed_bytes),
+          comma_num(s.disabled_compressed_clauses),
+          comma_num(s.disabled_estimated_uncompressed_bytes));
+  fprintf(fp,
+          "Allocator_bytes: reserved=%s, palloc_cumulative=%s. "
+          "FPA: nodes_live=%s, nodes_peak=%s, lists_live=%s, lists_peak=%s.\n",
+          comma_num(s.allocator_reserved_kbytes * 1024),
+          comma_num(s.palloc_cumulative_bytes),
+          comma_num(s.fpa_live_nodes), comma_num(s.fpa_peak_nodes),
+          comma_num(s.fpa_live_lists), comma_num(s.fpa_peak_lists));
 
   fprintf(fp,"User_CPU=%.2f, System_CPU=%.2f, Wall_clock=%u.\n",
 	  user_seconds(), system_seconds(), wallclock());
@@ -2657,6 +2754,47 @@ BOOL restricted_denial(Topform c)
     negative_clause(c->literals);
 }  /* restricted_denial */
 
+static
+BOOL active_or_indexable_clause(Topform c)
+{
+  return (Glob.usable != NULL && clist_member(c, Glob.usable)) ||
+         (Glob.sos != NULL && clist_member(c, Glob.sos)) ||
+         (Glob.limbo != NULL && clist_member(c, Glob.limbo)) ||
+         (Glob.demods != NULL && clist_member(c, Glob.demods)) ||
+         (Glob.hints != NULL && clist_member(c, Glob.hints));
+}  /* active_or_indexable_clause */
+
+static
+void compress_retained_clause(Topform c)
+{
+  if (!flag(Opt->compress_disabled))
+    return;
+  if (active_or_indexable_clause(c))
+    fatal_error("compress_retained_clause: clause is still active or indexed");
+  if (compress_clause(c) == CLAUSE_COMPRESS_INVALID)
+    fatal_error("compress_retained_clause: invalid clause");
+}  /* compress_retained_clause */
+
+static
+void retain_disabled_clause(Topform c)
+{
+  if (active_or_indexable_clause(c))
+    fatal_error("retain_disabled_clause: clause is still active or indexed");
+  clist_append(c, Glob.disabled);
+  compress_retained_clause(c);
+}  /* retain_disabled_clause */
+
+static
+void compress_retained_clist(Clist list)
+{
+  Clist_pos p;
+  if (!flag(Opt->compress_disabled) || list == NULL)
+    return;
+  for (p = list->first; p != NULL; p = p->next)
+    if (p->c->compressed == NULL)
+      compress_retained_clause(p->c);
+}  /* compress_retained_clist */
+
 /*************
  *
  *   disable_clause()
@@ -2702,7 +2840,7 @@ void disable_clause(Topform c)
     clist_remove(c, Glob.limbo);
   }
 
-  clist_append(c, Glob.disabled);
+  retain_disabled_clause(c);
   clock_stop(Clocks.disable);
 }  // disable_clause
 
@@ -2783,11 +2921,11 @@ static
 void handle_proof_and_maybe_exit(Topform empty_clause)
 {
   Term answers;
-  Plist proof, p;
+  Plist proof, materialized, p;
 
   assign_clause_id(empty_clause);
   proof = get_clause_ancestors(empty_clause);
-  uncompress_clauses(proof);
+  materialized = materialize_clauses(proof);
 
   if (!flag(Opt->reuse_denials) && Glob.horn) {
     Topform c = first_negative_clause(proof);
@@ -2796,6 +2934,9 @@ void handle_proof_and_maybe_exit(Topform empty_clause)
 	printf("%% Redundant proof: ");
 	f_clause(empty_clause);
       }
+      recompress_clauses(materialized);
+      zap_plist(materialized);
+      zap_plist(proof);
       return;
     }
     else
@@ -3085,6 +3226,8 @@ void handle_proof_and_maybe_exit(Topform empty_clause)
   if (answers)
     zap_term(answers);
 
+  recompress_clauses(materialized);
+  zap_plist(materialized);
   actions_in_proof(proof, &Att);  /* this can exit */
 
   if (at_parm_limit(Stats.proofs, Opt->max_proofs))
@@ -3303,10 +3446,10 @@ BOOL on_hit_list(int x)
 static
 void print_derivation(Topform cl)
 {
-  Plist proof, p;
+  Plist proof, materialized, p;
   static int pfcount = 0;
   proof = get_clause_ancestors(cl);
-  uncompress_clauses(proof);
+  materialized = materialize_clauses(proof);
   pfcount++;
   print_separator(stdout, "PROOF", TRUE);
   printf("\n%% Derivation (Proof) %d (Clause #%llu): ", pfcount, cl->id);
@@ -3315,21 +3458,24 @@ void print_derivation(Topform cl)
   for (p = proof; p; p = p->next)
     fwrite_clause(stdout, p->v, CL_FORM_STD);
   print_separator(stdout, "end of proof", TRUE);
+  recompress_clauses(materialized);
+  zap_plist(materialized);
 
   if (flag(Opt->derivations_only) && Hsize > 0
       && cl->id >= (unsigned) HIT_LIST[Hsize - 1]) {
     printf("\n%% %d derivations completed.  Terminating execution.\n", Hsize);
     done_with_search(ACTION_EXIT);  /* clean exit via longjmp */
   }
+  zap_plist(proof);
 }  /* print_derivation */
 
 static
 void hint_derivation(Topform cl)
 {
-  Plist proof, p;
+  Plist proof, materialized, p;
   static int pfcount = 0;
   proof = get_clause_ancestors(cl);
-  uncompress_clauses(proof);
+  materialized = materialize_clauses(proof);
   pfcount++;
   print_separator(stdout, "PROOF", TRUE);
   printf("\n%% Hint derivation (Proof) %d: ", pfcount);
@@ -3338,6 +3484,9 @@ void hint_derivation(Topform cl)
   for (p = proof; p; p = p->next)
     fwrite_clause(stdout, p->v, CL_FORM_STD);
   print_separator(stdout, "end of proof", TRUE);
+  recompress_clauses(materialized);
+  zap_plist(materialized);
+  zap_plist(proof);
 }  /* hint_derivation */
 
 static
@@ -4020,7 +4169,7 @@ void infer_outside_loop(Topform c)
     if (c->id == 0)   /* see the guard note in the Usable loop */
       assign_clause_id(c);
     copy->justification->u.id = c->id;
-    clist_append(c, Glob.disabled);
+    retain_disabled_clause(c);
     cl_process(copy);  /* This re-simplifies, but that's ok. */
   }
 
@@ -4266,7 +4415,7 @@ Topform orient_input_eq(Topform c)
     assign_clause_id(new);
     mark_parents_as_used(new);
     clist_swap(c, new);
-    clist_append(c, Glob.disabled);
+    retain_disabled_clause(c);
     return new;
   }
 }  /* orient_input_eq */
@@ -4896,7 +5045,6 @@ void index_and_process_initial_clauses(void)
       Topform c = temp_sos->first->c;
       Topform new;
       clist_remove(c, temp_sos);
-      clist_append(c, Glob.disabled);
 
       new = copy_inference(c);  // c has no ID, so this is tricky
       cl_process_simplify(new);
@@ -4922,6 +5070,7 @@ void index_and_process_initial_clauses(void)
 	  fwrite_clause(stdout, c, CL_FORM_STD);
 	}
       }
+      retain_disabled_clause(c);
       cl_process(new);  // This re-simplifies, but that's ok.
 
       rp_count++;
@@ -5061,7 +5210,11 @@ Prover_results collect_prover_results(BOOL xproofs)
 
   for (p = Glob.empties; p; p = p->next) {
     Plist proof = get_clause_ancestors(p->v);
-    uncompress_clauses(proof);
+    Plist materialized;
+    /* Results own a printable proof DAG, so materialization is intentional
+       here and lasts until zap_prover_results(). */
+    materialized = materialize_clauses(proof);
+    zap_plist(materialized);
     results->proofs = plist_append(results->proofs, proof);
     if (xproofs) {
       Plist xproof = proof_to_xproof(proof);
@@ -5156,8 +5309,11 @@ int write_clist_bare(FILE *clause_fp, FILE *data_fp,
   int list_pos = 0;  /* position in original list (all entries) */
   for (p = lst->first; p != NULL; p = p->next) {
     Topform c = p->c;
+    BOOL was_compressed = c->compressed != NULL;
     if (c->id == 0)
       continue;  /* skip clauses without IDs (e.g. unprocessed disabled) */
+    if (was_compressed && !materialize_clause(c))
+      fatal_error("write_clist_bare: invalid compressed clause");
     /* Write-side dedup: if clause was already written to another list,
        mark as shared in clause_data and skip the clause text. */
     {
@@ -5198,6 +5354,8 @@ int write_clist_bare(FILE *clause_fp, FILE *data_fp,
       if (!is_shared)
         file_pos++;
     }
+    if (was_compressed && !recompress_clause(c))
+      fatal_error("write_clist_bare: could not recompress clause");
     list_pos++;
   }
   fprintf(clause_fp, "end_of_list.\n");
@@ -7479,6 +7637,10 @@ void load_checkpoint_into_loop(void)
   if (flag(Opt->print_derivations))
     get_hit_list();
 
+  /* Restored disabled clauses must remain materialized through FPA-ID,
+     atom-flag, justification, hash, and hit-list restoration. */
+  compress_retained_clist(Glob.disabled);
+
   /* 11. Update stats and print status */
   update_stats();
 
@@ -7650,6 +7812,7 @@ Prover_results search(Prover_input p)
         if (!flag(Opt->quiet))
           print_separator(stdout, "PREDICATE ELIMINATION", TRUE);
         predicate_elimination(Glob.sos, Glob.disabled, !flag(Opt->quiet));
+        compress_retained_clist(Glob.disabled);
         if (!flag(Opt->quiet))
           print_separator(stdout, "end predicate elimination", TRUE);
       }

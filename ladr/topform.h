@@ -60,6 +60,8 @@ struct topform {
   struct just      *justification;
   double           weight;
   char             *compressed;     /* if nonNULL, a compressed form */
+  unsigned         compressed_size; /* bytes in compressed payload */
+  unsigned         uncompressed_body_bytes; /* logical body estimate */
   Topform          matching_hint;   /* hint that matches clause, if any */
   unsigned long long last_matched_given;  /* given count at last hint match */
   int              proof_tree_weight_cache;  /* memoized; -1 = unset */

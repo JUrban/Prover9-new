@@ -57,6 +57,7 @@ static unsigned Fpa_chunk_gets, Fpa_chunk_frees;
 
 #define PTRS_FPA_LIST PTRS(sizeof(struct fpa_list))
 static unsigned Fpa_list_gets, Fpa_list_frees;
+static unsigned long long Fpa_list_high_water;
 
 static unsigned Chunk_mem;  /* keep track of memory (pointers) for chunks */
 
@@ -105,8 +106,12 @@ void free_fpa_chunk(Fpa_chunk p)
 Fpa_list get_fpa_list()
 {
   Fpa_list p = get_cmem(PTRS_FPA_LIST);
+  unsigned long long live;
   p->chunksize = F_INITIAL_SIZE;
   Fpa_list_gets++;
+  live = (unsigned long long) Fpa_list_gets - Fpa_list_frees;
+  if (live > Fpa_list_high_water)
+    Fpa_list_high_water = live;
   return(p);
 }  /* get_fpa_list */
 
@@ -526,6 +531,8 @@ void zap_fpa_chunks(Fpa_chunk p)
 /* PUBLIC */
 void zap_fpalist(Fpa_list p)
 {
+  if (p == NULL)
+    return;
   zap_fpa_chunks(p->chunks);
   free_fpa_list(p);
 }  /* zap_fpalist */
@@ -632,3 +639,14 @@ Fpa_list fpalist_build(Term *terms, int n)
   return p;
 }  /* fpalist_build */
 
+/* PUBLIC */
+unsigned long long fpalist_live_lists(void)
+{
+  return (unsigned long long) Fpa_list_gets - Fpa_list_frees;
+}  /* fpalist_live_lists */
+
+/* PUBLIC */
+unsigned long long fpalist_peak_lists(void)
+{
+  return Fpa_list_high_water;
+}  /* fpalist_peak_lists */

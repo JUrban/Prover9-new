@@ -17,6 +17,7 @@
 */
 
 #include "ioutil.h"
+#include "compress.h"
 
 /* Preprocessing progress report - defined in top_input.c */
 extern void preprocessing_report_check(const char *phase, int count,
@@ -631,7 +632,10 @@ void fwrite_clause_jmap(FILE *fp, Topform c, int format, I3list map)
   if (c == NULL)
     fprintf(fp, "fwrite_clause_jmap: NULL clause\n");
   else {
+    BOOL was_compressed = c->compressed != NULL;
     String_buf sb = get_string_buf();
+    if (was_compressed && !materialize_clause(c))
+      fatal_error("fwrite_clause_jmap: invalid compressed clause");
     if (format == CL_FORM_XML)
       sb_xml_write_clause_jmap(sb, c, map);
     else if (format == CL_FORM_IVY)
@@ -644,6 +648,8 @@ void fwrite_clause_jmap(FILE *fp, Topform c, int format, I3list map)
       sb_write_clause_jmap(sb, c, format, map);
     fprint_sb(fp, sb);
     zap_string_buf(sb);
+    if (was_compressed && !recompress_clause(c))
+      fatal_error("fwrite_clause_jmap: could not recompress clause");
   }
   fflush(fp);
 }  /* fwrite_clause_jmap */
@@ -1205,4 +1211,3 @@ Plist read_clause_or_formula_list(FILE *fin, FILE *fout)
     zap_topform(tf);
   return reverse_plist(lst);
 }  /* read_clause_or_formula_list */
-

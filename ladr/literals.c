@@ -289,8 +289,11 @@ Term literals_to_term(Literals l)
   for (p = l; p; p = p->next) n++;
 
   /* Use a stack of literal-terms, then fold right. */
-  Literals lits_array[1000];
+  Literals fixed_array[128];
+  Literals *lits_array = fixed_array;
   int i = 0;
+  if (n > 128)
+    lits_array = (Literals *) safe_malloc(n * sizeof(Literals));
   for (p = l; p; p = p->next)
     lits_array[i++] = p;
 
@@ -301,6 +304,8 @@ Term literals_to_term(Literals l)
     ARG(d,1) = result;
     result = d;
   }
+  if (lits_array != fixed_array)
+    safe_free(lits_array);
   return result;
 }  /* literals_to_term */
 
@@ -325,8 +330,11 @@ Term lits_to_term(Literals l)
   Literals p;
   for (p = l; p; p = p->next) n++;
 
-  Literals lits_array[1000];
+  Literals fixed_array[128];
+  Literals *lits_array = fixed_array;
   int i = 0;
+  if (n > 128)
+    lits_array = (Literals *) safe_malloc(n * sizeof(Literals));
   for (p = l; p; p = p->next)
     lits_array[i++] = p;
 
@@ -353,6 +361,8 @@ Term lits_to_term(Literals l)
     ARG(d,1) = result;
     result = d;
   }
+  if (lits_array != fixed_array)
+    safe_free(lits_array);
   return result;
 }  /* lits_to_term */
 
@@ -1234,4 +1244,3 @@ Ilist pos_predicates(Ilist p, Literals lits)
   }
   return p;
 }  /* pos_predicates */
-

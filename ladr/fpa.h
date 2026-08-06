@@ -97,6 +97,10 @@ unsigned long long fpa_query_special_calls(void);
 
 unsigned long long fpa_intersect_merge_ops(void);
 
+unsigned long long fpa_live_trie_nodes(void);
+
+unsigned long long fpa_peak_trie_nodes(void);
+
 unsigned get_fpa_id_count(void);
 
 void set_fpa_id_count(unsigned n);

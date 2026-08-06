@@ -110,4 +110,8 @@ void p_fpa_list(Fpa_chunk c);
 
 Fpa_list fpalist_build(Term *terms, int n);
 
+unsigned long long fpalist_live_lists(void);
+
+unsigned long long fpalist_peak_lists(void);
+
 #endif  /* conditional compilation of whole file */

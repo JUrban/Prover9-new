@@ -26,6 +26,21 @@
 
 /* Public definitions */
 
+typedef enum {
+  CLAUSE_COMPRESS_OK,
+  CLAUSE_COMPRESS_ALREADY,
+  CLAUSE_COMPRESS_NO_BODY,
+  CLAUSE_COMPRESS_INVALID
+} Clause_compress_result;
+
+struct clause_compression_stats {
+  unsigned long long attempted;
+  unsigned long long successful;
+  unsigned long long skipped;
+  unsigned long long materialized;
+  unsigned long long recompressed;
+};
+
 /* End of public definitions */
 
 /* Public function prototypes from compress.c */
@@ -34,10 +49,28 @@ Term uncompress_term(char *s, int *ip);
 
 char *compress_term(Term t);
 
-void compress_clause(Topform c);
+Clause_compress_result compress_clause(Topform c);
 
 void uncompress_clause(Topform c);
 
 void uncompress_clauses(Plist p);
+
+BOOL materialize_clause(Topform c);
+
+BOOL recompress_clause(Topform c);
+
+Plist materialize_clauses(Plist p);
+
+void recompress_clauses(Plist p);
+
+BOOL compressed_clause_is_valid(Topform c);
+
+unsigned long long clause_body_storage_bytes(Topform c);
+
+struct clause_compression_stats clause_compression_get_stats(void);
+
+void clause_compression_reset_stats(void);
+
+void discard_compressed_clause(Topform c);
 
 #endif  /* conditional compilation of whole file */

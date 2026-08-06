@@ -3214,8 +3214,7 @@ Plist get_clanc(int id, Plist anc)
 /* DOCUMENTATION
 This routine returns the Plist of clauses that are ancestors of Topform c,
 including clause c.  The result is sorted (increasing) by ID.
-If any of the ancestors are compressed, they are uncompressed
-(in place) and left uncompressed.
+Clause bodies are not accessed or materialized by this routine.
 */
 
 /* PUBLIC */
@@ -4099,4 +4098,3 @@ const char *tptp_rule_name(Just_type type)
   default:                 return "unknown";
   }
 }  /* tptp_rule_name */
-

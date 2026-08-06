@@ -11,7 +11,7 @@ CFLAGS = $(XFLAGS) -g  -O0 -Wall
 # CFLAGS = $(XFLAGS) -pg -O -Wall
 # CFLAGS = $(XFLAGS)  -Wall -pedantic
 
-PROGRAMS = avltest
+PROGRAMS = avltest memory_lifecycle_test
 
 all: ladr apps
 
@@ -33,6 +33,11 @@ apps: $(PROGRAMS)
 avltest: avltest.o
 	$(CC) $(CFLAGS) -o avltest avltest.o ../ladr/libladr.a -lm
 
+memory_lifecycle_test: memory_lifecycle_test.o
+	$(CC) $(CFLAGS) -o memory_lifecycle_test memory_lifecycle_test.o ../ladr/libladr.a -lm
+
+memory-tests: memory_lifecycle_test
+	./memory_lifecycle_test
+
 tptp_test: tptp_test.o
 	$(CC) $(CFLAGS) -o tptp_test tptp_test.o ../ladr/libladr.a -lm
-

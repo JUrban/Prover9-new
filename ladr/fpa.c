@@ -110,6 +110,7 @@ static Fpa_state build_query(Term t, Context c, Querytype type,
 
 #define PTRS_FPA_TRIE PTRS(sizeof(struct fpa_trie))
 static unsigned Fpa_trie_gets, Fpa_trie_frees;
+static unsigned long long Fpa_trie_high_water;
 
 #define PTRS_FPA_STATE PTRS(sizeof(struct fpa_state))
 static unsigned Fpa_state_gets, Fpa_state_frees;
@@ -127,8 +128,12 @@ static
 Fpa_trie get_fpa_trie(void)
 {
   Fpa_trie p = get_cmem(PTRS_FPA_TRIE);
+  unsigned long long live;
   p->label = -1;
   Fpa_trie_gets++;
+  live = (unsigned long long) Fpa_trie_gets - Fpa_trie_frees;
+  if (live > Fpa_trie_high_water)
+    Fpa_trie_high_water = live;
   return(p);
 }  /* get_fpa_trie */
 
@@ -663,10 +668,12 @@ void fpa_trie_possible_delete(Fpa_trie node)
   Fpa_trie to_free[1000];
   int nfree = 0;
 
-  while (node->parent &&
-	 node->terms &&
-	 fpalist_empty(node->terms) &&
-	 node->kids == NULL) {
+  if (node->terms != NULL && fpalist_empty(node->terms)) {
+    zap_fpalist(node->terms);
+    node->terms = NULL;
+  }
+
+  while (node->parent && node->terms == NULL && node->kids == NULL) {
     Fpa_trie parent = node->parent;
     /* Unlink from parent's kids list */
     if (parent->kids == node)
@@ -1833,6 +1840,18 @@ unsigned long long fpa_intersect_merge_ops(void)
   return Intersect_merge_ops;
 }  /* fpa_intersect_merge_ops */
 
+/* PUBLIC */
+unsigned long long fpa_live_trie_nodes(void)
+{
+  return (unsigned long long) Fpa_trie_gets - Fpa_trie_frees;
+}  /* fpa_live_trie_nodes */
+
+/* PUBLIC */
+unsigned long long fpa_peak_trie_nodes(void)
+{
+  return Fpa_trie_high_water;
+}  /* fpa_peak_trie_nodes */
+
 /*************
  *
  *   get_fpa_id_count()
@@ -2097,10 +2116,9 @@ BOOL fpa_restore_index(FILE *fp, Fpa_index idx)
             depth, idx->depth);
   }
 
-  /* Replace root with restored trie */
-  if (idx->root != NULL) {
-    /* Leak old root - acceptable during checkpoint restore */
-  }
+  /* Replace the initialization root without retaining it. */
+  if (idx->root != NULL)
+    zap_fpa_trie(idx->root);
   idx->root = fpa_restore_trie_node(fp, NULL);
   if (idx->root == NULL) {
     idx->root = get_fpa_trie();

@@ -134,6 +134,7 @@ struct prover_options {
     ignore_option_dependencies,
     comma_stats,          // format statistics with commas
     report_index_stats,   // include FPA index stats in reports
+    compress_disabled,    // compact bodies of clauses retained only as ancestors
 
     checkpoint_exit,      // exit after writing checkpoint
     checkpoint_ancestors, // include disabled list in checkpoint
@@ -294,7 +295,25 @@ struct prover_stats {
     denials_size,
     limbo_size,
     kbyte_usage,
-    new_constants;
+    new_constants,
+    compression_attempted,
+    compression_successful,
+    compression_skipped,
+    compression_materialized,
+    compression_recompressed,
+    active_body_bytes,
+    hint_body_bytes,
+    disabled_full_body_bytes,
+    disabled_compressed_bytes,
+    disabled_estimated_uncompressed_bytes,
+    disabled_full_clauses,
+    disabled_compressed_clauses,
+    allocator_reserved_kbytes,
+    palloc_cumulative_bytes,
+    fpa_live_nodes,
+    fpa_peak_nodes,
+    fpa_live_lists,
+    fpa_peak_lists;
 };
 
 // Search input

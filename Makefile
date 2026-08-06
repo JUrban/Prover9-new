@@ -65,6 +65,9 @@ test6:
 	@echo "*** All of the programs are in ./bin, and they can be copied anywhere you like. ***"
 	@echo ""
 
+memory-tests:
+	cd test.src && $(MAKE) memory-tests
+
 clean:
 	cd ladr             && $(MAKE) realclean
 	cd apps.src         && $(MAKE) realclean

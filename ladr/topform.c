@@ -18,6 +18,7 @@
 
 #include "topform.h"
 #include "memory.h"
+#include "compress.h"
 
 /* Private definitions and types */
 
@@ -125,6 +126,7 @@ use the higher-level routine delete_clause(c) instead.
 /* PUBLIC */
 void zap_topform(Topform tf)
 {
+  discard_compressed_clause(tf);
   zap_literals(tf->literals);
   zap_formula(tf->formula);
   zap_attributes(tf->attributes);
@@ -147,7 +149,11 @@ void fprint_clause(FILE *fp, Topform c)
   if (c == NULL)
     fprintf(fp, "fprint_clause: NULL clause\n");
   else {
+    BOOL was_compressed = c->compressed != NULL;
     Literals lit;
+
+    if (was_compressed && !materialize_clause(c))
+      fatal_error("fprint_clause: invalid compressed clause");
 
     if (c->id > 0)
       fprintf(fp, "%llu: ", c->id);
@@ -168,6 +174,8 @@ void fprint_clause(FILE *fp, Topform c)
       }
     }
     fprintf(fp, ".\n");
+    if (was_compressed && !recompress_clause(c))
+      fatal_error("fprint_clause: could not recompress clause");
   }
   fflush(fp);
 }  /* fprint_clause */
@@ -941,4 +949,3 @@ Ordertype cl_hint_id_compare(Topform c1, Topform c2)
   else
     return SAME_AS;
 }  /* cl_hint_id_compare */
-
