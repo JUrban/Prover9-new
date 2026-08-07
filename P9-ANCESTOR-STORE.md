@@ -36,7 +36,7 @@ ownership flag, are never installed into search indexes, and are released at
 the end of the enclosing proof/output scope.  Final proof traversal follows
 parent IDs and materializes exactly the reachable DAG.
 
-## Version 1 record
+## Version 2 record
 
 Every integer field is fixed little-endian.  A record has a 96-byte header,
 followed by five length-delimited sections.
@@ -44,7 +44,7 @@ followed by five length-delimited sections.
 | Offset | Width | Field |
 | ---: | ---: | --- |
 | 0 | 4 | magic `P9AR` |
-| 4 | 2 | record version (`1`) |
+| 4 | 2 | record version (`2`) |
 | 6 | 2 | header size (`96`) |
 | 8 | 8 | total record bytes |
 | 16 | 8 | stable clause ID |
@@ -60,9 +60,9 @@ followed by five length-delimited sections.
 | 72 | 4 | attribute-term bytes |
 | 76 | 4 | compact-justification bytes |
 | 80 | 4 | parent count |
-| 84 | 4 | CRC-32 of the complete payload |
+| 84 | 4 | CRC-32 of the complete payload, XOR activation epoch |
 | 88 | 4 | CRC-32 of header bytes 0--87 |
-| 92 | 4 | reserved; must be zero |
+| 92 | 4 | DISCOUNT simplifier/activation epoch |
 
 The payload order is the versioned Phase 2 exact clause body, a versioned
 formula term, a versioned attribute term, the versioned compact justification,
@@ -74,13 +74,21 @@ records, and INSTANCE substitution terms.  The separate parent array permits
 proof size, tree weight, subsumption cost, and negative-parent walks without
 decoding a justification or clause body.
 
+Version 2 preserves the activation epoch needed by delayed collective
+inference after an archived historical clause is materialized for a
+checkpoint.  The epoch is folded into the payload checksum, so changing it is
+detected even though the fixed 96-byte header and its original CRC boundary
+remain unchanged.  The reader also accepts version 1 records, whose reserved
+word must be zero and whose restored epoch is zero.
+
 The record is process-internal: term sections use the current process's symbol
 numbers.  It is deliberately not a new external checkpoint format.
 
 ## Validation and failure behavior
 
 Before exposing a record view, the reader checks the store offset, minimum
-header extent, magic, supported version, exact header size, reserved zero,
+header extent, magic, supported version, exact header size, the version-1
+reserved zero,
 header checksum, overflow-safe section sum and parent multiplication, exact
 total size, store bounds, and payload checksum.  Section decoders then check
 their own versions, lengths, varints, symbol/arity validity, term shape, and

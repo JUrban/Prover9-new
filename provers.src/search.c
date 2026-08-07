@@ -199,6 +199,8 @@ struct collective_batch {
   unsigned long long given_id;
   unsigned long long cursor;
   unsigned long long activation_limit;
+  unsigned long long hyper_cursor;
+  unsigned long long hyper_prefix_hash;
   unsigned snapshot_epoch;
   unsigned kind;
   struct collective_batch *next;
@@ -367,6 +369,11 @@ void collective_reset_state(void)
   Stats.collective_batches_completed = 0;
   Stats.collective_pair_expansions = 0;
   Stats.collective_hyper_expansions = 0;
+  Stats.collective_hyper_sets_completed = 0;
+  Stats.collective_candidates_emitted = 0;
+  Stats.collective_candidates_replayed = 0;
+  Stats.collective_deferred_turns = 0;
+  Stats.collective_raw_candidates_peak = 0;
   Stats.collective_partners_skipped = 0;
   Stats.collective_parent_materializations = 0;
   Stats.collective_snapshot_rebuilds = 0;
@@ -914,6 +921,8 @@ Prover_options init_prover_options(void)
   p->ur_nucleus_limit = init_parm("ur_nucleus_limit",     -1,     -1,INT_MAX);
   p->collective_given_ratio =
     init_parm("collective_given_ratio", 1, 1, 1000);
+  p->collective_candidate_chunk =
+    init_parm("collective_candidate_chunk", 64, 1, INT_MAX);
 
   p->fold_denial_max =  init_parm("fold_denial_max",       0,     -1,INT_MAX);
 
@@ -1644,9 +1653,19 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             comma_num(s.collective_parent_materializations),
             comma_num(s.collective_activation_entries));
     fprintf(fp,
-            "Collective_work: paramod_pairs=%s, hyper_batches=%s.\n",
+            "Collective_work: paramod_pairs=%s, hyper_turns=%s, "
+            "hyper_sets_completed=%s.\n",
             comma_num(s.collective_pair_expansions),
-            comma_num(s.collective_hyper_expansions));
+            comma_num(s.collective_hyper_expansions),
+            comma_num(s.collective_hyper_sets_completed));
+    fprintf(fp,
+            "Collective_chunks: limit=%d, emitted=%s, replayed=%s, "
+            "deferred_turns=%s, raw_peak=%s.\n",
+            parm(Opt->collective_candidate_chunk),
+            comma_num(s.collective_candidates_emitted),
+            comma_num(s.collective_candidates_replayed),
+            comma_num(s.collective_deferred_turns),
+            comma_num(s.collective_raw_candidates_peak));
     fprintf(fp,
             "Collective_hint_probes: scheduled=%s, expanded=%s, "
             "credit=%s.\n",
@@ -5532,6 +5551,77 @@ struct collective_history_filter {
   unsigned long long rejected_inactive;
 };
 
+struct collective_candidate_chunk {
+  unsigned long long skip;
+  unsigned long long limit;
+  unsigned long long seen;
+  unsigned long long emitted;
+  unsigned long long rolling_hash;
+  unsigned long long expected_prefix_hash;
+  unsigned long long replay_prefix_hash;
+  unsigned long long committed_prefix_hash;
+  BOOL replay_prefix_captured;
+  BOOL committed_prefix_captured;
+};
+
+#define COLLECTIVE_REPLAY_HASH_SEED 1469598103934665603ULL
+
+/* Extend a sequence hash with the structural fingerprint of one raw
+   conclusion.  This is deliberately computed before cl_process() can assign
+   an ID, simplify, or delete the clause. */
+static
+unsigned long long collective_replay_hash_clause(
+  unsigned long long h, Topform c)
+{
+  unsigned long long clause_hash = hint_trace_clause_hash(c);
+  h = hint_trace_mix_u32(h, (unsigned) clause_hash);
+  h = hint_trace_mix_u32(h, (unsigned) (clause_hash >> 32));
+  return hint_trace_mix_u32(h, 0xc011ec7eU);
+}
+
+/* A collective hyper set is replayable from immutable historical parents.
+   Discard the already-committed prefix before it reaches clause IDs, hints,
+   or passive storage, commit at most one bounded chunk, and discard the
+   remainder so the descriptor can revisit it on a later fair turn. */
+static
+void collective_chunk_process(Topform c, void *data)
+{
+  struct collective_candidate_chunk *chunk = data;
+  unsigned long long ordinal = chunk->seen++;
+
+  if (ordinal == chunk->skip) {
+    chunk->replay_prefix_hash = chunk->rolling_hash;
+    chunk->replay_prefix_captured = TRUE;
+    if (chunk->replay_prefix_hash != chunk->expected_prefix_hash)
+      fatal_error("collective hyper replay prefix changed");
+  }
+  chunk->rolling_hash =
+    collective_replay_hash_clause(chunk->rolling_hash, c);
+
+  if (ordinal < chunk->skip)
+    delete_clause(c);
+  else if (chunk->emitted < chunk->limit) {
+    chunk->emitted++;
+    if (chunk->emitted == chunk->limit) {
+      chunk->committed_prefix_hash = chunk->rolling_hash;
+      chunk->committed_prefix_captured = TRUE;
+    }
+    cl_process(c);
+  }
+  else
+    delete_clause(c);
+}
+
+static struct collective_candidate_chunk *Current_collective_chunk = NULL;
+
+static
+void collective_chunk_cl_process(Topform c)
+{
+  if (Current_collective_chunk == NULL)
+    fatal_error("collective chunk callback has no active context");
+  collective_chunk_process(c, Current_collective_chunk);
+}
+
 /* The persistent index contains every historically clashable activation.
    Filter each retrieved candidate against the descriptor epoch: a clone's
    simplifier_epoch is its activation epoch, and the side table records the
@@ -5574,9 +5664,10 @@ BOOL collective_expand_one_batch(void)
       (b->kind & ~COLLECTIVE_KIND_MASK) != 0)
     fatal_error("unknown collective batch kind");
 
-  /* A hint probe advances one paramodulation pair before any one-shot hyper
-     work.  Hyper expansion can emit an unbounded number of conclusions, so
-     it remains on the ordinary fair queue and cannot masquerade as a bounded
+  /* A hint probe advances one paramodulation pair before any hyper work.
+     Hyper now commits only a bounded conclusion chunk, but regenerating and
+     checking the raw set can still be arbitrarily expensive.  It therefore
+     remains on the ordinary fair queue and cannot masquerade as a cheap
      probe. */
   if ((b->kind & (COLLECTIVE_POS_HYPER | COLLECTIVE_NEG_HYPER)) != 0 &&
       (!hint_probe ||
@@ -5586,6 +5677,7 @@ BOOL collective_expand_one_batch(void)
     unsigned long long given_position;
     unsigned long long generated_before = Stats.generated;
     unsigned long long kept_before = Stats.kept;
+    struct collective_candidate_chunk chunk;
     Topform given;
     unsigned hyper_kind = (b->kind & COLLECTIVE_POS_HYPER) != 0 ?
                           COLLECTIVE_POS_HYPER : COLLECTIVE_NEG_HYPER;
@@ -5598,14 +5690,50 @@ BOOL collective_expand_one_batch(void)
       fatal_error("collective hyper batch is not anchored by its given");
     memset(&filter, 0, sizeof(filter));
     filter.snapshot_epoch = b->snapshot_epoch;
+    memset(&chunk, 0, sizeof(chunk));
+    chunk.skip = b->hyper_cursor;
+    chunk.limit = (unsigned long long) parm(Opt->collective_candidate_chunk);
+    chunk.rolling_hash = COLLECTIVE_REPLAY_HASH_SEED;
+    chunk.expected_prefix_hash = b->hyper_cursor == 0 ?
+      COLLECTIVE_REPLAY_HASH_SEED : b->hyper_prefix_hash;
     clock_start(Clocks.infer);
     Current_inference_source = INFER_SOURCE_HYPER;
+    Current_collective_chunk = &chunk;
     hyper_resolution_with_clause_test(
       given, direction, Collective_historical_idx,
-      collective_history_clause_test, &filter, cl_process);
+      collective_history_clause_test, &filter, collective_chunk_cl_process);
+    Current_collective_chunk = NULL;
     Current_inference_source = INFER_SOURCE_OTHER;
     clock_stop(Clocks.infer);
-    b->kind &= ~hyper_kind;
+    if (chunk.seen < chunk.skip)
+      fatal_error("collective hyper replay order changed");
+    if (!chunk.replay_prefix_captured) {
+      /* The cursor can equal the regenerated set size. */
+      chunk.replay_prefix_hash = chunk.rolling_hash;
+      chunk.replay_prefix_captured = TRUE;
+    }
+    if (chunk.replay_prefix_hash != chunk.expected_prefix_hash)
+      fatal_error("collective hyper replay prefix changed");
+    if (!chunk.committed_prefix_captured) {
+      /* The set ended before filling this turn's conclusion budget. */
+      chunk.committed_prefix_hash = chunk.rolling_hash;
+      chunk.committed_prefix_captured = TRUE;
+    }
+    if (chunk.seen > Stats.collective_raw_candidates_peak)
+      Stats.collective_raw_candidates_peak = chunk.seen;
+    Stats.collective_candidates_emitted += chunk.emitted;
+    Stats.collective_candidates_replayed += chunk.skip;
+    if (chunk.seen > chunk.skip + chunk.emitted) {
+      b->hyper_cursor = chunk.skip + chunk.emitted;
+      b->hyper_prefix_hash = chunk.committed_prefix_hash;
+      Stats.collective_deferred_turns++;
+    }
+    else {
+      b->kind &= ~hyper_kind;
+      b->hyper_cursor = 0;
+      b->hyper_prefix_hash = 0;
+      Stats.collective_hyper_sets_completed++;
+    }
     Stats.collective_hyper_expansions++;
     Stats.collective_history_queries++;
     Stats.collective_history_candidates += filter.accepted;
@@ -5615,13 +5743,15 @@ BOOL collective_expand_one_batch(void)
       printf("%sCOLLECTIVE_TRACE kind=%s given=%llu epoch=%u "
              "history_candidates=%llu future_rejected=%llu "
              "inactive_rejected=%llu generated=%llu kept=%llu "
-             "hint_probe=%d.\n",
+             "hint_probe=%d raw=%llu emitted=%llu cursor=%llu "
+             "complete=%d.\n",
              TPTP_PFX,
              hyper_kind == COLLECTIVE_POS_HYPER ? "pos_hyper" : "neg_hyper",
              b->given_id, b->snapshot_epoch, filter.accepted,
              filter.rejected_future, filter.rejected_inactive,
              Stats.generated - generated_before, Stats.kept - kept_before,
-             hint_probe);
+             hint_probe, chunk.seen, chunk.emitted, b->hyper_cursor,
+             (b->kind & hyper_kind) == 0);
     collective_finish_batch_turn(b);
     return TRUE;
   }
@@ -8058,7 +8188,7 @@ void write_collective_checkpoint(const char *dir)
   FILE *fp;
   unsigned long long i;
   struct collective_batch *b;
-  const char magic[8] = {'P','9','C','O','L','L','6','\0'};
+  const char magic[8] = {'P','9','C','O','L','L','7','\0'};
   uint32_t turn = Collective_batch_turn ? 1U : 0U;
   uint32_t givens_since_batch = Collective_givens_since_batch;
   uint32_t hint_probe_credit = Collective_hint_probe_credit ? 1U : 0U;
@@ -8093,6 +8223,8 @@ void write_collective_checkpoint(const char *dir)
     if (fwrite(&b->given_id, sizeof(b->given_id), 1, fp) != 1 ||
         fwrite(&b->cursor, sizeof(b->cursor), 1, fp) != 1 ||
         fwrite(&b->activation_limit, sizeof(b->activation_limit), 1, fp) != 1 ||
+        fwrite(&b->hyper_cursor, sizeof(b->hyper_cursor), 1, fp) != 1 ||
+        fwrite(&b->hyper_prefix_hash, sizeof(b->hyper_prefix_hash), 1, fp) != 1 ||
         fwrite(&epoch, sizeof(epoch), 1, fp) != 1 ||
         fwrite(&kind, sizeof(kind), 1, fp) != 1)
       fatal_error("write_collective_checkpoint: descriptor write failed");
@@ -8108,7 +8240,7 @@ void read_collective_checkpoint(const char *dir)
   FILE *fp;
   unsigned long long activations, batches, i;
   uint32_t turn, givens_since_batch, hint_probe_credit;
-  BOOL format6;
+  BOOL format6, format7;
 
   if (!collective_frontier_mode())
     return;
@@ -8118,14 +8250,15 @@ void read_collective_checkpoint(const char *dir)
     fatal_error("resume: collective frontier state is missing");
   if (fread(magic, sizeof(magic), 1, fp) != 1)
     fatal_error("resume: corrupt collective frontier header");
+  format7 = memcmp(magic, "P9COLL7", 7) == 0;
   format6 = memcmp(magic, "P9COLL6", 7) == 0;
-  if ((!format6 && memcmp(magic, "P9COLL5", 7) != 0) ||
+  if ((!format7 && !format6 && memcmp(magic, "P9COLL5", 7) != 0) ||
       fread(&activations, sizeof(activations), 1, fp) != 1 ||
       fread(&batches, sizeof(batches), 1, fp) != 1 ||
       fread(&turn, sizeof(turn), 1, fp) != 1 ||
       fread(&givens_since_batch, sizeof(givens_since_batch), 1, fp) != 1)
     fatal_error("resume: corrupt collective frontier header");
-  if (format6) {
+  if (format6 || format7) {
     if (fread(&hint_probe_credit, sizeof(hint_probe_credit), 1, fp) != 1)
       fatal_error("resume: corrupt collective frontier probe state");
   }
@@ -8151,8 +8284,19 @@ void read_collective_checkpoint(const char *dir)
     uint32_t epoch, kind;
     if (fread(&b->given_id, sizeof(b->given_id), 1, fp) != 1 ||
         fread(&b->cursor, sizeof(b->cursor), 1, fp) != 1 ||
-        fread(&b->activation_limit, sizeof(b->activation_limit), 1, fp) != 1 ||
-        fread(&epoch, sizeof(epoch), 1, fp) != 1 ||
+        fread(&b->activation_limit, sizeof(b->activation_limit), 1, fp) != 1)
+      fatal_error("resume: truncated collective batch queue");
+    if (format7) {
+      if (fread(&b->hyper_cursor, sizeof(b->hyper_cursor), 1, fp) != 1 ||
+          fread(&b->hyper_prefix_hash,
+                sizeof(b->hyper_prefix_hash), 1, fp) != 1)
+        fatal_error("resume: truncated collective hyper cursor");
+    }
+    else {
+      b->hyper_cursor = 0;
+      b->hyper_prefix_hash = 0;
+    }
+    if (fread(&epoch, sizeof(epoch), 1, fp) != 1 ||
         fread(&kind, sizeof(kind), 1, fp) != 1)
       fatal_error("resume: truncated collective batch queue");
     if (b->cursor > b->activation_limit ||
@@ -8161,7 +8305,10 @@ void read_collective_checkpoint(const char *dir)
     b->snapshot_epoch = epoch;
     if ((kind & COLLECTIVE_INFERENCE_MASK) == 0 ||
         (kind & ~COLLECTIVE_KIND_MASK) != 0 ||
-        (!format6 && (kind & COLLECTIVE_HINT_PROBE) != 0) ||
+        (!format7 && !format6 && (kind & COLLECTIVE_HINT_PROBE) != 0) ||
+        (b->hyper_cursor != 0 &&
+         (kind & (COLLECTIVE_POS_HYPER | COLLECTIVE_NEG_HYPER)) == 0) ||
+        (b->hyper_cursor == 0 && b->hyper_prefix_hash != 0) ||
         ((kind & COLLECTIVE_HINT_PROBE) != 0 &&
          (i != 0 || hint_probe_credit != 0)))
       fatal_error("resume: invalid collective batch kind");
@@ -8266,6 +8413,16 @@ void write_checkpoint(void)
             Stats.collective_pair_expansions);
     fprintf(fp, "collective_hyper_expansions %llu\n",
             Stats.collective_hyper_expansions);
+    fprintf(fp, "collective_hyper_sets_completed %llu\n",
+            Stats.collective_hyper_sets_completed);
+    fprintf(fp, "collective_candidates_emitted %llu\n",
+            Stats.collective_candidates_emitted);
+    fprintf(fp, "collective_candidates_replayed %llu\n",
+            Stats.collective_candidates_replayed);
+    fprintf(fp, "collective_deferred_turns %llu\n",
+            Stats.collective_deferred_turns);
+    fprintf(fp, "collective_raw_candidates_peak %llu\n",
+            Stats.collective_raw_candidates_peak);
     fprintf(fp, "collective_partners_skipped %llu\n",
             Stats.collective_partners_skipped);
     fprintf(fp, "collective_parent_materializations %llu\n",
@@ -8991,6 +9148,26 @@ void resume_load_clauses(const char *dir)
       read_metadata_ull(fp, "collective_pair_expansions");
     rewind(fp); Stats.collective_hyper_expansions =
       read_metadata_ull(fp, "collective_hyper_expansions");
+    Stats.collective_hyper_sets_completed = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_hyper_sets_completed",
+      &Stats.collective_hyper_sets_completed);
+    Stats.collective_candidates_emitted = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_candidates_emitted",
+      &Stats.collective_candidates_emitted);
+    Stats.collective_candidates_replayed = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_candidates_replayed",
+      &Stats.collective_candidates_replayed);
+    Stats.collective_deferred_turns = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_deferred_turns",
+      &Stats.collective_deferred_turns);
+    Stats.collective_raw_candidates_peak = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_raw_candidates_peak",
+      &Stats.collective_raw_candidates_peak);
     rewind(fp); Stats.collective_partners_skipped =
       read_metadata_ull(fp, "collective_partners_skipped");
     rewind(fp); Stats.collective_parent_materializations =

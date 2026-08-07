@@ -18,7 +18,7 @@
 #endif
 
 #define ANCESTOR_MAGIC "P9AR"
-#define ANCESTOR_VERSION 1
+#define ANCESTOR_VERSION 2
 #define ANCESTOR_HEADER_SIZE 96
 #define STORE_REF_TAG ((uintptr_t) 1)
 
@@ -279,8 +279,13 @@ static BOOL append_record(Clause_store store, Topform c,
     put64(out, (uint64_t) (unsigned) p->i);
     out += 8;
   }
+  /* Version 2 uses the formerly reserved final word for the DISCOUNT
+     activation epoch.  Fold it into the payload checksum so corruption of
+     this scheduling-critical value is detected without growing the header. */
+  put32(record + 92, c->simplifier_epoch);
   put32(record + 84,
-        crc32_bytes(record + ANCESTOR_HEADER_SIZE, (size_t) payload_size));
+        crc32_bytes(record + ANCESTOR_HEADER_SIZE, (size_t) payload_size) ^
+        c->simplifier_epoch);
   put32(record + 88, crc32_bytes(record, 88));
   store->backing_size += (size_t) total_size;
   *record_offset = offset;
@@ -317,6 +322,7 @@ struct record_view {
   uint32_t attribute_size;
   uint32_t just_size;
   uint32_t parent_count;
+  uint32_t simplifier_epoch;
 };
 
 static BOOL record_view(Clause_store store, unsigned long long offset,
@@ -324,15 +330,17 @@ static BOOL record_view(Clause_store store, unsigned long long offset,
 {
   const unsigned char *r;
   uint64_t payload, sum;
+  unsigned version;
   if (store == NULL || v == NULL || offset > store->backing_size ||
       store->backing_size - (size_t) offset < ANCESTOR_HEADER_SIZE)
     goto bad;
   r = store->backing + (size_t) offset;
+  version = get16(r + 4);
   if (memcmp(r, ANCESTOR_MAGIC, 4) != 0 ||
-      get16(r + 4) != ANCESTOR_VERSION ||
+      (version != 1 && version != ANCESTOR_VERSION) ||
       get16(r + 6) != ANCESTOR_HEADER_SIZE ||
       get32(r + 88) != crc32_bytes(r, 88) ||
-      get32(r + 92) != 0)
+      (version == 1 && get32(r + 92) != 0))
     goto bad;
   memset(v, 0, sizeof(*v));
   v->record = r;
@@ -350,6 +358,7 @@ static BOOL record_view(Clause_store store, unsigned long long offset,
   v->attribute_size = get32(r + 72);
   v->just_size = get32(r + 76);
   v->parent_count = get32(r + 80);
+  v->simplifier_epoch = version >= 2 ? get32(r + 92) : 0;
   if (v->id == 0 || (v->flags & ~0x00ffU) != 0 || v->just_size < 5)
     goto bad;
   sum = (uint64_t) v->body_size + v->formula_size + v->attribute_size +
@@ -365,7 +374,8 @@ static BOOL record_view(Clause_store store, unsigned long long offset,
   v->attributes = v->formula + v->formula_size;
   v->justification = v->attributes + v->attribute_size;
   v->parents = v->justification + v->just_size;
-  if (get32(r + 84) != crc32_bytes(v->body, (size_t) payload))
+  if (get32(r + 84) !=
+      (crc32_bytes(v->body, (size_t) payload) ^ v->simplifier_epoch))
     goto bad;
   return TRUE;
 bad:
@@ -556,6 +566,7 @@ BOOL clause_store_archive_clause_preserve(Clause_store store, Topform c)
   source->weight = c->weight;
   source->proof_tree_weight_cache = c->proof_tree_weight_cache;
   source->semantics = c->semantics;
+  source->simplifier_epoch = c->simplifier_epoch;
   source->normal_vars = c->normal_vars;
   source->used = c->used;
   source->initial = c->initial;
@@ -739,6 +750,7 @@ Topform clause_store_materialize(Clause_store store, size_t position)
   c = get_topform();
   c->id = v.id;
   c->semantics = v.semantics;
+  c->simplifier_epoch = v.simplifier_epoch;
   memcpy(&weight, &v.weight_bits, sizeof(weight));
   c->weight = weight;
   c->last_matched_given = v.last_matched;

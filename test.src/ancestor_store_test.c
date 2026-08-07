@@ -208,6 +208,7 @@ static void archive_round_trip(Clause_store_archive_mode mode)
   a->justification = input_just();
   a->initial = 1;
   a->was_given = 1;
+  a->simplifier_epoch = 37;
   a->weight = 17.25;
   assign_clause_id(a);
   a_id = a->id;
@@ -225,6 +226,7 @@ static void archive_round_trip(Clause_store_archive_mode mode)
   b->goal_derived = 1;
   b->semantics = 7;
   b->last_matched_given = 99;
+  b->simplifier_epoch = 41;
   assign_clause_id(b);
   b_id = b->id;
   expected_b = copy_clause_with_flags(b);
@@ -248,7 +250,7 @@ static void archive_round_trip(Clause_store_archive_mode mode)
         clause_flags_ident(ma, expected_a),
         "compressed body and every private term flag round trip");
   CHECK(ma != NULL && ma->id == a_id && ma->initial && ma->was_given &&
-        ma->weight == 17.25,
+        ma->weight == 17.25 && ma->simplifier_epoch == 37,
         "stable ID, proof flags, and scalar metadata round trip");
   CHECK(ma != NULL && get_term_attribute(ma->attributes, attr, 1) != NULL,
         "term attributes round trip");
@@ -258,7 +260,7 @@ static void archive_round_trip(Clause_store_archive_mode mode)
   zap_ilist(parents);
   CHECK(mb != NULL && clause_ident(mb->literals, expected_b->literals) &&
         mb->goal_derived && mb->semantics == 7 &&
-        mb->last_matched_given == 99,
+        mb->last_matched_given == 99 && mb->simplifier_epoch == 41,
         "derived record metadata round trips");
 
   proof = get_clause_ancestors(mb);
@@ -284,11 +286,11 @@ static void archive_round_trip(Clause_store_archive_mode mode)
   CHECK(clause_store_test_corrupt(store, a_offset + 8, 0x80),
         "record bound corruption is reversible");
   CHECK(clause_store_test_corrupt(store, a_offset + 92, 0x01),
-        "test can corrupt a reserved header field");
+        "test can corrupt the archived simplifier epoch");
   CHECK(clause_store_materialize(store, 0) == NULL,
-        "nonzero reserved header fields fail closed");
+        "simplifier-epoch checksum corruption fails closed");
   CHECK(clause_store_test_corrupt(store, a_offset + 92, 0x01),
-        "reserved-field corruption is reversible");
+        "simplifier-epoch corruption is reversible");
   CHECK(clause_store_test_corrupt(store, a_offset + 96, 0x01),
         "test can corrupt record payload");
   CHECK(clause_store_materialize(store, 0) == NULL,
@@ -335,6 +337,7 @@ static void archive_preserve_body_test(Clause_store_archive_mode mode)
   original->semantics = 9;
   original->initial = 1;
   original->was_given = 1;
+  original->simplifier_epoch = 73;
   assign_clause_id(original);
   id = original->id;
   original_body = original->literals;
@@ -343,6 +346,7 @@ static void archive_preserve_body_test(Clause_store_archive_mode mode)
   expected->semantics = original->semantics;
   expected->initial = original->initial;
   expected->was_given = original->was_given;
+  expected->simplifier_epoch = original->simplifier_epoch;
 
   clause_store_append(store, original);
   CHECK(clause_store_archive_clause_preserve(store, original),
@@ -358,7 +362,8 @@ static void archive_preserve_body_test(Clause_store_archive_mode mode)
         clause_ident(materialized->literals, expected->literals) &&
         clause_flags_ident(materialized, expected) &&
         materialized->weight == 23.5 && materialized->semantics == 9 &&
-        materialized->initial && materialized->was_given,
+        materialized->initial && materialized->was_given &&
+        materialized->simplifier_epoch == 73,
         "preserve-body archive retains body, flags, and scalar metadata");
   CHECK(materialized != NULL &&
         get_term_attribute(materialized->attributes, attr, 1) != NULL &&

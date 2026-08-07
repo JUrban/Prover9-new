@@ -13,7 +13,9 @@ grep -Eq 'Search_loop: mode=discount, frontier=collective, active_indexed=[0-9]+
   "$test_tmp/prover.out"
 grep -Eq 'Collective_frontier: batches_created=[1-9][0-9]*, completed=[1-9][0-9]*, pending=[1-9][0-9]*, peak=[1-9][0-9]*, ratio=1, skipped=[0-9]+, parent_materializations=0, activations=[1-9][0-9]*\.' \
   "$test_tmp/prover.out"
-grep -Eq 'Collective_work: paramod_pairs=[1-9][0-9]*, hyper_batches=[0-9]+\.' \
+grep -Eq 'Collective_work: paramod_pairs=[1-9][0-9]*, hyper_turns=[0-9]+, hyper_sets_completed=[0-9]+\.' \
+  "$test_tmp/prover.out"
+grep -Eq 'Collective_chunks: limit=64, emitted=[0-9]+, replayed=[0-9]+, deferred_turns=[0-9]+, raw_peak=[0-9]+\.' \
   "$test_tmp/prover.out"
 grep -Eq 'Collective_hint_probes: scheduled=[1-9][0-9]*, expanded=[1-9][0-9]*, credit=(available|consumed)\.' \
   "$test_tmp/prover.out"
@@ -54,13 +56,29 @@ grep -Eq 'total=2, redundant=[0-9]+, active=[0-9]+, matched=[1-9][0-9]*' \
 grep -q 'THEOREM PROVED' "$test_tmp/hyper.out"
 grep -Eq 'Generated_by_rule: binary=0, hyper=[1-9][0-9]*, ur=0, paramod=0, other=[0-9]+\.' \
   "$test_tmp/hyper.out"
-grep -Eq 'Collective_work: paramod_pairs=0, hyper_batches=[1-9][0-9]*\.' \
+grep -Eq 'Collective_work: paramod_pairs=0, hyper_turns=[1-9][0-9]*, hyper_sets_completed=[1-9][0-9]*\.' \
   "$test_tmp/hyper.out"
 grep -Eq 'Collective_history_index: clauses=[1-9][0-9]*, indexed=[1-9][0-9]*, shared=[0-9]+, retained=[0-9]+, retained_clause_bytes=[0-9]+, queries=[1-9][0-9]*, candidates=[1-9][0-9]*, future_rejected=[1-9][0-9]*, inactive_rejected=[0-9]+\.' \
   "$test_tmp/hyper.out"
 "$repo_dir/bin/prooftrans" parents_only < "$test_tmp/hyper.out" \
   > "$test_tmp/hyper-parents.out"
 grep -q 'end of proof' "$test_tmp/hyper-parents.out"
+
+# Force conclusion-level replay.  The same hyper proof must survive while one
+# descriptor turn commits at most one raw conclusion and older ordinals are
+# regenerated then discarded before clause processing.
+sed '1i assign(collective_candidate_chunk,1).' \
+  "$repo_dir/test.src/collective_hyper.in" > "$test_tmp/hyper-chunk1.in"
+"$repo_dir/bin/prover9" < "$test_tmp/hyper-chunk1.in" \
+  > "$test_tmp/hyper-chunk1.out" 2> "$test_tmp/hyper-chunk1.err"
+grep -q 'THEOREM PROVED' "$test_tmp/hyper-chunk1.out"
+grep -Eq 'Collective_work: paramod_pairs=0, hyper_turns=[1-9][0-9]*, hyper_sets_completed=[1-9][0-9]*\.' \
+  "$test_tmp/hyper-chunk1.out"
+grep -Eq 'Collective_chunks: limit=1, emitted=[1-9][0-9]*, replayed=[1-9][0-9]*, deferred_turns=[1-9][0-9]*, raw_peak=([2-9]|[1-9][0-9]+)\.' \
+  "$test_tmp/hyper-chunk1.out"
+"$repo_dir/bin/prooftrans" expand < "$test_tmp/hyper-chunk1.out" \
+  > "$test_tmp/hyper-chunk1-parents.out"
+grep -q 'end of proof' "$test_tmp/hyper-chunk1-parents.out"
 
 if "$repo_dir/bin/prover9" < \
      "$repo_dir/test.src/collective_historical_hyper.in" \
@@ -70,7 +88,7 @@ if "$repo_dir/bin/prover9" < \
   exit 1
 fi
 grep -q 'SEARCH FAILED' "$test_tmp/historical-hyper.out"
-grep -Eq 'COLLECTIVE_TRACE kind=pos_hyper given=[0-9]+ epoch=[0-9]+ history_candidates=2 future_rejected=0 inactive_rejected=0 generated=1 kept=1 hint_probe=0\.' \
+grep -Eq 'COLLECTIVE_TRACE kind=pos_hyper given=[0-9]+ epoch=[0-9]+ history_candidates=2 future_rejected=0 inactive_rejected=0 generated=1 kept=1 hint_probe=0 raw=1 emitted=1 cursor=0 complete=1\.' \
   "$test_tmp/historical-hyper.out"
 grep -Eq 'Generated_by_rule: binary=0, hyper=1, ur=0, paramod=0, other=[0-9]+\.' \
   "$test_tmp/historical-hyper.out"

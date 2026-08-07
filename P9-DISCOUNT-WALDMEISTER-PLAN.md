@@ -352,6 +352,31 @@ Implementation status on 2026-08-07:
   together occupy 46,808 bytes versus 132,944 in the original persistent-clone
   implementation, a 64.8% reduction with identical search counts.  The fresh
   given-87 checkpoint still restores all 18 hashes and the exact boundary.
+- Collective hyperresolution now has a conclusion-level fair cursor in
+  addition to its set-level descriptor.  `collective_candidate_chunk`
+  defaults to 64 and is the hard maximum number of raw conclusions sent
+  through the exact `cl_process` path in one descriptor turn.  An unfinished
+  immutable historical set rotates to the queue tail; its next turn
+  regenerates and deletes the committed prefix before clause IDs, hints, or
+  passive selection can observe it.  A rolling structural checksum covers
+  that prefix and fails closed if replay order or content changes.  This
+  bounds the immediate passive/RAM burst without dropping a finite
+  conclusion, changing its exact hint match, or letting a large hyper set
+  monopolize fair scheduling.  The tradeoff is deliberate CPU replay until a
+  true Waldmeister-style promising-candidate cache can replace it.  A forced
+  chunk-size-one proof completed nine hyper sets in 38 turns, emitted 34
+  candidates, replayed 31 prefix candidates, deferred 29 turns, and observed
+  a 27-candidate raw peak.  The original proof still passed `prooftrans`.
+  On the 250-given/10%-hint Osborn boundary, all 51 hyper sets happen to emit
+  zero raw conclusions, so the new default is search-identical: 830 generated,
+  587 kept, 199 usable, two SOS, and 11 paramodulation pairs.  Peak RSS was
+  32,976 KiB.  The two 64-bit cursor/checksum fields do make the 248 pending
+  descriptors 13,888 rather than 9,920 bytes.  Current descriptors, structural
+  history, and retained bodies therefore total 50,776 bytes, still 61.8%
+  below the 132,944-byte persistent-clone implementation but less than the
+  prior stage's 64.8% reduction.  This bounded cost must be recovered by the
+  future compact promising-candidate representation if descriptor counts
+  themselves become large.
 - The first hint-aware scheduler increment is an opt-in bounded descriptor
   probe, enabled by `collective_hint_probes`.  When a selected given has an exact
   `matching_hint`, its newly appended combined descriptor may move to the
@@ -389,7 +414,9 @@ Implementation status on 2026-08-07:
   verifies every restored symbol number.  Collective binary checkpoint format
   `P9COLL5` first added clashable eligibility for each activation.
   `P9COLL6` additionally preserves the bounded hint-probe scheduler credit
-  and its optional queue-head marker; the reader still accepts `P9COLL5`.
+  and its optional queue-head marker.  `P9COLL7` adds each partial hyper set's
+  conclusion cursor and structural prefix checksum; the reader still accepts
+  `P9COLL5` and `P9COLL6`.
   A fresh persistent-history checkpoint at given 92 passed all 18 integrity
   hashes; its resumed and uninterrupted 200-given runs both ended at exactly 695
   generated, 566 kept, 162 usable, 161 SOS, 9 paramodulation pairs, 41 hyper
@@ -403,6 +430,17 @@ Implementation status on 2026-08-07:
   again passed 18/18 hashes and resumed to the uninterrupted conservative
   boundary: 830 generated, 587 kept, 199 usable, two SOS, 11 paramodulation
   pairs, and 51 hyper batches.
+  A dedicated chunk checkpoint saved 23 nonzero hyper cursors, passed all 18
+  integrity hashes, and resumed to the exact uninterrupted 150-given
+  boundary: 1,408 generated, 1,353 by hyperresolution, 151 kept, 218 physical
+  hyper turns, 57 completed sets, 720 replayed prefix candidates, and 161
+  deferred turns.  That test exposed a previously latent archive omission:
+  a disabled historical clause's activation epoch was not represented in the
+  compact ancestor record, so resume could admit it before its snapshot.
+  Ancestor record version 2 now stores and checksums that epoch while reading
+  version 1 records compatibly.  The parallel build install target also now
+  depends on completed prover binaries, preventing a stale `bin/prover9` from
+  being copied during verification.
 - `passive_store=dense` now removes passive ownership from `Topform`,
   `Clist_pos`, selector AVL nodes, active indexes, and the live clause-ID
   table.  Given-selection rules and semantics are evaluated once while the
@@ -459,13 +497,15 @@ The full 310,153-hint acceptance run is intentionally not being executed on
 the current low-RAM host.  The 10% sample is an implementation/regression
 gate, not a claim that the Phase 4 80% full-input gate has already passed.
 The Phase 5 gate is not yet claimed.  Hyper batches now query a persistent
-versioned historical index and the focused later-disabled-parent regression
-closes the known coverage bug.  Active history bodies are now shared, only
+versioned historical index, the focused later-disabled-parent regression
+closes the known coverage bug, and one expansion can no longer commit an
+unbounded hyper-conclusion burst.  Active history bodies are now shared, only
 deactivated historical versions remain as ordinary term trees, and
 deactivation epochs use a sparse map.  A packed representation for retained
-versions remains desirable before a week-long scale gate.  Phase 5
-also still needs a bounded promising-pair cache, useful lower bounds, and a
-hint-discovery channel for unmaterialized conclusions.  Exact matches on
+versions remains desirable before a week-long scale gate.  Phase 5 still
+needs a bounded promising-candidate cache with useful lower bounds so it can
+avoid repeated raw generation, plus a hint-discovery channel for
+unmaterialized conclusions.  Exact matches on
 selected givens now provide a starvation-safe one-turn descriptor probe, and
 every emitted candidate passes the unchanged exact hint matcher and all
 ordinary passive selection heuristics.  However, unseen conclusions still

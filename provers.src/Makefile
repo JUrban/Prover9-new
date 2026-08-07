@@ -127,7 +127,7 @@ ladr libladr:
 libmace libmace4:
 	cd ../mace4.src && $(MAKE) libmace4
 
-install:
+install: $(PROGRAMS)
 	@for f in $(PROGRAMS); do \
 	  codesign -s - -f "$$f" 2>/dev/null || true; \
 	  /bin/cp -p "$$f" ../bin; \
