@@ -446,6 +446,26 @@ Implementation status on 2026-08-07:
   threshold/next keys.  This is encouraging short-prefix evidence that the
   bounded buffer improves resident candidate quality, not a solved-problem
   coverage result or a substitute for cross-descriptor scheduling.
+- Cross-descriptor selection is now available behind the separate default-off
+  `collective_promising_scheduler` flag.  Every partial inference unit with a
+  known next raw key is referenced by a min-heap; its queue descriptor remains
+  the owner, so the heap adds only one pointer per allocated slot.  At most
+  seven least-key turns are taken before a mandatory FIFO turn by default
+  (`collective_promising_fair_interval=8`).  Consequently unknown descriptors
+  are discovered and every finite queue entry advances even if lower raw
+  weights arrive forever.  Heap ordering is deterministic by next raw weight,
+  given ID, and local ordinal, and the fairness counter is checkpointed.  The
+  forced equality proof exercised 236 priority and 120 fair turns with a
+  two-entry heap peak and still passed `prooftrans`; it also demonstrates that
+  raw-weight priority changes the search and is not uniformly cheaper.
+  The cache-64 Osborn prefix offered only one priority opportunity (heap peak
+  one), so it is a scheduler integrity check rather than a strong ranking
+  experiment.  It ended with 15 SOS clauses, between per-set promising's eight
+  and FIFO's 38, and the same 873 generated/127 emitted conclusions as the
+  per-set run.  User CPU was 16.25 seconds and wall time 16.61 seconds, versus
+  17.77/18.50 without global priority; peak RSS remained at the same floor
+  (33,112 KiB).  The 26,512-byte descriptor/heap accounting is still constant
+  per activated given and tiny at this boundary.
 - The first hint-aware scheduler increment is an opt-in bounded descriptor
   probe, enabled by `collective_hint_probes`.  When a selected given has an exact
   `matching_hint`, its newly appended combined descriptor may move to the
@@ -487,8 +507,9 @@ Implementation status on 2026-08-07:
   conclusion cursor and structural prefix checksum.  `P9COLL8` generalizes
   those same-width fields to a hyper set or paramodulation pair.  `P9COLL9`
   adds the promising threshold/next raw keys and distinguishes full-sequence
-  checksums from legacy generator-prefix cursors; the reader still accepts
-  `P9COLL5` through `P9COLL8`.
+  checksums from legacy generator-prefix cursors.  `P9COLLA` adds the global
+  priority/fairness cycle state; the reader still accepts `P9COLL5` through
+  `P9COLL9`.
   A fresh persistent-history checkpoint at given 92 passed all 18 integrity
   hashes; its resumed and uninterrupted 200-given runs both ended at exactly 695
   generated, 566 kept, 162 usable, 161 SOS, 9 paramodulation pairs, 41 hyper
@@ -529,6 +550,15 @@ Implementation status on 2026-08-07:
   candidates considered by the promising buffer.  The current reader also
   resumed the older partial-paramodulation `P9COLL8` checkpoint to its exact
   9,449-generated/151-kept boundary with 18/18 hashes.
+  `P9COLLA` adds the priority-versus-fair cycle position; the priority heap is
+  reconstructed from saved descriptor keys.  A checkpoint at given 65 saved
+  a nonzero cycle position and six heap-resident partial descriptors.  It
+  passed all 18 hashes, and resumed and uninterrupted 150-given runs agreed
+  exactly at 13,611 generated, 151 kept, 13,691 paramodulation turns, 1,329
+  completed pairs, 11,854 priority turns, 1,835 fair turns, and a heap peak of
+  68.  The separate scheduler flag lets the same reader resume the older
+  `P9COLL9` checkpoint on its original FIFO path, again producing exactly
+  9,324 generated and 151 kept with 18/18 hashes.
 - `passive_store=dense` now removes passive ownership from `Topform`,
   `Clist_pos`, selector AVL nodes, active indexes, and the live clause-ID
   table.  Given-selection rules and semantics are evaluated once while the
@@ -591,10 +621,11 @@ unbounded hyper-conclusion burst.  Active history bodies are now shared, only
 deactivated historical versions remain as ordinary term trees, and
 deactivation epochs use a sparse map.  A packed representation for retained
 versions remains desirable before a week-long scale gate.  The optional
-promising scan now stores each visited inference unit's exact next raw-weight
-key, but Phase 5 still needs a fair global scheduler over those known keys and
-a conservative treatment of simplification/hint adjustments.  It also needs
-a hint-discovery channel for unmaterialized conclusions.  Exact matches on
+promising scan stores each visited inference unit's exact next raw-weight key,
+and the opt-in min-heap schedules those known keys with a mandatory fair FIFO
+fallback.  Phase 5 still needs a conservative treatment of
+simplification/hint adjustments and a hint-discovery channel for
+unmaterialized conclusions.  Exact matches on
 selected givens now provide a starvation-safe one-turn descriptor probe, and
 every emitted candidate passes the unchanged exact hint matcher and all
 ordinary passive selection heuristics.  However, unseen conclusions still

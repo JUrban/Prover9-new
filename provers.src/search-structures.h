@@ -89,6 +89,7 @@ struct prover_options {
     collective_trace,        // one line per collective batch expansion
     collective_hint_probes,  // one bounded early expansion for hinted givens
     collective_promising_candidates, // raw-weight order within inference set
+    collective_promising_scheduler, // prioritize known next raw keys
     print_matched_hints,     // print matched/unmatched hints per proof
     print_derivations,       // print derivation for clauses in hitlist file
     derivations_only,        // exit after last hitlist derivation
@@ -167,6 +168,7 @@ struct prover_options {
     collective_given_ratio, // givens per collective descriptor expansion
     collective_candidate_chunk, // max collective conclusions per turn
     collective_candidate_cache, // max passives exposed by collective turns
+    collective_promising_fair_interval, // one FIFO turn per N expansions
 
     fold_denial_max,
 
@@ -334,6 +336,9 @@ struct prover_stats {
     collective_promising_scans,
     collective_promising_considered,
     collective_promising_buffer_peak,
+    collective_promising_priority_turns,
+    collective_promising_fair_turns,
+    collective_promising_heap_peak,
     collective_partners_skipped,
     collective_parent_materializations,
     collective_snapshot_rebuilds,

@@ -140,6 +140,9 @@ Keys (in order as written):
   collective_promising_scans <ull>
   collective_promising_considered <ull>
   collective_promising_buffer_peak <ull>
+  collective_promising_priority_turns <ull>
+  collective_promising_fair_turns <ull>
+  collective_promising_heap_peak <ull>
   collective_partners_skipped <ull>
   collective_parent_materializations <ull>
   collective_snapshot_rebuilds <ull>
@@ -181,12 +184,16 @@ Present only when `search_loop=discount` and
 `inference_frontier=collective`.  All scalar fields use the writer's native
 byte order and C representation.  The current layout is:
 
-  char[8]  magic = "P9COLL9\0"
+  char[8]  magic = "P9COLLA\0"
   uint64   activation_count
   uint64   pending_batch_count
   uint32   batch_turn
   uint32   givens_since_batch
   uint32   hint_probe_credit          (exactly 0 or 1)
+  uint32   priority_turns_since_fair
+
+`A` is the single-byte version-10 marker; the magic remains eight bytes so
+older readers fail cleanly without shifting the rest of the header.
 
 Followed by `activation_count` history records:
 
@@ -226,6 +233,15 @@ rejects an unsupported magic, invalid Boolean/kind values, an inconsistent
 probe marker, out-of-range cursors, invalid promising keys, truncated records,
 or trailing bytes.
 
+When `collective_promising_scheduler` is enabled, descriptors with a known
+next raw key are also referenced by a runtime min-heap.  The heap is rebuilt
+canonically from the queue records rather than serialized.  Up to
+`collective_promising_fair_interval - 1` least-key turns may occur before one
+mandatory FIFO turn; `priority_turns_since_fair` preserves that position in
+the cycle and must be smaller than the configured interval.  The mandatory
+turn discovers unknown keys and proves that every queued finite descriptor
+continues to advance.
+
 `inference_conclusion_cursor` is the number of raw conclusions already
 committed from the current hyper set or paramodulation pair.  Each fair turn
 deterministically regenerates the set/pair, deletes that prefix before clause
@@ -247,17 +263,19 @@ buffer.  Only those buffered clauses enter `cl_process`, in key order.  The
 sequence checksum must agree on every rescan.  `(inference_next_weight,
 inference_next_ordinal)` is the exact minimum raw key not yet committed and is
 strictly greater than the committed threshold.  It is persisted now so a
-later scheduler can compare collective set entries without changing this file
-format again.  All four ordering fields and the marker are zero when there is
-no partial promising inference.
+min-heap can compare collective set entries without regenerating them first.
+All four ordering fields and the marker are zero when there is no partial
+promising inference.
 
 The reader remains backward-compatible with `P9COLL5`, `P9COLL6`,
-`P9COLL7`, and `P9COLL8`.  `P9COLL5` ends the header after
+`P9COLL7`, `P9COLL8`, and `P9COLL9`.  `P9COLL5` ends the header after
 `givens_since_batch`, has no hint-probe kind bit, and restores with probe
 credit available.  `P9COLL7` and `P9COLL8` have a shorter descriptor ending
 after the cursor/checksum pair; those fields retain generator-prefix
 semantics.  `P9COLL7` permits a nonzero cursor only while a hyper bit is
 pending, whereas `P9COLL8` generalized it to paramodulation pairs.
+`P9COLL9` has the current descriptor layout but ends its header after hint
+probe credit and restores with zero priority turns since the last fair turn.
 `P9COLL5` and `P9COLL6` omit both cursor fields and restore them as zero.
 
 Shared/retained historical bodies and their FPA index are not serialized as a

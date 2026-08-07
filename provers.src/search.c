@@ -211,8 +211,12 @@ struct collective_batch {
   unsigned long long conclusion_next_ordinal;
   unsigned snapshot_epoch;
   unsigned kind;
+  size_t priority_heap_index;
+  struct collective_batch *prev;
   struct collective_batch *next;
 };
+
+#define COLLECTIVE_NO_HEAP_INDEX ((size_t) -1)
 
 static struct collective_activation_page **Collective_activation_pages = NULL;
 static size_t Collective_activation_page_capacity = 0;
@@ -225,6 +229,10 @@ static size_t Collective_deactivation_count = 0;
 static struct collective_batch *Collective_batch_head = NULL;
 static struct collective_batch *Collective_batch_tail = NULL;
 static unsigned long long Collective_batch_count = 0;
+static struct collective_batch **Collective_priority_heap = NULL;
+static size_t Collective_priority_heap_count = 0;
+static size_t Collective_priority_heap_capacity = 0;
+static unsigned Collective_priority_turns_since_fair = 0;
 static BOOL Collective_batch_turn = FALSE;
 static unsigned Collective_givens_since_batch = 0;
 static BOOL Collective_hint_probe_credit = TRUE;
@@ -404,6 +412,11 @@ void collective_clear_state(void)
   }
   Collective_batch_tail = NULL;
   Collective_batch_count = 0;
+  safe_free(Collective_priority_heap);
+  Collective_priority_heap = NULL;
+  Collective_priority_heap_count = 0;
+  Collective_priority_heap_capacity = 0;
+  Collective_priority_turns_since_fair = 0;
   Collective_batch_turn = FALSE;
   Collective_givens_since_batch = 0;
   Collective_hint_probe_credit = TRUE;
@@ -428,6 +441,9 @@ void collective_reset_state(void)
   Stats.collective_promising_scans = 0;
   Stats.collective_promising_considered = 0;
   Stats.collective_promising_buffer_peak = 0;
+  Stats.collective_promising_priority_turns = 0;
+  Stats.collective_promising_fair_turns = 0;
+  Stats.collective_promising_heap_peak = 0;
   Stats.collective_partners_skipped = 0;
   Stats.collective_parent_materializations = 0;
   Stats.collective_snapshot_rebuilds = 0;
@@ -659,9 +675,138 @@ void collective_note_deactivation(Topform c)
     collective_set_deactivation_epoch(c->id, Simplifier_epoch);
 }
 
+static struct collective_batch *collective_new_batch(void)
+{
+  struct collective_batch *b = safe_calloc(1, sizeof(*b));
+  b->priority_heap_index = COLLECTIVE_NO_HEAP_INDEX;
+  return b;
+}
+
+static BOOL collective_batch_priority_less(
+  struct collective_batch *a, struct collective_batch *b)
+{
+  if (a->conclusion_next_weight < b->conclusion_next_weight)
+    return TRUE;
+  else if (a->conclusion_next_weight > b->conclusion_next_weight)
+    return FALSE;
+  else if (a->given_id < b->given_id)
+    return TRUE;
+  else if (a->given_id > b->given_id)
+    return FALSE;
+  else
+    return a->conclusion_next_ordinal < b->conclusion_next_ordinal;
+}
+
+static void collective_priority_heap_swap(size_t a, size_t b)
+{
+  struct collective_batch *tmp = Collective_priority_heap[a];
+  Collective_priority_heap[a] = Collective_priority_heap[b];
+  Collective_priority_heap[b] = tmp;
+  Collective_priority_heap[a]->priority_heap_index = a;
+  Collective_priority_heap[b]->priority_heap_index = b;
+}
+
+static void collective_priority_heap_grow(void)
+{
+  size_t old_capacity = Collective_priority_heap_capacity;
+  size_t new_capacity = old_capacity == 0 ? 64 : old_capacity * 2;
+  struct collective_batch **heap;
+  if (new_capacity < old_capacity)
+    fatal_error("collective priority heap capacity overflow");
+  heap = safe_calloc(new_capacity, sizeof(*heap));
+  if (old_capacity != 0) {
+    memcpy(heap, Collective_priority_heap,
+           old_capacity * sizeof(*heap));
+    safe_free(Collective_priority_heap);
+  }
+  Collective_priority_heap = heap;
+  Collective_priority_heap_capacity = new_capacity;
+}
+
+static void collective_priority_heap_insert(struct collective_batch *b)
+{
+  size_t at;
+  if ((b->kind & COLLECTIVE_PROMISING_CURSOR) == 0)
+    return;
+  if (b->priority_heap_index != COLLECTIVE_NO_HEAP_INDEX)
+    fatal_error("collective descriptor inserted into priority heap twice");
+  if (Collective_priority_heap_count == Collective_priority_heap_capacity)
+    collective_priority_heap_grow();
+  at = Collective_priority_heap_count++;
+  Collective_priority_heap[at] = b;
+  b->priority_heap_index = at;
+  while (at != 0) {
+    size_t parent = (at - 1) / 2;
+    if (!collective_batch_priority_less(Collective_priority_heap[at],
+                                        Collective_priority_heap[parent]))
+      break;
+    collective_priority_heap_swap(at, parent);
+    at = parent;
+  }
+  if (Collective_priority_heap_count > Stats.collective_promising_heap_peak)
+    Stats.collective_promising_heap_peak = Collective_priority_heap_count;
+}
+
+static void collective_priority_heap_remove(struct collective_batch *b)
+{
+  size_t at, parent;
+  if (b->priority_heap_index == COLLECTIVE_NO_HEAP_INDEX)
+    return;
+  at = b->priority_heap_index;
+  if (at >= Collective_priority_heap_count ||
+      Collective_priority_heap[at] != b)
+    fatal_error("collective priority heap index corrupted");
+  b->priority_heap_index = COLLECTIVE_NO_HEAP_INDEX;
+  Collective_priority_heap_count--;
+  if (at == Collective_priority_heap_count) {
+    Collective_priority_heap[at] = NULL;
+    return;
+  }
+  Collective_priority_heap[at] =
+    Collective_priority_heap[Collective_priority_heap_count];
+  Collective_priority_heap[Collective_priority_heap_count] = NULL;
+  Collective_priority_heap[at]->priority_heap_index = at;
+
+  parent = at == 0 ? 0 : (at - 1) / 2;
+  if (at != 0 &&
+      collective_batch_priority_less(Collective_priority_heap[at],
+                                      Collective_priority_heap[parent])) {
+    while (at != 0) {
+      parent = (at - 1) / 2;
+      if (!collective_batch_priority_less(Collective_priority_heap[at],
+                                          Collective_priority_heap[parent]))
+        break;
+      collective_priority_heap_swap(at, parent);
+      at = parent;
+    }
+  }
+  else {
+    while (TRUE) {
+      size_t left = at * 2 + 1;
+      size_t right = left + 1;
+      size_t smallest = at;
+      if (left < Collective_priority_heap_count &&
+          collective_batch_priority_less(Collective_priority_heap[left],
+                                          Collective_priority_heap[smallest]))
+        smallest = left;
+      if (right < Collective_priority_heap_count &&
+          collective_batch_priority_less(Collective_priority_heap[right],
+                                          Collective_priority_heap[smallest]))
+        smallest = right;
+      if (smallest == at)
+        break;
+      collective_priority_heap_swap(at, smallest);
+      at = smallest;
+    }
+  }
+}
+
 static
 void collective_append_batch(struct collective_batch *b)
 {
+  if (b->priority_heap_index != COLLECTIVE_NO_HEAP_INDEX)
+    fatal_error("collective queued descriptor is still in priority heap");
+  b->prev = Collective_batch_tail;
   b->next = NULL;
   if (Collective_batch_tail == NULL)
     Collective_batch_head = b;
@@ -671,6 +816,7 @@ void collective_append_batch(struct collective_batch *b)
   Collective_batch_count++;
   if (Collective_batch_count > Stats.collective_batches_peak)
     Stats.collective_batches_peak = Collective_batch_count;
+  collective_priority_heap_insert(b);
 }
 
 /* Give a newly activated hint-matched clause one prompt descriptor turn.
@@ -700,7 +846,9 @@ void collective_maybe_schedule_hint_probe(
       fatal_error("collective hint probe queue order corrupted");
     tail_before->next = NULL;
     Collective_batch_tail = tail_before;
+    b->prev = NULL;
     b->next = Collective_batch_head;
+    Collective_batch_head->prev = b;
     Collective_batch_head = b;
   }
 
@@ -721,7 +869,7 @@ void collective_enqueue_batch(Topform given)
     Collective_batch_tail->activation_limit = Collective_activation_count;
     return;
   }
-  b = safe_calloc(1, sizeof(*b));
+  b = collective_new_batch();
   b->given_id = given->id;
   b->cursor = 0;
   b->activation_limit = Collective_activation_count;
@@ -742,7 +890,7 @@ void collective_enqueue_hyper_batch(Topform given, unsigned kind)
     Collective_batch_tail->activation_limit = Collective_activation_count;
     return;
   }
-  b = safe_calloc(1, sizeof(*b));
+  b = collective_new_batch();
   b->given_id = given->id;
   b->activation_limit = Collective_activation_count;
   b->snapshot_epoch = Simplifier_epoch;
@@ -772,6 +920,7 @@ void collective_finish_batch_turn(struct collective_batch *b)
 {
   if (Collective_batch_head != b)
     fatal_error("collective batch queue order corrupted");
+  collective_priority_heap_remove(b);
   if ((b->kind & COLLECTIVE_HINT_PROBE) != 0) {
     b->kind &= ~COLLECTIVE_HINT_PROBE;
     Stats.collective_hint_probes_expanded++;
@@ -781,9 +930,57 @@ void collective_finish_batch_turn(struct collective_batch *b)
   Collective_batch_head = b->next;
   if (Collective_batch_head == NULL)
     Collective_batch_tail = NULL;
+  else
+    Collective_batch_head->prev = NULL;
+  b->prev = NULL;
   b->next = NULL;
   Collective_batch_count--;
   collective_rotate_or_complete_batch(b);
+}
+
+/* Select the least next raw key among already-scanned descriptors, but force
+   one FIFO head expansion per configured interval.  The FIFO turn discovers
+   unknown keys and advances every finite descriptor even under an unbounded
+   stream of lower-weight work. */
+static BOOL collective_choose_batch_for_turn(void)
+{
+  unsigned interval;
+  struct collective_batch *b;
+
+  if (!flag(Opt->collective_promising_candidates) ||
+      !flag(Opt->collective_promising_scheduler)) {
+    Collective_priority_turns_since_fair = 0;
+    return FALSE;
+  }
+  if (Collective_batch_head == NULL ||
+      (Collective_batch_head->kind & COLLECTIVE_HINT_PROBE) != 0)
+    return FALSE;
+
+  interval = (unsigned) parm(Opt->collective_promising_fair_interval);
+  if (Collective_priority_heap_count != 0 && interval > 1 &&
+      Collective_priority_turns_since_fair < interval - 1) {
+    b = Collective_priority_heap[0];
+    if (b != Collective_batch_head) {
+      if (b->prev == NULL)
+        fatal_error("collective priority descriptor has no predecessor");
+      b->prev->next = b->next;
+      if (b->next == NULL)
+        Collective_batch_tail = b->prev;
+      else
+        b->next->prev = b->prev;
+      b->prev = NULL;
+      b->next = Collective_batch_head;
+      Collective_batch_head->prev = b;
+      Collective_batch_head = b;
+    }
+    Collective_priority_turns_since_fair++;
+    Stats.collective_promising_priority_turns++;
+    return TRUE;
+  }
+
+  Collective_priority_turns_since_fair = 0;
+  Stats.collective_promising_fair_turns++;
+  return FALSE;
 }
 
 static
@@ -898,6 +1095,8 @@ Prover_options init_prover_options(void)
   p->collective_hint_probes = init_flag("collective_hint_probes",  FALSE);
   p->collective_promising_candidates =
     init_flag("collective_promising_candidates", FALSE);
+  p->collective_promising_scheduler =
+    init_flag("collective_promising_scheduler", FALSE);
   p->print_matched_hints    = init_flag("print_matched_hints",    FALSE);
   p->print_derivations      = init_flag("print_derivations",      FALSE);
   p->derivations_only       = init_flag("derivations_only",        TRUE);
@@ -981,6 +1180,8 @@ Prover_options init_prover_options(void)
     init_parm("collective_candidate_chunk", 64, 1, INT_MAX);
   p->collective_candidate_cache =
     init_parm("collective_candidate_cache", 4096, 1, INT_MAX);
+  p->collective_promising_fair_interval =
+    init_parm("collective_promising_fair_interval", 8, 1, 1000);
 
   p->fold_denial_max =  init_parm("fold_denial_max",       0,     -1,INT_MAX);
 
@@ -1646,7 +1847,8 @@ void update_stats(void)
   Stats.collective_activation_entries = Collective_activation_count;
   Stats.collective_deactivation_entries = Collective_deactivation_count;
   Stats.collective_descriptor_bytes = Collective_batch_count *
-                                      sizeof(struct collective_batch);
+                                      sizeof(struct collective_batch) +
+    Collective_priority_heap_capacity * sizeof(*Collective_priority_heap);
   Stats.collective_history_bytes = collective_history_bytes();
   collective_history_clause_stats(&Stats.collective_history_clauses,
                                    &Stats.collective_history_indexed_clauses,
@@ -1737,6 +1939,16 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             comma_num(s.collective_promising_scans),
             comma_num(s.collective_promising_considered),
             comma_num(s.collective_promising_buffer_peak));
+    fprintf(fp,
+            "Collective_promising_scheduler: enabled=%d, fair_interval=%d, "
+            "priority_turns=%s, fair_turns=%s, heap_peak=%s, "
+            "heap_pending=%s.\n",
+            flag(Opt->collective_promising_scheduler),
+            parm(Opt->collective_promising_fair_interval),
+            comma_num(s.collective_promising_priority_turns),
+            comma_num(s.collective_promising_fair_turns),
+            comma_num(s.collective_promising_heap_peak),
+            comma_num(Collective_priority_heap_count));
     fprintf(fp,
             "Collective_hint_probes: scheduled=%s, expanded=%s, "
             "credit=%s.\n",
@@ -5969,6 +6181,7 @@ BOOL collective_expand_one_batch(void)
   if (Collective_batch_head == NULL)
     return FALSE;
 
+  collective_choose_batch_for_turn();
   b = Collective_batch_head;
   hint_probe = (b->kind & COLLECTIVE_HINT_PROBE) != 0;
 
@@ -8502,10 +8715,13 @@ void write_collective_checkpoint(const char *dir)
   FILE *fp;
   unsigned long long i;
   struct collective_batch *b;
-  const char magic[8] = {'P','9','C','O','L','L','9','\0'};
+  const char magic[8] = {'P','9','C','O','L','L','A','\0'};
   uint32_t turn = Collective_batch_turn ? 1U : 0U;
   uint32_t givens_since_batch = Collective_givens_since_batch;
   uint32_t hint_probe_credit = Collective_hint_probe_credit ? 1U : 0U;
+  uint32_t priority_turns_since_fair =
+    flag(Opt->collective_promising_scheduler) ?
+      Collective_priority_turns_since_fair : 0U;
 
   if (!collective_frontier_mode())
     return;
@@ -8519,7 +8735,9 @@ void write_collective_checkpoint(const char *dir)
       fwrite(&Collective_batch_count, sizeof(Collective_batch_count), 1, fp) != 1 ||
       fwrite(&turn, sizeof(turn), 1, fp) != 1 ||
       fwrite(&givens_since_batch, sizeof(givens_since_batch), 1, fp) != 1 ||
-      fwrite(&hint_probe_credit, sizeof(hint_probe_credit), 1, fp) != 1)
+      fwrite(&hint_probe_credit, sizeof(hint_probe_credit), 1, fp) != 1 ||
+      fwrite(&priority_turns_since_fair,
+             sizeof(priority_turns_since_fair), 1, fp) != 1)
     fatal_error("write_collective_checkpoint: header write failed");
 
   for (i = 0; i < Collective_activation_count; i++) {
@@ -8564,7 +8782,8 @@ void read_collective_checkpoint(const char *dir)
   FILE *fp;
   unsigned long long activations, batches, i;
   uint32_t turn, givens_since_batch, hint_probe_credit;
-  BOOL format6, format7, format8, format9;
+  uint32_t priority_turns_since_fair;
+  BOOL format6, format7, format8, format9, format_a;
 
   if (!collective_frontier_mode())
     return;
@@ -8574,25 +8793,38 @@ void read_collective_checkpoint(const char *dir)
     fatal_error("resume: collective frontier state is missing");
   if (fread(magic, sizeof(magic), 1, fp) != 1)
     fatal_error("resume: corrupt collective frontier header");
+  format_a = memcmp(magic, "P9COLLA", 7) == 0;
   format9 = memcmp(magic, "P9COLL9", 7) == 0;
   format8 = memcmp(magic, "P9COLL8", 7) == 0;
   format7 = memcmp(magic, "P9COLL7", 7) == 0;
   format6 = memcmp(magic, "P9COLL6", 7) == 0;
-  if ((!format9 && !format8 && !format7 && !format6 &&
+  if ((!format_a && !format9 && !format8 && !format7 && !format6 &&
        memcmp(magic, "P9COLL5", 7) != 0) ||
       fread(&activations, sizeof(activations), 1, fp) != 1 ||
       fread(&batches, sizeof(batches), 1, fp) != 1 ||
       fread(&turn, sizeof(turn), 1, fp) != 1 ||
       fread(&givens_since_batch, sizeof(givens_since_batch), 1, fp) != 1)
     fatal_error("resume: corrupt collective frontier header");
-  if (format6 || format7 || format8 || format9) {
+  if (format6 || format7 || format8 || format9 || format_a) {
     if (fread(&hint_probe_credit, sizeof(hint_probe_credit), 1, fp) != 1)
       fatal_error("resume: corrupt collective frontier probe state");
   }
   else
     hint_probe_credit = 1U;
+  if (format_a) {
+    if (fread(&priority_turns_since_fair,
+              sizeof(priority_turns_since_fair), 1, fp) != 1)
+      fatal_error("resume: corrupt collective priority scheduler state");
+  }
+  else
+    priority_turns_since_fair = 0;
   if (turn > 1 || hint_probe_credit > 1)
     fatal_error("resume: invalid collective scheduler state");
+  if (priority_turns_since_fair >=
+        (unsigned) parm(Opt->collective_promising_fair_interval) ||
+      (!flag(Opt->collective_promising_scheduler) &&
+       priority_turns_since_fair != 0))
+    fatal_error("resume: invalid collective priority scheduler state");
 
   for (i = 0; i < activations; i++) {
     unsigned long long id;
@@ -8607,13 +8839,13 @@ void read_collective_checkpoint(const char *dir)
     collective_set_deactivation_epoch(id, deactivated);
   }
   for (i = 0; i < batches; i++) {
-    struct collective_batch *b = safe_calloc(1, sizeof(*b));
+    struct collective_batch *b = collective_new_batch();
     uint32_t epoch, kind;
     if (fread(&b->given_id, sizeof(b->given_id), 1, fp) != 1 ||
         fread(&b->cursor, sizeof(b->cursor), 1, fp) != 1 ||
         fread(&b->activation_limit, sizeof(b->activation_limit), 1, fp) != 1)
       fatal_error("resume: truncated collective batch queue");
-    if (format7 || format8 || format9) {
+    if (format7 || format8 || format9 || format_a) {
       if (fread(&b->conclusion_cursor,
                 sizeof(b->conclusion_cursor), 1, fp) != 1 ||
           fread(&b->conclusion_prefix_hash,
@@ -8624,7 +8856,7 @@ void read_collective_checkpoint(const char *dir)
       b->conclusion_cursor = 0;
       b->conclusion_prefix_hash = 0;
     }
-    if (format9) {
+    if (format9 || format_a) {
       if (fread(&b->conclusion_order_weight,
                 sizeof(b->conclusion_order_weight), 1, fp) != 1 ||
           fread(&b->conclusion_order_ordinal,
@@ -8644,9 +8876,10 @@ void read_collective_checkpoint(const char *dir)
     b->snapshot_epoch = epoch;
     if ((kind & COLLECTIVE_INFERENCE_MASK) == 0 ||
         (kind & ~COLLECTIVE_KIND_MASK) != 0 ||
-        (!format9 && !format8 && !format7 && !format6 &&
+        (!format_a && !format9 && !format8 && !format7 && !format6 &&
          (kind & COLLECTIVE_HINT_PROBE) != 0) ||
-        (!format9 && (kind & COLLECTIVE_PROMISING_CURSOR) != 0) ||
+        (!format_a && !format9 &&
+         (kind & COLLECTIVE_PROMISING_CURSOR) != 0) ||
         (format7 && b->conclusion_cursor != 0 &&
          (kind & (COLLECTIVE_POS_HYPER | COLLECTIVE_NEG_HYPER)) == 0) ||
         (b->conclusion_cursor == 0 && b->conclusion_prefix_hash != 0) ||
@@ -8677,6 +8910,7 @@ void read_collective_checkpoint(const char *dir)
   Collective_batch_turn = turn != 0;
   Collective_givens_since_batch = givens_since_batch;
   Collective_hint_probe_credit = hint_probe_credit != 0;
+  Collective_priority_turns_since_fair = priority_turns_since_fair;
   if (fgetc(fp) != EOF)
     fatal_error("resume: trailing data in collective frontier state");
   fclose(fp);
@@ -8794,6 +9028,12 @@ void write_checkpoint(void)
             Stats.collective_promising_considered);
     fprintf(fp, "collective_promising_buffer_peak %llu\n",
             Stats.collective_promising_buffer_peak);
+    fprintf(fp, "collective_promising_priority_turns %llu\n",
+            Stats.collective_promising_priority_turns);
+    fprintf(fp, "collective_promising_fair_turns %llu\n",
+            Stats.collective_promising_fair_turns);
+    fprintf(fp, "collective_promising_heap_peak %llu\n",
+            Stats.collective_promising_heap_peak);
     fprintf(fp, "collective_partners_skipped %llu\n",
             Stats.collective_partners_skipped);
     fprintf(fp, "collective_parent_materializations %llu\n",
@@ -9566,6 +9806,18 @@ void resume_load_clauses(const char *dir)
     rewind(fp); (void) read_metadata_ull_if_present(
       fp, "collective_promising_buffer_peak",
       &Stats.collective_promising_buffer_peak);
+    Stats.collective_promising_priority_turns = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_promising_priority_turns",
+      &Stats.collective_promising_priority_turns);
+    Stats.collective_promising_fair_turns = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_promising_fair_turns",
+      &Stats.collective_promising_fair_turns);
+    Stats.collective_promising_heap_peak = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_promising_heap_peak",
+      &Stats.collective_promising_heap_peak);
     rewind(fp); Stats.collective_partners_skipped =
       read_metadata_ull(fp, "collective_partners_skipped");
     rewind(fp); Stats.collective_parent_materializations =
@@ -10551,11 +10803,17 @@ Prover_results search(Prover_input p)
     Opt = p->options;          // put options into a global variable
     Current_inference_source = INFER_SOURCE_OTHER;
     collective_reset_state();
+    if (flag(Opt->collective_promising_scheduler) &&
+        !str_ident(stringparm1(Opt->inference_frontier), "collective"))
+      fatal_error("collective_promising_scheduler requires inference_frontier=collective");
     if (str_ident(stringparm1(Opt->inference_frontier), "collective")) {
       if (!discount_mode())
 	fatal_error("inference_frontier=collective requires search_loop=discount");
       if (str_ident(stringparm1(Opt->ancestor_store), "off"))
 	fatal_error("inference_frontier=collective requires ancestor_store=memory or mmap");
+      if (flag(Opt->collective_promising_scheduler) &&
+          !flag(Opt->collective_promising_candidates))
+        fatal_error("collective_promising_scheduler requires collective_promising_candidates");
       /* A delayed parent may already be disabled when a checkpoint is
 	 resumed, so collective checkpoints necessarily include ancestors. */
       if (!flag(Opt->checkpoint_ancestors))

@@ -64,7 +64,7 @@ grep -q 'end of proof' "$test_tmp/paramod-chunk1-parents.out"
 # only the lowest raw-weight/ordinal candidate, and resumes above that key.
 # It may choose a different sound search, but must retain exact processing,
 # bounded residency, deterministic replay, and a translatable proof.
-sed '1i set(collective_promising_candidates).\nassign(collective_candidate_cache,4).\nassign(collective_candidate_chunk,1).' \
+sed '1i set(collective_promising_candidates).\nset(collective_promising_scheduler).\nassign(collective_candidate_cache,4).\nassign(collective_candidate_chunk,1).' \
   "$repo_dir/test.src/collective_frontier.in" > "$test_tmp/promising.in"
 "$repo_dir/bin/prover9" < "$test_tmp/promising.in" \
   > "$test_tmp/promising.out" 2> "$test_tmp/promising.err"
@@ -74,6 +74,8 @@ grep -Eq 'Collective_chunks: limit=1, emitted=[1-9][0-9]*, replayed=[1-9][0-9]*,
 grep -Eq 'Collective_candidate_cache: limit=4, peak=4, stalls=[1-9][0-9]*\.' \
   "$test_tmp/promising.out"
 grep -Eq 'Collective_promising: enabled=1, scans=[1-9][0-9]*, considered=[1-9][0-9]*, buffer_peak=1\.' \
+  "$test_tmp/promising.out"
+grep -Eq 'Collective_promising_scheduler: enabled=1, fair_interval=8, priority_turns=[1-9][0-9]*, fair_turns=[1-9][0-9]*, heap_peak=[1-9][0-9]*, heap_pending=[0-9]+\.' \
   "$test_tmp/promising.out"
 "$repo_dir/bin/prooftrans" expand < "$test_tmp/promising.out" \
   > "$test_tmp/promising-parents.out"
