@@ -164,7 +164,8 @@ struct prover_options {
     para_lit_limit,
     ur_nucleus_limit,
     collective_given_ratio, // givens per collective descriptor expansion
-    collective_candidate_chunk, // max hyper conclusions committed per turn
+    collective_candidate_chunk, // max collective conclusions per turn
+    collective_candidate_cache, // max passives exposed by collective turns
 
     fold_denial_max,
 
@@ -320,12 +321,15 @@ struct prover_stats {
     collective_batches_created,
     collective_batches_completed,
     collective_pair_expansions,
+    collective_pair_turns,
     collective_hyper_expansions,
     collective_hyper_sets_completed,
     collective_candidates_emitted,
     collective_candidates_replayed,
     collective_deferred_turns,
     collective_raw_candidates_peak,
+    collective_candidate_cache_peak,
+    collective_candidate_cache_stalls,
     collective_partners_skipped,
     collective_parent_materializations,
     collective_snapshot_rebuilds,

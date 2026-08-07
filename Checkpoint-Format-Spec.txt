@@ -128,12 +128,15 @@ Keys (in order as written):
   collective_batches_created <ull>
   collective_batches_completed <ull>
   collective_pair_expansions <ull>
+  collective_pair_turns <ull>
   collective_hyper_expansions <ull>
   collective_hyper_sets_completed <ull>
   collective_candidates_emitted <ull>
   collective_candidates_replayed <ull>
   collective_deferred_turns <ull>
   collective_raw_candidates_peak <ull>
+  collective_candidate_cache_peak <ull>
+  collective_candidate_cache_stalls <ull>
   collective_partners_skipped <ull>
   collective_parent_materializations <ull>
   collective_snapshot_rebuilds <ull>
@@ -175,7 +178,7 @@ Present only when `search_loop=discount` and
 `inference_frontier=collective`.  All integers use the writer's native byte
 order and C representation.  The current layout is:
 
-  char[8]  magic = "P9COLL7\0"
+  char[8]  magic = "P9COLL8\0"
   uint64   activation_count
   uint64   pending_batch_count
   uint32   batch_turn
@@ -200,8 +203,8 @@ Finally, `pending_batch_count` descriptors are written in queue order:
   uint64   given_id
   uint64   paramodulation_cursor
   uint64   activation_limit
-  uint64   hyper_conclusion_cursor
-  uint64   hyper_prefix_hash
+  uint64   inference_conclusion_cursor
+  uint64   inference_prefix_hash
   uint32   snapshot_epoch
   uint32   kind_bits
 
@@ -215,21 +218,24 @@ FIFO expansion restores the credit.  Restore rejects an unsupported magic,
 invalid Boolean/kind values, an inconsistent probe marker, out-of-range
 cursors, truncated records, or trailing bytes.
 
-`hyper_conclusion_cursor` is the number of raw conclusions already committed
-from the current hyper set.  Each fair turn deterministically regenerates the
-set, deletes that prefix before clause processing, and sends at most
-`collective_candidate_chunk` subsequent conclusions through the exact
-`cl_process` path.  `hyper_prefix_hash` is a rolling structural checksum of
-that committed prefix; every replay verifies it before advancing.  A mismatch
-is fatal rather than silently skipping different conclusions.  A nonzero
-cursor therefore requires a pending positive- or negative-hyper bit and
-carries its prefix checksum; both fields are zero when no partial set is
-pending.
+`inference_conclusion_cursor` is the number of raw conclusions already
+committed from the current hyper set or paramodulation pair.  Each fair turn
+deterministically regenerates the set/pair, deletes that prefix before clause
+processing, and sends at most `collective_candidate_chunk` subsequent
+conclusions through the exact `cl_process` path.  `inference_prefix_hash` is a
+rolling structural checksum of that committed prefix; every replay verifies
+it before advancing.  A mismatch is fatal rather than silently skipping
+different conclusions.  A nonzero cursor therefore requires a pending
+inference kind and carries its prefix checksum; both fields are zero when no
+partial inference is pending.
 
-The reader remains backward-compatible with `P9COLL5` and `P9COLL6`.
-`P9COLL5` ends the header after `givens_since_batch`, has no hint-probe kind
-bit, and restores with probe credit available.  Both older layouts omit the
-per-descriptor hyper cursor and prefix checksum and restore both as zero.
+The reader remains backward-compatible with `P9COLL5`, `P9COLL6`, and
+`P9COLL7`.  `P9COLL5` ends the header after `givens_since_batch`, has no
+hint-probe kind bit, and restores with probe credit available.
+`P9COLL7` has the same descriptor width as `P9COLL8`, but permits a nonzero
+conclusion cursor only while a hyper bit is pending; its fields are restored
+as the generalized cursor and checksum.  `P9COLL5` and `P9COLL6` omit both
+fields and restore them as zero.
 
 Shared/retained historical bodies and their FPA index are not serialized as a
 second copy of the clause database.  On resume the index is rebuilt in

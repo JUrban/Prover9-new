@@ -13,9 +13,11 @@ grep -Eq 'Search_loop: mode=discount, frontier=collective, active_indexed=[0-9]+
   "$test_tmp/prover.out"
 grep -Eq 'Collective_frontier: batches_created=[1-9][0-9]*, completed=[1-9][0-9]*, pending=[1-9][0-9]*, peak=[1-9][0-9]*, ratio=1, skipped=[0-9]+, parent_materializations=0, activations=[1-9][0-9]*\.' \
   "$test_tmp/prover.out"
-grep -Eq 'Collective_work: paramod_pairs=[1-9][0-9]*, hyper_turns=[0-9]+, hyper_sets_completed=[0-9]+\.' \
+grep -Eq 'Collective_work: paramod_turns=[1-9][0-9]*, paramod_pairs_completed=[1-9][0-9]*, hyper_turns=[0-9]+, hyper_sets_completed=[0-9]+\.' \
   "$test_tmp/prover.out"
 grep -Eq 'Collective_chunks: limit=64, emitted=[0-9]+, replayed=[0-9]+, deferred_turns=[0-9]+, raw_peak=[0-9]+\.' \
+  "$test_tmp/prover.out"
+grep -Eq 'Collective_candidate_cache: limit=4096, peak=[1-9][0-9]*, stalls=[0-9]+\.' \
   "$test_tmp/prover.out"
 grep -Eq 'Collective_hint_probes: scheduled=[1-9][0-9]*, expanded=[1-9][0-9]*, credit=(available|consumed)\.' \
   "$test_tmp/prover.out"
@@ -39,6 +41,25 @@ fi
 grep -q 'end of proof' "$test_tmp/parents.out"
 grep -q 'Directproof did' "$test_tmp/direct.out"
 
+# A paramodulation pair can itself emit several conclusions.  Force both the
+# per-turn conclusion budget and the selector-backed candidate cache to their
+# small regression bounds; replay must preserve the proof and exact matcher
+# path while the cache causes at least one scheduler stall.
+sed '1i assign(collective_candidate_cache,4).\nassign(collective_candidate_chunk,1).' \
+  "$repo_dir/test.src/collective_frontier.in" > "$test_tmp/paramod-chunk1.in"
+"$repo_dir/bin/prover9" < "$test_tmp/paramod-chunk1.in" \
+  > "$test_tmp/paramod-chunk1.out" 2> "$test_tmp/paramod-chunk1.err"
+grep -q 'THEOREM PROVED' "$test_tmp/paramod-chunk1.out"
+grep -Eq 'Collective_work: paramod_turns=[1-9][0-9]*, paramod_pairs_completed=[1-9][0-9]*, hyper_turns=0, hyper_sets_completed=0\.' \
+  "$test_tmp/paramod-chunk1.out"
+grep -Eq 'Collective_chunks: limit=1, emitted=[1-9][0-9]*, replayed=[1-9][0-9]*, deferred_turns=[1-9][0-9]*, raw_peak=([2-9]|[1-9][0-9]+)\.' \
+  "$test_tmp/paramod-chunk1.out"
+grep -Eq 'Collective_candidate_cache: limit=4, peak=4, stalls=[1-9][0-9]*\.' \
+  "$test_tmp/paramod-chunk1.out"
+"$repo_dir/bin/prooftrans" expand < "$test_tmp/paramod-chunk1.out" \
+  > "$test_tmp/paramod-chunk1-parents.out"
+grep -q 'end of proof' "$test_tmp/paramod-chunk1-parents.out"
+
 # The optimization is independently switchable.  Turning it off must retain
 # exact hint matching/proof behavior while scheduling no early descriptors.
 sed 's/set(collective_hint_probes)\./clear(collective_hint_probes)./' \
@@ -56,7 +77,7 @@ grep -Eq 'total=2, redundant=[0-9]+, active=[0-9]+, matched=[1-9][0-9]*' \
 grep -q 'THEOREM PROVED' "$test_tmp/hyper.out"
 grep -Eq 'Generated_by_rule: binary=0, hyper=[1-9][0-9]*, ur=0, paramod=0, other=[0-9]+\.' \
   "$test_tmp/hyper.out"
-grep -Eq 'Collective_work: paramod_pairs=0, hyper_turns=[1-9][0-9]*, hyper_sets_completed=[1-9][0-9]*\.' \
+grep -Eq 'Collective_work: paramod_turns=0, paramod_pairs_completed=0, hyper_turns=[1-9][0-9]*, hyper_sets_completed=[1-9][0-9]*\.' \
   "$test_tmp/hyper.out"
 grep -Eq 'Collective_history_index: clauses=[1-9][0-9]*, indexed=[1-9][0-9]*, shared=[0-9]+, retained=[0-9]+, retained_clause_bytes=[0-9]+, queries=[1-9][0-9]*, candidates=[1-9][0-9]*, future_rejected=[1-9][0-9]*, inactive_rejected=[0-9]+\.' \
   "$test_tmp/hyper.out"
@@ -72,7 +93,7 @@ sed '1i assign(collective_candidate_chunk,1).' \
 "$repo_dir/bin/prover9" < "$test_tmp/hyper-chunk1.in" \
   > "$test_tmp/hyper-chunk1.out" 2> "$test_tmp/hyper-chunk1.err"
 grep -q 'THEOREM PROVED' "$test_tmp/hyper-chunk1.out"
-grep -Eq 'Collective_work: paramod_pairs=0, hyper_turns=[1-9][0-9]*, hyper_sets_completed=[1-9][0-9]*\.' \
+grep -Eq 'Collective_work: paramod_turns=0, paramod_pairs_completed=0, hyper_turns=[1-9][0-9]*, hyper_sets_completed=[1-9][0-9]*\.' \
   "$test_tmp/hyper-chunk1.out"
 grep -Eq 'Collective_chunks: limit=1, emitted=[1-9][0-9]*, replayed=[1-9][0-9]*, deferred_turns=[1-9][0-9]*, raw_peak=([2-9]|[1-9][0-9]+)\.' \
   "$test_tmp/hyper-chunk1.out"

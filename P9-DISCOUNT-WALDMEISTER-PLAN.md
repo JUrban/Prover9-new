@@ -377,6 +377,33 @@ Implementation status on 2026-08-07:
   prior stage's 64.8% reduction.  This bounded cost must be recovered by the
   future compact promising-candidate representation if descriptor counts
   themselves become large.
+- The conclusion cursor now covers both directions of a paramodulation pair
+  as well as hyperresolution.  No single collective pair can therefore bypass
+  the per-turn materialization bound by containing many eligible positions.
+  The ordinary exact given selector is also used as a bounded materialized
+  candidate cache: `collective_candidate_cache` defaults to 4,096, descriptor
+  expansion pauses at that occupancy, and selection drains the existing best
+  candidates until space is available.  The expansion budget accounts for
+  both committed passives and the current limbo, so a collective turn cannot
+  overfill the cache.  Nothing is dropped: partial pairs/sets rotate with a
+  cursor and checksum, and every eventually exposed candidate still takes the
+  unchanged simplification, exact hint-matching, keep/delete, weighting, and
+  selection path.  With a four-candidate cache and one-candidate chunks, the
+  equality regression retained its proof while 86 paramodulation pairs took
+  201 turns, replayed 258 prefix conclusions, and caused an explicit
+  cache-full stall.  This is a hard bound for conclusions emitted by the
+  collective paramodulation/hyper frontier.  Initial SOS clauses and any
+  separately enabled eager binary/UR rules are reported in the same occupancy
+  peak but are not yet governed by this frontier bound.  The bounded
+  250-given/10%-hint Osborn rerun remained search-identical at 830 generated,
+  587 kept, 199 usable, two SOS, 11 completed paramodulation pairs, and 51
+  completed hyper sets.  Paramodulation emitted 79 raw conclusions without a
+  deferred turn (raw-pair peak 18), so the default chunk of 64 did not alter
+  this boundary.  The cache peaked at 378, including initial/preprocessing
+  occupancy, and never stalled below its 4,096 limit.  Peak RSS was 32,972
+  KiB and CPU time was 16.73 seconds.  This validates non-perturbation on the
+  safe short run; it does not pretend to measure the limit's intended benefit
+  on the archived multi-hundred-thousand-passive runs.
 - The first hint-aware scheduler increment is an opt-in bounded descriptor
   probe, enabled by `collective_hint_probes`.  When a selected given has an exact
   `matching_hint`, its newly appended combined descriptor may move to the
@@ -415,8 +442,9 @@ Implementation status on 2026-08-07:
   `P9COLL5` first added clashable eligibility for each activation.
   `P9COLL6` additionally preserves the bounded hint-probe scheduler credit
   and its optional queue-head marker.  `P9COLL7` adds each partial hyper set's
-  conclusion cursor and structural prefix checksum; the reader still accepts
-  `P9COLL5` and `P9COLL6`.
+  conclusion cursor and structural prefix checksum.  `P9COLL8` generalizes
+  those same-width fields to a hyper set or paramodulation pair; the reader
+  still accepts `P9COLL5`, `P9COLL6`, and `P9COLL7`.
   A fresh persistent-history checkpoint at given 92 passed all 18 integrity
   hashes; its resumed and uninterrupted 200-given runs both ended at exactly 695
   generated, 566 kept, 162 usable, 161 SOS, 9 paramodulation pairs, 41 hyper
@@ -441,6 +469,14 @@ Implementation status on 2026-08-07:
   version 1 records compatibly.  The parallel build install target also now
   depends on completed prover binaries, preventing a stale `bin/prover9` from
   being copied during verification.
+  A `P9COLL8` checkpoint at given 33 contained 18 nonzero paramodulation
+  conclusion cursors and passed all 18 integrity hashes.  Its resumed and
+  uninterrupted 150-given cache-four runs both ended at exactly 9,449
+  generated, 151 kept, 9,515 paramodulation turns, 1,012 completed pairs,
+  9,325 emitted conclusions, 56,070 replayed prefix conclusions, and an
+  observed cache peak of four.  The current reader also restored the older
+  `P9COLL7`, `P9COLL6`, and `P9COLL5` checkpoints with 18/18 hashes and their
+  original final generated/kept boundaries.
 - `passive_store=dense` now removes passive ownership from `Topform`,
   `Clist_pos`, selector AVL nodes, active indexes, and the live clause-ID
   table.  Given-selection rules and semantics are evaluated once while the
@@ -503,8 +539,9 @@ unbounded hyper-conclusion burst.  Active history bodies are now shared, only
 deactivated historical versions remain as ordinary term trees, and
 deactivation epochs use a sparse map.  A packed representation for retained
 versions remains desirable before a week-long scale gate.  Phase 5 still
-needs a bounded promising-candidate cache with useful lower bounds so it can
-avoid repeated raw generation, plus a hint-discovery channel for
+needs conservative descriptor lower bounds so the bounded selector cache is
+filled from globally more promising pairs instead of FIFO alone and can avoid
+so much repeated raw generation, plus a hint-discovery channel for
 unmaterialized conclusions.  Exact matches on
 selected givens now provide a starvation-safe one-turn descriptor probe, and
 every emitted candidate passes the unchanged exact hint matcher and all
