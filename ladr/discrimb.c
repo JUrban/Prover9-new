@@ -800,6 +800,7 @@ Plist discrim_bind_retrieve_leaf(Term t_in, Discrim root,
     if (status == BACKTRACK) {
       while (f && !f->alternatives) {  /* clean up HERE??? */
 	if (f->bound) {
+	  CONTEXT_PROFILE_UNBIND(subst, f->varnum);
 	  subst->terms[f->varnum] = NULL;
 	  f->bound = 0;
 	}
@@ -808,6 +809,7 @@ Plist discrim_bind_retrieve_leaf(Term t_in, Discrim root,
       }
       if (f != NULL) {
 	if (f->bound) {
+	  CONTEXT_PROFILE_UNBIND(subst, f->varnum);
 	  subst->terms[f->varnum] = NULL;
 	  f->bound = 0;
 	}
@@ -832,6 +834,7 @@ Plist discrim_bind_retrieve_leaf(Term t_in, Discrim root,
 	}
 	else { /* bind variable in discrimb tree */
 	  match = 1;
+	  CONTEXT_PROFILE_BIND(subst, symbol);
 	  subst->terms[symbol] = f->t;
 	  bound = 1;
 	}
@@ -1035,8 +1038,10 @@ void discrim_bind_cancel(Discrim_pos pos)
 
   f1 = pos->backtrack;
   while (f1) {
-    if (f1->bound)
+    if (f1->bound) {
+      CONTEXT_PROFILE_UNBIND(pos->subst, f1->varnum);
       pos->subst->terms[f1->varnum] = NULL;
+    }
     f2 = f1;
     f1 = f1->prev;
 #ifndef SPEED
@@ -1048,4 +1053,3 @@ void discrim_bind_cancel(Discrim_pos pos)
 #endif
   free_discrim_pos(pos);
 }  /* discrim_bind_cancel */
-

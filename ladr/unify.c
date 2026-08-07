@@ -34,6 +34,7 @@ struct trail {
 /* bind a variable, record binding in a trail */
 
 #define BIND_TR(i, c1, t2, c2, trp) { struct trail *tr; \
+    CONTEXT_PROFILE_BIND(c1, i); \
     c1->terms[i] = t2; c1->contexts[i] = c2; \
     tr = get_trail(); tr->varnum = i; tr->context = c1; \
     tr->next = *trp; *trp = tr; }
@@ -76,6 +77,46 @@ static unsigned Context_gets, Context_frees;
    from this list avoids the expensive memset-to-zero in get_cmem(). */
 static Context Context_freelist = NULL;
 
+#ifdef CONTEXT_PROFILE
+static unsigned long long Context_profile_allocated;
+static unsigned long long Context_profile_reused;
+static unsigned long long Context_profile_bindings;
+static unsigned long long Context_profile_lifetimes;
+static unsigned long long Context_profile_zero_lifetimes;
+static unsigned long long Context_profile_dirty_frees;
+static unsigned long long Context_profile_distinct_sum;
+static unsigned long long Context_profile_peak_sum;
+static unsigned Context_profile_max_distinct;
+static unsigned Context_profile_max_peak;
+static unsigned Context_profile_max_live;
+
+/* PUBLIC */
+void context_profile_note_bind(Context c, int varnum)
+{
+  unsigned word = (unsigned) varnum / 64;
+  unsigned bit = (unsigned) varnum % 64;
+  unsigned long long mask = 1ULL << bit;
+
+  Context_profile_bindings++;
+  if (c->terms[varnum] == NULL) {
+    c->profile_current++;
+    if (c->profile_current > c->profile_peak)
+      c->profile_peak = c->profile_current;
+    if ((c->profile_seen[word] & mask) == 0) {
+      c->profile_seen[word] |= mask;
+      c->profile_distinct++;
+    }
+  }
+}
+
+/* PUBLIC */
+void context_profile_note_unbind(Context c, int varnum)
+{
+  if (c->terms[varnum] != NULL && c->profile_current > 0)
+    c->profile_current--;
+}
+#endif
+
 #define PTRS_TRAIL PTRS(sizeof(struct trail))
 static unsigned Trail_gets, Trail_frees;
 
@@ -97,13 +138,32 @@ Context get_context(void)
     p = Context_freelist;
     Context_freelist = (Context) p->partial_term;  /* next pointer */
     p->partial_term = NULL;
+#ifdef CONTEXT_PROFILE
+    Context_profile_reused++;
+#endif
   }
   else {
     /* First-time allocation: get_cmem zeroes the entire struct. */
     p = get_cmem(PTRS_CONTEXT);
+#ifdef CONTEXT_PROFILE
+    Context_profile_allocated++;
+#endif
   }
+#ifdef CONTEXT_PROFILE
+  memset(p->profile_seen, 0, sizeof(p->profile_seen));
+  p->profile_current = 0;
+  p->profile_peak = 0;
+  p->profile_distinct = 0;
+#endif
   p->multiplier = next_available_multiplier();
   Context_gets++;
+#ifdef CONTEXT_PROFILE
+  {
+    unsigned live = Context_gets - Context_frees;
+    if (live > Context_profile_max_live)
+      Context_profile_max_live = live;
+  }
+#endif
   return(p);
 }  /* get_context */
 
@@ -121,6 +181,19 @@ void free_context(Context p)
 {
   if (Multipliers[p->multiplier] == FALSE)
     fatal_error("free_context, bad multiplier");
+#ifdef CONTEXT_PROFILE
+  Context_profile_lifetimes++;
+  if (p->profile_current != 0)
+    Context_profile_dirty_frees++;
+  if (p->profile_distinct == 0)
+    Context_profile_zero_lifetimes++;
+  Context_profile_distinct_sum += p->profile_distinct;
+  Context_profile_peak_sum += p->profile_peak;
+  if (p->profile_distinct > Context_profile_max_distinct)
+    Context_profile_max_distinct = p->profile_distinct;
+  if (p->profile_peak > Context_profile_max_peak)
+    Context_profile_max_peak = p->profile_peak;
+#endif
   Multipliers[p->multiplier] = FALSE;
   /* Push onto private free list instead of returning to palloc.
      The Context is already clean (terms[]/contexts[] all NULL)
@@ -188,6 +261,35 @@ void fprint_unify_mem(FILE *fp, BOOL heading)
           n, Trail_gets, Trail_frees,
           Trail_gets - Trail_frees,
           ((Trail_gets - Trail_frees) * n) / 1024.);
+
+#ifdef CONTEXT_PROFILE
+  {
+    unsigned long long nonzero = Context_profile_lifetimes -
+                                 Context_profile_zero_lifetimes;
+    fprintf(fp,
+            "Context_profile: capacity=%d gets=%u allocated=%llu reused=%llu "
+            "max_live=%u bindings=%llu\n",
+            MAX_VARS, Context_gets, Context_profile_allocated,
+            Context_profile_reused, Context_profile_max_live,
+            Context_profile_bindings);
+    fprintf(fp,
+            "Context_profile_slots: lifetimes=%llu zero=%llu dirty=%llu "
+            "distinct_mean=%.3f distinct_nonzero_mean=%.3f distinct_max=%u "
+            "peak_mean=%.3f peak_nonzero_mean=%.3f peak_max=%u\n",
+            Context_profile_lifetimes, Context_profile_zero_lifetimes,
+            Context_profile_dirty_frees,
+            Context_profile_lifetimes == 0 ? 0.0 :
+              (double) Context_profile_distinct_sum / Context_profile_lifetimes,
+            nonzero == 0 ? 0.0 :
+              (double) Context_profile_distinct_sum / nonzero,
+            Context_profile_max_distinct,
+            Context_profile_lifetimes == 0 ? 0.0 :
+              (double) Context_profile_peak_sum / Context_profile_lifetimes,
+            nonzero == 0 ? 0.0 :
+              (double) Context_profile_peak_sum / nonzero,
+            Context_profile_max_peak);
+  }
+#endif
 
 }  /* fprint_unify_mem */
 
@@ -329,6 +431,7 @@ fail:
     /* Restore trail to entry state. */
     Trail tp = *trp;
     while (tp != entry_trail) {
+      CONTEXT_PROFILE_UNBIND(tp->context, tp->varnum);
       tp->context->terms[tp->varnum] = NULL;
       tp->context->contexts[tp->varnum] = NULL;
       Trail t3 = tp;
@@ -583,6 +686,7 @@ fail:
   {
     Trail tp = *trp;
     while (tp != entry_trail) {
+      CONTEXT_PROFILE_UNBIND(tp->context, tp->varnum);
       tp->context->terms[tp->varnum] = NULL;
       Trail t3 = tp;
       tp = tp->next;
@@ -894,6 +998,7 @@ void undo_subst(Trail tr)
 {
   Trail t3;
   while (tr != NULL) {
+    CONTEXT_PROFILE_UNBIND(tr->context, tr->varnum);
     tr->context->terms[tr->varnum] = NULL;
     tr->context->contexts[tr->varnum] = NULL;
     t3 = tr;
@@ -927,6 +1032,7 @@ void undo_subst_2(Trail tr, Trail sub_tr)
 {
   Trail t3;
   while (tr != sub_tr) {
+    CONTEXT_PROFILE_UNBIND(tr->context, tr->varnum);
     tr->context->terms[tr->varnum] = NULL;
     tr->context->contexts[tr->varnum] = NULL;
     t3 = tr;
@@ -1169,6 +1275,7 @@ fail:
   {
     Trail tp = *trp;
     while (tp != entry_trail) {
+      CONTEXT_PROFILE_UNBIND(tp->context, tp->varnum);
       tp->context->terms[tp->varnum] = NULL;
       Trail t3 = tp;
       tp = tp->next;
@@ -1367,4 +1474,3 @@ BOOL subst_changes_term(Term t, Context c)
   }
   return FALSE;
 }  /* subst_changes_term */
-

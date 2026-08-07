@@ -87,6 +87,7 @@ struct ac_match_free_vars_pos {
 /* Bind a variable, record binding in a bt_node. */
 
 #define BIND_BT(i, c1, t2, c2, bt) {  \
+    CONTEXT_PROFILE_BIND(c1, i); \
     c1->terms[i] = t2; c1->contexts[i] = c2; \
     bt->varnum = i; bt->cb = c1; }
 
@@ -459,6 +460,7 @@ void unbind_free_var(Ac_match_free_vars_pos pos, Context c)
   }
     
   /* unbind variable */
+  CONTEXT_PROFILE_UNBIND(c, pos->varnum);
   c->terms[pos->varnum] = NULL;
     
 }  /* unbind_free_var */
@@ -566,6 +568,7 @@ int free_var_match(Ac_match_free_vars_pos pos, Term *args2,
     }
 
   /* Bind variable. */
+  CONTEXT_PROFILE_BIND(c1, pos->varnum);
   c1->terms[pos->varnum] = t;
     
   /* Mark args2 terms matched to the current variable. */
@@ -892,6 +895,7 @@ Btm_state match_bt_backup(Btm_state bt1)
   while (bt1 != NULL && bt1->alternative == NO_ALT) {
 
     if (bt1->cb) {  /* unbind variable */
+      CONTEXT_PROFILE_UNBIND(bt1->cb, bt1->varnum);
       bt1->cb->terms[bt1->varnum] = NULL;
       bt1->cb->contexts[bt1->varnum] = NULL;
     }
@@ -1306,6 +1310,7 @@ void match_bt_cancel(Btm_state bt)
       match_ac_cancel(bt1->acm);
     }
     else if (bt1->cb) {
+      CONTEXT_PROFILE_UNBIND(bt1->cb, bt1->varnum);
       bt1->cb->terms[bt1->varnum] = NULL;
       bt1->cb->contexts[bt1->varnum] = NULL;
     }
@@ -1314,4 +1319,3 @@ void match_bt_cancel(Btm_state bt)
     free_btm_state(bt2);
   }
 }  /* match_bt_cancel */
-

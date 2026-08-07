@@ -91,7 +91,9 @@ void maybe_unbind(Flatterm f, Context subst)
 }  /* maybe_unbind */
 #endif
 
-#define MAYBE_UNBIND(f,c)  if (f->varnum_bound_to >= 0) { c->terms[f->varnum_bound_to] = NULL; f->varnum_bound_to = -1; }
+#define MAYBE_UNBIND(f,c)  if (f->varnum_bound_to >= 0) { \
+    CONTEXT_PROFILE_UNBIND(c, f->varnum_bound_to); \
+    c->terms[f->varnum_bound_to] = NULL; f->varnum_bound_to = -1; }
 
 /* DOCUMENTATION
 */
@@ -145,6 +147,7 @@ Plist discrim_flat_retrieve_leaf(Flatterm fin, Discrim root,
 	  status = BACKTRACK;  /* already bound to something else */
       }
       else {
+	CONTEXT_PROFILE_BIND(subst, varnum);
 	subst->terms[varnum] = (Term) f;
 	f->varnum_bound_to = varnum;
 	f->alternative = d->next;
@@ -255,6 +258,7 @@ void discrim_flat_cancel(Discrim_pos pos)
 
   while (f != query->prev) {
     if (f->varnum_bound_to >= 0) {
+      CONTEXT_PROFILE_UNBIND(pos->subst, f->varnum_bound_to);
       pos->subst->terms[f->varnum_bound_to] = NULL;
       f->varnum_bound_to = -1;
     }
@@ -489,4 +493,3 @@ void fdemod_clause(Topform c, Mindex idx,
     }
   }
 }  /* fdemod_clause */
-

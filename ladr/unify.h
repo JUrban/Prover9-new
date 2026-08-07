@@ -121,12 +121,34 @@ type defined here.)
 
 typedef struct context * Context;
 
+#ifdef CONTEXT_PROFILE
+#define CONTEXT_PROFILE_WORDS ((MAX_VARS + 63) / 64)
+#endif
+
 struct context {
   Term    terms[MAX_VARS];    /* terms substituted for variables */
   Context contexts[MAX_VARS]; /* Contexts corresponding to terms */
   int     multiplier;         /* for getting separate vars in apply */
   Term    partial_term;       /* for AC matching */
+#ifdef CONTEXT_PROFILE
+  unsigned long long profile_seen[CONTEXT_PROFILE_WORDS];
+  unsigned short profile_current;
+  unsigned short profile_peak;
+  unsigned short profile_distinct;
+#endif
 };
+
+/* Optional profiling hooks.  Release builds compile these to no-ops and
+   retain the existing Context layout and binding operations. */
+#ifdef CONTEXT_PROFILE
+void context_profile_note_bind(Context c, int varnum);
+void context_profile_note_unbind(Context c, int varnum);
+#define CONTEXT_PROFILE_BIND(c, i) context_profile_note_bind((c), (i))
+#define CONTEXT_PROFILE_UNBIND(c, i) context_profile_note_unbind((c), (i))
+#else
+#define CONTEXT_PROFILE_BIND(c, i) ((void) 0)
+#define CONTEXT_PROFILE_UNBIND(c, i) ((void) 0)
+#endif
 
 typedef struct trail * Trail;
 

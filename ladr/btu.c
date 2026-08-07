@@ -74,6 +74,7 @@ struct btu_state {
 /******** bind a variable, record binding in a bt_node ********/
 
 #define BIND_BT(i, c1, t2, c2, bt) {  \
+    CONTEXT_PROFILE_BIND(c1, i); \
     c1->terms[i] = t2; c1->contexts[i] = c2; \
     bt->varnum = i; bt->cb = c1; }
 
@@ -691,6 +692,7 @@ int unify_ac(Term t1, Context c1,
 	  fflush(stdout);
 	  p_binding(vn, ci, ci->terms[vn], ci->contexts[vn]);
 #endif
+	  CONTEXT_PROFILE_UNBIND(ci, vn);
 	  ci->terms[vn] = NULL;
 	  ci->contexts[vn] = NULL;
 	}
@@ -702,6 +704,7 @@ int unify_ac(Term t1, Context c1,
 		    ac->c3->terms[VARNUM(ac->new_terms[i])],
 		    ac->c3->contexts[VARNUM(ac->new_terms[i])]);
 #endif
+	  CONTEXT_PROFILE_UNBIND(ac->c3, VARNUM(ac->new_terms[i]));
 	  ac->c3->terms[VARNUM(ac->new_terms[i])] = NULL;
 	  ac->c3->contexts[VARNUM(ac->new_terms[i])] = NULL;
 	}
@@ -774,6 +777,7 @@ int unify_ac(Term t1, Context c1,
 
 	if (ci && VARIABLE(ti)) {
 	  vn = VARNUM(ti);
+	  CONTEXT_PROFILE_BIND(ci, vn);
 	  ci->terms[vn] = t4;
 	  ci->contexts[vn] = ac->c3;
 #ifdef DEBUG
@@ -782,6 +786,7 @@ int unify_ac(Term t1, Context c1,
 #endif
 	}
 	else if (CONSTANT(ti) || (!ci && VARIABLE(ti))) {
+	  CONTEXT_PROFILE_BIND(ac->c3, VARNUM(t4));
 	  ac->c3->terms[VARNUM(t4)] = ti;
 	  ac->c3->contexts[VARNUM(t4)] = ci;
 #ifdef DEBUG
@@ -911,11 +916,13 @@ void unify_ac_cancel(Ac_position ac)
 	
     if (ci && VARIABLE(ti)) {
       vn = VARNUM(ARG(ac,i));
+      CONTEXT_PROFILE_UNBIND(ci, vn);
       ci->terms[vn] = NULL;
       ci->contexts[vn] = NULL;
     }
 	
     else if (CONSTANT(ti) || (!ci && VARIABLE(ti))) {
+      CONTEXT_PROFILE_UNBIND(ac->c3, VARNUM(ac->new_terms[i]));
       ac->c3->terms[VARNUM(ac->new_terms[i])] = NULL;
       ac->c3->contexts[VARNUM(ac->new_terms[i])] = NULL;
     }
@@ -994,6 +1001,7 @@ Btu_state unify_bt_backup(Btu_state bt1)
       printf("CLEAR: v%d, c%d\n", bt1->varnum, bt1->cb->multiplier);
       fflush(stdout);
 #endif
+      CONTEXT_PROFILE_UNBIND(bt1->cb, bt1->varnum);
       bt1->cb->terms[bt1->varnum] = NULL;
       bt1->cb->contexts[bt1->varnum] = NULL;
       bt1->cb = NULL;
@@ -1219,6 +1227,7 @@ void unify_bt_cancel(Btu_state bt)
       unify_ac_cancel(bt1->ac);
     }
     else if (bt1->cb != NULL) {
+      CONTEXT_PROFILE_UNBIND(bt1->cb, bt1->varnum);
       bt1->cb->terms[bt1->varnum] = NULL;
       bt1->cb->contexts[bt1->varnum] = NULL;
     }
@@ -1467,4 +1476,3 @@ void p_bt_tree(Btu_state bt, int n)
     printf(" end of bt_tree: %d\n", n);
   }
 }  /* p_bt_tree */
-
