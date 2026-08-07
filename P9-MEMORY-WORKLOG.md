@@ -1,4 +1,4 @@
-# Prover9 AIM memory worklog (Phases 0--2)
+# Prover9 AIM memory worklog (Phases 0--3)
 
 Date: 2026-08-07 (Europe/Berlin)
 Base revision: `b36df4c06d5794dd98e42335f191dd41d7abd2ab`
@@ -90,6 +90,9 @@ Normal statistics now separate:
   materialized/recompressed operations;
 - palloc cumulative bytes and whole allocator slabs reserved from `malloc()`;
 - live and high-water FPA trie nodes and `Fpa_list` headers.
+- compact disabled-store allocation versus the replaced `Clist` estimate;
+- clause-ID entries, 64-ID pages, hash slots, allocated bytes, and the
+  replaced fixed-table/`Plist` estimate.
 
 Body-byte figures are logical allocation-size estimates for literal cells and
 non-variable term cells. Compact bytes are payload bytes and exclude general
@@ -122,16 +125,72 @@ presented as interchangeable.
   see disabled clauses go through scoped proof materialization or the safe
   `fwrite_clause*` entry point.
 
-## Exact next actions for Phase 3 (not implemented)
+## Phase 3 compact bookkeeping
 
-1. Measure bytes per disabled clause for the `Clist` node, clause-ID hash entry,
-   and surviving `Topform`, then design a paged ID-indexed cold record with
-   sparse-ID handling.
-2. Prototype O(1) ID lookup and compact iteration without changing ID stability,
-   justification ownership, proof ordering, or format-3 checkpoint behavior;
-   add proof/checkpoint equivalence tests before replacing either collection.
-3. Re-run the bounded driver plus a larger synthetic high-water workload and
-   compare peak RSS, allocator slab growth, lookup time, and bytes per retained
-   ancestor. Separately fix the documented checkpoint selector divergence.
+The replaced clause-ID structure was a static 50,000-pointer bucket array plus
+one 16-byte `Plist` cell per official clause. Each bucket was ID-sorted, but a
+dense million-record run averaged 56.4 bookkeeping bytes per record when its
+40-byte disabled `Clist_pos` was included. The `Topform` was 112 bytes and had
+unused trailing padding.
 
-No Phase 3 representation work was started.
+The new ID table hashes sparse 64-ID pages. A page contains its page number,
+live count, and 64 direct `Topform` slots; the open-addressed page table grows
+at a bounded load factor and uses tombstones only until a same-size compaction
+or final teardown. Lookup is one page hash plus one direct slot. Removing the
+last ID frees its page, and deleting the last page frees the page table. A
+restored isolated high ID therefore allocates one 528-byte page and a bounded
+hash entry rather than storage proportional to the maximum ID.
+
+Disabled clauses now use an append-order `Topform *` vector. Membership is an
+O(1) byte flag placed in the existing `Topform` padding, so `sizeof(struct
+topform)` remains 112. Appending preserves retention/checkpoint order. The
+negative-descendant path applies the same stable merge sort by clause ID as the
+old `Clist`, then merges usable, SOS, and compact-store iterators without
+materializing compressed clauses. Generic Clist teardown was taught that the
+disabled flag is also live ownership.
+
+Checkpoint format 3 is unchanged. Specialized store writers preserve the old
+ID-zero omission, clause text, atom flags, justification order, and scoped
+materialize/recompress behavior. Restore loads through the existing temporary
+Clist and transfers clauses to the compact store. Verification now additionally
+hashes the checkpointed disabled IDs and count; the fresh aK checkpoint passed
+18/18 checks. Formula collection from the paged ID table is ID ordered so goal
+formula restoration remains deterministic.
+
+`bookkeeping_lifecycle_test` covers 200,000 records by default and accepts a
+larger count for bounded scale runs. It checks dense and sparse ID lookup,
+stable next-ID assignment, formula collection, sort/order, O(1) membership,
+exact counts/bytes, and complete page/store teardown. At one million records,
+the two structures use 16,901,304 logical allocated bytes (16.901/record),
+versus 56,400,032 bytes (56.400/record) for the replaced structures. This
+excludes the unchanged 112-byte `Topform` and allocator metadata.
+
+## Phase 3 decisions and remaining risks
+
+- Compact bookkeeping is always on and exact; it adds no incomplete-search
+  mode and changes no option default. `compress_disabled` remains exact and
+  default off.
+- The paged table preserves pointer lookup and IDs, but debug printing now
+  follows page-hash order rather than legacy bucket order. Formula checkpoint
+  output is explicitly ID ordered. Neither order participates in inference.
+- Vector capacity is power-of-two high-water storage. Its steady cost tends to
+  8 bytes per record at powers of two and can approach 16 just before growth;
+  reported allocation uses actual capacity rather than an idealized count.
+- Stable sorting temporarily allocates one pointer per disabled clause, as the
+  old Clist sort did. It is only used by denial-descendant processing.
+- Format 3 still omits disabled clauses with ID zero, matching the old writer.
+  These pre-elimination clauses cannot be proof parents. The new disabled
+  checkpoint hashes deliberately cover the serialized, official-ID subset.
+- The two pre-existing checkpoint divergences above remain out of Phase 3.
+
+## Exact next actions after Phase 3
+
+1. Before Phase 4 implementation, specify the compact proof-record ownership,
+   versioning, bounds checks, and proof-checker reconstruction contract.
+2. Add a long, deterministic ancestor-heavy AIM soak to quantify when the
+   current vector and paged-table high-water reaches another allocator/RSS
+   boundary; keep strict time and work caps for routine CI.
+3. Independently diagnose the aK kept/SOS resume divergence and LCC AVL restore
+   failure before relying on checkpoint equivalence for a Phase 4 record log.
+
+Phase 4 was not started.
