@@ -345,6 +345,7 @@ void bulk_insert_into_sos2(Clist sos)
 {
   int n, i;
   void **all;
+  BOOL *high_matched;
   Clist_pos cp;
   Plist p;
 
@@ -353,6 +354,7 @@ void bulk_insert_into_sos2(Clist sos)
 
   /* Build array of all clauses, evaluating semantics if needed */
   all = (void **) safe_malloc(n * sizeof(void *));
+  high_matched = (BOOL *) safe_malloc(n * sizeof(BOOL));
   i = 0;
   for (cp = sos->first; cp != NULL; cp = cp->next) {
     Topform c = cp->c;
@@ -360,6 +362,8 @@ void bulk_insert_into_sos2(Clist sos)
       set_semantics(c);
     all[i++] = c;
   }
+  for (i = 0; i < n; i++)
+    high_matched[i] = FALSE;
 
   /* For each selector, filter matching clauses, sort, build AVL */
   {
@@ -375,10 +379,18 @@ void bulk_insert_into_sos2(Clist sos)
         Giv_select gs = p->v;
         int nm = 0;
 
-        /* Collect clauses matching this selector's property */
+        /* Normal insertion puts a clause in matching high selectors, or in
+           matching low selectors if and only if no high selector matched. */
         for (i = 0; i < n; i++) {
-          if (eval_clause_in_rule((Topform) all[i], gs->property))
-            matched[nm++] = all[i];
+          if (si == 0) {
+            if (eval_clause_in_rule((Topform) all[i], gs->property)) {
+              matched[nm++] = all[i];
+              high_matched[i] = TRUE;
+            }
+          }
+          else if (!high_matched[i] &&
+                   eval_clause_in_rule((Topform) all[i], gs->property))
+              matched[nm++] = all[i];
         }
 
         if (nm > 0) {
@@ -397,6 +409,7 @@ void bulk_insert_into_sos2(Clist sos)
   }
 
   Sos_size = n;
+  safe_free(high_matched);
   safe_free(all);
 }  /* bulk_insert_into_sos2 */
 
@@ -903,4 +916,3 @@ Plist selector_rules_from_options(Prover_options opt)
 
   return p;
 }  /* selector_rules_from_options */
-

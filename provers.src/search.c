@@ -6643,17 +6643,25 @@ void write_checkpoint(void)
     }
 
     /* 3b. Write precedence.txt - symbol ordering for deterministic resume.
-       Format: "F name arity [S]" for function, "R name arity" for predicate.
-       S flag indicates Skolem constant. */
+       Format: "F name arity [flags]" for functions and "R name arity" for
+       predicates.  S marks Skolem symbols and U preserves unfold ordering. */
     snprintf(cpath, sizeof(cpath), "%s/precedence.txt", tmpdir);
     fp = fopen(cpath, "w");
     if (fp) {
       Ilist fsyms = current_fsym_precedence();
       Ilist rsyms = current_rsym_precedence();
       Ilist p;
-      for (p = fsyms; p; p = p->next)
-        fprintf(fp, "F %s %d%s\n", sn_to_str(p->i), sn_to_arity(p->i),
-                is_skolem(p->i) ? " S" : "");
+      for (p = fsyms; p; p = p->next) {
+        char flags[3];
+        int fi = 0;
+        if (is_skolem(p->i))
+          flags[fi++] = 'S';
+        if (is_unfold_symbol(p->i))
+          flags[fi++] = 'U';
+        flags[fi] = '\0';
+        fprintf(fp, "F %s %d%s%s\n", sn_to_str(p->i), sn_to_arity(p->i),
+                fi > 0 ? " " : "", flags);
+      }
       for (p = rsyms; p; p = p->next)
         fprintf(fp, "R %s %d\n", sn_to_str(p->i), sn_to_arity(p->i));
       zap_ilist(fsyms);
@@ -7035,8 +7043,10 @@ void resume_load_precedence(const char *dir)
         int sn = str_to_sn(name, arity);
         if (type_ch == 'F') {
           set_symbol_type(sn, FUNCTION_SYMBOL);
-          if (skolem_flag[0] == 'S')
+          if (strchr(skolem_flag, 'S') != NULL)
             set_skolem(sn);
+          if (strchr(skolem_flag, 'U') != NULL)
+            set_unfold_symbol(sn);
           fsyms = ilist_prepend(fsyms, sn);
         }
         else if (type_ch == 'R') {
@@ -7756,6 +7766,12 @@ void load_checkpoint_into_loop(void)
         }
         safe_free(is_usable);
       }
+
+      /* The serialized FPA tries do not include the nonunit feature tree
+         used by forward/back subsumption.  Rebuild it for both the fast
+         restore and fallback paths. */
+      for (idx = 0; idx < n_all; idx++)
+        index_literals_features_only(all_clauses[idx], INSERT, Clocks.index);
     }
     safe_free(all_clauses);
 

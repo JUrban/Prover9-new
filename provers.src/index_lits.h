@@ -60,6 +60,8 @@ void lits_idx_report(void);
 
 void index_literals_fpa_only(Topform c, Indexop op, Clock clock, BOOL no_fapl);
 
+void index_literals_features_only(Topform c, Indexop op, Clock clock);
+
 void write_unit_discrim_index(const char *dir);
 
 void restore_unit_discrim_index(const char *dir);
