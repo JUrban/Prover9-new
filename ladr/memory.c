@@ -22,6 +22,9 @@
 #include <unistd.h>
 #include <string.h>
 #include <stdint.h>
+#if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+#include <mach/mach.h>
+#endif
 #ifndef __EMSCRIPTEN__
 #include <sys/mman.h>
 #ifndef MAP_ANONYMOUS
@@ -514,10 +517,46 @@ unsigned long long memory_current_rss_kbytes(void)
   page_bytes = sysconf(_SC_PAGESIZE);
   return page_bytes > 0 ?
     resident_pages * (unsigned long long) page_bytes / 1024 : 0;
+#elif defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+#ifdef MACH_TASK_BASIC_INFO
+  mach_task_basic_info_data_t info;
+  mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+  kern_return_t result = task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                                   (task_info_t) &info, &count);
+#else
+  task_basic_info_data_t info;
+  mach_msg_type_number_t count = TASK_BASIC_INFO_COUNT;
+  kern_return_t result = task_info(mach_task_self(), TASK_BASIC_INFO,
+                                   (task_info_t) &info, &count);
+#endif
+  return result == KERN_SUCCESS ?
+    (unsigned long long) info.resident_size / 1024 : 0;
 #else
   return 0;
 #endif
 }  /* memory_current_rss_kbytes */
+
+/* PUBLIC */
+BOOL memory_current_rss_supported(void)
+{
+#if (defined(__linux__) || defined(__APPLE__)) && !defined(__EMSCRIPTEN__)
+  return TRUE;
+#else
+  return FALSE;
+#endif
+}  /* memory_current_rss_supported */
+
+/* PUBLIC */
+BOOL memory_can_return_pages_to_os(void)
+{
+#ifdef __EMSCRIPTEN__
+  /* free() makes the storage reusable inside the WebAssembly heap, but the
+     linear memory cannot contract and return pages to the host. */
+  return FALSE;
+#else
+  return TRUE;
+#endif
+}  /* memory_can_return_pages_to_os */
 
 /* PUBLIC */
 unsigned long long memory_peak_rss_kbytes(void)

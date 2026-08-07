@@ -78,6 +78,10 @@ unsigned long long memory_current_rss_kbytes(void);
 
 unsigned long long memory_peak_rss_kbytes(void);
 
+BOOL memory_current_rss_supported(void);
+
+BOOL memory_can_return_pages_to_os(void);
+
 long long megs_malloced(void);
 
 void set_max_megs(int megs);

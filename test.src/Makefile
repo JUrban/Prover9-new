@@ -59,6 +59,13 @@ memory-tests: memory_lifecycle_test allocator_churn_test bookkeeping_lifecycle_t
 	./bookkeeping_lifecycle_test
 	./ancestor_store_test
 
+# The object-count bound keeps this suitable for Linux/macOS CI and for a
+# Node-hosted Emscripten build.  The test checks RSS contraction only on hosts
+# that expose current RSS and can return pages; logical reclamation is always
+# mandatory (including WebAssembly, whose linear heap cannot contract).
+allocator-churn-bounded: allocator_churn_test
+	./allocator_churn_test 150000
+
 checkpoint-tests: checkpoint_selector_test
 	./checkpoint_selector_test
 

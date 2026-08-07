@@ -89,6 +89,8 @@ int main(int argc, char **argv)
   unsigned i;
   struct memory_stats before, allocated, almost_freed, freed, direct;
   unsigned long long rss_before, rss_allocated, rss_freed, rss_peak;
+  BOOL rss_supported = memory_current_rss_supported();
+  BOOL returns_pages = memory_can_return_pages_to_os();
 
   if (argc == 2) {
     unsigned long parsed = strtoul(argv[1], NULL, 10);
@@ -165,11 +167,18 @@ int main(int argc, char **argv)
   CHECK(freed.reclaimed_slabs >=
         allocated.slab_count - before.slab_count,
         "reclamation counter observes every emptied test slab");
-  if (rss_before != 0 && rss_allocated != 0 && rss_freed != 0) {
+  if (rss_supported) {
+    CHECK(rss_before != 0 && rss_allocated != 0 && rss_freed != 0,
+          "supported current-RSS probe returns measurements");
     CHECK(rss_allocated > rss_before + 32 * 1024,
           "resident set observes touched slab payload");
-    CHECK(rss_freed + 32 * 1024 < rss_allocated,
-          "resident set falls after slab mappings are returned");
+    if (returns_pages)
+      CHECK(rss_freed + 32 * 1024 < rss_allocated,
+            "resident set falls after slab mappings are returned");
+  }
+  else {
+    CHECK(rss_before == 0 && rss_allocated == 0 && rss_freed == 0,
+          "unsupported current-RSS probe is explicit");
   }
 
   mixed_class_churn(freed.logical_live_bytes, freed.reserved_bytes,
@@ -209,10 +218,12 @@ int main(int argc, char **argv)
   printf("allocator_churn_test: PASS objects=%u logical_peak=%llu "
          "reserved_peak=%llu reclaimed_slabs=%llu reclaimed_bytes=%llu "
          "rss_before_kb=%llu rss_live_kb=%llu rss_after_kb=%llu "
-         "rss_peak_kb=%llu cumulative=%llu\n",
+         "rss_peak_kb=%llu rss_supported=%s returns_pages=%s "
+         "cumulative=%llu\n",
          count, freed.logical_peak_bytes, freed.peak_reserved_bytes,
          freed.reclaimed_slabs, freed.reclaimed_bytes,
          rss_before, rss_allocated, rss_freed, rss_peak,
+         rss_supported ? "yes" : "no", returns_pages ? "yes" : "no",
          freed.cumulative_bytes);
   return 0;
 }
