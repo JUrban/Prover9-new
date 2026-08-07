@@ -1,4 +1,4 @@
-# Prover9 AIM memory worklog (Phases 0--4)
+# Prover9 AIM memory worklog (Phases 0--6)
 
 Date: 2026-08-07 (Europe/Berlin)
 Base revision: `b36df4c06d5794dd98e42335f191dd41d7abd2ab`
@@ -367,3 +367,37 @@ therefore remain visible as fragmentation and are reported separately.  Phase
 3. Add a bounded long-churn allocator workload with phase-boundary
    `memory_release_unused()` calls to measure warm-slab virtual fragmentation,
    RSS return, and mapping rate on Linux, macOS, and Emscripten.
+
+## Phase 6 outcomes
+
+The three Phase 5 follow-ups are resolved.
+
+1. Commit `77660fc` repairs selector duplication, restores the nonunit feature
+   index after fast FPA loading, and preserves `unfold` symbol state.  Fresh
+   and resumed aK and LCC runs now have identical final work counters; the
+   post-checkpoint aK kept trace is byte-identical and both resumes pass all
+   18 verification hashes.
+2. An opt-in `CONTEXT_PROFILE` build observes every substitution bind/unbind
+   path without changing release layout.  Both sampled AIM prefixes allocate
+   only five contexts concurrently (8,080 release bytes total), 95.7--96.5%
+   of lifetimes are empty, non-empty lifetimes touch about 2--3 slots, maxima
+   are six/seven, and dirty frees are zero.  Generation stamping is rejected:
+   it enlarges a tiny pool that the existing private freelist already reuses
+   without clearing.  Sparse contexts cannot affect total RAM materially.
+3. The bounded churn check now makes platform capability explicit.  Linux
+   asserts RSS rise and contraction using `/proc`; macOS obtains current RSS
+   through Mach; Emscripten requires logical slab reclamation but does not
+   pretend its linear heap can return pages to the host.  The local Linux
+   150,000-object run passed and contracted from 40,304 to 1,620 KiB after
+   purge.  macOS/Emscripten toolchains are unavailable on this host and are
+   not reported as executed.
+
+The requested pre-project/current measurement used the exact same 2,000-given
+`Ka_to_aK1` prefix for 69--73 seconds.  Both builds performed
+2,001/6,980,123/2,198 given/generated/kept and both peaked at 14,720 KiB RSS.
+Logical live bytes fell only 4.57%, from 11,230,432 to 10,717,376.  Detailed
+pre-project accounting assigns at least 56.8% of live allocation to FPA and
+23.4% to terms/argument arrays.  The archived AIM statistics and the local
+Waldmeister paper were then used to produce `P9-RADICAL-MEMORY-PLAN.md`; its
+core is packed immutable index segments, an immutable shared term bank with
+mutable sidecars, and a Waldmeister-style collective passive frontier.

@@ -1,4 +1,4 @@
-# Prover9 AIM memory results (Phases 0--5)
+# Prover9 AIM memory results (Phases 0--6)
 
 Date: 2026-08-07 (Europe/Berlin)
 Base revision: `b36df4c06d5794dd98e42335f191dd41d7abd2ab`
@@ -447,4 +447,41 @@ selector/restart issue already recorded in Phases 3--4; Phase 5 changes no
 checkpoint format.
 
 No option changed default or completeness, no uncapped AIM run was started,
-and Phase 6 was not begun.
+and Phase 6 had not begun at that Phase 5 handoff.
+
+## Phase 6 context, platform, and total-RAM findings
+
+Phase 6 first repaired deterministic checkpoint selector/index restoration;
+that work is recorded separately in commit `77660fc`.  The memory work then
+used an opt-in `CONTEXT_PROFILE` build.  It has no fields or calls in release
+builds.
+
+At given 500, `Ka_to_aK1` performed 964,661 context lifetimes but allocated
+only five physical contexts.  About 95.7% of lifetimes bound no slots; a
+non-empty lifetime touched roughly 2.3 distinct slots, with maximum six.
+`LCC_to_aK1` performed 614,614 lifetimes, also allocated only five contexts,
+had 593,339 empty lifetimes (96.5%), a 2.530 non-empty distinct-slot mean,
+and maximum seven.  Both runs reported zero dirty frees.  A release context
+is 1,616 bytes, so the maximum live pool is only 8,080 bytes.  Generation
+stamps would add storage and lookup work to a pool that is already reused
+without clearing; a sparse representation could save only a few KiB.  Neither
+is a material total-RAM project.
+
+The bounded allocator churn test now distinguishes platform capabilities.
+Linux uses `/proc/self/statm`; macOS uses Mach task information; Emscripten
+explicitly reports current RSS unsupported and that WebAssembly linear memory
+cannot return pages to the host.  Logical slab reclamation remains mandatory
+everywhere.  The local Linux run over 150,000 256-byte objects passed, with
+38,400,000 logical peak bytes, RSS 40,304 -> 1,620 KiB after purge, and 58
+slabs / 60,817,408 cumulative bytes reclaimed.  No macOS or Emscripten
+compiler is installed on this host, so those paths are implemented but not
+claimed as locally executed.
+
+The exact pre-project/current comparison and the resulting radical plan are
+in `P9-RADICAL-MEMORY-PLAN.md`.  On an identical 69--73 second,
+2,000-given `Ka_to_aK1` prefix, pre-project and current peak RSS were both
+14,720 KiB.  Logical live allocation fell only 4.57%, from 11,230,432 to
+10,717,376 bytes.  The old detailed table attributes at least 6,231.6 KiB
+(56.8%) to FPA and 2,565.9 KiB (23.4%) to terms/argument arrays.  This is why
+the next architecture must replace pointer-rich indexes and individually
+materialized passive facts rather than continue local structure packing.
