@@ -1,5 +1,5 @@
 #!/bin/sh
-# Bounded memory/correctness benchmark driver for Phases 0--4.
+# Bounded memory/correctness benchmark driver for Phases 0--5.
 
 set -eu
 
@@ -21,7 +21,7 @@ summarize()
   err=$3
   status=$4
   echo "===== $label (status=$status, external_cap=${cap_seconds}s) ====="
-  grep -E '^(Given|Usable|Disabled_compression|Clause_body_bytes|Ancestor_store|Bookkeeping_bytes|Allocator_bytes)' "$out" || true
+  grep -E '^(Given|Usable|Disabled_compression|Clause_body_bytes|Ancestor_store|Bookkeeping_bytes|Allocator_bytes|Allocator_slabs)' "$out" || true
   grep -E 'User time|System time|Elapsed .* time|Maximum resident set size' "$err" || true
 }
 

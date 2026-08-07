@@ -38,6 +38,28 @@
 
 /* End of public definitions */
 
+/* Snapshot of the pointer-count allocator.  "logical" counts bytes requested
+   from get_mem/get_cmem (rounded only to their public pointer units), while
+   "reserved" counts the backing mappings plus directly allocated storage. */
+
+struct memory_stats {
+  unsigned long long logical_live_bytes;
+  unsigned long long logical_peak_bytes;
+  unsigned long long reserved_bytes;
+  unsigned long long peak_reserved_bytes;
+  unsigned long long reusable_bytes;
+  unsigned long long unallocated_bytes;
+  unsigned long long metadata_bytes;
+  unsigned long long fragmentation_bytes;
+  unsigned long long direct_live_bytes;
+  unsigned long long permanent_live_bytes;
+  unsigned long long slab_count;
+  unsigned long long peak_slab_count;
+  unsigned long long reclaimed_slabs;
+  unsigned long long reclaimed_bytes;
+  unsigned long long cumulative_bytes;
+};
+
 /* Public function prototypes from memory.c */
 
 void *get_cmem(unsigned n);
@@ -47,6 +69,14 @@ void *get_mem(unsigned n);
 void free_mem(void *q, unsigned n);
 
 void memory_report(FILE *fp);
+
+void memory_get_stats(struct memory_stats *stats);
+
+void memory_release_unused(void);
+
+unsigned long long memory_current_rss_kbytes(void);
+
+unsigned long long memory_peak_rss_kbytes(void);
 
 long long megs_malloced(void);
 
@@ -59,6 +89,8 @@ unsigned long long bytes_palloced(void);
 void *tp_alloc(size_t n);
 
 unsigned mega_mem_calls(void);
+
+unsigned long long memory_allocation_calls(void);
 
 void disable_max_megs(void);
 

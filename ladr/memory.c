@@ -21,25 +21,47 @@
 #include "fatal.h"
 #include <unistd.h>
 #include <string.h>
-
-#define MALLOC_MEGS        20  /* size of blocks malloced by palloc */
-#define DEFAULT_MAX_MEGS  49152  /* 48 GB; change with set_max_megs(n) */
-#ifndef MAX_MEM_LISTS
-#define MAX_MEM_LISTS     500  /* number of lists of available nodes */
+#include <stdint.h>
+#ifndef __EMSCRIPTEN__
+#include <sys/mman.h>
+#ifndef MAP_ANONYMOUS
+#define MAP_ANONYMOUS MAP_ANON
+#endif
 #endif
 
-static void ** M[MAX_MEM_LISTS];
+#define DEFAULT_MAX_MEGS  49152  /* 48 GB; change with set_max_megs(n) */
+#define MAX_SLAB_LISTS      128  /* larger requests use direct allocation */
+#define SLAB_BYTES      (1024 * 1024)
+#define SLAB_MAGIC ((uintptr_t) 0x51ab51abU)
+
+struct memory_slab {
+  uintptr_t magic;
+  unsigned class_index;
+  size_t slot_size;
+  unsigned capacity;
+  unsigned next_unused;
+  unsigned live_count;
+  unsigned free_count;
+  void *free_list;
+  struct memory_slab *all_prev;
+  struct memory_slab *all_next;
+  struct memory_slab *avail_prev;
+  struct memory_slab *avail_next;
+};
+
+struct memory_class {
+  struct memory_slab *all;
+  struct memory_slab *available;
+};
+
+static struct memory_class Classes[MAX_SLAB_LISTS];
+static struct memory_stats Memory_stats;
 
 static BOOL Max_megs_check = TRUE;
 static int Max_megs = DEFAULT_MAX_MEGS;  /* change with set_max_megs(n) */
 static void (*Exit_proc) (void);         /* set with set_max_megs_proc() */
 
-static int Malloc_calls = 0;   /* number of calls to malloc by palloc */
-
 static unsigned long long Bytes_palloced = 0;  /* 64-bit to handle >4GB */
-
-static void *Block = NULL;        /* location returned by most recent malloc */
-static void *Block_pos = NULL;    /* current position in block */
 
 static unsigned Mem_calls = 0;
 static unsigned Mem_calls_overflows = 0;
@@ -49,46 +71,253 @@ static unsigned Mem_calls_overflows = 0;
 /* Forward declarations for safe allocation functions */
 void *safe_malloc(size_t n);
 void *safe_calloc(size_t nmemb, size_t size);
+static void release_empty_slabs(void);
 
 /*************
  *
- *    void *palloc(n) -- assume n is a multiple of BYTES_POINTER.
+ *    Reclaimable segregated slabs.
  *
  *************/
 
 static
-void *palloc(size_t n)
+void max_megs_check(size_t additional)
 {
-  if (n == 0)
-    return NULL;
-  else {
-    void *chunk;
-    size_t malloc_bytes = MALLOC_MEGS*1024*1024;
-
-    if (Block==NULL || Block + malloc_bytes - Block_pos < n) {
-      /* First call or not enough in the current block, so get a new block. */
-      if (n > malloc_bytes) {
-	printf("palloc, n=%d\n", (int) n);
-	fatal_error("palloc, request too big; reset MALLOC_MEGS");
-      }
-      else if (Max_megs_check && (long long)(Malloc_calls+1)*MALLOC_MEGS > Max_megs) {
-	if (Exit_proc)
-	  (*Exit_proc)();
-	else
-	  fatal_error("palloc, Max_megs parameter exceeded");
-      }
-      else {
-	Block_pos = Block = safe_malloc(malloc_bytes);
-	Malloc_calls++;
-	/* safe_malloc handles retry/exit on failure, so Block_pos is valid */
-      } 
-    }
-    chunk = Block_pos; 
-    Block_pos += n; 
-    Bytes_palloced += n; 
-    return(chunk);
+  unsigned long long limit = (unsigned long long) Max_megs * 1024 * 1024;
+  if (Max_megs_check && Memory_stats.reserved_bytes + additional > limit)
+    release_empty_slabs();
+  if (Max_megs_check && Memory_stats.reserved_bytes + additional > limit) {
+    if (Exit_proc)
+      (*Exit_proc)();
+    else
+      fatal_error("memory allocator, Max_megs parameter exceeded");
   }
-}  /* palloc */
+}  /* max_megs_check */
+
+static
+void record_reservation(size_t bytes)
+{
+  Memory_stats.reserved_bytes += bytes;
+  if (Memory_stats.reserved_bytes > Memory_stats.peak_reserved_bytes)
+    Memory_stats.peak_reserved_bytes = Memory_stats.reserved_bytes;
+}  /* record_reservation */
+
+static
+void record_allocation(size_t bytes)
+{
+  Memory_stats.cumulative_bytes += bytes;
+  Memory_stats.logical_live_bytes += bytes;
+  if (Memory_stats.logical_live_bytes > Memory_stats.logical_peak_bytes)
+    Memory_stats.logical_peak_bytes = Memory_stats.logical_live_bytes;
+}  /* record_allocation */
+
+static
+void available_add(struct memory_class *c, struct memory_slab *s)
+{
+  s->avail_prev = NULL;
+  s->avail_next = c->available;
+  if (c->available)
+    c->available->avail_prev = s;
+  c->available = s;
+}  /* available_add */
+
+static
+void available_remove(struct memory_class *c, struct memory_slab *s)
+{
+  if (s->avail_prev)
+    s->avail_prev->avail_next = s->avail_next;
+  else
+    c->available = s->avail_next;
+  if (s->avail_next)
+    s->avail_next->avail_prev = s->avail_prev;
+  s->avail_prev = s->avail_next = NULL;
+}  /* available_remove */
+
+static
+void all_add(struct memory_class *c, struct memory_slab *s)
+{
+  s->all_prev = NULL;
+  s->all_next = c->all;
+  if (c->all)
+    c->all->all_prev = s;
+  c->all = s;
+}  /* all_add */
+
+static
+void all_remove(struct memory_class *c, struct memory_slab *s)
+{
+  if (s->all_prev)
+    s->all_prev->all_next = s->all_next;
+  else
+    c->all = s->all_next;
+  if (s->all_next)
+    s->all_next->all_prev = s->all_prev;
+}  /* all_remove */
+
+static
+void *slab_mapping_alloc(void)
+{
+#ifdef __EMSCRIPTEN__
+  return safe_malloc(SLAB_BYTES);
+#else
+  size_t mapping_bytes = 2 * (size_t) SLAB_BYTES;
+  void *mapping = mmap(NULL, mapping_bytes, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  uintptr_t raw, aligned;
+  size_t prefix, suffix;
+
+  if (mapping == MAP_FAILED) {
+    set_fatal_szs_status("MemoryOut");
+    fatal_error("memory allocator, mmap failed");
+  }
+  raw = (uintptr_t) mapping;
+  aligned = (raw + SLAB_BYTES - 1) & ~((uintptr_t) SLAB_BYTES - 1);
+  prefix = (size_t) (aligned - raw);
+  suffix = mapping_bytes - prefix - SLAB_BYTES;
+  if (prefix != 0 && munmap(mapping, prefix) != 0)
+    fatal_error("memory allocator, prefix munmap failed");
+  if (suffix != 0 &&
+      munmap((void *) (aligned + SLAB_BYTES), suffix) != 0)
+    fatal_error("memory allocator, suffix munmap failed");
+  return (void *) aligned;
+#endif
+}  /* slab_mapping_alloc */
+
+static
+void slab_mapping_free(struct memory_slab *s)
+{
+#ifdef __EMSCRIPTEN__
+  safe_free(s);
+#else
+  if (munmap(s, SLAB_BYTES) != 0)
+    fatal_error("memory allocator, slab munmap failed");
+#endif
+}  /* slab_mapping_free */
+
+static
+void release_slab(struct memory_class *c, struct memory_slab *s)
+{
+  available_remove(c, s);
+  all_remove(c, s);
+  s->magic = 0;
+  Memory_stats.slab_count--;
+  Memory_stats.reserved_bytes -= SLAB_BYTES;
+  Memory_stats.reclaimed_slabs++;
+  Memory_stats.reclaimed_bytes += SLAB_BYTES;
+  slab_mapping_free(s);
+}  /* release_slab */
+
+static
+void release_empty_slabs(void)
+{
+  unsigned i;
+  for (i = 1; i < MAX_SLAB_LISTS; i++) {
+    struct memory_class *c = &Classes[i];
+    struct memory_slab *s = c->all;
+    while (s) {
+      struct memory_slab *next = s->all_next;
+      if (s->live_count == 0)
+        release_slab(c, s);
+      s = next;
+    }
+  }
+}  /* release_empty_slabs */
+
+static
+struct memory_slab *new_slab(unsigned n)
+{
+  struct memory_class *c = &Classes[n];
+  struct memory_slab *s;
+  size_t header = CEILING(sizeof(struct memory_slab), BYTES_POINTER) *
+                  BYTES_POINTER;
+
+  max_megs_check(SLAB_BYTES);
+  s = slab_mapping_alloc();
+  memset(s, 0, sizeof(*s));
+  s->magic = SLAB_MAGIC;
+  s->class_index = n;
+  s->slot_size = n * BYTES_POINTER;
+  s->capacity = (unsigned) ((SLAB_BYTES - header) / s->slot_size);
+  if (s->capacity == 0)
+    fatal_error("memory allocator, empty slab class");
+  all_add(c, s);
+  available_add(c, s);
+  Memory_stats.slab_count++;
+  if (Memory_stats.slab_count > Memory_stats.peak_slab_count)
+    Memory_stats.peak_slab_count = Memory_stats.slab_count;
+  record_reservation(SLAB_BYTES);
+  return s;
+}  /* new_slab */
+
+static
+void *slab_get(unsigned n)
+{
+  struct memory_class *c = &Classes[n];
+  struct memory_slab *s = c->available;
+  void *p;
+  size_t header = CEILING(sizeof(struct memory_slab), BYTES_POINTER) *
+                  BYTES_POINTER;
+
+  if (s == NULL)
+    s = new_slab(n);
+  if (s->free_list) {
+    p = s->free_list;
+    s->free_list = *((void **) p);
+    s->free_count--;
+  }
+  else {
+    p = (char *) s + header + ((size_t) s->next_unused * s->slot_size);
+    s->next_unused++;
+    Bytes_palloced += s->slot_size;
+  }
+  s->live_count++;
+  if (s->live_count == s->capacity)
+    available_remove(c, s);
+  record_allocation(s->slot_size);
+  return p;
+}  /* slab_get */
+
+static
+struct memory_slab *slab_for_pointer(void *p, unsigned n)
+{
+#ifdef __EMSCRIPTEN__
+  struct memory_slab *s;
+  uintptr_t address = (uintptr_t) p;
+  for (s = Classes[n].all; s; s = s->all_next) {
+    uintptr_t start = (uintptr_t) s;
+    if (address >= start && address < start + SLAB_BYTES)
+      return s;
+  }
+  return NULL;
+#else
+  uintptr_t base = (uintptr_t) p & ~((uintptr_t) SLAB_BYTES - 1);
+  return (struct memory_slab *) base;
+#endif
+}  /* slab_for_pointer */
+
+static
+void slab_free(void *p, unsigned n)
+{
+  struct memory_class *c = &Classes[n];
+  struct memory_slab *s = slab_for_pointer(p, n);
+
+  if (s == NULL || s->magic != SLAB_MAGIC || s->class_index != n ||
+      s->live_count == 0)
+    fatal_error("free_mem, invalid slab pointer or size class");
+  if (s->live_count == s->capacity)
+    available_add(c, s);
+  *((void **) p) = s->free_list;
+  s->free_list = p;
+  s->free_count++;
+  s->live_count--;
+  Memory_stats.logical_live_bytes -= s->slot_size;
+
+  if (s->live_count == 0) {
+    if (s->all_prev != NULL || s->all_next != NULL)
+      release_slab(c, s);
+    /* Otherwise keep one empty slab warm for this size class.  Its freelist
+       is slab-local, and memory_release_unused() can purge the mapping. */
+  }
+}  /* slab_free */
 
 /*************
  *
@@ -107,22 +336,18 @@ void *get_cmem(unsigned n)
   if (n == 0)
     return NULL;
   else {
-    void **p = NULL;
+    void **p;
+    size_t bytes = (size_t) n * BYTES_POINTER;
     BUMP_MEM_CALLS;
-    if (n >= MAX_MEM_LISTS)
+    if (n >= MAX_SLAB_LISTS) {
+      max_megs_check(bytes);
+      record_reservation(bytes);
+      Memory_stats.direct_live_bytes += bytes;
+      record_allocation(bytes);
       return safe_calloc(n, BYTES_POINTER);
-    else if (M[n] == NULL)
-      p = palloc(n * BYTES_POINTER);
-    else {
-      /* the first pointer is used for the avail list */
-      p = M[n];
-      M[n] = *p;
     }
-    {
-      int i;
-      for (i = 0; i < n; i++)
-	p[i] = 0;
-    }
+    p = slab_get(n);
+    memset(p, 0, bytes);
     return p;
   }
 }  /* get_cmem */
@@ -145,18 +370,18 @@ void *get_mem(unsigned n)
   if (n == 0)
     return NULL;
   else {
-    void **p = NULL;
+    size_t bytes = (size_t) n * BYTES_POINTER;
     BUMP_MEM_CALLS;
-    if (n >= MAX_MEM_LISTS)
-      p = safe_malloc(n * BYTES_POINTER);
-    else if (M[n] == NULL)
-      p = palloc(n * BYTES_POINTER);
-    else {
-      /* the first pointer is used for the avail list */
-      p = M[n];
-      M[n] = *p;
+    if (n >= MAX_SLAB_LISTS) {
+      void *p;
+      max_megs_check(bytes);
+      p = safe_malloc(bytes);
+      record_reservation(bytes);
+      Memory_stats.direct_live_bytes += bytes;
+      record_allocation(bytes);
+      return p;
     }
-    return p;
+    return slab_get(n);
   }
 }  /* get_mem */
 
@@ -177,31 +402,18 @@ void free_mem(void *q, unsigned n)
   if (n == 0)
     ;  /* do nothing */
   else {
-    /* put it on the appropriate avail list */
-    void **p = q;
-    if (n >= MAX_MEM_LISTS)
-      safe_free(p);  /* large allocations used safe_malloc/safe_calloc */
+    size_t bytes = (size_t) n * BYTES_POINTER;
+    if (n >= MAX_SLAB_LISTS) {
+      safe_free(q);
+      Memory_stats.direct_live_bytes -= bytes;
+      Memory_stats.logical_live_bytes -= bytes;
+      Memory_stats.reserved_bytes -= bytes;
+    }
     else {
-      /* the first pointer is used for the avail list */
-      *p = M[n];
-      M[n] = p;
+      slab_free(q, n);
     }
   }
 }  /* free_mem */
-
-/*************
- *
- *   mlist_length()
- *
- *************/
-
-static
-int mlist_length(void **p)
-{
-  int n;
-  for (n = 0; p; p = *p, n++);
-  return n;
-}  /* mlist_length */
 
 /*************
  *
@@ -216,16 +428,116 @@ int mlist_length(void **p)
 void memory_report(FILE *fp)
 {
   int i;
-  fprintf(fp, "\nMemory report, %d @ %d = %lld megs (%s bytes used).\n",
-	  Malloc_calls, MALLOC_MEGS, (long long) Malloc_calls * MALLOC_MEGS,
-	  comma_num(Bytes_palloced));
-  for (i = 0; i < MAX_MEM_LISTS; i++) {
-    int n = mlist_length(M[i]);
-    if (n != 0)
-      fprintf(fp, "List %3d, length %s, %8.1f K\n", i, comma_num(n),
-	      (double) i * n * BYTES_POINTER / 1024.);
+  struct memory_stats stats;
+  memory_get_stats(&stats);
+  fprintf(fp,
+          "\nMemory report: live=%s, reserved=%s, peak_reserved=%s, "
+          "reclaimed=%s bytes in %s slabs, cumulative=%s.\n",
+          comma_num(stats.logical_live_bytes),
+          comma_num(stats.reserved_bytes),
+          comma_num(stats.peak_reserved_bytes),
+          comma_num(stats.reclaimed_bytes),
+          comma_num(stats.reclaimed_slabs),
+          comma_num(stats.cumulative_bytes));
+  for (i = 1; i < MAX_SLAB_LISTS; i++) {
+    struct memory_slab *s;
+    unsigned slabs = 0, live = 0, reusable = 0;
+    for (s = Classes[i].all; s; s = s->all_next) {
+      slabs++;
+      live += s->live_count;
+      reusable += s->free_count + (s->capacity - s->next_unused);
+    }
+    if (slabs != 0)
+      fprintf(fp, "Class %3d: slabs=%u, live=%u, reusable=%u, %8.1f K live\n",
+              i, slabs, live, reusable,
+              (double) i * live * BYTES_POINTER / 1024.);
   }
 }  /* memory_report */
+
+/*************
+ *
+ *   memory_get_stats()
+ *
+ *************/
+
+/* PUBLIC */
+void memory_get_stats(struct memory_stats *stats)
+{
+  unsigned i;
+  *stats = Memory_stats;
+  stats->reusable_bytes = 0;
+  stats->unallocated_bytes = 0;
+  stats->metadata_bytes = 0;
+  for (i = 1; i < MAX_SLAB_LISTS; i++) {
+    struct memory_slab *s;
+    for (s = Classes[i].all; s; s = s->all_next) {
+      size_t payload = (size_t) s->capacity * s->slot_size;
+      stats->reusable_bytes += (unsigned long long) s->free_count *
+                               s->slot_size;
+      stats->unallocated_bytes +=
+        (unsigned long long) (s->capacity - s->next_unused) * s->slot_size;
+      stats->metadata_bytes += SLAB_BYTES - payload;
+    }
+  }
+  stats->fragmentation_bytes = stats->reserved_bytes >=
+                               stats->logical_live_bytes ?
+    stats->reserved_bytes - stats->logical_live_bytes : 0;
+}  /* memory_get_stats */
+
+/* PUBLIC */
+void memory_release_unused(void)
+{
+  release_empty_slabs();
+}  /* memory_release_unused */
+
+/*************
+ *
+ *   memory_current_rss_kbytes() / memory_peak_rss_kbytes()
+ *
+ *************/
+
+/* PUBLIC */
+unsigned long long memory_current_rss_kbytes(void)
+{
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+  FILE *fp = fopen("/proc/self/statm", "r");
+  unsigned long long total_pages, resident_pages;
+  long page_bytes;
+  if (fp == NULL)
+    return 0;
+  if (fscanf(fp, "%llu %llu", &total_pages, &resident_pages) != 2) {
+    fclose(fp);
+    return 0;
+  }
+  fclose(fp);
+  (void) total_pages;
+  page_bytes = sysconf(_SC_PAGESIZE);
+  return page_bytes > 0 ?
+    resident_pages * (unsigned long long) page_bytes / 1024 : 0;
+#else
+  return 0;
+#endif
+}  /* memory_current_rss_kbytes */
+
+/* PUBLIC */
+unsigned long long memory_peak_rss_kbytes(void)
+{
+#ifdef __EMSCRIPTEN__
+  return 0;
+#else
+  struct rusage usage;
+  unsigned long long peak, current;
+  if (getrusage(RUSAGE_SELF, &usage) != 0)
+    return 0;
+#ifdef __APPLE__
+  peak = (unsigned long long) usage.ru_maxrss / 1024;
+#else
+  peak = (unsigned long long) usage.ru_maxrss;
+#endif
+  current = memory_current_rss_kbytes();
+  return peak > current ? peak : current;
+#endif
+}  /* memory_peak_rss_kbytes */
 
 /*************
  *
@@ -234,14 +546,16 @@ void memory_report(FILE *fp)
  *************/
 
 /* DOCUMENTATION
-This routine returns the number of megabytes that palloc()
-has obtained from the operating system by malloc();
+This compatibility routine returns the high-water reservation rounded up to
+megabytes.  It remains monotonic for callers that subtract a startup mark;
+use memory_get_stats() for the current reservation.
 */
 
 /* PUBLIC */
 long long megs_malloced(void)
 {
-  return (long long) Malloc_calls * MALLOC_MEGS;
+  return (long long) ((Memory_stats.peak_reserved_bytes + 1024*1024 - 1) /
+                      (1024*1024));
 }  /* megs_malloced */
 
 /*************
@@ -310,11 +624,20 @@ The memory is not initialized, and it cannot be freed.
 /* PUBLIC */
 void *tp_alloc(size_t n)
 {
+  void *p;
   /* If n is not a multiple of BYTES_POINTER, round up so that it is. */
   if (n % BYTES_POINTER != 0) {
     n += (BYTES_POINTER - (n % BYTES_POINTER));
   }
-  return palloc(n);
+  if (n == 0)
+    return NULL;
+  max_megs_check(n);
+  p = safe_malloc(n);
+  record_reservation(n);
+  Memory_stats.permanent_live_bytes += n;
+  record_allocation(n);
+  Bytes_palloced += n;
+  return p;
 }  /* tp_alloc */
 
 /*************
@@ -333,6 +656,13 @@ unsigned mega_mem_calls(void)
     (Mem_calls / 1000000) +
     ((UINT_MAX / 1000000) * Mem_calls_overflows);
 }  /* mega_mem_calls */
+
+/* PUBLIC */
+unsigned long long memory_allocation_calls(void)
+{
+  return (unsigned long long) Mem_calls_overflows *
+         ((unsigned long long) UINT_MAX + 1) + Mem_calls;
+}  /* memory_allocation_calls */
 
 /*************
  *

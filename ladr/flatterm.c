@@ -149,7 +149,10 @@ BOOL flatterm_ident(Flatterm a, Flatterm b)
 void zap_flatterm(Flatterm f)
 {
   Flatterm fi = f;
-  while (fi != f->end->next) {
+  /* Save the boundary before freeing f.  Reclaimable slabs can unmap the
+     slab containing f as soon as its last object is released. */
+  Flatterm after = f->end->next;
+  while (fi != after) {
     Flatterm tmp = fi;
     fi = fi->next;
     free_flatterm(tmp);
@@ -565,4 +568,3 @@ int flatterm_count_without_vars(Flatterm f)
       n++;
   return n;
 }  /* flatterm_count_without_vars */
-

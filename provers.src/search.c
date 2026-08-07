@@ -699,6 +699,8 @@ void update_memory_stats(void)
   struct clause_compression_stats cs = clause_compression_get_stats();
   struct clause_id_table_stats ids = clause_id_table_get_stats();
   struct clause_store_stats as = clause_store_get_stats(Glob.disabled);
+  struct memory_stats ms;
+  memory_get_stats(&ms);
   Clist_pos p;
   size_t i;
 
@@ -766,8 +768,25 @@ void update_memory_stats(void)
   Stats.clause_id_table_bytes = ids.allocated_bytes;
   Stats.clause_id_legacy_bytes = ids.legacy_bytes;
 
-  Stats.allocator_reserved_kbytes =
-    (unsigned long long) megs_malloced() * 1024;
+  Stats.allocator_reserved_kbytes = ms.reserved_bytes / 1024;
+  Stats.allocator_logical_live_bytes = ms.logical_live_bytes;
+  Stats.allocator_logical_peak_bytes = ms.logical_peak_bytes;
+  Stats.allocator_reserved_bytes = ms.reserved_bytes;
+  Stats.allocator_peak_reserved_bytes = ms.peak_reserved_bytes;
+  Stats.allocator_reusable_bytes = ms.reusable_bytes;
+  Stats.allocator_unallocated_bytes = ms.unallocated_bytes;
+  Stats.allocator_metadata_bytes = ms.metadata_bytes;
+  Stats.allocator_fragmentation_bytes = ms.fragmentation_bytes;
+  Stats.allocator_direct_live_bytes = ms.direct_live_bytes;
+  Stats.allocator_permanent_live_bytes = ms.permanent_live_bytes;
+  Stats.allocator_slab_count = ms.slab_count;
+  Stats.allocator_peak_slab_count = ms.peak_slab_count;
+  Stats.allocator_reclaimed_slabs = ms.reclaimed_slabs;
+  Stats.allocator_reclaimed_bytes = ms.reclaimed_bytes;
+  Stats.current_rss_kbytes = memory_current_rss_kbytes();
+  Stats.peak_rss_kbytes = memory_peak_rss_kbytes();
+  Stats.allocator_cumulative_bytes = ms.cumulative_bytes;
+  Stats.allocator_allocation_calls = memory_allocation_calls();
   Stats.palloc_cumulative_bytes = bytes_palloced();
   Stats.fpa_live_nodes = fpa_live_trie_nodes();
   Stats.fpa_peak_nodes = fpa_peak_trie_nodes();
@@ -887,10 +906,35 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
           s.clause_id_entries == 0 ? 0.0 :
             (double) s.clause_id_table_bytes / s.clause_id_entries);
   fprintf(fp,
-          "Allocator_bytes: reserved=%s, palloc_cumulative=%s. "
+          "Allocator_bytes: live=%s, live_peak=%s, reserved_current=%s, "
+          "reserved_peak=%s, fragmentation=%s, reusable=%s, ",
+          comma_num(s.allocator_logical_live_bytes),
+          comma_num(s.allocator_logical_peak_bytes),
+          comma_num(s.allocator_reserved_bytes),
+          comma_num(s.allocator_peak_reserved_bytes),
+          comma_num(s.allocator_fragmentation_bytes),
+          comma_num(s.allocator_reusable_bytes));
+  fprintf(fp,
+          "unallocated=%s, metadata=%s, direct_live=%s, permanent_live=%s, "
+          "palloc_cumulative=%s.\n",
+          comma_num(s.allocator_unallocated_bytes),
+          comma_num(s.allocator_metadata_bytes),
+          comma_num(s.allocator_direct_live_bytes),
+          comma_num(s.allocator_permanent_live_bytes),
+          comma_num(s.palloc_cumulative_bytes));
+  fprintf(fp,
+          "Allocator_slabs: current=%s, peak=%s, reclaimed=%s (%s bytes), "
+          "RSS_kb: current=%s, peak=%s. ",
+          comma_num(s.allocator_slab_count),
+          comma_num(s.allocator_peak_slab_count),
+          comma_num(s.allocator_reclaimed_slabs),
+          comma_num(s.allocator_reclaimed_bytes),
+          comma_num(s.current_rss_kbytes), comma_num(s.peak_rss_kbytes));
+  fprintf(fp,
+          "Allocator_traffic: calls=%s, bytes=%s. "
           "FPA: nodes_live=%s, nodes_peak=%s, lists_live=%s, lists_peak=%s.\n",
-          comma_num(s.allocator_reserved_kbytes * 1024),
-          comma_num(s.palloc_cumulative_bytes),
+          comma_num(s.allocator_allocation_calls),
+          comma_num(s.allocator_cumulative_bytes),
           comma_num(s.fpa_live_nodes), comma_num(s.fpa_peak_nodes),
           comma_num(s.fpa_live_lists), comma_num(s.fpa_peak_lists));
 

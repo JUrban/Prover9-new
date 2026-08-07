@@ -11,7 +11,7 @@ CFLAGS = $(XFLAGS) -g  -O0 -Wall
 # CFLAGS = $(XFLAGS) -pg -O -Wall
 # CFLAGS = $(XFLAGS)  -Wall -pedantic
 
-PROGRAMS = avltest memory_lifecycle_test bookkeeping_lifecycle_test ancestor_store_test ancestor_store_scale_test
+PROGRAMS = avltest memory_lifecycle_test allocator_churn_test bookkeeping_lifecycle_test ancestor_store_test ancestor_store_scale_test
 
 all: ladr apps
 
@@ -36,6 +36,9 @@ avltest: avltest.o
 memory_lifecycle_test: memory_lifecycle_test.o ../ladr/libladr.a
 	$(CC) $(CFLAGS) -o memory_lifecycle_test memory_lifecycle_test.o ../ladr/libladr.a -lm
 
+allocator_churn_test: allocator_churn_test.o ../ladr/libladr.a
+	$(CC) $(CFLAGS) -o allocator_churn_test allocator_churn_test.o ../ladr/libladr.a -lm
+
 bookkeeping_lifecycle_test: bookkeeping_lifecycle_test.o ../ladr/libladr.a
 	$(CC) $(CFLAGS) -o bookkeeping_lifecycle_test bookkeeping_lifecycle_test.o ../ladr/libladr.a -lm
 
@@ -47,8 +50,9 @@ ancestor_store_scale_test: ancestor_store_scale_test.o ../ladr/libladr.a
 
 bookkeeping_lifecycle_test.o: ../ladr/topform.h ../ladr/clause_store.h ../ladr/clauseid.h
 
-memory-tests: memory_lifecycle_test bookkeeping_lifecycle_test ancestor_store_test
+memory-tests: memory_lifecycle_test allocator_churn_test bookkeeping_lifecycle_test ancestor_store_test
 	./memory_lifecycle_test
+	./allocator_churn_test
 	./bookkeeping_lifecycle_test
 	./ancestor_store_test
 
