@@ -44,7 +44,18 @@ BOOL clause_store_member(Clause_store store, Topform c);
 
 size_t clause_store_length(Clause_store store);
 
+size_t clause_store_current_length(Clause_store store);
+
 BOOL clause_store_position_is_archived(Clause_store store, size_t position);
+
+BOOL clause_store_position_is_current(Clause_store store, size_t position);
+
+/* Return compact body, encoded justification, and estimated materialized-body
+   bytes for one immutable record without decoding it. */
+BOOL clause_store_payload_sizes(Clause_store store, size_t position,
+                                unsigned long long *body_bytes,
+                                unsigned long long *justification_bytes,
+                                unsigned long long *logical_body_bytes);
 
 unsigned long long clause_store_id(Clause_store store, size_t position);
 
@@ -55,6 +66,8 @@ Ilist clause_store_parents(Clause_store store, size_t position);
 Topform clause_store_get(Clause_store store, size_t position);
 
 Topform clause_store_materialize(Clause_store store, size_t position);
+
+Topform clause_store_activate(Clause_store store, size_t position);
 
 Topform clause_store_materialize_by_id(unsigned long long id);
 

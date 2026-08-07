@@ -1297,11 +1297,23 @@ Prover_input std_prover_init_and_input(int argc, char **argv,
     snprintf(spath, sizeof(spath), "%s/symbols.txt", opts.resume_dir);
     sfp = fopen(spath, "r");
     if (sfp) {
-      int max_sn, sn, arity;
-      char name[512];
-      if (fscanf(sfp, "%d", &max_sn) == 1) {
-        while (fscanf(sfp, "%d %d %511s", &sn, &arity, name) == 3)
-          str_to_sn(name, arity);  /* creates symbol with sequential symnum */
+      char line[4096];
+      if (fgets(line, sizeof(line), sfp) != NULL) {
+        while (fgets(line, sizeof(line), sfp) != NULL) {
+          int sn, arity, used = 0;
+          if (sscanf(line, "%d %d %n", &sn, &arity, &used) == 2) {
+            char *name = line + used;
+            size_t len = strlen(name);
+            int actual_sn;
+            while (len > 0 && (name[len-1] == '\n' || name[len-1] == '\r'))
+              name[--len] = '\0';
+            if (len == 0)
+              fatal_error("Resume: empty symbol name in symbols.txt");
+            actual_sn = str_to_sn(name, arity);
+            if (actual_sn != sn)
+              fatal_error("Resume: symbols.txt does not reproduce symnums");
+          }
+        }
       }
       fclose(sfp);
     }
@@ -2365,5 +2377,4 @@ Prover_input std_prover_from_scan(Prover_scan_result psr,
 
   return pi;
 }  /* std_prover_from_scan */
-
 

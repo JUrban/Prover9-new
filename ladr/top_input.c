@@ -1177,6 +1177,7 @@ Plist process_input_formulas(Plist formulas, BOOL echo)
   for (p = formulas; p; p = p->next) {
     Topform tf = p->v;
     if (clausal_formula(tf->formula)) {
+      Formula old_formula = tf->formula;
       /* Mark it: this fof axiom is already in clause form, so clausify() is a
          no-op and no fof-leaf + clausify node would otherwise be emitted.  The
          marker lets TSTP output emit a documented fof leaf + clausify(thm).
@@ -1185,10 +1186,9 @@ Plist process_input_formulas(Plist formulas, BOOL echo)
         tf->attributes = set_int_attribute(tf->attributes,
 					   get_clausal_fof_attr(), 1);
       /* just make it into a clause data structure and use the same Topform */
-      tf->literals = formula_to_literals(tf->formula);
+      tf->literals = formula_to_literals(old_formula);
       upward_clause_links(tf);
-      zap_formula(tf->formula);
-      tf->formula = NULL;
+      zap_formula(old_formula);
       tf->is_formula = FALSE;
       clause_set_variables(tf, MAX_VARS);
       new = plist_prepend(new, tf);
@@ -1254,11 +1254,11 @@ Plist process_demod_formulas(Plist formulas, BOOL echo)
   for (p = formulas; p; p = p->next) {
     Topform tf = p->v;
     if (clausal_formula(tf->formula)) {
+      Formula old_formula = tf->formula;
       /* just make it into a clause data structure and use the same Topform */
-      tf->literals = formula_to_literals(tf->formula);
+      tf->literals = formula_to_literals(old_formula);
       upward_clause_links(tf);
-      zap_formula(tf->formula);
-      tf->formula = NULL;
+      zap_formula(old_formula);
       tf->is_formula = FALSE;
       clause_set_variables(tf, MAX_VARS);
       new = plist_prepend(new, tf);
@@ -1462,4 +1462,3 @@ Plist embed_formulas_in_topforms(Plist formulas, BOOL assumption)
   }
   return formulas;
 }  /* embed_formulas_in_topforms */
-

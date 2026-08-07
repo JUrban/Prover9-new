@@ -18,6 +18,7 @@
 
 #include "search.h"
 #include "provers.h"
+#include "cold_passive_store.h"
 #include "../ladr/ac_redun.h"
 #include "../ladr/std_options.h"
 #include "../ladr/memory.h"
@@ -45,6 +46,7 @@
 #include <errno.h>
 #include <time.h>
 #include <dirent.h>
+#include <stdint.h>
 
 // Private definitions and types
 
@@ -54,6 +56,7 @@ static Prover_options Opt;               // Prover9 options
 static struct prover_attributes Att;     // Prover9 accepted attributes
 static struct prover_stats Stats;        // Prover9 statistics
 static struct prover_clocks Clocks;      // Prover9 clocks
+static Cold_passive_store Dense_body_store = NULL;
 
 /* Progress callback for shared-memory IPC (set by -cores scheduler) */
 static Search_progress_fn Progress_callback = NULL;
@@ -65,6 +68,42 @@ static double Wasm_deadline_ms = 0;
 /* "% " prefix for diagnostic output in TPTP mode (makes it a TPTP comment) */
 #define TPTP_PFX  (Opt && flag(Opt->tptp_output) ? "% " : "")
 
+static BOOL discount_mode(void)
+{
+  return Opt != NULL && str_ident(stringparm1(Opt->search_loop), "discount");
+}
+
+static BOOL compressed_passive_mode(void)
+{
+  return discount_mode() &&
+         (str_ident(stringparm1(Opt->passive_store), "compressed") ||
+          str_ident(stringparm1(Opt->passive_store), "dense"));
+}
+
+static BOOL dense_passive_mode(void)
+{
+  return discount_mode() && Opt != NULL &&
+         str_ident(stringparm1(Opt->passive_store), "dense");
+}
+
+static BOOL collective_frontier_mode(void)
+{
+  return discount_mode() && Opt != NULL &&
+         str_ident(stringparm1(Opt->inference_frontier), "collective");
+}
+
+static int configured_hint_fpa_depth(void)
+{
+  if (str_ident(stringparm1(Opt->hint_index), "packed"))
+    return 0;
+  else if (str_ident(stringparm1(Opt->hint_index), "compact"))
+    return 2;
+  else if (str_ident(stringparm1(Opt->hint_index), "shallow"))
+    return 1;
+  else
+    return parm(Opt->hints_fpa_depth);
+}
+
 /* Saved selector state from checkpoint (used during resume) */
 static char Resume_low_selector_name[32] = "";
 static int  Resume_low_selector_count = 0;
@@ -74,6 +113,7 @@ static int  Resume_high_selector_count = 0;
 /* Saved hint_match data for restoring matching_hint pointers */
 static struct clause_meta *Resume_meta = NULL;
 static int Resume_meta_count = 0;
+static unsigned long long Resume_hint_epoch = 1;
 
 /* In-loop checkpoint loading state */
 static BOOL Load_checkpoint = FALSE;  /* TRUE on first loop iteration during resume */
@@ -91,6 +131,62 @@ static int Resume_dtbd_count = 0;
 static int Bf_level = 0;             /* breadth-first level counter */
 static int Bf_last_of_level = 0;     /* last clause ID of current level */
 static int Nohints_count = 0;        /* consecutive givens without hint match */
+static unsigned Simplifier_epoch = 1; /* active state visible to DISCOUNT SOS */
+
+enum inference_source {
+  INFER_SOURCE_OTHER,
+  INFER_SOURCE_BINARY,
+  INFER_SOURCE_HYPER,
+  INFER_SOURCE_UR,
+  INFER_SOURCE_PARAMOD
+};
+static enum inference_source Current_inference_source = INFER_SOURCE_OTHER;
+
+/* A Waldmeister-style collective frontier delays the Cartesian product of
+   one newly active clause with the active clauses visible at that moment.
+   One descriptor is constant size.  The append-only activation history and
+   a dense deactivation-epoch side table let a descriptor reconstruct that
+   historical partner set without retaining Topform or Clist pointers. */
+#define COLLECTIVE_ACT_PAGE_BITS 10
+#define COLLECTIVE_ACT_PAGE_SIZE (1U << COLLECTIVE_ACT_PAGE_BITS)
+#define COLLECTIVE_DEACT_PAGE_BITS 12
+#define COLLECTIVE_DEACT_PAGE_SIZE (1U << COLLECTIVE_DEACT_PAGE_BITS)
+
+struct collective_activation_page {
+  unsigned long long ids[COLLECTIVE_ACT_PAGE_SIZE];
+};
+
+struct collective_deactivation_page {
+  unsigned epochs[COLLECTIVE_DEACT_PAGE_SIZE];
+};
+
+enum collective_batch_kind {
+  COLLECTIVE_PARAMOD   = 1U,
+  COLLECTIVE_POS_HYPER = 2U,
+  COLLECTIVE_NEG_HYPER = 4U
+};
+
+struct collective_batch {
+  unsigned long long given_id;
+  unsigned long long cursor;
+  unsigned long long activation_limit;
+  unsigned snapshot_epoch;
+  unsigned kind;
+  struct collective_batch *next;
+};
+
+static struct collective_activation_page **Collective_activation_pages = NULL;
+static size_t Collective_activation_page_capacity = 0;
+static size_t Collective_activation_page_count = 0;
+static unsigned long long Collective_activation_count = 0;
+static struct collective_deactivation_page **Collective_deactivation_pages = NULL;
+static size_t Collective_deactivation_page_capacity = 0;
+static size_t Collective_deactivation_page_count = 0;
+static struct collective_batch *Collective_batch_head = NULL;
+static struct collective_batch *Collective_batch_tail = NULL;
+static unsigned long long Collective_batch_count = 0;
+static BOOL Collective_batch_turn = FALSE;
+static unsigned Collective_givens_since_batch = 0;
 
 /* Periodic automatic checkpoint state */
 static time_t Last_auto_ckpt_time = 0;       // wall-clock of last auto checkpoint
@@ -177,6 +273,282 @@ static struct {
   int return_code;     // result of search
 } Glob;
 
+static
+void collective_clear_state(void)
+{
+  size_t i;
+  struct collective_batch *b;
+
+  for (i = 0; i < Collective_activation_page_count; i++)
+    safe_free(Collective_activation_pages[i]);
+  safe_free(Collective_activation_pages);
+  Collective_activation_pages = NULL;
+  Collective_activation_page_capacity = 0;
+  Collective_activation_page_count = 0;
+  Collective_activation_count = 0;
+
+  for (i = 0; i < Collective_deactivation_page_capacity; i++)
+    if (Collective_deactivation_pages[i] != NULL)
+      safe_free(Collective_deactivation_pages[i]);
+  safe_free(Collective_deactivation_pages);
+  Collective_deactivation_pages = NULL;
+  Collective_deactivation_page_capacity = 0;
+  Collective_deactivation_page_count = 0;
+
+  while (Collective_batch_head != NULL) {
+    b = Collective_batch_head;
+    Collective_batch_head = b->next;
+    safe_free(b);
+  }
+  Collective_batch_tail = NULL;
+  Collective_batch_count = 0;
+  Collective_batch_turn = FALSE;
+  Collective_givens_since_batch = 0;
+}
+
+static
+void collective_reset_state(void)
+{
+  collective_clear_state();
+  Stats.collective_batches_created = 0;
+  Stats.collective_batches_completed = 0;
+  Stats.collective_pair_expansions = 0;
+  Stats.collective_hyper_expansions = 0;
+  Stats.collective_partners_skipped = 0;
+  Stats.collective_parent_materializations = 0;
+  Stats.collective_batches_pending = 0;
+  Stats.collective_batches_peak = 0;
+  Stats.collective_activation_entries = 0;
+  Stats.collective_descriptor_bytes = 0;
+  Stats.collective_history_bytes = 0;
+}
+
+static
+void collective_grow_activation_pages(size_t need)
+{
+  size_t old_capacity = Collective_activation_page_capacity;
+  size_t new_capacity = old_capacity == 0 ? 16 : old_capacity;
+  struct collective_activation_page **p;
+  while (new_capacity < need) {
+    if (new_capacity > ((size_t) -1) / 2)
+      fatal_error("collective activation page table overflow");
+    new_capacity *= 2;
+  }
+  p = safe_calloc(new_capacity, sizeof(*p));
+  if (Collective_activation_pages != NULL) {
+    memcpy(p, Collective_activation_pages, old_capacity * sizeof(*p));
+    safe_free(Collective_activation_pages);
+  }
+  Collective_activation_pages = p;
+  Collective_activation_page_capacity = new_capacity;
+}
+
+static
+void collective_grow_deactivation_pages(size_t need)
+{
+  size_t old_capacity = Collective_deactivation_page_capacity;
+  size_t new_capacity = old_capacity == 0 ? 16 : old_capacity;
+  struct collective_deactivation_page **p;
+  while (new_capacity < need) {
+    if (new_capacity > ((size_t) -1) / 2)
+      fatal_error("collective deactivation page table overflow");
+    new_capacity *= 2;
+  }
+  p = safe_calloc(new_capacity, sizeof(*p));
+  if (Collective_deactivation_pages != NULL) {
+    memcpy(p, Collective_deactivation_pages, old_capacity * sizeof(*p));
+    safe_free(Collective_deactivation_pages);
+  }
+  Collective_deactivation_pages = p;
+  Collective_deactivation_page_capacity = new_capacity;
+}
+
+static
+struct collective_deactivation_page *collective_deactivation_page(
+    unsigned long long id, BOOL create)
+{
+  unsigned long long page_number = id >> COLLECTIVE_DEACT_PAGE_BITS;
+  struct collective_deactivation_page *p;
+  if (page_number > (unsigned long long) ((size_t) -1))
+    fatal_error("collective clause ID exceeds addressable page table");
+  if ((size_t) page_number >= Collective_deactivation_page_capacity) {
+    if (!create)
+      return NULL;
+    collective_grow_deactivation_pages((size_t) page_number + 1);
+  }
+  p = Collective_deactivation_pages[(size_t) page_number];
+  if (p == NULL && create) {
+    p = safe_calloc(1, sizeof(*p));
+    Collective_deactivation_pages[(size_t) page_number] = p;
+    Collective_deactivation_page_count++;
+  }
+  return p;
+}
+
+static
+unsigned collective_deactivation_epoch(unsigned long long id)
+{
+  struct collective_deactivation_page *p =
+    collective_deactivation_page(id, FALSE);
+  return p == NULL ? 0 :
+    p->epochs[(unsigned) (id & (COLLECTIVE_DEACT_PAGE_SIZE - 1))];
+}
+
+static
+void collective_set_deactivation_epoch(unsigned long long id, unsigned epoch)
+{
+  struct collective_deactivation_page *p =
+    collective_deactivation_page(id, TRUE);
+  p->epochs[(unsigned) (id & (COLLECTIVE_DEACT_PAGE_SIZE - 1))] = epoch;
+}
+
+static
+unsigned long long collective_activation_id(unsigned long long position)
+{
+  size_t page_number = (size_t) (position >> COLLECTIVE_ACT_PAGE_BITS);
+  unsigned offset = (unsigned) (position & (COLLECTIVE_ACT_PAGE_SIZE - 1));
+  if (position >= Collective_activation_count ||
+      page_number >= Collective_activation_page_count)
+    fatal_error("collective activation cursor out of bounds");
+  return Collective_activation_pages[page_number]->ids[offset];
+}
+
+static
+void collective_append_activation_id(unsigned long long id)
+{
+  size_t page_number =
+    (size_t) (Collective_activation_count >> COLLECTIVE_ACT_PAGE_BITS);
+  unsigned offset =
+    (unsigned) (Collective_activation_count & (COLLECTIVE_ACT_PAGE_SIZE - 1));
+  if (page_number == Collective_activation_page_count) {
+    if (page_number >= Collective_activation_page_capacity)
+      collective_grow_activation_pages(page_number + 1);
+    Collective_activation_pages[page_number] = safe_calloc(
+      1, sizeof(struct collective_activation_page));
+    Collective_activation_page_count++;
+  }
+  Collective_activation_pages[page_number]->ids[offset] = id;
+  Collective_activation_count++;
+  (void) collective_deactivation_page(id, TRUE);
+}
+
+static
+void collective_note_activation(Topform c)
+{
+  if (!collective_frontier_mode())
+    return;
+  if (c == NULL || c->id == 0)
+    fatal_error("collective activation requires a stable clause ID");
+  c->simplifier_epoch = Simplifier_epoch;
+  collective_set_deactivation_epoch(c->id, 0);
+  collective_append_activation_id(c->id);
+}
+
+static
+void collective_note_deactivation(Topform c)
+{
+  if (!collective_frontier_mode() || c == NULL || c->id == 0)
+    return;
+  if (collective_deactivation_epoch(c->id) == 0)
+    collective_set_deactivation_epoch(c->id, Simplifier_epoch);
+}
+
+static
+void collective_append_batch(struct collective_batch *b)
+{
+  b->next = NULL;
+  if (Collective_batch_tail == NULL)
+    Collective_batch_head = b;
+  else
+    Collective_batch_tail->next = b;
+  Collective_batch_tail = b;
+  Collective_batch_count++;
+  if (Collective_batch_count > Stats.collective_batches_peak)
+    Stats.collective_batches_peak = Collective_batch_count;
+}
+
+static
+void collective_enqueue_batch(Topform given)
+{
+  struct collective_batch *b;
+  if (Collective_batch_tail != NULL &&
+      Collective_batch_tail->given_id == given->id &&
+      Collective_batch_tail->snapshot_epoch == Simplifier_epoch) {
+    Collective_batch_tail->kind |= COLLECTIVE_PARAMOD;
+    Collective_batch_tail->activation_limit = Collective_activation_count;
+    return;
+  }
+  b = safe_calloc(1, sizeof(*b));
+  b->given_id = given->id;
+  b->cursor = 0;
+  b->activation_limit = Collective_activation_count;
+  b->snapshot_epoch = Simplifier_epoch;
+  b->kind = COLLECTIVE_PARAMOD;
+  collective_append_batch(b);
+  Stats.collective_batches_created++;
+}
+
+static
+void collective_enqueue_hyper_batch(Topform given, unsigned kind)
+{
+  struct collective_batch *b;
+  if (Collective_batch_tail != NULL &&
+      Collective_batch_tail->given_id == given->id &&
+      Collective_batch_tail->snapshot_epoch == Simplifier_epoch) {
+    Collective_batch_tail->kind |= kind;
+    return;
+  }
+  b = safe_calloc(1, sizeof(*b));
+  b->given_id = given->id;
+  b->activation_limit = 1;
+  b->snapshot_epoch = Simplifier_epoch;
+  b->kind = kind;
+  collective_append_batch(b);
+  Stats.collective_batches_created++;
+}
+
+static
+void collective_rotate_or_complete_batch(struct collective_batch *b)
+{
+  BOOL hyper_pending =
+    (b->kind & (COLLECTIVE_POS_HYPER | COLLECTIVE_NEG_HYPER)) != 0;
+  BOOL paramod_pending =
+    (b->kind & COLLECTIVE_PARAMOD) != 0 &&
+    b->cursor < b->activation_limit;
+  if (!hyper_pending && !paramod_pending) {
+    safe_free(b);
+    Stats.collective_batches_completed++;
+  }
+  else
+    collective_append_batch(b);
+}
+
+static
+void collective_finish_batch_turn(struct collective_batch *b)
+{
+  if (Collective_batch_head != b)
+    fatal_error("collective batch queue order corrupted");
+  Collective_batch_head = b->next;
+  if (Collective_batch_head == NULL)
+    Collective_batch_tail = NULL;
+  b->next = NULL;
+  Collective_batch_count--;
+  collective_rotate_or_complete_batch(b);
+}
+
+static
+unsigned long long collective_history_bytes(void)
+{
+  return (unsigned long long) Collective_activation_page_count *
+           sizeof(struct collective_activation_page) +
+         (unsigned long long) Collective_activation_page_capacity *
+           sizeof(*Collective_activation_pages) +
+         (unsigned long long) Collective_deactivation_page_count *
+           sizeof(struct collective_deactivation_page) +
+         (unsigned long long) Collective_deactivation_page_capacity *
+           sizeof(*Collective_deactivation_pages);
+}
+
 // How many statics are to be output?
 
 /*************
@@ -241,6 +613,8 @@ Prover_options init_prover_options(void)
   p->collect_hint_labels    = init_flag("collect_hint_labels",    FALSE);
   p->hint_match_stats       = init_flag("hint_match_stats",       FALSE);
   p->hint_match_once        = init_flag("hint_match_once",        FALSE);
+  p->hint_trace             = init_flag("hint_trace",             FALSE);
+  p->collective_trace       = init_flag("collective_trace",       FALSE);
   p->print_matched_hints    = init_flag("print_matched_hints",    FALSE);
   p->print_derivations      = init_flag("print_derivations",      FALSE);
   p->derivations_only       = init_flag("derivations_only",        TRUE);
@@ -318,6 +692,8 @@ Prover_options init_prover_options(void)
   p->new_constants =    init_parm("new_constants",         0,     -1,INT_MAX);
   p->para_lit_limit =   init_parm("para_lit_limit",       -1,     -1,INT_MAX);
   p->ur_nucleus_limit = init_parm("ur_nucleus_limit",     -1,     -1,INT_MAX);
+  p->collective_given_ratio =
+    init_parm("collective_given_ratio", 1, 1, 1000);
 
   p->fold_denial_max =  init_parm("fold_denial_max",       0,     -1,INT_MAX);
 
@@ -418,6 +794,25 @@ Prover_options init_prover_options(void)
   p->multiple_interps = init_stringparm("multiple_interps", 2,
 					"false_in_all",
 					"false_in_some");
+
+  p->search_loop = init_stringparm("search_loop", 2,
+				   "otter",
+				   "discount");
+
+  p->passive_store = init_stringparm("passive_store", 3,
+				     "full",
+				     "compressed",
+				     "dense");
+
+  p->hint_index = init_stringparm("hint_index", 4,
+				  "fpa",
+				  "compact",
+				  "shallow",
+				  "packed");
+
+  p->inference_frontier = init_stringparm("inference_frontier", 2,
+					  "clauses",
+					  "collective");
 
   p->ancestor_store = init_stringparm("ancestor_store", 3,
 				      "off",
@@ -688,10 +1083,95 @@ unsigned long long clist_body_bytes(Clist list)
   Clist_pos p;
   if (list == NULL)
     return 0;
-  for (p = list->first; p != NULL; p = p->next)
-    bytes += clause_body_storage_bytes(p->c);
+  for (p = list->first; p != NULL; p = p->next) {
+    Topform c = p->c;
+    if (c->compressed != NULL)
+      bytes += c->compressed_size -
+               compressed_clause_justification_bytes(c);
+    else
+      bytes += clause_body_storage_bytes(c);
+  }
   return bytes;
 }  /* clist_body_bytes */
+
+static
+unsigned long long clist_estimated_body_bytes(Clist list)
+{
+  unsigned long long bytes = 0;
+  Clist_pos p;
+  if (list == NULL)
+    return 0;
+  for (p = list->first; p != NULL; p = p->next) {
+    Topform c = p->c;
+    bytes += c->compressed != NULL ? c->uncompressed_body_bytes :
+                                      clause_body_storage_bytes(c);
+  }
+  return bytes;
+}  /* clist_estimated_body_bytes */
+
+static
+unsigned long long clist_compressed_count(Clist list)
+{
+  unsigned long long count = 0;
+  Clist_pos p;
+  if (list != NULL)
+    for (p = list->first; p != NULL; p = p->next)
+      if (p->c->compressed != NULL)
+        count++;
+  return count;
+}  /* clist_compressed_count */
+
+static
+unsigned long long clist_compressed_justification_bytes(Clist list)
+{
+  unsigned long long bytes = 0;
+  Clist_pos p;
+  if (list != NULL)
+    for (p = list->first; p != NULL; p = p->next)
+      bytes += compressed_clause_justification_bytes(p->c);
+  return bytes;
+}  /* clist_compressed_justification_bytes */
+
+static
+unsigned long long delayed_demodulator_count(void)
+{
+  unsigned long long count = 0;
+  Clist_pos p;
+
+  if (!discount_mode() || !flag(Opt->back_demod) || Glob.sos == NULL)
+    return 0;
+
+  if (dense_passive_mode())
+    return dense_passive_delayed_demodulators();
+
+  for (p = Glob.sos->first; p != NULL; p = p->next) {
+    if (p->c->delayed_demodulator)
+      count++;
+  }
+  return count;
+}  /* delayed_demodulator_count */
+
+struct dense_payload_context {
+  unsigned long long body_bytes;
+  unsigned long long justification_bytes;
+  unsigned long long logical_body_bytes;
+  unsigned long long clauses;
+};
+
+static void dense_payload_visit(const struct dense_passive_view *view,
+                                void *context)
+{
+  struct dense_payload_context *ctx = context;
+  unsigned long long body, justification, logical;
+  if (!cold_passive_store_payload_sizes(Dense_body_store,
+                                        view->store_position,
+                                        &body, &justification, &logical))
+    fatal_error("dense_payload_visit: corrupt passive archive record");
+  ctx->body_bytes += body;
+  ctx->justification_bytes += justification;
+  ctx->logical_body_bytes += logical;
+  ctx->clauses++;
+}
 
 static
 void update_memory_stats(void)
@@ -699,6 +1179,8 @@ void update_memory_stats(void)
   struct clause_compression_stats cs = clause_compression_get_stats();
   struct clause_id_table_stats ids = clause_id_table_get_stats();
   struct clause_store_stats as = clause_store_get_stats(Glob.disabled);
+  struct cold_passive_store_stats ps =
+    cold_passive_store_get_stats(Dense_body_store);
   struct memory_stats ms;
   memory_get_stats(&ms);
   Clist_pos p;
@@ -710,9 +1192,56 @@ void update_memory_stats(void)
   Stats.compression_materialized = cs.materialized;
   Stats.compression_recompressed = cs.recompressed;
 
-  Stats.active_body_bytes = clist_body_bytes(Glob.usable) +
-                            clist_body_bytes(Glob.sos) +
-                            clist_body_bytes(Glob.limbo);
+  Stats.passive_body_bytes = clist_body_bytes(Glob.sos);
+  Stats.passive_justification_bytes =
+    clist_compressed_justification_bytes(Glob.sos);
+  Stats.passive_estimated_full_body_bytes =
+    clist_estimated_body_bytes(Glob.sos);
+  Stats.passive_compressed_clauses = clist_compressed_count(Glob.sos);
+  dense_passive_memory(&Stats.dense_passive_record_bytes,
+                       &Stats.dense_passive_heap_bytes,
+                       &Stats.dense_passive_records);
+  Stats.dense_passive_arena_records = ps.records;
+  Stats.dense_passive_arena_record_bytes = ps.record_bytes;
+  Stats.dense_passive_arena_backing_bytes = ps.backing_bytes;
+  Stats.dense_passive_arena_materializations = ps.materializations;
+  Stats.dense_passive_arena_validation_failures = ps.validation_failures;
+  if (dense_passive_mode()) {
+    struct dense_payload_context payload;
+    memset(&payload, 0, sizeof(payload));
+    dense_passive_foreach(dense_payload_visit, &payload);
+    Stats.passive_body_bytes = payload.body_bytes;
+    Stats.passive_justification_bytes = payload.justification_bytes;
+    Stats.passive_estimated_full_body_bytes = payload.logical_body_bytes;
+    Stats.passive_compressed_clauses = payload.clauses;
+  }
+  if (discount_mode()) {
+    Stats.active_body_bytes = clist_body_bytes(Glob.usable);
+    if (Glob.limbo != NULL) {
+      for (p = Glob.limbo->first; p != NULL; p = p->next) {
+        if (p->c->was_given)
+          Stats.active_body_bytes += clause_body_storage_bytes(p->c);
+        else
+          Stats.passive_body_bytes += clause_body_storage_bytes(p->c);
+        if (!p->c->was_given) {
+          Stats.passive_estimated_full_body_bytes +=
+            p->c->compressed != NULL ? p->c->uncompressed_body_bytes :
+                                       clause_body_storage_bytes(p->c);
+          if (p->c->compressed != NULL)
+            Stats.passive_compressed_clauses++;
+        }
+      }
+    }
+  }
+  else {
+    /* Preserve the historical meaning of active_body_bytes in the Otter
+       loop: every materialized search clause, including indexed SOS. */
+    Stats.active_body_bytes = clist_body_bytes(Glob.usable) +
+                              clist_body_bytes(Glob.sos) +
+                              clist_body_bytes(Glob.limbo);
+  }
+  Stats.passive_total_payload_bytes = Stats.passive_body_bytes +
+                                      Stats.passive_justification_bytes;
   if (Glob.demods != NULL) {
     for (p = Glob.demods->first; p != NULL; p = p->next) {
       Topform c = p->c;
@@ -723,6 +1252,13 @@ void update_memory_stats(void)
     }
   }
   Stats.hint_body_bytes = clist_body_bytes(Glob.hints);
+  Stats.hint_estimated_full_body_bytes =
+    clist_estimated_body_bytes(Glob.hints);
+  Stats.hint_compressed_clauses = clist_compressed_count(Glob.hints);
+  packed_hint_index_stats(&Stats.hint_index_node_bytes,
+                          &Stats.hint_index_reference_bytes,
+                          &Stats.hint_index_table_bytes,
+                          &Stats.hint_candidate_checks);
 
   Stats.disabled_full_body_bytes = 0;
   Stats.disabled_compressed_bytes = 0;
@@ -806,11 +1342,20 @@ void update_stats(void)
   Stats.nonunit_fsub = nonunit_fsub_tests();
   Stats.nonunit_bsub = nonunit_bsub_tests();
   Stats.usable_size = Glob.usable ? Glob.usable->length : 0;
-  Stats.sos_size = Glob.sos ? Glob.sos->length : 0;
+  Stats.sos_size = dense_passive_mode() ? dense_passive_size() :
+                   (Glob.sos ? Glob.sos->length : 0);
   Stats.demodulators_size = Glob.demods ? Glob.demods->length : 0;
   Stats.limbo_size = Glob.limbo ? Glob.limbo->length : 0;
-  Stats.disabled_size = clause_store_length(Glob.disabled);
+  Stats.disabled_size = clause_store_current_length(Glob.disabled);
   Stats.hints_size = Glob.hints ? Glob.hints->length : 0;
+  Stats.active_indexed_clauses = Stats.usable_size;
+  Stats.passive_indexed_clauses = discount_mode() ? 0 : Stats.sos_size;
+  Stats.delayed_demodulators = delayed_demodulator_count();
+  Stats.collective_batches_pending = Collective_batch_count;
+  Stats.collective_activation_entries = Collective_activation_count;
+  Stats.collective_descriptor_bytes = Collective_batch_count *
+                                      sizeof(struct collective_batch);
+  Stats.collective_history_bytes = collective_history_bytes();
   Stats.kbyte_usage = bytes_palloced() / 1000;
   update_memory_stats();
 }  /* update_stats */
@@ -827,12 +1372,59 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
   fprintf(fp,"\nGiven=%s. Generated=%s. Kept=%s. proofs=%s.\n",
 	  comma_num(s.given), comma_num(s.generated),
 	  comma_num(s.kept), comma_num(s.proofs));
+  fprintf(fp,
+          "Generated_by_rule: binary=%s, hyper=%s, ur=%s, paramod=%s, "
+          "other=%s.\n",
+          comma_num(s.generated_binary), comma_num(s.generated_hyper),
+          comma_num(s.generated_ur), comma_num(s.generated_paramod),
+          comma_num(s.generated_other));
   fprintf(fp,"Usable=%s. Sos=%s. Demods=%s. Limbo=%s, "
 	  "Disabled=%s. Hints=%s. Active_Hints=%s.\n",
 	  comma_num(s.usable_size), comma_num(s.sos_size),
 	  comma_num(s.demodulators_size), comma_num(s.limbo_size),
 	  comma_num(s.disabled_size), comma_num(s.hints_size),
 	  comma_num(active_hints()));
+  fprintf(fp,
+          "Search_loop: mode=%s, frontier=%s, active_indexed=%s, passive_indexed=%s, "
+          "delayed_demodulators=%s.\n",
+          discount_mode() ? "discount" : "otter",
+          stringparm1(Opt->inference_frontier),
+          comma_num(s.active_indexed_clauses),
+          comma_num(s.passive_indexed_clauses),
+          comma_num(s.delayed_demodulators));
+  if (discount_mode())
+    fprintf(fp,
+            "Passive_refresh: epoch=%u, checks=%s, requeued=%s, "
+            "subsumed=%s.\n",
+            Simplifier_epoch,
+            comma_num(s.passive_refresh_checks),
+            comma_num(s.passive_refresh_requeued),
+            comma_num(s.passive_refresh_subsumed));
+  if (collective_frontier_mode()) {
+    fprintf(fp,
+            "Collective_frontier: batches_created=%s, completed=%s, "
+            "pending=%s, peak=%s, ratio=%d, skipped=%s, "
+            "parent_materializations=%s, activations=%s.\n",
+            comma_num(s.collective_batches_created),
+            comma_num(s.collective_batches_completed),
+            comma_num(s.collective_batches_pending),
+            comma_num(s.collective_batches_peak),
+            parm(Opt->collective_given_ratio),
+            comma_num(s.collective_partners_skipped),
+            comma_num(s.collective_parent_materializations),
+            comma_num(s.collective_activation_entries));
+    fprintf(fp,
+            "Collective_work: paramod_pairs=%s, hyper_batches=%s.\n",
+            comma_num(s.collective_pair_expansions),
+            comma_num(s.collective_hyper_expansions));
+    fprintf(fp,
+            "Collective_memory: descriptor_bytes=%s, history_bytes=%s.\n",
+            comma_num(s.collective_descriptor_bytes),
+            comma_num(s.collective_history_bytes));
+  }
+  fprintf(fp, "Hint_index: mode=%s, fpa_depth=%d, epoch=%llu.\n",
+          stringparm1(Opt->hint_index), configured_hint_fpa_depth(),
+          hint_state_epoch());
 
   if (str_ident(stats_level, "lots") || str_ident(stats_level, "all")) {
 
@@ -875,14 +1467,56 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
           comma_num(s.compression_materialized),
           comma_num(s.compression_recompressed));
   fprintf(fp,
-          "Clause_body_bytes: active=%s, hints=%s, disabled_full=%s (%s clauses), "
+          "Clause_body_bytes: active=%s, passive=%s, hints=%s, "
+          "disabled_full=%s (%s clauses), "
           "disabled_compressed=%s (%s clauses), disabled_estimated_full=%s.\n",
-          comma_num(s.active_body_bytes), comma_num(s.hint_body_bytes),
+          comma_num(s.active_body_bytes), comma_num(s.passive_body_bytes),
+          comma_num(s.hint_body_bytes),
           comma_num(s.disabled_full_body_bytes),
           comma_num(s.disabled_full_clauses),
           comma_num(s.disabled_compressed_bytes),
           comma_num(s.disabled_compressed_clauses),
           comma_num(s.disabled_estimated_uncompressed_bytes));
+  fprintf(fp,
+          "Passive_store: compressed=%s, body_bytes=%s, "
+          "justification_bytes=%s, total_bytes=%s, estimated_full=%s.\n",
+          comma_num(s.passive_compressed_clauses),
+          comma_num(s.passive_body_bytes),
+          comma_num(s.passive_justification_bytes),
+          comma_num(s.passive_total_payload_bytes),
+          comma_num(s.passive_estimated_full_body_bytes));
+  if (dense_passive_mode())
+    fprintf(fp,
+            "Dense_passive: records=%s, record_bytes=%s, heap_bytes=%s, "
+            "arena_records=%s, arena_record_bytes=%s, arena_backing=%s, "
+            "arena_materialized=%s, validation_failures=%s, "
+            "allocated_bytes_per_active=%.2f.\n",
+            comma_num(s.dense_passive_records),
+            comma_num(s.dense_passive_record_bytes),
+            comma_num(s.dense_passive_heap_bytes),
+            comma_num(s.dense_passive_arena_records),
+            comma_num(s.dense_passive_arena_record_bytes),
+            comma_num(s.dense_passive_arena_backing_bytes),
+            comma_num(s.dense_passive_arena_materializations),
+            comma_num(s.dense_passive_arena_validation_failures),
+            s.dense_passive_records == 0 ? 0.0 :
+            (double) (s.dense_passive_record_bytes +
+                      s.dense_passive_heap_bytes +
+                      s.dense_passive_arena_backing_bytes) /
+            s.dense_passive_records);
+  fprintf(fp,
+          "Hint_store: compressed=%s, body_bytes=%s, estimated_full=%s.\n",
+          comma_num(s.hint_compressed_clauses),
+          comma_num(s.hint_body_bytes),
+          comma_num(s.hint_estimated_full_body_bytes));
+  if (packed_hints_enabled())
+    fprintf(fp,
+            "Packed_hint_index: nodes=%s, references=%s, tables=%s, "
+            "candidate_checks=%s.\n",
+            comma_num(s.hint_index_node_bytes),
+            comma_num(s.hint_index_reference_bytes),
+            comma_num(s.hint_index_table_bytes),
+            comma_num(s.hint_candidate_checks));
   fprintf(fp,
           "Ancestor_store: records=%s, record_bytes=%s, backing_bytes=%s, "
           "handle_bytes=%s, materialized=%s, validation_failures=%s.\n",
@@ -2817,7 +3451,8 @@ void exit_if_over_limit(void)
 static
 BOOL inferences_to_make(void)
 {
-  return givens_available();
+  return givens_available() ||
+         (collective_frontier_mode() && Collective_batch_head != NULL);
 }  // inferences_to_make
 
 /*************
@@ -2902,6 +3537,55 @@ Clause_store new_disabled_store(void)
   }
   return store;
 }  /* new_disabled_store */
+
+static Cold_passive_store new_dense_body_store(void)
+{
+  Cold_passive_store_mode mode =
+    str_ident(stringparm1(Opt->ancestor_store), "mmap") ?
+    COLD_PASSIVE_MMAP : COLD_PASSIVE_MEMORY;
+  Cold_passive_store store = cold_passive_store_init(mode);
+  if (store == NULL)
+    fatal_error("new_dense_body_store: cannot initialize compact arena");
+  return store;
+}
+
+static size_t archive_dense_passive(Topform c)
+{
+  if (c == NULL || c->id == 0 || active_or_indexable_clause(c))
+    fatal_error("archive_dense_passive: clause is not a detached passive");
+  return cold_passive_store_archive(Dense_body_store, c);
+}  /* archive_dense_passive */
+
+static Topform activate_dense_passive(size_t position,
+                                      unsigned long long id,
+                                      unsigned long long hint_id)
+{
+  Topform c = cold_passive_store_materialize(Dense_body_store, position,
+                                              id, TRUE);
+  if (c == NULL)
+    return NULL;
+  c->matching_hint = hint_by_id(hint_id);
+  return c;
+}  /* activate_dense_passive */
+
+/* Decode a dense passive without changing its archived ID-table entry.
+   The selector metadata is authoritative for fields that are deliberately
+   kept outside the immutable clause record. */
+static Topform materialize_dense_passive(
+  const struct dense_passive_view *view)
+{
+  Topform c = cold_passive_store_materialize(Dense_body_store,
+                                              view->store_position,
+                                              view->id, FALSE);
+  if (c == NULL || c->id != view->id)
+    fatal_error("materialize_dense_passive: archive identity mismatch");
+  c->matching_hint = hint_by_id(view->hint_id);
+  c->weight = view->weight;
+  c->semantics = view->semantics;
+  c->simplifier_epoch = view->simplifier_epoch;
+  c->delayed_demodulator = view->delayed_demodulator;
+  return c;
+}  /* materialize_dense_passive */
 
 static
 void compress_retained_clause(Topform c)
@@ -2995,6 +3679,7 @@ void disable_clause(Topform c)
   }
 
   if (clist_member(c, Glob.usable)) {
+    collective_note_deactivation(c);
     index_literals(c, DELETE, Clocks.index, FALSE);
     index_back_demod(c, DELETE, Clocks.index, flag(Opt->back_demod));
     if (!restricted_denial(c))
@@ -3002,12 +3687,15 @@ void disable_clause(Topform c)
     clist_remove(c, Glob.usable);
   }
   else if (clist_member(c, Glob.sos)) {
-    index_literals(c, DELETE, Clocks.index, FALSE);
-    index_back_demod(c, DELETE, Clocks.index, flag(Opt->back_demod));
+    if (!discount_mode()) {
+      index_literals(c, DELETE, Clocks.index, FALSE);
+      index_back_demod(c, DELETE, Clocks.index, flag(Opt->back_demod));
+    }
     remove_from_sos2(c, Glob.sos);
   }
   else if (clist_member(c, Glob.limbo)) {
-    index_literals(c, DELETE, Clocks.index, FALSE);
+    if (!discount_mode() || c->was_given || restricted_denial(c))
+      index_literals(c, DELETE, Clocks.index, FALSE);
     clist_remove(c, Glob.limbo);
   }
 
@@ -3075,6 +3763,9 @@ void free_search_memory(void)
 
   clause_store_delete_clauses(Glob.disabled);
   Glob.disabled = NULL;
+  reset_selector_indexes();
+  cold_passive_store_free(Dense_body_store);
+  Dense_body_store = NULL;
 
   if (Glob.hints->first) {
     Clist_pos p;
@@ -3084,6 +3775,8 @@ void free_search_memory(void)
   }
   delete_clist(Glob.hints);
   Glob.hints = NULL;
+
+  collective_clear_state();
 
 }  // free_search_memory
 
@@ -3674,6 +4367,87 @@ void hint_derivation(Topform cl)
 }  /* hint_derivation */
 
 static
+unsigned long long hint_trace_mix_u32(unsigned long long h, unsigned value)
+{
+  int i;
+  for (i = 0; i < 4; i++) {
+    h ^= (value >> (8 * i)) & 0xff;
+    h *= 1099511628211ULL;
+  }
+  return h;
+}
+
+static
+unsigned long long hint_trace_term_hash(Term t, unsigned long long h)
+{
+  int i;
+  h = hint_trace_mix_u32(h, VARIABLE(t) ? 0U : 1U);
+  if (VARIABLE(t))
+    h = hint_trace_mix_u32(h, (unsigned) VARNUM(t));
+  else {
+    const unsigned char *s =
+      (const unsigned char *) sn_to_str(SYMNUM(t));
+    while (*s != '\0') {
+      h ^= *s++;
+      h *= 1099511628211ULL;
+    }
+    h ^= 0xfe;
+    h *= 1099511628211ULL;
+  }
+  h = hint_trace_mix_u32(h, (unsigned) ARITY(t));
+  for (i = 0; i < ARITY(t); i++)
+    h = hint_trace_term_hash(ARG(t, i), h);
+  return h;
+}
+
+static
+unsigned long long hint_trace_clause_hash(Topform c)
+{
+  unsigned long long h = 1469598103934665603ULL;
+  Literals lit;
+  for (lit = c->literals; lit != NULL; lit = lit->next) {
+    h = hint_trace_mix_u32(h, lit->sign ? 1U : 0U);
+    h = hint_trace_term_hash(lit->atom, h);
+  }
+  return hint_trace_mix_u32(h, 0xffffffffU);
+}
+
+static
+unsigned long long hint_trace_label_hash(Topform c)
+{
+  unsigned long long h = 1469598103934665603ULL;
+  int occurrence = 1;
+  char *label;
+  while ((label = get_string_attribute(c->attributes, label_att(),
+                                       occurrence++)) != NULL) {
+    const unsigned char *s = (const unsigned char *) label;
+    while (*s != '\0') {
+      h ^= *s++;
+      h *= 1099511628211ULL;
+    }
+    h ^= 0xff;
+    h *= 1099511628211ULL;
+  }
+  return h;
+}
+
+static
+void print_hint_trace(Topform c)
+{
+  unsigned long long matcher = c->matching_hint == NULL ? 0 :
+                               c->matching_hint->id;
+  unsigned long long degradation = c->matching_hint == NULL ? 0 :
+                                   (unsigned long long) c->matching_hint->weight;
+  double raw_weight = clause_weight(c->literals);
+  printf("%sHINT_TRACE clause=%llu fingerprint=%016llx matcher=%llu "
+         "raw=%.17g adjusted=%.17g labels=%016llx degradation=%llu "
+         "epoch=%llu\n",
+         TPTP_PFX, c->id, hint_trace_clause_hash(c), matcher,
+         raw_weight, c->weight, hint_trace_label_hash(c), degradation,
+         hint_state_epoch());
+}  /* print_hint_trace */
+
+static
 void cl_process_keep(Topform c)
 {
   Stats.kept++;
@@ -3698,6 +4472,8 @@ void cl_process_keep(Topform c)
 	&& c->matching_hint->id < (unsigned) parm(Opt->hint_derivations))
       hint_derivation(c);
   }
+  if (flag(Opt->hint_trace))
+    print_hint_trace(c);
 
   if (flag(Opt->print_clause_properties))
       c->attributes = set_term_attribute(c->attributes,
@@ -3731,6 +4507,14 @@ void cl_process_conflict(Topform c, BOOL denial)
 static
 void cl_process_new_demod(Topform c)
 {
+  /* In the DISCOUNT loop, an ordinary kept clause remains passive until it
+     is selected.  Promoting it here would make the passive frontier part of
+     the active rewrite system, which is precisely the ownership violation
+     this mode removes.  Restricted denials are placed directly in Usable and
+     retain their historical treatment. */
+  if (discount_mode() && !c->was_given && !restricted_denial(c))
+    return;
+
   // If the clause should be a demodulator, make it so.
   if (flag(Opt->back_demod)) {
     int type = demodulator_type(c,
@@ -3757,6 +4541,24 @@ void cl_process_new_demod(Topform c)
     }
   }
 }  // cl_process_new_demod
+
+static
+void prepare_discount_passive(Topform c, BOOL stamp_epoch)
+{
+  if (stamp_epoch)
+    c->simplifier_epoch = Simplifier_epoch;
+  c->delayed_demodulator =
+    flag(Opt->back_demod) &&
+    demodulator_type(c,
+		     parm(Opt->lex_dep_demod_lim),
+		     flag(Opt->lex_dep_demod_sane)) != NOT_DEMODULATOR;
+
+  if (compressed_passive_mode()) {
+    Clause_compress_result result = compress_clause_with_justification(c);
+    if (result != CLAUSE_COMPRESS_OK && result != CLAUSE_COMPRESS_ALREADY)
+      fatal_error("prepare_discount_passive: clause body cannot be compressed");
+  }
+}  /* prepare_discount_passive */
 
 static
 BOOL skip_black_white_tests(Topform c)
@@ -3853,6 +4655,13 @@ void cl_process(Topform c)
     possible_report();
 
   Stats.generated++;
+  switch (Current_inference_source) {
+  case INFER_SOURCE_BINARY: Stats.generated_binary++; break;
+  case INFER_SOURCE_HYPER:  Stats.generated_hyper++; break;
+  case INFER_SOURCE_UR:     Stats.generated_ur++; break;
+  case INFER_SOURCE_PARAMOD: Stats.generated_paramod++; break;
+  default: Stats.generated_other++; break;
+  }
   statistic_actions("generated", Stats.generated);
   if (flag(Opt->print_gen)) {
     printf("\n%sgenerated: ", TPTP_PFX);
@@ -3868,21 +4677,33 @@ void cl_process(Topform c)
     if (flag(Opt->safe_unit_conflict))
       cl_process_conflict(c, FALSE);  // marked as used if conflict
 
-    if (cl_process_delete(c))
-      delete_clause(c);
-    else {
-      cl_process_keep(c);
-      // Ordinary unit conflict.
-      if (!flag(Opt->safe_unit_conflict))
-	cl_process_conflict(c, FALSE);
-      cl_process_new_demod(c);
-      // We insert c into the literal index now so that it will be
-      // available for unit conflict and forward subsumption while
-      // it's in limbo.  (It should not be back subsumed while in limbo.
-      // See fatal error in limbo_process).
-      index_literals(c, INSERT, Clocks.index, FALSE);
-      clist_append(c, Glob.limbo);
-    }  // not deleted
+    {
+      BOOL deleted = cl_process_delete(c);
+      if (flag(Opt->hint_trace))
+        {
+          unsigned long long fingerprint = hint_trace_clause_hash(c);
+          printf("%sCANDIDATE_TRACE generated=%llu fingerprint=%016llx "
+                 "outcome=%s\n",
+                 TPTP_PFX, Stats.generated, fingerprint,
+                 deleted ? "deleted" : "kept");
+        }
+      if (deleted)
+        delete_clause(c);
+      else {
+        cl_process_keep(c);
+        // Ordinary unit conflict.
+        if (!flag(Opt->safe_unit_conflict))
+	  cl_process_conflict(c, FALSE);
+        cl_process_new_demod(c);
+        // We insert c into the literal index now so that it will be
+        // available for unit conflict and forward subsumption while
+        // it's in limbo.  (It should not be back subsumed while in limbo.
+        // See fatal error in limbo_process).
+        if (!discount_mode() || c->was_given || restricted_denial(c))
+          index_literals(c, INSERT, Clocks.index, FALSE);
+        clist_append(c, Glob.limbo);
+      }  // not deleted
+    }
   }  // not empty clause
   
   clock_stop(Clocks.preprocess);
@@ -4107,6 +4928,7 @@ void limbo_process(BOOL pre_search)
 
   while (Glob.limbo->first) {
     Topform c = Glob.limbo->first->c;
+    BOOL discount_activation = discount_mode() && c->was_given;
     double iter_start = (lp_next > 0) ? user_seconds() : 0;
 
     /* Timeout is handled by SIGALRM (setup_timeout_signal) */
@@ -4122,6 +4944,23 @@ void limbo_process(BOOL pre_search)
 	fflush(stderr);
 	lp_next = now + parm(Opt->report_preprocessing);
       }
+    }
+
+    /* A DISCOUNT passive has already been simplified, weighed, and matched
+       against hints by cl_process().  Commit it only to the selector here.
+       Factoring and every backward operation are activation-time work; doing
+       them now would turn an unselected clause into active search state. */
+    if (discount_mode() && !discount_activation && !restricted_denial(c)) {
+      clist_remove(c, Glob.limbo);
+      if (parm(Opt->sos_limit) != -1 &&
+	  clist_length(Glob.sos) >= parm(Opt->sos_limit)) {
+	sos_displace2(disable_clause, flag(Opt->quiet));
+	Stats.sos_displaced++;
+      }
+      c->initial = pre_search ? TRUE : FALSE;
+      prepare_discount_passive(c, TRUE);
+      insert_into_sos2(c, Glob.sos);
+      continue;
     }
 
     // factoring
@@ -4290,7 +5129,7 @@ void limbo_process(BOOL pre_search)
 
     // If restricted_denial, append to usable, else append to sos.
 
-    if (restricted_denial(c)) {
+    if (restricted_denial(c) || discount_activation) {
       // do not index_clashable!  disable_clause should not unindex_clashable!
       clist_append(c, Glob.usable);
       index_back_demod(c, INSERT, Clocks.index, flag(Opt->back_demod));
@@ -4366,6 +5205,147 @@ void infer_outside_loop(Topform c)
   limbo_process(FALSE);
 }  /* infer_outside_loop */
 
+static
+Topform collective_parent_clause(unsigned long long id, BOOL *materialized)
+{
+  Topform c = find_clause_by_id(id);
+  *materialized = FALSE;
+  if (c != NULL) {
+    /* Passive clauses have IDs too, but activation history must never name
+       one.  This also catches accidental pointer ownership across the cold
+       passive boundary. */
+    if (!clist_member(c, Glob.usable))
+      fatal_error("collective parent is live but not active");
+    if (c->compressed != NULL)
+      fatal_error("collective active parent is unexpectedly compressed");
+    return c;
+  }
+
+  c = clause_store_materialize_by_id(id);
+  if (c == NULL)
+    fatal_error("collective parent is absent from active and ancestor stores");
+  *materialized = TRUE;
+  Stats.collective_parent_materializations++;
+  return c;
+}
+
+/* Expand at most one historical active partner from the oldest round-robin
+   batch.  Both paramodulation directions for that pair are performed before
+   yielding.  Conclusions still go through cl_process(), including exact
+   normalization, hint matching, weighting, and proof construction. */
+static
+BOOL collective_expand_one_batch(void)
+{
+  struct collective_batch *b;
+
+  if (Collective_batch_head == NULL)
+    return FALSE;
+
+  b = Collective_batch_head;
+
+  if ((b->kind & (COLLECTIVE_POS_HYPER | COLLECTIVE_NEG_HYPER)) != 0) {
+    BOOL materialized;
+    unsigned long long generated_before = Stats.generated;
+    unsigned long long kept_before = Stats.kept;
+    Topform given = collective_parent_clause(b->given_id, &materialized);
+    unsigned hyper_kind = (b->kind & COLLECTIVE_POS_HYPER) != 0 ?
+                          COLLECTIVE_POS_HYPER : COLLECTIVE_NEG_HYPER;
+    int direction = hyper_kind == COLLECTIVE_POS_HYPER ? POS_RES : NEG_RES;
+    clock_start(Clocks.infer);
+    Current_inference_source = INFER_SOURCE_HYPER;
+    hyper_resolution(given, direction, Glob.clashable_idx, cl_process);
+    Current_inference_source = INFER_SOURCE_OTHER;
+    clock_stop(Clocks.infer);
+    if (materialized)
+      clause_store_release_materialized(given);
+    b->kind &= ~hyper_kind;
+    Stats.collective_hyper_expansions++;
+    if (flag(Opt->collective_trace))
+      printf("%sCOLLECTIVE_TRACE kind=%s given=%llu epoch=%u "
+             "generated=%llu kept=%llu archived_parent=%d.\n",
+             TPTP_PFX,
+             hyper_kind == COLLECTIVE_POS_HYPER ? "pos_hyper" : "neg_hyper",
+             b->given_id, b->snapshot_epoch,
+             Stats.generated - generated_before, Stats.kept - kept_before,
+             materialized ? 1 : 0);
+    collective_finish_batch_turn(b);
+    return TRUE;
+  }
+
+  if ((b->kind & COLLECTIVE_PARAMOD) == 0 ||
+      (b->kind & ~(COLLECTIVE_PARAMOD | COLLECTIVE_POS_HYPER |
+                   COLLECTIVE_NEG_HYPER)) != 0)
+    fatal_error("unknown collective batch kind");
+
+  while (b->cursor < b->activation_limit) {
+    unsigned long long partner_id = collective_activation_id(b->cursor++);
+    unsigned deactivated = collective_deactivation_epoch(partner_id);
+    BOOL given_materialized, partner_materialized = FALSE;
+    Topform given, partner;
+    BOOL good_given, good_pair;
+
+    if (deactivated != 0 && deactivated <= b->snapshot_epoch) {
+      Stats.collective_partners_skipped++;
+      continue;
+    }
+
+    given = collective_parent_clause(b->given_id, &given_materialized);
+    if (partner_id == b->given_id)
+      partner = given;
+    else
+      partner = collective_parent_clause(partner_id, &partner_materialized);
+
+    good_given = (b->given_id <
+                    (unsigned long long) parm(Opt->para_restr_beg) ||
+                  b->given_id >
+                    (unsigned long long) parm(Opt->para_restr_end));
+    good_pair = (good_given ||
+                 partner_id <
+                   (unsigned long long) parm(Opt->para_restr_beg) ||
+                 partner_id >
+                   (unsigned long long) parm(Opt->para_restr_end));
+
+    if (!restricted_denial(partner) && good_pair &&
+        !over_parm_limit(number_of_literals(partner->literals),
+                         Opt->para_lit_limit)) {
+      Context cf = get_context();
+      Context ci = get_context();
+      unsigned long long generated_before = Stats.generated;
+      unsigned long long kept_before = Stats.kept;
+      clock_start(Clocks.infer);
+      Current_inference_source = INFER_SOURCE_PARAMOD;
+      para_from_into(given, cf, partner, ci, FALSE, cl_process);
+      para_from_into(partner, cf, given, ci, TRUE, cl_process);
+      Current_inference_source = INFER_SOURCE_OTHER;
+      clock_stop(Clocks.infer);
+      free_context(cf);
+      free_context(ci);
+      Stats.collective_pair_expansions++;
+      if (flag(Opt->collective_trace))
+        printf("%sCOLLECTIVE_TRACE kind=paramod given=%llu partner=%llu "
+               "epoch=%u generated=%llu kept=%llu given_archived=%d "
+               "partner_archived=%d.\n",
+               TPTP_PFX, b->given_id, partner_id, b->snapshot_epoch,
+               Stats.generated - generated_before, Stats.kept - kept_before,
+               given_materialized ? 1 : 0,
+               partner_materialized ? 1 : 0);
+    }
+    else
+      Stats.collective_partners_skipped++;
+
+    if (partner_materialized)
+      clause_store_release_materialized(partner);
+    if (given_materialized)
+      clause_store_release_materialized(given);
+
+    collective_finish_batch_turn(b);
+    return TRUE;
+  }
+
+  collective_finish_batch_turn(b);
+  return TRUE;
+}
+
 /*************
  *
  *   given_infer()
@@ -4385,58 +5365,142 @@ void given_infer(Topform given)
 {
   clock_start(Clocks.infer);
 
-  if (flag(Opt->binary_resolution))
+  if (flag(Opt->binary_resolution)) {
+    Current_inference_source = INFER_SOURCE_BINARY;
     binary_resolution(given,
 		      ANY_RES,
 		      Glob.clashable_idx,
 		      cl_process);
+  }
 
-  if (flag(Opt->neg_binary_resolution))
+  if (flag(Opt->neg_binary_resolution)) {
+    Current_inference_source = INFER_SOURCE_BINARY;
     binary_resolution(given,
 		      NEG_RES,
 		      Glob.clashable_idx,
 		      cl_process);
+  }
 
-  if (flag(Opt->pos_hyper_resolution))
-    hyper_resolution(given, POS_RES, Glob.clashable_idx, cl_process);
+  if (flag(Opt->pos_hyper_resolution)) {
+    if (collective_frontier_mode())
+      collective_enqueue_hyper_batch(given, COLLECTIVE_POS_HYPER);
+    else {
+      Current_inference_source = INFER_SOURCE_HYPER;
+      hyper_resolution(given, POS_RES, Glob.clashable_idx, cl_process);
+    }
+  }
 
-  if (flag(Opt->neg_hyper_resolution))
-    hyper_resolution(given, NEG_RES, Glob.clashable_idx, cl_process);
+  if (flag(Opt->neg_hyper_resolution)) {
+    if (collective_frontier_mode())
+      collective_enqueue_hyper_batch(given, COLLECTIVE_NEG_HYPER);
+    else {
+      Current_inference_source = INFER_SOURCE_HYPER;
+      hyper_resolution(given, NEG_RES, Glob.clashable_idx, cl_process);
+    }
+  }
 
-  if (flag(Opt->pos_ur_resolution))
+  if (flag(Opt->pos_ur_resolution)) {
+    Current_inference_source = INFER_SOURCE_UR;
     ur_resolution(given, POS_RES, Glob.clashable_idx, cl_process);
+  }
 
-  if (flag(Opt->neg_ur_resolution))
+  if (flag(Opt->neg_ur_resolution)) {
+    Current_inference_source = INFER_SOURCE_UR;
     ur_resolution(given, NEG_RES, Glob.clashable_idx, cl_process);
+  }
 
   if (flag(Opt->paramodulation) &&
       !over_parm_limit(number_of_literals(given->literals),
 		       Opt->para_lit_limit)) {
-    /* This paramodulation does not use indexing. */
-    Context cf = get_context();
-    Context ci = get_context();
-    Clist_pos p;
-    BOOL good_given = (given->id < (unsigned) parm(Opt->para_restr_beg)
-		       || given->id > (unsigned) parm(Opt->para_restr_end));
-    for (p = Glob.usable->first; p; p = p->next) {
-      if (!restricted_denial(p->c) &&
-	  !over_parm_limit(number_of_literals(p->c->literals),
-			   Opt->para_lit_limit)) {
-	BOOL good_pair = (good_given
-			  || p->c->id < (unsigned) parm(Opt->para_restr_beg)
-			  || p->c->id > (unsigned) parm(Opt->para_restr_end));
-	if (good_pair) {
-	  para_from_into(given, cf, p->c, ci, FALSE, cl_process);
-	  para_from_into(p->c, cf, given, ci, TRUE, cl_process);
+    if (collective_frontier_mode())
+      collective_enqueue_batch(given);
+    else {
+      /* This paramodulation does not use indexing. */
+      Context cf = get_context();
+      Context ci = get_context();
+      Clist_pos p;
+      BOOL good_given =
+	(given->id < (unsigned long long) parm(Opt->para_restr_beg) ||
+	 given->id > (unsigned long long) parm(Opt->para_restr_end));
+      for (p = Glob.usable->first; p; p = p->next) {
+	if (!restricted_denial(p->c) &&
+	    !over_parm_limit(number_of_literals(p->c->literals),
+			     Opt->para_lit_limit)) {
+	  BOOL good_pair =
+	    (good_given ||
+	     p->c->id < (unsigned long long) parm(Opt->para_restr_beg) ||
+	     p->c->id > (unsigned long long) parm(Opt->para_restr_end));
+	  if (good_pair) {
+	    Current_inference_source = INFER_SOURCE_PARAMOD;
+	    para_from_into(given, cf, p->c, ci, FALSE, cl_process);
+	    para_from_into(p->c, cf, given, ci, TRUE, cl_process);
+	  }
 	}
       }
+      free_context(cf);
+      free_context(ci);
     }
-    free_context(cf);
-    free_context(ci);
   }
+
+  Current_inference_source = INFER_SOURCE_OTHER;
 
   clock_stop(Clocks.infer);
 }  // given_infer
+
+/* Refresh a cold clause only if the active set has changed since it entered
+   SOS.  A rewrite/unit/CAC change is represented as a copy inference, just
+   as eager back simplification represents it in the compatibility loop.  A
+   changed clause is sent through cl_process() again, which deliberately
+   repeats exact hint matching and selector evaluation for the new body. */
+static
+BOOL discount_refresh_selected(Topform c)
+{
+  Topform copy;
+  Topform subsumer;
+
+  if (c->simplifier_epoch == Simplifier_epoch)
+    return TRUE;
+
+  Stats.passive_refresh_checks++;
+  copy = copy_inference(c);
+  cl_process_simplify(copy);
+
+  if (copy->justification->next != NULL) {
+    copy->justification->u.id = c->id;
+    retain_disabled_clause(c);
+    Stats.passive_refresh_requeued++;
+    cl_process(copy);
+    limbo_process(FALSE);
+    return FALSE;
+  }
+
+  delete_clause(copy);
+
+  /* The clause was forward-subsumption checked when first retained, so this
+     is necessary only after an active-state epoch change. */
+  clock_start(Clocks.subsume);
+  if (flag(Opt->ancestor_subsume)) {
+    BOOL use_prf_weight = flag(Opt->proof_weight);
+    subsumer = forward_subsumption_filter(c, anc_subsume_accept_cb,
+                                          &use_prf_weight);
+  }
+  else
+    subsumer = forward_subsumption(c);
+  clock_stop(Clocks.subsume);
+
+  if (subsumer != NULL && !c->used) {
+    if (flag(Opt->print_gen))
+      printf("%sDISCOUNT refresh: %llu subsumed by %llu.\n",
+             TPTP_PFX, c->id, subsumer->id);
+    Stats.subsumed++;
+    Stats.passive_refresh_subsumed++;
+    retain_disabled_clause(c);
+    return FALSE;
+  }
+
+  c->simplifier_epoch = Simplifier_epoch;
+  return TRUE;
+}  /* discount_refresh_selected */
 
 /*************
  *
@@ -4477,11 +5541,29 @@ void make_inferences(void)
   Topform given_clause;
   char *selection_type;
 
+  /* Spend one descriptor-expansion turn after the configured number of given
+     activations.  If SOS is empty, drain the finite batch queue.  The
+     round-robin queue is fair: every finite descriptor cursor is advanced
+     repeatedly. */
+  if (collective_frontier_mode() && Collective_batch_head != NULL &&
+      (Collective_batch_turn || !givens_available())) {
+    collective_expand_one_batch();
+    Collective_batch_turn = FALSE;
+    Collective_givens_since_batch = 0;
+    return;
+  }
+
+  if (!givens_available())
+    return;
+
   clock_start(Clocks.pick_given);
   given_clause = get_given_clause2(Glob.sos,Stats.given, Opt, &selection_type);
   clock_stop(Clocks.pick_given);
 
   if (given_clause != NULL) {
+
+    if (discount_mode() && !discount_refresh_selected(given_clause))
+      return;
 
     // Print "level" message for breadth-first; also "level" actions.
 
@@ -4572,9 +5654,49 @@ void make_inferences(void)
       To_trace_cl = NULL;
     }
 
-    clist_append(given_clause, Glob.usable);
-    index_clashable(given_clause, INSERT);
-    given_infer(given_clause);
+    if (discount_mode()) {
+      unsigned long long given_id = given_clause->id;
+      Topform activated;
+
+      /* The selector owns passive clauses without active indexes.  Reuse the
+         established limbo activation order now that this clause has actually
+         been selected: install its literal index and possible demodulator,
+         perform factoring/backward work against active clauses only, then
+         put it in Usable and the clashable inference index.  Any conclusions
+         generated during activation take the ordinary passive shortcut in
+         limbo_process(). */
+      /* Advancing before activation means every conclusion generated from
+         this given is stamped with the state that already includes it. */
+      if (Simplifier_epoch != UINT_MAX)
+        Simplifier_epoch++;
+      clist_append(given_clause, Glob.limbo);
+      given_clause->delayed_demodulator = FALSE;
+      cl_process_new_demod(given_clause);
+      index_literals(given_clause, INSERT, Clocks.index, FALSE);
+      limbo_process(FALSE);
+
+      activated = find_clause_by_id(given_id);
+      if (activated != NULL && clist_member(activated, Glob.usable)) {
+	if (!restricted_denial(activated))
+	  index_clashable(activated, INSERT);
+	collective_note_activation(activated);
+	given_infer(activated);
+      }
+    }
+    else {
+      clist_append(given_clause, Glob.usable);
+      index_clashable(given_clause, INSERT);
+      given_infer(given_clause);
+    }
+
+    if (collective_frontier_mode()) {
+      if (Collective_givens_since_batch < UINT_MAX)
+        Collective_givens_since_batch++;
+      if (Collective_batch_head != NULL &&
+          Collective_givens_since_batch >=
+            (unsigned) parm(Opt->collective_given_ratio))
+        Collective_batch_turn = TRUE;
+    }
   }
 }  // make_inferences
 
@@ -4924,7 +6046,6 @@ void init_search_late(void)
   // Symbol precedence (examines clauses)
 
   symbol_order(Glob.usable, Glob.sos, Glob.demods, !flag(Opt->quiet));
-
   if (flag(Opt->multi_order_trial))
     multi_order_trial(Glob.usable, Glob.sos, !flag(Opt->quiet));
 
@@ -5077,7 +6198,8 @@ void index_and_process_initial_clauses(void)
   init_hints(ORDINARY_UNIF, Att.bsub_hint_wt,
 	     flag(Opt->collect_hint_labels),
 	     flag(Opt->back_demod_hints),
-	     parm(Opt->hints_fpa_depth),
+	     configured_hint_fpa_depth(),
+	     str_ident(stringparm1(Opt->hint_index), "packed"),
 	     demodulate_clause);
   set_hint_match_stats(flag(Opt->hint_match_stats));
   set_hint_match_once(flag(Opt->hint_match_once));
@@ -5128,11 +6250,11 @@ void index_and_process_initial_clauses(void)
       assign_clause_id(c);
     if (flag(Opt->eval_rewrite)) {
       if (c->is_formula) {
+	Formula old_formula = c->formula;
 	/* make it into a pseudo-clause */
-	c->literals = new_literal(TRUE, formula_to_term(c->formula));
+	c->literals = new_literal(TRUE, formula_to_term(old_formula));
 	upward_clause_links(c);
-	zap_formula(c->formula);
-	c->formula = NULL;
+	zap_formula(old_formula);
 	c->is_formula = FALSE;
 	clause_set_variables(c, MAX_VARS);
 	mark_oriented_eq(c->literals->atom);
@@ -5203,6 +6325,8 @@ void index_and_process_initial_clauses(void)
     int hint_id_number = 1;
     for (p = Glob.hints->first; p != NULL; p = p->next) {
       Topform h = p->c;
+      if (h->compressed != NULL && !materialize_clause(h))
+        fatal_error("index_and_process_initial_clauses: invalid packed hint");
       h->id = hint_id_number++;
       orient_equalities(h, TRUE);
       renumber_variables(h, MAX_VARS);
@@ -5316,14 +6440,26 @@ void index_and_process_initial_clauses(void)
 	}
 
 	c->initial = TRUE;
-	insert_into_sos2(c, Glob.sos);
-	index_literals(c, INSERT, Clocks.index, FALSE);
-	index_back_demod(c, INSERT, Clocks.index, flag(Opt->back_demod));
+	if (discount_mode()) {
+	  prepare_discount_passive(c, TRUE);
+	  insert_into_sos2(c, Glob.sos);
+	}
+	else {
+	  insert_into_sos2(c, Glob.sos);
+	  index_literals(c, INSERT, Clocks.index, FALSE);
+	  index_back_demod(c, INSERT, Clocks.index, flag(Opt->back_demod));
+	}
       }
     }
   }
 
   clist_zap(temp_sos);  // free the temporary list
+
+  /* Establish the epoch-1 historical active set only after preprocessing,
+     because that phase can replace or disable input usable clauses. */
+  if (collective_frontier_mode())
+    for (p = Glob.usable->first; p != NULL; p = p->next)
+      collective_note_activation(p->c);
 
   {
     int rp_interval = parm(Opt->report_preprocessing);
@@ -5522,6 +6658,8 @@ BOOL write_bare_clause(FILE *clause_fp, FILE *data_fp, Topform c,
     fprintf(data_fp, " used");
   if (c->was_given)
     fprintf(data_fp, " was_given");
+  if (c->simplifier_epoch > 0)
+    fprintf(data_fp, " simplifier_epoch %u", c->simplifier_epoch);
   if (c->last_matched_given > 0)
     fprintf(data_fp, " last_matched %llu", c->last_matched_given);
   if (strcmp(list_name, "hints") == 0 && hint_is_redundant(c))
@@ -5561,6 +6699,12 @@ int write_clause_store_bare(FILE *clause_fp, FILE *data_fp,
   int file_pos = 0;
   int list_pos = 0;
   for (i = 0; i < clause_store_length(store); i++) {
+    unsigned long long id;
+    if (!clause_store_position_is_current(store, i))
+      continue;  /* superseded immutable version */
+    id = clause_store_id(store, i);
+    if (dense_passive_contains_id(id))
+      continue;  /* serialized through sos.clauses */
     Topform c = clause_store_materialize(store, i);
     if (c == NULL)
       fatal_error("write_clause_store_bare: corrupt ancestor record");
@@ -5576,6 +6720,45 @@ int write_clause_store_bare(FILE *clause_fp, FILE *data_fp,
   fprintf(clause_fp, "end_of_list.\n");
   return list_pos;
 }  /* write_clause_store_bare */
+
+struct dense_bare_context {
+  FILE *clause_fp;
+  FILE *data_fp;
+  const char *list_name;
+  int file_pos;
+  int list_pos;
+  Plist *seen_tab;
+  int seen_tab_size;
+};
+
+static void write_dense_bare_visit(const struct dense_passive_view *view,
+                                   void *context)
+{
+  struct dense_bare_context *ctx = context;
+  Topform c = materialize_dense_passive(view);
+  if (write_bare_clause(ctx->clause_fp, ctx->data_fp, c,
+                        ctx->list_name, ctx->list_pos, &ctx->file_pos,
+                        ctx->seen_tab, ctx->seen_tab_size))
+    ctx->list_pos++;
+  cold_passive_store_release(c);
+}
+
+static int write_dense_bare(FILE *clause_fp, FILE *data_fp,
+                            const char *list_name,
+                            Plist *seen_tab, int seen_tab_size)
+{
+  struct dense_bare_context ctx;
+  ctx.clause_fp = clause_fp;
+  ctx.data_fp = data_fp;
+  ctx.list_name = list_name;
+  ctx.file_pos = 0;
+  ctx.list_pos = 0;
+  ctx.seen_tab = seen_tab;
+  ctx.seen_tab_size = seen_tab_size;
+  dense_passive_foreach(write_dense_bare_visit, &ctx);
+  fprintf(clause_fp, "end_of_list.\n");
+  return ctx.list_pos;
+}  /* write_dense_bare */
 
 /*************
  *
@@ -5607,7 +6790,8 @@ unsigned long long hash_clause_store_ids(Clause_store store)
   for (i = 0; i < clause_store_length(store); i++) {
     unsigned long long id = clause_store_id(store, i);
     /* Format 3 intentionally omits pre-elimination clauses without IDs. */
-    if (id != 0) {
+    if (clause_store_position_is_current(store, i) && id != 0 &&
+        !dense_passive_contains_id(id)) {
       h ^= id;
       h = (h << 7) | (h >> 57);
     }
@@ -5621,9 +6805,47 @@ unsigned long long checkpointed_clause_store_count(Clause_store store)
   unsigned long long count = 0;
   size_t i;
   for (i = 0; i < clause_store_length(store); i++)
-    if (clause_store_id(store, i) != 0)
+    if (clause_store_position_is_current(store, i) &&
+        clause_store_id(store, i) != 0 &&
+        !dense_passive_contains_id(clause_store_id(store, i)))
       count++;
   return count;
+}
+
+struct dense_hash_context {
+  unsigned long long hash;
+};
+
+static void hash_dense_ids_visit(const struct dense_passive_view *view,
+                                 void *context)
+{
+  struct dense_hash_context *ctx = context;
+  ctx->hash ^= view->id;
+  ctx->hash = (ctx->hash << 7) | (ctx->hash >> 57);
+}
+
+static unsigned long long hash_dense_ids(void)
+{
+  struct dense_hash_context ctx;
+  ctx.hash = 0;
+  dense_passive_foreach(hash_dense_ids_visit, &ctx);
+  return ctx.hash;
+}
+
+static void hash_dense_hints_visit(const struct dense_passive_view *view,
+                                   void *context)
+{
+  struct dense_hash_context *ctx = context;
+  ctx->hash ^= (view->id * 2654435761ULL) ^ view->hint_id;
+  ctx->hash = (ctx->hash << 11) | (ctx->hash >> 53);
+}
+
+static unsigned long long hash_dense_hint_matches(void)
+{
+  struct dense_hash_context ctx;
+  ctx.hash = 0;
+  dense_passive_foreach(hash_dense_hints_visit, &ctx);
+  return ctx.hash;
 }
 
 static
@@ -5679,19 +6901,23 @@ void write_checkpoint_hashes(const char *dir)
   fp = fopen(path, "w");
   if (!fp) return;
 
-  fprintf(fp, "sos_ids %llu\n",       hash_clist_ids(Glob.sos));
+  fprintf(fp, "sos_ids %llu\n",       dense_passive_mode() ?
+          hash_dense_ids() : hash_clist_ids(Glob.sos));
   fprintf(fp, "usable_ids %llu\n",    hash_clist_ids(Glob.usable));
   fprintf(fp, "demods_ids %llu\n",    hash_clist_ids(Glob.demods));
   fprintf(fp, "hints_ids %llu\n",     hash_clist_ids(Glob.hints));
   fprintf(fp, "limbo_ids %llu\n",     hash_clist_ids(Glob.limbo));
   fprintf(fp, "disabled_ids %llu\n",  hash_clause_store_ids(Glob.disabled));
-  fprintf(fp, "sos_fpa %llu\n",       hash_clist_fpa_ids(Glob.sos));
+  fprintf(fp, "sos_fpa %llu\n",       dense_passive_mode() ? 0ULL :
+          hash_clist_fpa_ids(Glob.sos));
   fprintf(fp, "usable_fpa %llu\n",    hash_clist_fpa_ids(Glob.usable));
   fprintf(fp, "hints_fpa %llu\n",     hash_clist_fpa_ids(Glob.hints));
   fprintf(fp, "limbo_fpa %llu\n",     hash_clist_fpa_ids(Glob.limbo));
-  fprintf(fp, "sos_hints %llu\n",     hash_clist_hint_matches(Glob.sos));
+  fprintf(fp, "sos_hints %llu\n",     dense_passive_mode() ?
+          hash_dense_hint_matches() : hash_clist_hint_matches(Glob.sos));
   fprintf(fp, "usable_hints %llu\n",  hash_clist_hint_matches(Glob.usable));
-  fprintf(fp, "sos_count %d\n",       Glob.sos->length);
+  fprintf(fp, "sos_count %d\n",       dense_passive_mode() ?
+          dense_passive_size() : Glob.sos->length);
   fprintf(fp, "usable_count %d\n",    Glob.usable->length);
   fprintf(fp, "demods_count %d\n",    Glob.demods->length);
   fprintf(fp, "hints_count %d\n",     Glob.hints->length);
@@ -5723,7 +6949,8 @@ void verify_checkpoint_hashes(const char *dir)
     const char *status;
 
     if (strcmp(key, "sos_ids") == 0)
-      actual = hash_clist_ids(Glob.sos);
+      actual = dense_passive_mode() ? hash_dense_ids() :
+               hash_clist_ids(Glob.sos);
     else if (strcmp(key, "usable_ids") == 0)
       actual = hash_clist_ids(Glob.usable);
     else if (strcmp(key, "demods_ids") == 0)
@@ -5735,7 +6962,7 @@ void verify_checkpoint_hashes(const char *dir)
     else if (strcmp(key, "disabled_ids") == 0)
       actual = hash_clause_store_ids(Glob.disabled);
     else if (strcmp(key, "sos_fpa") == 0)
-      actual = hash_clist_fpa_ids(Glob.sos);
+      actual = dense_passive_mode() ? 0ULL : hash_clist_fpa_ids(Glob.sos);
     else if (strcmp(key, "usable_fpa") == 0)
       actual = hash_clist_fpa_ids(Glob.usable);
     else if (strcmp(key, "hints_fpa") == 0)
@@ -5743,11 +6970,13 @@ void verify_checkpoint_hashes(const char *dir)
     else if (strcmp(key, "limbo_fpa") == 0)
       actual = hash_clist_fpa_ids(Glob.limbo);
     else if (strcmp(key, "sos_hints") == 0)
-      actual = hash_clist_hint_matches(Glob.sos);
+      actual = dense_passive_mode() ? hash_dense_hint_matches() :
+               hash_clist_hint_matches(Glob.sos);
     else if (strcmp(key, "usable_hints") == 0)
       actual = hash_clist_hint_matches(Glob.usable);
     else if (strcmp(key, "sos_count") == 0)
-      actual = (unsigned long long) Glob.sos->length;
+      actual = (unsigned long long) (dense_passive_mode() ?
+               dense_passive_size() : Glob.sos->length);
     else if (strcmp(key, "usable_count") == 0)
       actual = (unsigned long long) Glob.usable->length;
     else if (strcmp(key, "demods_count") == 0)
@@ -5804,6 +7033,31 @@ int write_term_fpa_ids(FILE *fp, Term t)
   return count;
 }  /* write_term_fpa_ids */
 
+static void write_clause_fpa_ids(FILE *fp, Topform c)
+{
+  Literals lit;
+  int term_count = 0;
+  for (lit = c->literals; lit; lit = lit->next)
+    term_count += symbol_count(lit->atom);
+  fprintf(fp, "%d", term_count);
+  for (lit = c->literals; lit; lit = lit->next)
+    write_term_fpa_ids(fp, lit->atom);
+  fprintf(fp, "\n");
+}
+
+struct dense_fpa_context {
+  FILE *fp;
+};
+
+static void write_dense_fpa_visit(const struct dense_passive_view *view,
+                                  void *context)
+{
+  struct dense_fpa_context *ctx = context;
+  Topform c = materialize_dense_passive(view);
+  write_clause_fpa_ids(ctx->fp, c);
+  cold_passive_store_release(c);
+}
+
 /*************
  *
  *   write_fpa_ids()
@@ -5856,17 +7110,17 @@ void write_fpa_ids(const char *dir)
     Clist lists[] = {Glob.usable, Glob.sos, Glob.hints, Glob.limbo};
     int nlist = 4, i;
     for (i = 0; i < nlist; i++) {
-      fprintf(fp, "LIST %s %d\n", names[i], lists[i]->length);
+      int count = (i == 1 && dense_passive_mode()) ?
+                  dense_passive_size() : lists[i]->length;
+      fprintf(fp, "LIST %s %d\n", names[i], count);
+      if (i == 1 && dense_passive_mode()) {
+        struct dense_fpa_context ctx;
+        ctx.fp = fp;
+        dense_passive_foreach(write_dense_fpa_visit, &ctx);
+        continue;
+      }
       for (p = lists[i]->first; p != NULL; p = p->next) {
-        Topform c = p->c;
-        Literals lit;
-        int term_count = 0;
-        for (lit = c->literals; lit; lit = lit->next)
-          term_count += symbol_count(lit->atom);
-        fprintf(fp, "%d", term_count);
-        for (lit = c->literals; lit; lit = lit->next)
-          write_term_fpa_ids(fp, lit->atom);
-        fprintf(fp, "\n");
+        write_clause_fpa_ids(fp, p->c);
       }
     }
   }
@@ -6222,6 +7476,9 @@ void restore_checkpoint_formulas(const char *dir)
 static
 void write_clause_justification(FILE *fp, Topform c)
 {
+  BOOL was_packed = c->compressed != NULL && c->packed_justification;
+  if (was_packed && !materialize_clause(c))
+    fatal_error("write_clause_justification: invalid cold clause");
   if (c->id != 0 && c->justification != NULL) {
     String_buf sb = get_string_buf();
     sb_write_just(sb, c->justification, NULL);
@@ -6230,6 +7487,8 @@ void write_clause_justification(FILE *fp, Topform c)
     fprintf(fp, "\n");
     zap_string_buf(sb);
   }
+  if (was_packed && !recompress_clause(c))
+    fatal_error("write_clause_justification: cannot restore cold clause");
 }
 
 static
@@ -6240,11 +7499,26 @@ void write_clist_justifications(FILE *fp, Clist lst)
     write_clause_justification(fp, p->c);
 }  /* write_clist_justifications */
 
+static void write_dense_justification_visit(
+  const struct dense_passive_view *view, void *context)
+{
+  FILE *fp = context;
+  Topform c = materialize_dense_passive(view);
+  write_clause_justification(fp, c);
+  cold_passive_store_release(c);
+}
+
 static
 void write_clause_store_justifications(FILE *fp, Clause_store store)
 {
   size_t i;
   for (i = 0; i < clause_store_length(store); i++) {
+    unsigned long long id;
+    if (!clause_store_position_is_current(store, i))
+      continue;
+    id = clause_store_id(store, i);
+    if (dense_passive_contains_id(id))
+      continue;
     Topform c = clause_store_materialize(store, i);
     if (c == NULL)
       fatal_error("write_clause_store_justifications: corrupt ancestor record");
@@ -6275,7 +7549,10 @@ void write_justifications(const char *dir)
     return;
   }
 
-  write_clist_justifications(fp, Glob.sos);
+  if (dense_passive_mode())
+    dense_passive_foreach(write_dense_justification_visit, fp);
+  else
+    write_clist_justifications(fp, Glob.sos);
   write_clist_justifications(fp, Glob.usable);
   write_clist_justifications(fp, Glob.demods);
   if (Glob.hints->length > 0)
@@ -6423,6 +7700,110 @@ void write_checkpoint_input(const char *dir)
   fclose(fp);
 }  /* write_checkpoint_input */
 
+static
+void write_collective_checkpoint(const char *dir)
+{
+  char path[600];
+  FILE *fp;
+  unsigned long long i;
+  struct collective_batch *b;
+  const char magic[8] = {'P','9','C','O','L','L','4','\0'};
+  uint32_t turn = Collective_batch_turn ? 1U : 0U;
+  uint32_t givens_since_batch = Collective_givens_since_batch;
+
+  if (!collective_frontier_mode())
+    return;
+  snprintf(path, sizeof(path), "%s/collective_frontier.bin", dir);
+  fp = fopen(path, "wb");
+  if (fp == NULL)
+    fatal_error("write_collective_checkpoint: cannot create state file");
+  if (fwrite(magic, sizeof(magic), 1, fp) != 1 ||
+      fwrite(&Collective_activation_count,
+             sizeof(Collective_activation_count), 1, fp) != 1 ||
+      fwrite(&Collective_batch_count, sizeof(Collective_batch_count), 1, fp) != 1 ||
+      fwrite(&turn, sizeof(turn), 1, fp) != 1 ||
+      fwrite(&givens_since_batch, sizeof(givens_since_batch), 1, fp) != 1)
+    fatal_error("write_collective_checkpoint: header write failed");
+
+  for (i = 0; i < Collective_activation_count; i++) {
+    unsigned long long id = collective_activation_id(i);
+    uint32_t deactivated = collective_deactivation_epoch(id);
+    if (fwrite(&id, sizeof(id), 1, fp) != 1 ||
+        fwrite(&deactivated, sizeof(deactivated), 1, fp) != 1)
+      fatal_error("write_collective_checkpoint: history write failed");
+  }
+  for (b = Collective_batch_head; b != NULL; b = b->next) {
+    uint32_t epoch = b->snapshot_epoch;
+    uint32_t kind = b->kind;
+    if (fwrite(&b->given_id, sizeof(b->given_id), 1, fp) != 1 ||
+        fwrite(&b->cursor, sizeof(b->cursor), 1, fp) != 1 ||
+        fwrite(&b->activation_limit, sizeof(b->activation_limit), 1, fp) != 1 ||
+        fwrite(&epoch, sizeof(epoch), 1, fp) != 1 ||
+        fwrite(&kind, sizeof(kind), 1, fp) != 1)
+      fatal_error("write_collective_checkpoint: descriptor write failed");
+  }
+  if (fclose(fp) != 0)
+    fatal_error("write_collective_checkpoint: close failed");
+}
+
+static
+void read_collective_checkpoint(const char *dir)
+{
+  char path[600], magic[8];
+  FILE *fp;
+  unsigned long long activations, batches, i;
+  uint32_t turn, givens_since_batch;
+
+  if (!collective_frontier_mode())
+    return;
+  snprintf(path, sizeof(path), "%s/collective_frontier.bin", dir);
+  fp = fopen(path, "rb");
+  if (fp == NULL)
+    fatal_error("resume: collective frontier state is missing");
+  if (fread(magic, sizeof(magic), 1, fp) != 1 ||
+      memcmp(magic, "P9COLL4", 7) != 0 ||
+      fread(&activations, sizeof(activations), 1, fp) != 1 ||
+      fread(&batches, sizeof(batches), 1, fp) != 1 ||
+      fread(&turn, sizeof(turn), 1, fp) != 1 ||
+      fread(&givens_since_batch, sizeof(givens_since_batch), 1, fp) != 1)
+    fatal_error("resume: corrupt collective frontier header");
+
+  for (i = 0; i < activations; i++) {
+    unsigned long long id;
+    uint32_t deactivated;
+    if (fread(&id, sizeof(id), 1, fp) != 1 ||
+        fread(&deactivated, sizeof(deactivated), 1, fp) != 1)
+      fatal_error("resume: truncated collective activation history");
+    collective_append_activation_id(id);
+    collective_set_deactivation_epoch(id, deactivated);
+  }
+  for (i = 0; i < batches; i++) {
+    struct collective_batch *b = safe_calloc(1, sizeof(*b));
+    uint32_t epoch, kind;
+    if (fread(&b->given_id, sizeof(b->given_id), 1, fp) != 1 ||
+        fread(&b->cursor, sizeof(b->cursor), 1, fp) != 1 ||
+        fread(&b->activation_limit, sizeof(b->activation_limit), 1, fp) != 1 ||
+        fread(&epoch, sizeof(epoch), 1, fp) != 1 ||
+        fread(&kind, sizeof(kind), 1, fp) != 1)
+      fatal_error("resume: truncated collective batch queue");
+    if (b->cursor > b->activation_limit ||
+        b->activation_limit > Collective_activation_count)
+      fatal_error("resume: invalid collective batch cursor");
+    b->snapshot_epoch = epoch;
+    if (kind == 0 ||
+        (kind & ~(COLLECTIVE_PARAMOD | COLLECTIVE_POS_HYPER |
+                  COLLECTIVE_NEG_HYPER)) != 0)
+      fatal_error("resume: invalid collective batch kind");
+    b->kind = kind;
+    collective_append_batch(b);
+  }
+  Collective_batch_turn = turn != 0;
+  Collective_givens_since_batch = givens_since_batch;
+  if (fgetc(fp) != EOF)
+    fatal_error("resume: trailing data in collective frontier state");
+  fclose(fp);
+}
+
 /*************
  *
  *   write_checkpoint()
@@ -6440,6 +7821,8 @@ void write_checkpoint(void)
 
   if (!clause_store_sync(Glob.disabled))
     fatal_error("write_checkpoint: cannot synchronize ancestor store");
+  if (!cold_passive_store_sync(Dense_body_store))
+    fatal_error("write_checkpoint: cannot synchronize passive store");
 
   /* Build directory names */
   n = snprintf(finaldir, sizeof(finaldir),
@@ -6470,6 +7853,11 @@ void write_checkpoint(void)
     fprintf(fp, "max_clause_id %llu\n", clause_ids_assigned());
     fprintf(fp, "given %llu\n", Stats.given);
     fprintf(fp, "generated %llu\n", Stats.generated);
+    fprintf(fp, "generated_binary %llu\n", Stats.generated_binary);
+    fprintf(fp, "generated_hyper %llu\n", Stats.generated_hyper);
+    fprintf(fp, "generated_ur %llu\n", Stats.generated_ur);
+    fprintf(fp, "generated_paramod %llu\n", Stats.generated_paramod);
+    fprintf(fp, "generated_other %llu\n", Stats.generated_other);
     fprintf(fp, "kept %llu\n", Stats.kept);
     fprintf(fp, "proofs %llu\n", Stats.proofs);
     fprintf(fp, "back_subsumed %llu\n", Stats.back_subsumed);
@@ -6492,6 +7880,28 @@ void write_checkpoint(void)
     fprintf(fp, "deleted_by_rule %llu\n", Stats.deleted_by_rule);
     fprintf(fp, "sos_displaced %llu\n", Stats.sos_displaced);
     fprintf(fp, "sos_removed %llu\n", Stats.sos_removed);
+    fprintf(fp, "passive_refresh_checks %llu\n",
+            Stats.passive_refresh_checks);
+    fprintf(fp, "passive_refresh_requeued %llu\n",
+            Stats.passive_refresh_requeued);
+    fprintf(fp, "passive_refresh_subsumed %llu\n",
+            Stats.passive_refresh_subsumed);
+    fprintf(fp, "collective_batches_created %llu\n",
+            Stats.collective_batches_created);
+    fprintf(fp, "collective_batches_completed %llu\n",
+            Stats.collective_batches_completed);
+    fprintf(fp, "collective_pair_expansions %llu\n",
+            Stats.collective_pair_expansions);
+    fprintf(fp, "collective_hyper_expansions %llu\n",
+            Stats.collective_hyper_expansions);
+    fprintf(fp, "collective_partners_skipped %llu\n",
+            Stats.collective_partners_skipped);
+    fprintf(fp, "collective_parent_materializations %llu\n",
+            Stats.collective_parent_materializations);
+    fprintf(fp, "collective_batches_peak %llu\n",
+            Stats.collective_batches_peak);
+    fprintf(fp, "simplifier_epoch %u\n", Simplifier_epoch);
+    fprintf(fp, "hint_state_epoch %llu\n", hint_state_epoch());
     fprintf(fp, "user_seconds %.2f\n", user_seconds());
     /* Save Low selector cycle state for deterministic resume */
     {
@@ -6527,6 +7937,8 @@ void write_checkpoint(void)
     fclose(fp);
   }
 
+  write_collective_checkpoint(tmpdir);
+
   /* 2. Write clause_data.txt and clause files */
   {
     char cdata_path[600];
@@ -6553,8 +7965,12 @@ void write_checkpoint(void)
     snprintf(cpath, sizeof(cpath), "%s/sos.clauses", tmpdir);
     fp = fopen(cpath, "w");
     if (fp) {
-      total_clauses += write_clist_bare(fp, data_fp, Glob.sos, "sos",
-                                        seen_tab, SEEN_TAB_SIZE);
+      if (dense_passive_mode())
+        total_clauses += write_dense_bare(fp, data_fp, "sos",
+                                          seen_tab, SEEN_TAB_SIZE);
+      else
+        total_clauses += write_clist_bare(fp, data_fp, Glob.sos, "sos",
+                                          seen_tab, SEEN_TAB_SIZE);
       fclose(fp);
     }
 
@@ -6842,6 +8258,7 @@ struct clause_meta {
   int hint_match; /* matched hint ID (1-based), 0 if none */
   int used;       /* c->used flag */
   int was_given;  /* c->was_given flag */
+  unsigned simplifier_epoch; /* DISCOUNT active-state generation */
   unsigned long long last_matched; /* hint last_matched_given (for expiry) */
   int redundant_hint; /* hint was in Redundant_hints at checkpoint time */
   unsigned aflags[10]; /* atom private_flags per literal (max 10 lits) */
@@ -6870,6 +8287,7 @@ int load_clause_data(const char *dir, struct clause_meta **out)
     m->hint_match = 0;
     m->used = 0;
     m->was_given = 0;
+    m->simplifier_epoch = 0;
     m->last_matched = 0;
     m->redundant_hint = 0;
     m->aflags_count = 0;
@@ -6885,6 +8303,9 @@ int load_clause_data(const char *dir, struct clause_meta **out)
         m->used = 1;
       if (strstr(line, "was_given") != NULL)
         m->was_given = 1;
+      p = strstr(line, "simplifier_epoch");
+      if (p != NULL)
+        sscanf(p, "simplifier_epoch %u", &m->simplifier_epoch);
       p = strstr(line, "last_matched");
       if (p != NULL)
         sscanf(p, "last_matched %llu", &m->last_matched);
@@ -6963,6 +8384,8 @@ Clist load_clauses_from_file(const char *dir, const char *filename,
         c->initial = meta[meta_pos].initial;
         c->used = meta[meta_pos].used;
         c->was_given = meta[meta_pos].was_given;
+        c->simplifier_epoch = meta[meta_pos].simplifier_epoch;
+        c->last_matched_given = meta[meta_pos].last_matched;
         if (!skip_register)
           register_clause_with_id(c);
         meta_pos++;
@@ -6978,6 +8401,8 @@ Clist load_clauses_from_file(const char *dir, const char *filename,
             c->initial = meta[j].initial;
             c->used = meta[j].used;
             c->was_given = meta[j].was_given;
+            c->simplifier_epoch = meta[j].simplifier_epoch;
+            c->last_matched_given = meta[j].last_matched;
             if (!skip_register)
               register_clause_with_id(c);
             break;
@@ -7116,6 +8541,11 @@ void resume_load_clauses(const char *dir)
   /* Read stats */
   rewind(fp); Stats.given = read_metadata_ull(fp, "given");
   rewind(fp); Stats.generated = read_metadata_ull(fp, "generated");
+  rewind(fp); Stats.generated_binary = read_metadata_ull(fp, "generated_binary");
+  rewind(fp); Stats.generated_hyper = read_metadata_ull(fp, "generated_hyper");
+  rewind(fp); Stats.generated_ur = read_metadata_ull(fp, "generated_ur");
+  rewind(fp); Stats.generated_paramod = read_metadata_ull(fp, "generated_paramod");
+  rewind(fp); Stats.generated_other = read_metadata_ull(fp, "generated_other");
   rewind(fp); Stats.kept = read_metadata_ull(fp, "kept");
   rewind(fp); Stats.proofs = read_metadata_ull(fp, "proofs");
   rewind(fp); Stats.back_subsumed = read_metadata_ull(fp, "back_subsumed");
@@ -7138,6 +8568,35 @@ void resume_load_clauses(const char *dir)
   rewind(fp); Stats.deleted_by_rule = read_metadata_ull(fp, "deleted_by_rule");
   rewind(fp); Stats.sos_displaced = read_metadata_ull(fp, "sos_displaced");
   rewind(fp); Stats.sos_removed = read_metadata_ull(fp, "sos_removed");
+  rewind(fp); Stats.passive_refresh_checks =
+    read_metadata_ull(fp, "passive_refresh_checks");
+  rewind(fp); Stats.passive_refresh_requeued =
+    read_metadata_ull(fp, "passive_refresh_requeued");
+  rewind(fp); Stats.passive_refresh_subsumed =
+    read_metadata_ull(fp, "passive_refresh_subsumed");
+  if (collective_frontier_mode()) {
+    rewind(fp); Stats.collective_batches_created =
+      read_metadata_ull(fp, "collective_batches_created");
+    rewind(fp); Stats.collective_batches_completed =
+      read_metadata_ull(fp, "collective_batches_completed");
+    rewind(fp); Stats.collective_pair_expansions =
+      read_metadata_ull(fp, "collective_pair_expansions");
+    rewind(fp); Stats.collective_hyper_expansions =
+      read_metadata_ull(fp, "collective_hyper_expansions");
+    rewind(fp); Stats.collective_partners_skipped =
+      read_metadata_ull(fp, "collective_partners_skipped");
+    rewind(fp); Stats.collective_parent_materializations =
+      read_metadata_ull(fp, "collective_parent_materializations");
+    rewind(fp); Stats.collective_batches_peak =
+      read_metadata_ull(fp, "collective_batches_peak");
+  }
+  rewind(fp); Simplifier_epoch =
+    (unsigned) read_metadata_ull(fp, "simplifier_epoch");
+  if (Simplifier_epoch == 0)
+    Simplifier_epoch = 1;
+  rewind(fp); Resume_hint_epoch = read_metadata_ull(fp, "hint_state_epoch");
+  if (Resume_hint_epoch == 0)
+    Resume_hint_epoch = 1;
 
   /* Restore accumulated CPU time from original run so max_seconds and
      reporting account for total time across checkpoint/resume cycles. */
@@ -7430,11 +8889,15 @@ void load_checkpoint_into_loop(void)
   Clist_pos p;
   int fpa_depth;
 
+  collective_clear_state();
+
   /* 0a. Drop the old disabled/archive store before clearing its tagged ID
      entries.  This matters for the in-process save+reload harness; a fresh
      resume process reaches the same empty state. */
   clause_store_delete_clauses(Glob.disabled);
   Glob.disabled = new_disabled_store();
+  cold_passive_store_free(Dense_body_store);
+  Dense_body_store = dense_passive_mode() ? new_dense_body_store() : NULL;
 
   /* Clear clause ID hash table so stale entries don't shadow
      newly-loaded clauses (critical for in-process save+reload). */
@@ -7449,15 +8912,24 @@ void load_checkpoint_into_loop(void)
     snprintf(spath, sizeof(spath), "%s/symbols.txt", Resume_dir);
     sfp = fopen(spath, "r");
     if (sfp) {
-      int max_sn, sn, arity, restored = 0;
-      char name[512];
-      if (fscanf(sfp, "%d", &max_sn) == 1) {
-        while (fscanf(sfp, "%d %d %511s", &sn, &arity, name) == 3) {
-          int actual_sn = str_to_sn(name, arity);
-          if (actual_sn != sn)
-            fprintf(stderr, "WARNING: symbol %s/%d: expected sn=%d, got %d\n",
-                    name, arity, sn, actual_sn);
-          restored++;
+      char line[4096];
+      int restored = 0;
+      if (fgets(line, sizeof(line), sfp) != NULL) {
+        while (fgets(line, sizeof(line), sfp) != NULL) {
+          int sn, arity, used = 0;
+          if (sscanf(line, "%d %d %n", &sn, &arity, &used) == 2) {
+            char *name = line + used;
+            size_t len = strlen(name);
+            int actual_sn;
+            while (len > 0 && (name[len-1] == '\n' || name[len-1] == '\r'))
+              name[--len] = '\0';
+            if (len == 0)
+              fatal_error("resume: empty symbol name in symbols.txt");
+            actual_sn = str_to_sn(name, arity);
+            if (actual_sn != sn)
+              fatal_error("resume: symbols.txt symnum mismatch");
+            restored++;
+          }
         }
       }
       fclose(sfp);
@@ -7480,6 +8952,9 @@ void load_checkpoint_into_loop(void)
 
   /* 2. Load checkpoint data */
   resume_load_clauses(Resume_dir);
+#ifndef PRIMITIVE_ENVIRONMENT
+  read_collective_checkpoint(Resume_dir);
+#endif
   restore_fpa_ids(Resume_dir);
 #ifndef PRIMITIVE_ENVIRONMENT
   restore_checkpoint_formulas(Resume_dir);
@@ -7595,8 +9070,6 @@ void load_checkpoint_into_loop(void)
      symbol_order uses the preliminary precedence + clause symbols
      to assign lex_val (the actual precedence used by term ordering). */
   symbol_order(Glob.usable, Glob.sos, Glob.demods, !flag(Opt->quiet));
-
-
   /* 3. Re-initialize indexes (old indexes are leaked - acceptable for
      in-process save+reload testing and cross-process resume alike) */
 
@@ -7620,7 +9093,8 @@ void load_checkpoint_into_loop(void)
   init_hints(ORDINARY_UNIF, Att.bsub_hint_wt,
              flag(Opt->collect_hint_labels),
              flag(Opt->back_demod_hints),
-             parm(Opt->hints_fpa_depth),
+             configured_hint_fpa_depth(),
+             str_ident(stringparm1(Opt->hint_index), "packed"),
              demodulate_clause);
   set_hint_match_stats(flag(Opt->hint_match_stats));
   set_hint_match_once(flag(Opt->hint_match_once));
@@ -7637,6 +9111,7 @@ void load_checkpoint_into_loop(void)
   {
     int n_usable, n_sos, n_all, idx;
     Topform *all_clauses;  /* merged usable+SOS for ID-sorted indexing */
+    char *is_usable;
 
     /* Build merged array of usable + SOS clauses */
     n_usable = Glob.usable->length;
@@ -7652,6 +9127,22 @@ void load_checkpoint_into_loop(void)
     /* Sort by clause ID (reproduces original insertion order) */
     qsort(all_clauses, n_all, sizeof(Topform), topform_id_qsort_compare);
 
+    is_usable = (char *) safe_calloc(n_all, sizeof(char));
+    for (p = Glob.usable->first; p != NULL; p = p->next) {
+      int lo = 0, hi = n_all - 1;
+      while (lo <= hi) {
+	int mid = lo + (hi - lo) / 2;
+	if (all_clauses[mid]->id == p->c->id) {
+	  is_usable[mid] = 1;
+	  break;
+	}
+	else if (all_clauses[mid]->id < p->c->id)
+	  lo = mid + 1;
+	else
+	  hi = mid - 1;
+      }
+    }
+
     /* Set container links for all clauses (needed regardless of index method) */
     for (idx = 0; idx < n_all; idx++)
       upward_clause_links(all_clauses[idx]);
@@ -7661,6 +9152,12 @@ void load_checkpoint_into_loop(void)
     {
       BOOL fpa_restored = FALSE;
 
+      /* Collective hyper batches are sensitive to complete clashable-leaf
+         multiplicity.  Until the serialized Lindex format has a dedicated
+         multiplicity check, rebuild the comparatively small active indexes
+         from clauses instead of accepting a structurally valid but lossy
+         fast restore. */
+      if (!collective_frontier_mode()) {
       /* Build FPA_ID -> Term* lookup table for trie restore */
       {
         unsigned id_count = get_fpa_id_count();
@@ -7734,45 +9231,79 @@ void load_checkpoint_into_loop(void)
       }
 
       fpa_free_id_table();
+      }
 
       if (!fpa_restored) {
         /* Fallback: rebuild FPA indexes from scratch (format 3 checkpoints
            or missing FPA trie files). */
-        char *is_usable = (char *) safe_calloc(n_all, sizeof(char));
-        for (p = Glob.usable->first; p != NULL; p = p->next) {
-          int lo = 0, hi = n_all - 1;
-          while (lo <= hi) {
-            int mid = lo + (hi - lo) / 2;
-            if (all_clauses[mid]->id == p->c->id) {
-              is_usable[mid] = 1; break;
-            }
-            else if (all_clauses[mid]->id < p->c->id) lo = mid + 1;
-            else hi = mid - 1;
-          }
-        }
         fprintf(stderr, "%% FPA trie files not found, rebuilding indexes...\n");
-        fprintf(stderr, "%% Indexing %d clauses...\n", n_all);
+        fprintf(stderr, "%% Indexing %d %s clauses...\n",
+                discount_mode() ? n_usable : n_all,
+                discount_mode() ? "active" : "active/passive");
         fflush(stderr);
         for (idx = 0; idx < n_all; idx++) {
           Topform c = all_clauses[idx];
-          index_literals_fpa_only(c, INSERT, Clocks.index, FALSE);
-          index_back_demod(c, INSERT, Clocks.index, flag(Opt->back_demod));
-          if (is_usable[idx])
+          if ((!discount_mode() || is_usable[idx]) &&
+              !collective_frontier_mode()) {
+            index_literals_fpa_only(c, INSERT, Clocks.index, FALSE);
+            index_back_demod(c, INSERT, Clocks.index, flag(Opt->back_demod));
+          }
+          /* In collective mode, rebuild the clashable index below by
+             replaying activation history.  Its leaf ordering affects the
+             order in which a hyper batch presents conclusions to
+             cl_process(), and therefore which equivalent conclusion is
+             retained first.  Clause-ID order is not activation order. */
+          if (is_usable[idx] && !collective_frontier_mode())
             index_clashable(c, INSERT);
           if ((idx + 1) % 1000000 == 0) {
             fprintf(stderr, "%%   %d / %d clauses indexed...\n", idx + 1, n_all);
             fflush(stderr);
           }
         }
-        safe_free(is_usable);
+
+        if (collective_frontier_mode()) {
+          unsigned long long position;
+          for (position = 0; position < Collective_activation_count;
+               position++) {
+            unsigned long long id = collective_activation_id(position);
+            Topform c;
+            if (collective_deactivation_epoch(id) != 0)
+              continue;
+            c = find_clause_by_id(id);
+            if (c == NULL || !clist_member(c, Glob.usable))
+              fatal_error("resume: active history does not match usable set");
+            index_literals_fpa_only(c, INSERT, Clocks.index, FALSE);
+            index_back_demod(c, INSERT, Clocks.index, flag(Opt->back_demod));
+            index_clashable(c, INSERT);
+          }
+        }
       }
 
       /* The serialized FPA tries do not include the nonunit feature tree
          used by forward/back subsumption.  Rebuild it for both the fast
          restore and fallback paths. */
-      for (idx = 0; idx < n_all; idx++)
-        index_literals_features_only(all_clauses[idx], INSERT, Clocks.index);
+      if (collective_frontier_mode()) {
+        unsigned long long position;
+        for (position = 0; position < Collective_activation_count;
+             position++) {
+          unsigned long long id = collective_activation_id(position);
+          Topform c;
+          if (collective_deactivation_epoch(id) != 0)
+            continue;
+          c = find_clause_by_id(id);
+          if (c == NULL || !clist_member(c, Glob.usable))
+            fatal_error("resume: active history does not match usable set");
+          index_literals_features_only(c, INSERT, Clocks.index);
+        }
+      }
+      else {
+        for (idx = 0; idx < n_all; idx++) {
+          if (!discount_mode() || is_usable[idx])
+            index_literals_features_only(all_clauses[idx], INSERT, Clocks.index);
+        }
+      }
     }
+    safe_free(is_usable);
     safe_free(all_clauses);
 
     /* Set up container links for demodulators (needed for demod index
@@ -7822,6 +9353,9 @@ void load_checkpoint_into_loop(void)
         else
           index_hint(h);  /* NOTE: this zeroes h->weight */
       }
+      /* Index reconstruction advances the epoch internally; restore the
+         logical search-state epoch saved at the checkpoint boundary. */
+      set_hint_state_epoch(Resume_hint_epoch);
     }
 
     /* Restore hint degradation weights and last_matched_given from
@@ -7892,7 +9426,18 @@ void load_checkpoint_into_loop(void)
       fprintf(stderr, "%% Bulk-inserting %d SOS clauses into selection queue...\n",
               Glob.sos->length);
       fflush(stderr);
+      /* Dense insertion destroys each resident Topform after archiving it,
+         so compute the DISCOUNT generation stamp/delayed-demodulator bit
+         while the restored body is still resident. */
+      if (discount_mode() && dense_passive_mode()) {
+        for (p = Glob.sos->first; p != NULL; p = p->next)
+          prepare_discount_passive(p->c, FALSE);
+      }
       bulk_insert_into_sos2(Glob.sos);
+      if (discount_mode() && !dense_passive_mode()) {
+        for (p = Glob.sos->first; p != NULL; p = p->next)
+          prepare_discount_passive(p->c, FALSE);
+      }
     }
   }
 
@@ -7986,6 +9531,18 @@ Prover_results search(Prover_input p)
       print_separator(stdout, "PROCESS INITIAL CLAUSES", TRUE);
 
     Opt = p->options;          // put options into a global variable
+    Current_inference_source = INFER_SOURCE_OTHER;
+    collective_reset_state();
+    if (str_ident(stringparm1(Opt->inference_frontier), "collective")) {
+      if (!discount_mode())
+	fatal_error("inference_frontier=collective requires search_loop=discount");
+      if (str_ident(stringparm1(Opt->ancestor_store), "off"))
+	fatal_error("inference_frontier=collective requires ancestor_store=memory or mmap");
+      /* A delayed parent may already be disabled when a checkpoint is
+	 resumed, so collective checkpoints necessarily include ancestors. */
+      if (!flag(Opt->checkpoint_ancestors))
+	set_flag(Opt->checkpoint_ancestors, !flag(Opt->quiet));
+    }
     Glob.initialized = TRUE;   // this signifies that Glob is being used
     Glob.has_goals = p->has_goals;  // for SZS status: Theorem vs Unsatisfiable
     Glob.has_neg_conj = p->has_neg_conj; // CNF negated_conjecture (refutation)
@@ -8030,6 +9587,18 @@ Prover_results search(Prover_input p)
     Glob.demods  = move_clauses_to_clist(p->demods,"demodulators",FALSE);
     Glob.hints   = move_clauses_to_clist(p->hints, "hints", FALSE);
 
+    /* Do not let parsed hint term forests overlap the packed feature bank.
+       The indexing pass below materializes one hint at a time.  This is an
+       important peak-memory property for large AIM hint files, not merely a
+       steady-state optimization. */
+    if (str_ident(stringparm1(Opt->hint_index), "packed")) {
+      Clist_pos hp;
+      for (hp = Glob.hints->first; hp != NULL; hp = hp->next) {
+        if (compress_clause(hp->c) == CLAUSE_COMPRESS_INVALID)
+          fatal_error("search: cannot precompress packed hint");
+      }
+    }
+
     Glob.weights          = tlist_copy(p->weights);
     Glob.resonators       = tlist_copy(p->resonators);
     Glob.kbo_weights      = tlist_copy(p->kbo_weights);
@@ -8044,6 +9613,19 @@ Prover_results search(Prover_input p)
     Glob.limbo    = clist_init("limbo");
     Glob.disabled = new_disabled_store();
     Glob.empties  = NULL;
+    cold_passive_store_free(Dense_body_store);
+    Dense_body_store = NULL;
+    if (dense_passive_mode()) {
+      if (str_ident(stringparm1(Opt->ancestor_store), "off"))
+        fatal_error("passive_store=dense requires ancestor_store=memory or mmap");
+      if (parm(Opt->sos_limit) != -1)
+        fatal_error("passive_store=dense currently requires sos_limit=-1");
+      Dense_body_store = new_dense_body_store();
+      configure_dense_passive(TRUE, archive_dense_passive,
+                              activate_dense_passive);
+    }
+    else
+      configure_dense_passive(FALSE, NULL, NULL);
 
     if (p->resume_dir) {
       // Resume from checkpoint.  Minimal setup here - the actual checkpoint
@@ -8160,6 +9742,8 @@ Prover_results search(Prover_input p)
 
     while (Load_checkpoint || inferences_to_make()) {
 
+      unsigned long long given_before_iteration = Stats.given;
+
 #ifndef __EMSCRIPTEN__
       // Checkpoint save triggers (periodic / SIGUSR2).
       // Skip on the first iteration if we are loading a checkpoint.
@@ -8225,13 +9809,15 @@ Prover_results search(Prover_input p)
         done_with_search(MAX_SECONDS_EXIT);
 #endif
 
-      if (Progress_callback && Stats.given % 100 == 0)
+      if (Progress_callback && Stats.given != given_before_iteration &&
+	  Stats.given % 100 == 0)
         Progress_callback(STAGE_SEARCHING, (int) Stats.given, (int) Stats.kept,
                           (int) Stats.sos_size, (int) Stats.usable_size,
                           (int) megs_malloced());
 
       /* Periodic hint expiry sweep */
-      if (parm(Opt->hint_expiry) > 0 &&
+      if (Stats.given != given_before_iteration &&
+	  parm(Opt->hint_expiry) > 0 &&
 	  Stats.given % (unsigned long long) parm(Opt->hint_sweep_interval) == 0) {
 	int expired = expire_old_hints(Stats.given,
 				       (unsigned long long) parm(Opt->hint_expiry),

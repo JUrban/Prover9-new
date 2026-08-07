@@ -71,6 +71,12 @@ memory-tests:
 bookkeeping-tests:
 	cd test.src && $(MAKE) bookkeeping-tests
 
+discount-tests: all
+	./test.src/discount_loop_test.sh
+	./test.src/collective_frontier_test.sh
+	./test.src/hint_index_trace_test.sh
+	./test.src/dense_passive_test.sh
+
 clean:
 	cd ladr             && $(MAKE) realclean
 	cd apps.src         && $(MAKE) realclean

@@ -51,7 +51,11 @@ ancestor_store_scale_test: ancestor_store_scale_test.o ../ladr/libladr.a
 checkpoint_selector_test: checkpoint_selector_test.o ../provers.src/giv_select.o ../provers.src/semantics.o ../ladr/libladr.a
 	$(CC) $(CFLAGS) -o checkpoint_selector_test checkpoint_selector_test.o ../provers.src/giv_select.o ../provers.src/semantics.o ../ladr/libladr.a -lm
 
-bookkeeping_lifecycle_test.o: ../ladr/topform.h ../ladr/clause_store.h ../ladr/clauseid.h
+memory_lifecycle_test.o allocator_churn_test.o bookkeeping_lifecycle_test.o ancestor_store_test.o: ../ladr/topform.h
+
+bookkeeping_lifecycle_test.o: ../ladr/clause_store.h ../ladr/clauseid.h
+
+ancestor_store_test.o: ../ladr/clause_store.h ../ladr/clauseid.h ../ladr/compress.h
 
 memory-tests: memory_lifecycle_test allocator_churn_test bookkeeping_lifecycle_test ancestor_store_test
 	./memory_lifecycle_test

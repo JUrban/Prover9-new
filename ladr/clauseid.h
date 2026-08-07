@@ -44,10 +44,17 @@ void assign_clause_id(Topform c);
 
 void unassign_clause_id(Topform c);
 
+/* Remove a live clause from the ID table without changing c->id.  This is
+   used while a passive clause is represented only by a compact store record. */
+BOOL detach_clause_id(Topform c);
+
 Topform find_clause_by_id(unsigned long long id);
 
 /* Archived entries are tagged offsets, never Topform pointers. */
 BOOL archive_clause_id(Topform c, unsigned long long offset);
+
+BOOL activate_archived_clause_id(Topform c,
+                                 unsigned long long expected_offset);
 
 BOOL clause_id_is_archived(unsigned long long id);
 

@@ -112,6 +112,66 @@ BOOL rewritable_clause(Topform demod, Topform c)
   return ok;
 }  /* rewritable_clause */
 
+static BOOL rewritable_term_direction(Term pattern, Term replacement,
+				      Term subject, Context subst,
+				      BOOL require_decrease,
+				      BOOL lex_order_vars)
+{
+  Trail tr = NULL;
+  if (match(pattern, subst, subject, &tr)) {
+    BOOL ok = TRUE;
+    if (require_decrease) {
+      Term instance = apply(replacement, subst);
+      ok = term_greater(subject, instance, lex_order_vars);
+      zap_term(instance);
+    }
+    undo_subst(tr);
+    if (ok)
+      return TRUE;
+  }
+  {
+    int i;
+    for (i = 0; i < ARITY(subject); i++) {
+      if (rewritable_term_direction(pattern, replacement, ARG(subject,i),
+                                    subst, require_decrease,
+                                    lex_order_vars))
+        return TRUE;
+    }
+  }
+  return FALSE;
+}
+
+/* PUBLIC */
+BOOL rewritable_clause_type(Topform demod, Topform c, int type,
+                            BOOL lex_order_vars)
+{
+  Term atom = demod->literals->atom;
+  Term alpha = ARG(atom,0);
+  Term beta = ARG(atom,1);
+  Context subst = get_context();
+  Literals lit;
+  BOOL ok = FALSE;
+  for (lit = c->literals; lit != NULL && !ok; lit = lit->next) {
+    int i;
+    for (i = 0; i < ARITY(lit->atom) && !ok; i++) {
+      Term subject = ARG(lit->atom,i);
+      if (type == ORIENTED)
+        ok = rewritable_term_direction(alpha, beta, subject, subst,
+                                       FALSE, lex_order_vars);
+      else {
+        if (type == LEX_DEP_LR || type == LEX_DEP_BOTH)
+          ok = rewritable_term_direction(alpha, beta, subject, subst,
+                                         TRUE, lex_order_vars);
+        if (!ok && (type == LEX_DEP_RL || type == LEX_DEP_BOTH))
+          ok = rewritable_term_direction(beta, alpha, subject, subst,
+                                         TRUE, lex_order_vars);
+      }
+    }
+  }
+  free_context(subst);
+  return ok;
+}
+
 /*************
  *
  *   back_demod_linear()
@@ -226,4 +286,3 @@ Plist back_demod_indexed(Topform demod, int type, Mindex idx,
   free_context(subst);
   return rewritables;
 }  /* back_demod_indexed */
-

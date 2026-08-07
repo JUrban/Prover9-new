@@ -85,6 +85,8 @@ struct prover_options {
     collect_hint_labels,
     hint_match_stats,        // print hint match count stats at end of search
     hint_match_once,         // unindex hint immediately after first match
+    hint_trace,              // exact committed-candidate hint tuple
+    collective_trace,        // one line per collective batch expansion
     print_matched_hints,     // print matched/unmatched hints per proof
     print_derivations,       // print derivation for clauses in hitlist file
     derivations_only,        // exit after last hitlist derivation
@@ -160,6 +162,7 @@ struct prover_options {
     new_constants,        // inference
     para_lit_limit,
     ur_nucleus_limit,
+    collective_given_ratio, // givens per collective descriptor expansion
 
     fold_denial_max,
 
@@ -236,6 +239,10 @@ struct prover_options {
     literal_selection,   // maximal, etc.
     stats,               // none, some, lots, all
     multiple_interps,    // false_in_all, false_in_some
+    search_loop,         // otter, discount
+    passive_store,       // full, compressed
+    hint_index,          // fpa, compact, shallow, packed
+    inference_frontier,  // clauses, collective
     ancestor_store;      // off, memory, mmap
 };
 
@@ -267,6 +274,11 @@ typedef struct prover_stats * Prover_stats;
 struct prover_stats {
   unsigned long long  given,
     generated,
+    generated_binary,
+    generated_hyper,
+    generated_ur,
+    generated_paramod,
+    generated_other,
     kept,
     proofs,
     kept_by_rule,
@@ -297,13 +309,49 @@ struct prover_stats {
     limbo_size,
     kbyte_usage,
     new_constants,
+    active_indexed_clauses,
+    passive_indexed_clauses,
+    delayed_demodulators,
+    passive_refresh_checks,
+    passive_refresh_requeued,
+    passive_refresh_subsumed,
+    collective_batches_created,
+    collective_batches_completed,
+    collective_pair_expansions,
+    collective_hyper_expansions,
+    collective_partners_skipped,
+    collective_parent_materializations,
+    collective_batches_pending,
+    collective_batches_peak,
+    collective_activation_entries,
+    collective_descriptor_bytes,
+    collective_history_bytes,
     compression_attempted,
     compression_successful,
     compression_skipped,
     compression_materialized,
     compression_recompressed,
     active_body_bytes,
+    passive_body_bytes,
+    passive_justification_bytes,
+    passive_total_payload_bytes,
+    passive_estimated_full_body_bytes,
+    passive_compressed_clauses,
+    dense_passive_records,
+    dense_passive_record_bytes,
+    dense_passive_heap_bytes,
+    dense_passive_arena_records,
+    dense_passive_arena_record_bytes,
+    dense_passive_arena_backing_bytes,
+    dense_passive_arena_materializations,
+    dense_passive_arena_validation_failures,
     hint_body_bytes,
+    hint_estimated_full_body_bytes,
+    hint_compressed_clauses,
+    hint_index_node_bytes,
+    hint_index_reference_bytes,
+    hint_index_table_bytes,
+    hint_candidate_checks,
     disabled_full_body_bytes,
     disabled_compressed_bytes,
     disabled_estimated_uncompressed_bytes,

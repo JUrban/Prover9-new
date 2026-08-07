@@ -60,36 +60,38 @@ struct topform {
   struct just      *justification;
   double           weight;
   char             *compressed;     /* if nonNULL, a compressed form */
-  unsigned         compressed_size; /* bytes in compressed payload */
-  unsigned         uncompressed_body_bytes; /* logical body estimate */
   Topform          matching_hint;   /* hint that matches clause, if any */
   unsigned long long last_matched_given;  /* given count at last hint match */
+
+  /* A topform is either a clause or a formula, never both.  Keeping the
+     alternatives in a union saves one pointer in every passive and hint. */
+  union {
+    Literals       literals;        /* NULL can mean the empty clause */
+    Formula        formula;
+  };
+
+  unsigned         compressed_size; /* bytes in compressed payload */
+  unsigned         uncompressed_body_bytes; /* logical body estimate */
   int              proof_tree_weight_cache;  /* memoized; -1 = unset */
 
-  /* for clauses only */
-
-  Literals         literals;        /* NULL can mean the empty clause */
-
-  /* for formulas only */
-
-  Formula          formula;
-
   int   semantics;        /* evaluation in interpretations */
+  unsigned simplifier_epoch; /* active state seen by a DISCOUNT passive */
 
-  /* The rest of the fields are flags.  These could be bits. */
-
-  char   is_formula;      /* is this really a formula? */
-  char   normal_vars;     /* variables have been renumbered */
-  char   used;            /* used to infer a clause that was kept */
-  char   official_id;     /* Topform is in the ID table */
-  char   initial;         /* existed at the start of the search */
-  char   neg_compressed;  /* negative and compressed */
-  char   subsumer;        /* has this clause back subsumed anything? */
-  char   was_given;       /* was this clause selected as given? */
-  char   goal_derived;    /* descended from a denied goal (negated conjecture) */
-  char   disabled;        /* member of the compact disabled-clause store */
-  char   archive_materialized; /* temporary object decoded from record */
-  char   cac_candidate;   /* add stable ID to the CAC trigger set when kept */
+  /* These flags used to occupy fourteen bytes. */
+  unsigned is_formula          : 1; /* is this really a formula? */
+  unsigned normal_vars         : 1; /* variables have been renumbered */
+  unsigned used                : 1; /* used to infer a clause that was kept */
+  unsigned official_id         : 1; /* Topform is in the ID table */
+  unsigned initial             : 1; /* existed at the start of the search */
+  unsigned neg_compressed      : 1; /* negative and compressed */
+  unsigned subsumer            : 1; /* has this clause back subsumed anything? */
+  unsigned was_given           : 1; /* was this clause selected as given? */
+  unsigned goal_derived        : 1; /* descended from a denied goal */
+  unsigned disabled            : 1; /* in the compact disabled-clause store */
+  unsigned archive_materialized: 1; /* decoded from an ancestor record */
+  unsigned cac_candidate       : 1; /* pending insertion in CAC trigger set */
+  unsigned delayed_demodulator : 1; /* activate as demodulator when selected */
+  unsigned packed_justification: 1; /* cold payload also owns justification */
 
 };
 

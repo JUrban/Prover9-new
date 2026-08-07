@@ -127,8 +127,10 @@ use the higher-level routine delete_clause(c) instead.
 void zap_topform(Topform tf)
 {
   discard_compressed_clause(tf);
-  zap_literals(tf->literals);
-  zap_formula(tf->formula);
+  if (tf->is_formula)
+    zap_formula(tf->formula);
+  else
+    zap_literals(tf->literals);
   zap_attributes(tf->attributes);
   free_topform(tf);
 }  /* zap_topform */

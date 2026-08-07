@@ -1,0 +1,23 @@
+clear(print_initial_clauses).
+clear(print_given).
+assign(search_loop,discount).
+assign(passive_store,compressed).
+assign(inference_frontier,collective).
+assign(collective_given_ratio,4).
+assign(hint_index,packed).
+assign(ancestor_store,mmap).
+assign(stats,all).
+assign(max_given,1000).
+assign(max_seconds,30).
+set(hyper_resolution).
+
+formulas(sos).
+  P(i(x, i(y, x))).
+  P(i(i(x, i(y, z)), i(i(x, y), i(x, z)))).
+  P(i(i(n(x), n(y)), i(y, x))).
+  -P(i(x, y)) | -P(x) | P(y).
+end_of_list.
+
+formulas(goals).
+  P(i(x, x)).
+end_of_list.

@@ -30,6 +30,44 @@
 
 /* Public function prototypes from giv_select.c */
 
+typedef size_t (*Dense_passive_archive_fn)(Topform c);
+typedef Topform (*Dense_passive_activate_fn)(size_t store_position,
+                                             unsigned long long id,
+                                             unsigned long long hint_id);
+
+/* Read-only metadata for one active dense passive.  Dense passives are
+   visited in insertion (and therefore clause-ID) order. */
+struct dense_passive_view {
+  unsigned long long id;
+  unsigned long long hint_id;
+  size_t store_position;
+  double weight;
+  unsigned simplifier_epoch;
+  int semantics;
+  BOOL delayed_demodulator;
+};
+
+typedef void (*Dense_passive_visit_fn)(
+  const struct dense_passive_view *view, void *context);
+
+void configure_dense_passive(BOOL enabled,
+                             Dense_passive_archive_fn archive_fn,
+                             Dense_passive_activate_fn activate_fn);
+
+BOOL dense_passive_enabled(void);
+
+int dense_passive_size(void);
+
+BOOL dense_passive_contains_id(unsigned long long id);
+
+void dense_passive_foreach(Dense_passive_visit_fn visit, void *context);
+
+void dense_passive_memory(unsigned long long *record_bytes,
+                          unsigned long long *heap_bytes,
+                          unsigned long long *records);
+
+unsigned long long dense_passive_delayed_demodulators(void);
+
 void init_giv_select(Plist rules);
 
 void insert_into_sos2(Topform c, Clist sos);

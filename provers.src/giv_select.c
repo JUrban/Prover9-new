@@ -20,6 +20,7 @@
 #include "semantics.h"
 #include "../ladr/avltree.h"
 #include "../ladr/clause_eval.h"
+#include <stdint.h>
 
 /* Private definitions and types */
 
@@ -39,7 +40,26 @@ struct giv_select {
   int          selected;
   Ordertype (*compare) (void *, void *);  /* function for ordering idx */
   Avl_node idx;          /* index of clauses (binary search (AVL) tree) */
+  uint32_t *dense_heap;  /* record indexes; lazy deletion */
+  size_t dense_size;
+  size_t dense_capacity;
+  size_t dense_active;
+  unsigned dense_bit;
 };  /* struct giv_select */
+
+#define DENSE_PASSIVE_ACTIVE  0x01U
+#define DENSE_PASSIVE_DELAYED 0x02U
+
+struct dense_passive_record {
+  unsigned long long id;
+  unsigned long long hint_id;
+  unsigned long long selector_mask;
+  size_t store_position;
+  double weight;
+  unsigned simplifier_epoch;
+  int semantics;
+  unsigned flags;
+};
 
 typedef struct select_state *Select_state;
 
@@ -61,6 +81,15 @@ static int Sos_deleted = 0;
 static int Sos_displaced = 0;
 
 static BOOL Debug = FALSE;
+
+static BOOL Dense_passive = FALSE;
+static Dense_passive_archive_fn Dense_archive = NULL;
+static Dense_passive_activate_fn Dense_activate = NULL;
+static struct dense_passive_record *Dense_records = NULL;
+static size_t Dense_record_count = 0;
+static size_t Dense_record_capacity = 0;
+static size_t Dense_active_count = 0;
+static unsigned Dense_selector_count = 0;
 
 /*
  * memory management
@@ -96,6 +125,189 @@ void free_giv_select(Giv_select p)
   Giv_select_frees++;
 }  /* free_giv_select */
 
+/* PUBLIC */
+void configure_dense_passive(BOOL enabled,
+                             Dense_passive_archive_fn archive_fn,
+                             Dense_passive_activate_fn activate_fn)
+{
+  Dense_passive = enabled;
+  Dense_archive = archive_fn;
+  Dense_activate = activate_fn;
+  if (enabled && (archive_fn == NULL || activate_fn == NULL))
+    fatal_error("configure_dense_passive: callbacks are required");
+}  /* configure_dense_passive */
+
+/* PUBLIC */
+BOOL dense_passive_enabled(void)
+{
+  return Dense_passive;
+}
+
+/* PUBLIC */
+int dense_passive_size(void)
+{
+  return Dense_active_count > INT_MAX ? INT_MAX : (int) Dense_active_count;
+}
+
+/* PUBLIC */
+BOOL dense_passive_contains_id(unsigned long long id)
+{
+  size_t lo = 0, hi = Dense_record_count;
+  while (lo < hi) {
+    size_t mid = lo + (hi - lo) / 2;
+    if (Dense_records[mid].id < id)
+      lo = mid + 1;
+    else
+      hi = mid;
+  }
+  return lo < Dense_record_count && Dense_records[lo].id == id &&
+         (Dense_records[lo].flags & DENSE_PASSIVE_ACTIVE) != 0;
+}  /* dense_passive_contains_id */
+
+/* PUBLIC */
+void dense_passive_foreach(Dense_passive_visit_fn visit, void *context)
+{
+  size_t i;
+  if (visit == NULL)
+    fatal_error("dense_passive_foreach: null visitor");
+  for (i = 0; i < Dense_record_count; i++) {
+    struct dense_passive_record *r = &Dense_records[i];
+    if ((r->flags & DENSE_PASSIVE_ACTIVE) != 0) {
+      struct dense_passive_view view;
+      view.id = r->id;
+      view.hint_id = r->hint_id;
+      view.store_position = r->store_position;
+      view.weight = r->weight;
+      view.simplifier_epoch = r->simplifier_epoch;
+      view.semantics = r->semantics;
+      view.delayed_demodulator =
+        (r->flags & DENSE_PASSIVE_DELAYED) != 0;
+      visit(&view, context);
+    }
+  }
+}  /* dense_passive_foreach */
+
+/* PUBLIC */
+void dense_passive_memory(unsigned long long *record_bytes,
+                          unsigned long long *heap_bytes,
+                          unsigned long long *records)
+{
+  unsigned long long heaps = 0;
+  Plist p;
+  for (p = High.selectors; p != NULL; p = p->next) {
+    Giv_select gs = p->v;
+    heaps += (unsigned long long) gs->dense_capacity * sizeof(uint32_t);
+  }
+  for (p = Low.selectors; p != NULL; p = p->next) {
+    Giv_select gs = p->v;
+    heaps += (unsigned long long) gs->dense_capacity * sizeof(uint32_t);
+  }
+  if (record_bytes != NULL)
+    *record_bytes = (unsigned long long) Dense_record_capacity *
+                    sizeof(struct dense_passive_record);
+  if (heap_bytes != NULL)
+    *heap_bytes = heaps;
+  if (records != NULL)
+    *records = Dense_active_count;
+}  /* dense_passive_memory */
+
+/* PUBLIC */
+unsigned long long dense_passive_delayed_demodulators(void)
+{
+  unsigned long long count = 0;
+  size_t i;
+  for (i = 0; i < Dense_record_count; i++)
+    if ((Dense_records[i].flags &
+         (DENSE_PASSIVE_ACTIVE | DENSE_PASSIVE_DELAYED)) ==
+        (DENSE_PASSIVE_ACTIVE | DENSE_PASSIVE_DELAYED))
+      count++;
+  return count;
+}  /* dense_passive_delayed_demodulators */
+
+static int dense_compare(Giv_select gs, uint32_t ai, uint32_t bi)
+{
+  struct dense_passive_record *a = &Dense_records[ai];
+  struct dense_passive_record *b = &Dense_records[bi];
+  if (gs->order == GS_ORDER_WEIGHT) {
+    if (a->weight < b->weight) return -1;
+    if (a->weight > b->weight) return 1;
+  }
+  else if (gs->order == GS_ORDER_HINT_AGE) {
+    if (a->hint_id != 0 && b->hint_id == 0) return -1;
+    if (a->hint_id == 0 && b->hint_id != 0) return 1;
+    if (a->hint_id < b->hint_id) return -1;
+    if (a->hint_id > b->hint_id) return 1;
+  }
+  if (a->id < b->id) return -1;
+  if (a->id > b->id) return 1;
+  return 0;
+}
+
+static void dense_heap_push(Giv_select gs, uint32_t record)
+{
+  size_t i;
+  if (gs->dense_size == gs->dense_capacity) {
+    size_t capacity = gs->dense_capacity == 0 ? 64 :
+                      gs->dense_capacity * 2;
+    if (capacity < gs->dense_capacity ||
+        capacity > SIZE_MAX / sizeof(uint32_t))
+      fatal_error("dense_heap_push: capacity overflow");
+    gs->dense_heap = safe_realloc(gs->dense_heap,
+                                  capacity * sizeof(uint32_t));
+    gs->dense_capacity = capacity;
+  }
+  i = gs->dense_size++;
+  while (i > 0) {
+    size_t parent = (i - 1) / 2;
+    if (dense_compare(gs, gs->dense_heap[parent], record) <= 0)
+      break;
+    gs->dense_heap[i] = gs->dense_heap[parent];
+    i = parent;
+  }
+  gs->dense_heap[i] = record;
+  gs->dense_active++;
+}
+
+static void dense_heap_remove_root(Giv_select gs)
+{
+  uint32_t last;
+  size_t i = 0;
+  if (gs->dense_size == 0)
+    return;
+  last = gs->dense_heap[--gs->dense_size];
+  while (i * 2 + 1 < gs->dense_size) {
+    size_t child = i * 2 + 1;
+    if (child + 1 < gs->dense_size &&
+        dense_compare(gs, gs->dense_heap[child+1],
+                      gs->dense_heap[child]) < 0)
+      child++;
+    if (dense_compare(gs, last, gs->dense_heap[child]) <= 0)
+      break;
+    gs->dense_heap[i] = gs->dense_heap[child];
+    i = child;
+  }
+  if (gs->dense_size != 0)
+    gs->dense_heap[i] = last;
+}
+
+static void dense_heap_prune(Giv_select gs)
+{
+  unsigned long long bit = 1ULL << gs->dense_bit;
+  while (gs->dense_size != 0) {
+    struct dense_passive_record *r =
+      &Dense_records[gs->dense_heap[0]];
+    if ((r->flags & DENSE_PASSIVE_ACTIVE) != 0 &&
+        (r->selector_mask & bit) != 0)
+      break;
+    dense_heap_remove_root(gs);
+  }
+}
+
+static size_t selector_size(Giv_select gs)
+{
+  return Dense_passive ? gs->dense_active : (size_t) avl_size(gs->idx);
+}
+
 /*************
  *
  *   current_cycle_size()
@@ -109,7 +321,7 @@ int current_cycle_size(Select_state s)
   Plist p;
   for (p = s->selectors; p; p = p->next) {
     Giv_select gs = p->v;
-    if (avl_size(gs->idx) > 0)
+    if (selector_size(gs) > 0)
       sum += gs->part;
   }
   return sum;
@@ -131,15 +343,30 @@ void reset_selector_indexes(void)
   for (p = High.selectors; p; p = p->next) {
     Giv_select gs = p->v;
     gs->idx = NULL;  /* leak old AVL nodes (small, one-time) */
+    safe_free(gs->dense_heap);
+    gs->dense_heap = NULL;
+    gs->dense_size = 0;
+    gs->dense_capacity = 0;
+    gs->dense_active = 0;
     gs->selected = 0;
   }
   High.occurrences = 0;
   for (p = Low.selectors; p; p = p->next) {
     Giv_select gs = p->v;
     gs->idx = NULL;
+    safe_free(gs->dense_heap);
+    gs->dense_heap = NULL;
+    gs->dense_size = 0;
+    gs->dense_capacity = 0;
+    gs->dense_active = 0;
     gs->selected = 0;
   }
   Low.occurrences = 0;
+  safe_free(Dense_records);
+  Dense_records = NULL;
+  Dense_record_count = 0;
+  Dense_record_capacity = 0;
+  Dense_active_count = 0;
   Sos_size = 0;
 }  /* reset_selector_indexes */
 
@@ -175,6 +402,9 @@ void init_giv_select(Plist rules)
     order_term = ARG(ARG(t,0),2);
     property_term = ARG(ARG(t,0),3);
     gs = get_giv_select();
+    if (Dense_selector_count >= 64)
+      fatal_error("dense passive supports at most 64 given selectors");
+    gs->dense_bit = Dense_selector_count++;
     
     if (is_constant(ARG(ARG(t,0),1), "high")) {
       High.selectors = plist_append(High.selectors, gs);
@@ -206,6 +436,8 @@ void init_giv_select(Plist rules)
       gs->compare = (Ordertype (*) (void *, void *)) cl_hint_id_compare;
     }
     else if (is_constant(order_term,"random")) {
+      if (Dense_passive)
+        fatal_error("passive_store=dense does not yet support random selection");
       gs->order = GS_ORDER_RANDOM;
       gs->compare = (Ordertype (*) (void *, void *)) cl_id_compare;
     }
@@ -278,6 +510,123 @@ void update_selectors(Topform c, BOOL insert)
   }
 }  /* update_selectors */
 
+static unsigned long long dense_selector_mask(Topform c)
+{
+  unsigned long long mask = 0;
+  BOOL matched = FALSE;
+  Plist p;
+  for (p = High.selectors; p != NULL; p = p->next) {
+    Giv_select gs = p->v;
+    if (eval_clause_in_rule(c, gs->property)) {
+      matched = TRUE;
+      mask |= 1ULL << gs->dense_bit;
+    }
+  }
+  if (!matched) {
+    for (p = Low.selectors; p != NULL; p = p->next) {
+      Giv_select gs = p->v;
+      if (eval_clause_in_rule(c, gs->property)) {
+        matched = TRUE;
+        mask |= 1ULL << gs->dense_bit;
+      }
+    }
+  }
+  if (!matched) {
+    static BOOL Already_warned_dense = FALSE;
+    if (!Already_warned_dense) {
+      fprintf(stderr, "\n\nWARNING: one or more kept clauses do not match "
+              "any given_selection rules (see output).\n\n");
+      printf("\nWARNING: the following clause does not match "
+             "any given_selection rules.\n"
+             "This message will not be repeated.\n");
+      f_clause(c);
+      Already_warned_dense = TRUE;
+    }
+  }
+  return mask;
+}
+
+static void dense_insert_passive(Topform c)
+{
+  struct dense_passive_record r;
+  uint32_t record;
+  Plist p;
+  if (c->id == 0)
+    fatal_error("dense_insert_passive: clause has no ID");
+  if (Dense_record_count >= UINT32_MAX)
+    fatal_error("dense_insert_passive: record index overflow");
+  if (Dense_record_count != 0 &&
+      Dense_records[Dense_record_count-1].id >= c->id)
+    fatal_error("dense_insert_passive: clause IDs are not increasing");
+  if (Rule_needs_semantics)
+    set_semantics(c);
+  memset(&r, 0, sizeof(r));
+  r.id = c->id;
+  r.hint_id = c->matching_hint == NULL ? 0 : c->matching_hint->id;
+  r.selector_mask = dense_selector_mask(c);
+  r.weight = c->weight;
+  r.simplifier_epoch = c->simplifier_epoch;
+  r.semantics = c->semantics;
+  r.flags = DENSE_PASSIVE_ACTIVE |
+            (c->delayed_demodulator ? DENSE_PASSIVE_DELAYED : 0);
+  r.store_position = Dense_archive(c);
+  if (r.store_position == SIZE_MAX)
+    fatal_error("dense_insert_passive: archive failed");
+  if (Dense_record_count == Dense_record_capacity) {
+    size_t capacity = Dense_record_capacity == 0 ? 64 :
+                      Dense_record_capacity * 2;
+    if (capacity < Dense_record_capacity ||
+        capacity > SIZE_MAX / sizeof(struct dense_passive_record))
+      fatal_error("dense_insert_passive: capacity overflow");
+    Dense_records = safe_realloc(Dense_records,
+                                  capacity * sizeof(*Dense_records));
+    Dense_record_capacity = capacity;
+  }
+  record = (uint32_t) Dense_record_count;
+  Dense_records[Dense_record_count++] = r;
+  Dense_active_count++;
+  for (p = High.selectors; p != NULL; p = p->next) {
+    Giv_select gs = p->v;
+    if ((r.selector_mask & (1ULL << gs->dense_bit)) != 0) {
+      dense_heap_push(gs, record);
+      High.occurrences++;
+    }
+  }
+  for (p = Low.selectors; p != NULL; p = p->next) {
+    Giv_select gs = p->v;
+    if ((r.selector_mask & (1ULL << gs->dense_bit)) != 0) {
+      dense_heap_push(gs, record);
+      Low.occurrences++;
+    }
+  }
+  Sos_size++;
+}
+
+static void dense_deactivate_record(uint32_t record)
+{
+  struct dense_passive_record *r = &Dense_records[record];
+  Plist p;
+  if ((r->flags & DENSE_PASSIVE_ACTIVE) == 0)
+    fatal_error("dense_deactivate_record: inactive record");
+  r->flags &= ~DENSE_PASSIVE_ACTIVE;
+  Dense_active_count--;
+  for (p = High.selectors; p != NULL; p = p->next) {
+    Giv_select gs = p->v;
+    if ((r->selector_mask & (1ULL << gs->dense_bit)) != 0) {
+      gs->dense_active--;
+      High.occurrences--;
+    }
+  }
+  for (p = Low.selectors; p != NULL; p = p->next) {
+    Giv_select gs = p->v;
+    if ((r->selector_mask & (1ULL << gs->dense_bit)) != 0) {
+      gs->dense_active--;
+      Low.occurrences--;
+    }
+  }
+  Sos_size--;
+}
+
 /*************
  *
  *   insert_into_sos2()
@@ -292,6 +641,10 @@ the (private) index for extracting sos clauses.
 /* PUBLIC */
 void insert_into_sos2(Topform c, Clist sos)
 {
+  if (Dense_passive) {
+    dense_insert_passive(c);
+    return;
+  }
   if (Rule_needs_semantics)
     set_semantics(c);  /* in case not yet evaluated */
 
@@ -314,6 +667,15 @@ the index for extracting the lightest and heaviest clauses.
 /* PUBLIC */
 void remove_from_sos2(Topform c, Clist sos)
 {
+  if (Dense_passive)
+    fatal_error("remove_from_sos2: dense passives are removed by record ID");
+  /* A cold DISCOUNT passive keeps selector metadata in Topform but may not
+     have a materialized literal body.  Selector membership rules are
+     re-evaluated during removal, so restore the body before touching the AVL
+     trees.  The caller is selecting or disabling the clause and needs the
+     body in either case. */
+  if (c->compressed != NULL && !materialize_clause(c))
+    fatal_error("remove_from_sos2: invalid compressed passive clause");
   update_selectors(c, FALSE);
   clist_remove(c, sos);
   Sos_size--;
@@ -351,6 +713,15 @@ void bulk_insert_into_sos2(Clist sos)
 
   n = sos->length;
   if (n == 0) return;
+
+  if (Dense_passive) {
+    while (sos->first != NULL) {
+      Topform c = sos->first->c;
+      clist_remove(c, sos);
+      dense_insert_passive(c);
+    }
+    return;
+  }
 
   /* Build array of all clauses, evaluating semantics if needed */
   all = (void **) safe_malloc(n * sizeof(void *));
@@ -427,16 +798,20 @@ Giv_select next_selector(Select_state s)
   else {
     Plist start = s->current;
     Giv_select gs = s->current->v;
-    while (gs->idx == NULL || s->count >= gs->part) {
+    if (Dense_passive)
+      dense_heap_prune(gs);
+    while (selector_size(gs) == 0 || s->count >= gs->part) {
       s->current = s->current->next;
       if (!s->current)
 	s->current = s->selectors;
       gs = s->current->v;
+      if (Dense_passive)
+        dense_heap_prune(gs);
       s->count = 0;
       if (s->current == start)
 	break;  /* we're back to the start */
     }
-    if (gs->idx == NULL)
+    if (selector_size(gs) == 0)
       return NULL;
     else {
       s->count++;  /* for next call */
@@ -479,6 +854,23 @@ Topform get_given_clause2(Clist sos, int num_given,
     gs = next_selector(&Low);
   if (gs == NULL)
     return NULL;  /* no clauses are available */
+
+  if (Dense_passive) {
+    uint32_t record = gs->dense_heap[0];
+    struct dense_passive_record r = Dense_records[record];
+    dense_deactivate_record(record);
+    giv = Dense_activate(r.store_position, r.id, r.hint_id);
+    if (giv == NULL || giv->id != r.id)
+      fatal_error("get_given_clause2: dense archive identity mismatch");
+    giv->weight = r.weight;
+    giv->semantics = r.semantics;
+    giv->simplifier_epoch = r.simplifier_epoch;
+    giv->delayed_demodulator =
+      (r.flags & DENSE_PASSIVE_DELAYED) != 0;
+    *type = gs->name;
+    gs->selected += 1;
+    return giv;
+  }
     
   if (gs->order == GS_ORDER_RANDOM) {
     int n = avl_size(gs->idx);
@@ -701,6 +1093,7 @@ void zap_given_selectors(void)
     Giv_select gs = p->v;
     zap_clause_eval_rule(gs->property);
     avl_zap(gs->idx);
+    safe_free(gs->dense_heap);
     free_giv_select(gs);
   }
   zap_plist(High.selectors);  /* shallow */
@@ -708,8 +1101,15 @@ void zap_given_selectors(void)
     Giv_select gs = p->v;
     zap_clause_eval_rule(gs->property);
     avl_zap(gs->idx);
+    safe_free(gs->dense_heap);
+    free_giv_select(gs);
   }
   zap_plist(Low.selectors);  /* shallow */
+  safe_free(Dense_records);
+  Dense_records = NULL;
+  Dense_record_count = 0;
+  Dense_record_capacity = 0;
+  Dense_active_count = 0;
 }  /* zap_given_selectors */
 
 /*************
@@ -823,7 +1223,7 @@ void selector_report(void)
     default: s2 = "???"; break;
     }
     printf("%10s %10d %10s %10s %10d %10d\n",
-	   gs->name, gs->part, s1, s2, avl_size(gs->idx), gs->selected);
+	   gs->name, gs->part, s1, s2, (int) selector_size(gs), gs->selected);
   }
   for (p = Low.selectors; p; p = p->next) {
     Giv_select gs = p->v;
@@ -837,7 +1237,7 @@ void selector_report(void)
     default: s2 = "???"; break;
     }
     printf("%10s %10d %10s %10s %10d %10d\n",
-	   gs->name, gs->part, s1, s2, avl_size(gs->idx), gs->selected);
+	   gs->name, gs->part, s1, s2, (int) selector_size(gs), gs->selected);
   }
   print_separator(stdout, "end of selector report", FALSE);  
   fflush(stdout);

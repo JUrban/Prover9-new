@@ -200,6 +200,12 @@ static BOOL append_record(Clause_store store, Topform c,
     return FALSE;
   if (sizeof(double) != sizeof(uint64_t))
     fatal_error("append_record: ancestor format requires 64-bit double");
+  /* Cold DISCOUNT payloads co-locate their justification with the body.
+     Ancestor records have a separate, parent-indexed justification field,
+     so materialize before producing the persistent record. */
+  if (c->compressed != NULL && c->packed_justification &&
+      !materialize_clause(c))
+    return FALSE;
   if (!c->is_formula && c->literals != NULL && c->compressed == NULL) {
     Clause_compress_result cr = compress_clause(c);
     if (cr != CLAUSE_COMPRESS_OK && cr != CLAUSE_COMPRESS_ALREADY)
@@ -438,9 +444,12 @@ void clause_store_free(Clause_store store)
     uintptr_t ref = store->refs[i];
     if (ref_is_archive(ref)) {
       struct record_view v;
+      unsigned long long current;
       if (!record_view(store, ref_offset(ref), &v))
         fatal_error("clause_store_free: corrupt ancestor record");
-      unassign_archived_clause_id(v.id, ref_offset(ref));
+      if (clause_id_archive_offset(v.id, &current) &&
+          current == ref_offset(ref))
+        unassign_archived_clause_id(v.id, ref_offset(ref));
     }
     else
       ((Topform) ref)->disabled = 0;
@@ -460,9 +469,12 @@ void clause_store_delete_clauses(Clause_store store)
     uintptr_t ref = store->refs[i];
     if (ref_is_archive(ref)) {
       struct record_view v;
+      unsigned long long current;
       if (!record_view(store, ref_offset(ref), &v))
         fatal_error("clause_store_delete_clauses: corrupt ancestor record");
-      unassign_archived_clause_id(v.id, ref_offset(ref));
+      if (clause_id_archive_offset(v.id, &current) &&
+          current == ref_offset(ref))
+        unassign_archived_clause_id(v.id, ref_offset(ref));
     }
     else {
       Topform c = (Topform) ref;
@@ -533,12 +545,65 @@ size_t clause_store_length(Clause_store store)
 }
 
 /* PUBLIC */
+size_t clause_store_current_length(Clause_store store)
+{
+  size_t i, count = 0;
+  if (store == NULL)
+    return 0;
+  for (i = 0; i < store->length; i++)
+    if (clause_store_position_is_current(store, i))
+      count++;
+  return count;
+}
+
+/* PUBLIC */
 BOOL clause_store_position_is_archived(Clause_store store, size_t position)
 {
   if (store == NULL || position >= store->length)
     return FALSE;
   return ref_is_archive(store->refs[position]);
 }
+
+/* PUBLIC */
+BOOL clause_store_position_is_current(Clause_store store, size_t position)
+{
+  uintptr_t ref;
+  struct record_view v;
+  unsigned long long current;
+  if (store == NULL || position >= store->length)
+    return FALSE;
+  ref = store->refs[position];
+  if (!ref_is_archive(ref))
+    return TRUE;
+  if (!record_view(store, ref_offset(ref), &v))
+    fatal_error("clause_store_position_is_current: corrupt ancestor record");
+  return clause_id_archive_offset(v.id, &current) &&
+         current == ref_offset(ref);
+}
+
+/* PUBLIC */
+BOOL clause_store_payload_sizes(Clause_store store, size_t position,
+                                unsigned long long *body_bytes,
+                                unsigned long long *justification_bytes,
+                                unsigned long long *logical_body_bytes)
+{
+  uintptr_t ref;
+  struct record_view v;
+  if (store == NULL || position >= store->length)
+    return FALSE;
+  ref = store->refs[position];
+  if (!ref_is_archive(ref))
+    return FALSE;
+  if (!record_view(store, ref_offset(ref), &v))
+    return FALSE;
+  if (body_bytes != NULL)
+    *body_bytes = v.body_size;
+  if (justification_bytes != NULL)
+    *justification_bytes = v.just_size;
+  if (logical_body_bytes != NULL)
+    *logical_body_bytes = v.logical_body;
+  return TRUE;
+}  /* clause_store_payload_sizes */
 
 /* PUBLIC */
 unsigned long long clause_store_id(Clause_store store, size_t position)
@@ -697,6 +762,28 @@ bad:
 }
 
 /* PUBLIC */
+Topform clause_store_activate(Clause_store store, size_t position)
+{
+  uintptr_t ref;
+  Topform c;
+  if (store == NULL || position >= store->length)
+    return NULL;
+  ref = store->refs[position];
+  if (!ref_is_archive(ref))
+    return (Topform) ref;
+  c = clause_store_materialize(store, position);
+  if (c == NULL)
+    return NULL;
+  if (!activate_archived_clause_id(c, ref_offset(ref))) {
+    clause_store_release_materialized(c);
+    return NULL;
+  }
+  c->archive_materialized = 0;
+  c->disabled = 0;
+  return c;
+}
+
+/* PUBLIC */
 Topform clause_store_materialize_by_id(unsigned long long id)
 {
   unsigned long long offset;
@@ -725,8 +812,16 @@ Ilist clause_parents_by_id(unsigned long long id)
   Topform c = find_clause_by_id(id);
   unsigned long long offset;
   size_t i;
-  if (c != NULL)
-    return get_parents(c->justification, TRUE);
+  if (c != NULL) {
+    BOOL was_packed = c->compressed != NULL && c->packed_justification;
+    Ilist parents;
+    if (was_packed && !materialize_clause(c))
+      fatal_error("clause_parents_by_id: corrupt cold clause");
+    parents = get_parents(c->justification, TRUE);
+    if (was_packed && !recompress_clause(c))
+      fatal_error("clause_parents_by_id: cannot restore cold clause");
+    return parents;
+  }
   if (Active_archive_store == NULL ||
       !clause_id_archive_offset(id, &offset))
     return NULL;

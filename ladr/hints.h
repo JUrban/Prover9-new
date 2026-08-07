@@ -38,6 +38,7 @@ void init_hints(Uniftype utype,
 		BOOL collect_labels,
 		BOOL back_demod_hints,
 		int fpa_depth,
+		BOOL packed_index,
 		void (*demod_proc) (Topform, int, int, BOOL, BOOL));
 
 void done_with_hints(void);
@@ -66,12 +67,23 @@ void set_hint_match_stats(BOOL on);
 
 void set_hint_match_once(BOOL on);
 
+unsigned long long hint_state_epoch(void);
+
+void set_hint_state_epoch(unsigned long long epoch);
+
 int expire_old_hints(unsigned long long current_given,
 		     unsigned long long expiry_distance,
 		     int min_matches,
 		     Clist hint_list);
 
 int active_hints(void);
+
+BOOL packed_hints_enabled(void);
+
+void packed_hint_index_stats(unsigned long long *node_bytes,
+			     unsigned long long *reference_bytes,
+			     unsigned long long *table_bytes,
+			     unsigned long long *candidate_checks);
 
 void print_hint_match_stats(FILE *fp, Clist hint_list);
 

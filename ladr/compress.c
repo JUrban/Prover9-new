@@ -22,8 +22,34 @@
 
 #define CLAUSE_COMPRESS_MAGIC   0xd7
 #define CLAUSE_COMPRESS_VERSION 2
+#define CLAUSE_PACKED_VERSION   3
+#define CLAUSE_PACKED_HEADER   10
 
 static struct clause_compression_stats Compression_stats;
+
+static
+void put32le(String_buf sb, unsigned value)
+{
+  sb_append_char(sb, (char) (value & 0xff));
+  sb_append_char(sb, (char) ((value >> 8) & 0xff));
+  sb_append_char(sb, (char) ((value >> 16) & 0xff));
+  sb_append_char(sb, (char) ((value >> 24) & 0xff));
+}
+
+static
+unsigned get32le(const unsigned char *p)
+{
+  return (unsigned) p[0] |
+         ((unsigned) p[1] << 8) |
+         ((unsigned) p[2] << 16) |
+         ((unsigned) p[3] << 24);
+}
+
+static
+BOOL empty_justification_encoding(const unsigned char *data, unsigned size)
+{
+  return size == 5 && memcmp(data, "P9J\1", 4) == 0 && data[4] == 0;
+}
 
 struct term_frame {
   Term node;
@@ -292,12 +318,16 @@ Literals take_literals_from_term(Term t)
 }  /* take_literals_from_term */
 
 static
-Clause_compress_result compress_clause_raw(Topform c)
+Clause_compress_result compress_clause_raw(Topform c, BOOL pack_justification)
 {
   Term t;
   String_buf sb;
   unsigned long long body_bytes;
   unsigned n;
+  char *body_data = NULL;
+  char *just_data = NULL;
+  unsigned body_size = 0;
+  unsigned just_size = 0;
 
   if (c == NULL)
     return CLAUSE_COMPRESS_INVALID;
@@ -309,9 +339,39 @@ Clause_compress_result compress_clause_raw(Topform c)
   body_bytes = clause_body_storage_bytes(c);
   t = lits_to_term(c->literals);
   sb = get_string_buf();
-  sb_append_char(sb, (char) CLAUSE_COMPRESS_MAGIC);
-  sb_append_char(sb, (char) CLAUSE_COMPRESS_VERSION);
-  append_varint_term(sb, t);
+  if (pack_justification) {
+    unsigned i;
+    if (!encode_term_versioned(t, &body_data, &body_size) ||
+        !encode_justification(c->justification, &just_data, &just_size)) {
+      safe_free(body_data);
+      safe_free(just_data);
+      zap_string_buf(sb);
+      free_lits_to_term(t);
+      return CLAUSE_COMPRESS_INVALID;
+    }
+    if (body_size > UINT_MAX - just_size - CLAUSE_PACKED_HEADER) {
+      safe_free(body_data);
+      safe_free(just_data);
+      zap_string_buf(sb);
+      free_lits_to_term(t);
+      return CLAUSE_COMPRESS_INVALID;
+    }
+    sb_append_char(sb, (char) CLAUSE_COMPRESS_MAGIC);
+    sb_append_char(sb, (char) CLAUSE_PACKED_VERSION);
+    put32le(sb, body_size);
+    put32le(sb, just_size);
+    for (i = 0; i < body_size; i++)
+      sb_append_char(sb, body_data[i]);
+    for (i = 0; i < just_size; i++)
+      sb_append_char(sb, just_data[i]);
+    safe_free(body_data);
+    safe_free(just_data);
+  }
+  else {
+    sb_append_char(sb, (char) CLAUSE_COMPRESS_MAGIC);
+    sb_append_char(sb, (char) CLAUSE_COMPRESS_VERSION);
+    append_varint_term(sb, t);
+  }
   n = (unsigned) sb_size(sb);
   c->compressed = (char *) safe_malloc(n);
   {
@@ -327,6 +387,11 @@ Clause_compress_result compress_clause_raw(Topform c)
   c->neg_compressed = negative_clause(c->literals);
   zap_literals(c->literals);
   c->literals = NULL;
+  c->packed_justification = pack_justification;
+  if (pack_justification) {
+    zap_just(c->justification);
+    c->justification = NULL;
+  }
   return CLAUSE_COMPRESS_OK;
 }  /* compress_clause_raw */
 
@@ -461,13 +526,26 @@ Clause_compress_result compress_clause(Topform c)
 {
   Clause_compress_result result;
   Compression_stats.attempted++;
-  result = compress_clause_raw(c);
+  result = compress_clause_raw(c, FALSE);
   if (result == CLAUSE_COMPRESS_OK)
     Compression_stats.successful++;
   else
     Compression_stats.skipped++;
   return result;
 }  /* compress_clause */
+
+/* PUBLIC */
+Clause_compress_result compress_clause_with_justification(Topform c)
+{
+  Clause_compress_result result;
+  Compression_stats.attempted++;
+  result = compress_clause_raw(c, TRUE);
+  if (result == CLAUSE_COMPRESS_OK)
+    Compression_stats.successful++;
+  else
+    Compression_stats.skipped++;
+  return result;
+}  /* compress_clause_with_justification */
 
 /*************
  *
@@ -513,16 +591,45 @@ BOOL materialize_clause(Topform c)
 {
   Term t;
   unsigned version;
+  Just justification = NULL;
+  BOOL packed = FALSE;
 
   if (c == NULL || c->compressed == NULL || c->literals != NULL ||
       c->compressed_size < 2)
     return FALSE;
   version = (unsigned char) c->compressed[1];
-  t = decode_varint_term((unsigned char *) c->compressed,
-                         c->compressed_size);
+  if (version == CLAUSE_PACKED_VERSION) {
+    const unsigned char *data = (const unsigned char *) c->compressed;
+    unsigned body_size, just_size;
+    if (c->compressed_size < CLAUSE_PACKED_HEADER)
+      return FALSE;
+    body_size = get32le(data + 2);
+    just_size = get32le(data + 6);
+    if (body_size > c->compressed_size - CLAUSE_PACKED_HEADER ||
+        just_size != c->compressed_size - CLAUSE_PACKED_HEADER - body_size)
+      return FALSE;
+    t = decode_term_versioned((const char *) data + CLAUSE_PACKED_HEADER,
+                              body_size);
+    if (t == NULL)
+      return FALSE;
+    justification = decode_justification(
+      (const char *) data + CLAUSE_PACKED_HEADER + body_size, just_size);
+    if (justification == NULL &&
+        !empty_justification_encoding(
+          data + CLAUSE_PACKED_HEADER + body_size, just_size)) {
+      zap_decoded_term(t);
+      return FALSE;
+    }
+    packed = TRUE;
+  }
+  else
+    t = decode_varint_term((unsigned char *) c->compressed,
+                           c->compressed_size);
   if (t == NULL)
     return FALSE;
   c->literals = take_literals_from_term(t);
+  if (packed)
+    c->justification = justification;
   upward_clause_links(c);
   free_lits_to_term(t);  /* frees only OR/NOT wrappers, not transferred atoms */
   safe_free(c->compressed);
@@ -530,6 +637,7 @@ BOOL materialize_clause(Topform c)
   c->compressed_size = 0;
   c->uncompressed_body_bytes = 0;
   c->neg_compressed = FALSE;
+  c->packed_justification = packed;
   if (version == 1)
     orient_equalities(c, FALSE);  /* version 1 did not retain term flags */
   Compression_stats.materialized++;
@@ -539,7 +647,8 @@ BOOL materialize_clause(Topform c)
 /* PUBLIC */
 BOOL recompress_clause(Topform c)
 {
-  Clause_compress_result result = compress_clause_raw(c);
+  Clause_compress_result result =
+    compress_clause_raw(c, c != NULL && c->packed_justification);
   if (result == CLAUSE_COMPRESS_OK) {
     Compression_stats.recompressed++;
     return TRUE;
@@ -576,15 +685,52 @@ void recompress_clauses(Plist p)
 BOOL compressed_clause_is_valid(Topform c)
 {
   Term t;
+  Just justification = NULL;
   if (c == NULL || c->compressed == NULL)
     return FALSE;
-  t = decode_varint_term((unsigned char *) c->compressed,
-                         c->compressed_size);
+  if ((unsigned char) c->compressed[1] == CLAUSE_PACKED_VERSION) {
+    const unsigned char *data = (const unsigned char *) c->compressed;
+    unsigned body_size, just_size;
+    if (c->compressed_size < CLAUSE_PACKED_HEADER)
+      return FALSE;
+    body_size = get32le(data + 2);
+    just_size = get32le(data + 6);
+    if (body_size > c->compressed_size - CLAUSE_PACKED_HEADER ||
+        just_size != c->compressed_size - CLAUSE_PACKED_HEADER - body_size)
+      return FALSE;
+    t = decode_term_versioned((const char *) data + CLAUSE_PACKED_HEADER,
+                              body_size);
+    if (t == NULL)
+      return FALSE;
+    justification = decode_justification(
+      (const char *) data + CLAUSE_PACKED_HEADER + body_size, just_size);
+    if (justification == NULL &&
+        !empty_justification_encoding(
+          data + CLAUSE_PACKED_HEADER + body_size, just_size)) {
+      zap_decoded_term(t);
+      return FALSE;
+    }
+  }
+  else
+    t = decode_varint_term((unsigned char *) c->compressed,
+                           c->compressed_size);
   if (t == NULL)
     return FALSE;
   zap_decoded_term(t);
+  zap_just(justification);
   return TRUE;
 }  /* compressed_clause_is_valid */
+
+/* PUBLIC */
+unsigned compressed_clause_justification_bytes(Topform c)
+{
+  const unsigned char *data;
+  if (c == NULL || c->compressed == NULL || c->compressed_size < 10 ||
+      (unsigned char) c->compressed[1] != CLAUSE_PACKED_VERSION)
+    return 0;
+  data = (const unsigned char *) c->compressed;
+  return get32le(data + 6);
+}  /* compressed_clause_justification_bytes */
 
 /* PUBLIC */
 unsigned long long clause_body_storage_bytes(Topform c)
@@ -649,5 +795,6 @@ void discard_compressed_clause(Topform c)
     c->compressed_size = 0;
     c->uncompressed_body_bytes = 0;
     c->neg_compressed = FALSE;
+    c->packed_justification = FALSE;
   }
 }  /* discard_compressed_clause */

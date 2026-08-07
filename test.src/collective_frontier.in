@@ -1,0 +1,26 @@
+clear(print_initial_clauses).
+clear(print_given).
+assign(search_loop,discount).
+assign(passive_store,compressed).
+assign(inference_frontier,collective).
+assign(hint_index,packed).
+assign(ancestor_store,mmap).
+assign(stats,all).
+assign(max_seconds,30).
+set(hint_match_stats).
+
+formulas(hints).
+  x * x = e.
+  x * y = y * x.
+end_of_list.
+
+formulas(sos).
+  e * x = x.
+  x' * x = e.
+  (x * y) * z = x * (y * z).
+  x * x = e.
+end_of_list.
+
+formulas(goals).
+  x * y = y * x.
+end_of_list.

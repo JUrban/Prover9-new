@@ -292,6 +292,43 @@ void unassign_clause_id(Topform c)
   }
 }  /* unassign_clause_id */
 
+/* PUBLIC */
+BOOL detach_clause_id(Topform c)
+{
+  unsigned long long page_number;
+  unsigned offset;
+  size_t i;
+  Clause_id_page page;
+  if (c == NULL || !c->official_id || c->id == 0)
+    return FALSE;
+  page_number = c->id >> CLAUSE_ID_PAGE_BITS;
+  offset = (unsigned) (c->id & (CLAUSE_ID_PAGE_SIZE - 1));
+  i = page_slot(page_number, FALSE);
+  page = i == (size_t) -1 ? NULL : Topform_id_pages[i];
+  if (page == NULL || page == PAGE_TOMBSTONE ||
+      page->entries[offset] != (uintptr_t) c)
+    return FALSE;
+  page->entries[offset] = 0;
+  page->count--;
+  Topform_id_entries--;
+  c->official_id = 0;
+  if (page->count == 0) {
+    safe_free(page);
+    Topform_id_pages[i] = PAGE_TOMBSTONE;
+    Topform_id_page_count--;
+    Topform_id_page_tombstones++;
+    if (Topform_id_page_count == 0) {
+      safe_free(Topform_id_pages);
+      Topform_id_pages = NULL;
+      Topform_id_page_capacity = 0;
+      Topform_id_page_tombstones = 0;
+    }
+    else if (Topform_id_page_tombstones > Topform_id_page_count)
+      resize_page_table(Topform_id_page_capacity);
+  }
+  return TRUE;
+}  /* detach_clause_id */
+
 /*************
  *
  *     find_clause_by_id(id)
@@ -327,6 +364,24 @@ BOOL archive_clause_id(Topform c, unsigned long long offset)
   c->official_id = 0;
   return TRUE;
 }  /* archive_clause_id */
+
+/* PUBLIC */
+BOOL activate_archived_clause_id(Topform c,
+                                 unsigned long long expected_offset)
+{
+  Clause_id_page page;
+  unsigned slot;
+  if (c == NULL || c->id == 0)
+    return FALSE;
+  page = find_id_page(c->id >> CLAUSE_ID_PAGE_BITS);
+  slot = (unsigned) (c->id & (CLAUSE_ID_PAGE_SIZE - 1));
+  if (page == NULL ||
+      page->entries[slot] != archive_entry(expected_offset))
+    return FALSE;
+  page->entries[slot] = (uintptr_t) c;
+  c->official_id = 1;
+  return TRUE;
+}  /* activate_archived_clause_id */
 
 /* PUBLIC */
 BOOL clause_id_is_archived(unsigned long long id)

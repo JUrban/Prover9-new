@@ -35,6 +35,9 @@ void index_clause_back_demod(Topform c, Mindex idx, Indexop op);
 
 BOOL rewritable_clause(Topform demod, Topform c);
 
+BOOL rewritable_clause_type(Topform demod, Topform c, int type,
+			    BOOL lex_order_vars);
+
 Plist back_demod_linear(Topform demod, Clist lst, Plist rewritables);
 
 Plist back_demod_indexed(Topform demod, int type, Mindex idx,

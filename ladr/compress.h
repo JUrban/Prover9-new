@@ -57,6 +57,8 @@ Term decode_term_versioned(const char *data, unsigned size);
 
 Clause_compress_result compress_clause(Topform c);
 
+Clause_compress_result compress_clause_with_justification(Topform c);
+
 void uncompress_clause(Topform c);
 
 void uncompress_clauses(Plist p);
@@ -70,6 +72,8 @@ Plist materialize_clauses(Plist p);
 void recompress_clauses(Plist p);
 
 BOOL compressed_clause_is_valid(Topform c);
+
+unsigned compressed_clause_justification_bytes(Topform c);
 
 unsigned long long clause_body_storage_bytes(Topform c);
 
