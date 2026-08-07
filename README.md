@@ -87,12 +87,18 @@ contract.
 
 Normal statistics report compression attempts, successes, skips,
 materializations and recompressions, along with active/full/compact logical
-body bytes, allocator-reserved bytes, and live/peak FPA node/list counts.
-Logical bytes are not process RSS: the early-phase allocator reuses its 20 MB
-slabs but does not return them to the operating system.
+body bytes and live/peak FPA node/list counts.  The Phase 5 allocator reports
+logical live/peak bytes, current/peak reservation, reusable/unallocated and
+metadata fragmentation, direct/permanent storage, reclaimed slabs, allocation
+traffic, and current/peak RSS separately.  Small pointer-count allocations use
+reclaimable segregated slabs; wholly free excess slabs are returned to the
+operating system and `memory_release_unused()` can purge the one warm slab kept
+per active size class.  See `P9-ALLOCATOR.md` for the ownership and measurement
+contract.
 
-Run `make memory-tests` for the focused body, FPA, bookkeeping, ancestor-format,
-corruption, mmap, and proof-DAG lifecycle regressions.  Run
+Run `make memory-tests` for the focused allocator churn/reclamation, compact
+term layout, body, FPA, bookkeeping, ancestor-format, corruption, mmap, and
+proof-DAG lifecycle regressions.  Run
 `make -C test.src ancestor-store-scale` for the bounded 20,000-record accounting
 test.
 `benchmarks/run-memory-benchmarks.sh smoke` runs the bounded proof and

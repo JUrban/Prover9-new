@@ -284,14 +284,86 @@ without the option migrate to the default `off` path.
 - The outstanding deterministic-restart AVL/selector failure remains the first
   correctness follow-up.  Phase 5 was not started.
 
-## Next three actions after Phase 4
+## Phase 5 reclaimable allocator and exact representation
+
+The Phase 5 design and accounting contract are in `P9-ALLOCATOR.md`.  The old
+global per-size free lists were replaced by 1 MiB, power-of-two-aligned,
+segregated slabs for pointer classes 1--127.  Each slab owns its free list and
+tracks exact live/free/unallocated slots; this prevents a reclaimed mapping
+from leaving dangling free-list links elsewhere.  Larger objects are directly
+allocated, and permanent `tp_alloc` ownership is explicit.
+
+Native builds use anonymous mappings so a completely free excess slab is
+returned with `munmap` without moving any live pointer.  A single empty slab
+per class stays warm because a measured release-on-every-empty prototype made
+short object churn syscall-bound.  `memory_release_unused()` purges warm slabs,
+and `max_megs` does so automatically before failing.  Emscripten retains a
+safe malloc/free fallback and class-local slab lookup.
+
+Normal statistics now distinguish logical current/peak bytes, mapped/direct
+current/peak reservation, reusable/unallocated/metadata fragmentation,
+direct/permanent storage, slab reclamation, allocation traffic, current RSS,
+and peak RSS.  The legacy monotonic `megs_malloced()` remains usable by Mace4
+and progress code as peak reservation; current reservation is no longer
+inferred from it.
+
+Making free storage genuinely inaccessible exposed one old ownership bug:
+`zap_flatterm()` reread its first node after freeing it.  Capturing the list
+boundary before the first free preserves the exact traversal and allows the
+slab to disappear safely.  Release, debug, and sanitizer proof/lifecycle tests
+cover the corrected path.
+
+The representation study was deliberately separate.  The measured aK prefix
+allocated 2,005,677 term nodes, making the redundant stored pointer to the
+already-contiguous argument array a clear target.  Deriving the array from the
+header shrinks 64-bit terms from 32 to 24 bytes without changing mutability,
+identity, ordering, proof text, archive encoding, or checkpoint format.  The
+paired run saved 16.0 MB of allocation traffic, 426 KB live logical memory,
+one 1 MiB slab, and about 536 KiB peak RSS.
+
+Hash-consing was rejected because terms are mutable and carry container and
+FPA/auxiliary state.  Packed literals were rejected because the measured live
+saving is small and a 16-byte result requires pointer tagging across hundreds
+of direct accesses.  Attributes were too rare, and justification/parajust
+live counts too small to justify tagging or another arena after Phase 4 already
+compacted cold proof metadata.  No speculative layout was bundled into the
+term patch.
+
+### Phase 5 verification and compatibility
+
+- The 300,000-object allocator test spans 74 slabs, touches 76.8 MB, reclaims
+  mappings while a later pointer remains valid, observes RSS fall by over 70
+  MiB, checks exact fragmentation components, purges the warm mapping, and
+  adds four mixed-class shuffled churn rounds.
+- Sequential release tests 1--6, `make memory-tests`, the supported debug
+  build/test1/memory tests, and ASan+UBSan focused tests pass.  Leak-enabled
+  allocator churn is clean; initialized tests have only known global registry
+  retention and pass invalid-access/UB checks with leak reporting disabled.
+- x2 work and its 16-step proof are unchanged in all four ancestor/body modes.
+  Normalized proofs are byte-identical; `prooftrans`, `directproof`, and TSTP
+  archive proofs pass.
+- LCC and aK fixed-work counters and FPA live/peak counts are identical across
+  modes and to the Phase 5 baseline.  Final single-run allocator overhead is
+  about 2.6% on LCC and 7.1% on aK; the term compaction offsets memory traffic.
+- A fresh mmap format-3 checkpoint saved 5,329 clauses at given 84, resumed,
+  restored archive/proof state, and passed 18/18 hashes.  Its later kept-count
+  divergence is the previously documented selector/restart defect.  No
+  checkpoint version or compatibility rule changed.
+
+Phase 5 changes no inference, soundness, completeness, default option, proof
+contract, or archive default.  Slabs are process-global and non-thread-safe as
+before.  Reservations are virtual mappings rather than RSS; warm sparse slabs
+therefore remain visible as fragmentation and are reported separately.  Phase
+6 was not started.
+
+## Next three actions after Phase 5
 
 1. Diagnose and repair the format-3 AVL/selector duplicate on aK and the
    related option-off resume divergence, then repeat full-run checkpoint
    equality with all ancestor modes.
-2. Run a longer deterministic ancestor-heavy AIM soak, with fixed work/time
-   caps, to locate the heap-slab and mmap page-cache crossover and quantify
-   record metadata by justification class.
-3. Expand the proof corpus across native, TSTP, expanded, IVY, hints, CAC, and
-   denial-reuse paths, comparing normalized proof DAGs and checker results for
-   `off`, `memory`, and `mmap`.
+2. Profile the Phase 6 unification-context clear path and prototype a sparse or
+   generation-stamped context behind focused equivalence/throughput tests; do
+   not infer a win from allocation statistics alone.
+3. Add a bounded long-churn allocator workload with phase-boundary
+   `memory_release_unused()` calls to measure warm-slab virtual fragmentation,
+   RSS return, and mapping rate on Linux, macOS, and Emscripten.

@@ -118,6 +118,9 @@ int main(int argc, char **argv)
         "backing reservation grows under load");
   CHECK(allocated.slab_count > before.slab_count + 1,
         "load spans multiple independently reclaimable slabs");
+  CHECK(allocated.fragmentation_bytes == allocated.reusable_bytes +
+        allocated.unallocated_bytes + allocated.metadata_bytes,
+        "fragmentation decomposes into exact slab components");
 
   for (i = 0; i + 1 < count; i++) {
     unsigned char *p = objects[i];
@@ -196,6 +199,8 @@ int main(int argc, char **argv)
           direct.reserved_bytes == freed.reserved_bytes,
           "direct allocation accounting returns to baseline");
   }
+
+  memory_get_stats(&freed);
 
   if (Failures != 0) {
     fprintf(stderr, "allocator_churn_test: %d failure(s)\n", Failures);

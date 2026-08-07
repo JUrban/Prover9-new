@@ -39,6 +39,7 @@ void print_memory_stats(FILE *fp)
   fprint_parse_mem(fp, FALSE);
   fprint_hash_mem(fp, FALSE);
   fprint_term_mem(fp, FALSE);
+  fprint_literals_mem(fp, FALSE);
   fprint_attrib_mem(fp, FALSE);
   fprint_glist_mem(fp, FALSE);
 

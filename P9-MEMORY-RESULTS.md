@@ -1,8 +1,9 @@
-# Prover9 AIM memory results (Phases 0--4)
+# Prover9 AIM memory results (Phases 0--5)
 
 Date: 2026-08-07 (Europe/Berlin)
 Base revision: `b36df4c06d5794dd98e42335f191dd41d7abd2ab`
 Phase 4 starting revision: `9172cd401095a10aebf5b90f835715baeca0aaca`
+Phase 5 starting revision: `7c06dfe` (Phase 4 documentation complete)
 Release flags: `-O2 -Wall`; debug flags: `-g -O0` (prover sources also
 define `DEBUG`)
 Host compiler: GCC 13.3.0
@@ -326,5 +327,124 @@ CAP_SECONDS=30 timeout 150s benchmarks/run-memory-benchmarks.sh aim
   deterministic-restart claim but does not indicate archive corruption or a
   mismatched checkpoint hash.
 
-No uncapped AIM search was run, no capped non-proof result is treated as a
-logical failure, and Phase 5 was not started.
+No uncapped AIM search was run, and no capped non-proof result is treated as a
+logical failure.
+
+## Phase 5 reclaimable allocator and compact term results
+
+### Allocator reclamation
+
+The pre-change allocator churn driver allocated and touched 300,000 objects of
+256 bytes each.  The old 20 MiB bump allocator reached 80 MiB reserved and
+78,464 KiB peak RSS, then still reported 80 MiB after all 76.8 MB of logical
+objects were freed.  With the reclaimable allocator the equivalent live load
+used 74 one-MiB slabs (77,594,624 reserved bytes including the final partial
+slab), preserved a pointer in the last slab while earlier slabs were unmapped,
+and returned to zero reservation after the final warm-slab purge.  Current RSS
+fell from about 78,988 KiB at the touched live load to about 1,624 KiB.  The
+final driver additionally runs 80,000 deterministically shuffled allocations
+and frees across eight size classes, zeroing and direct-allocation checks, and
+an exact fragmentation decomposition; its wall time is about 0.18 seconds.
+
+The allocator keeps one empty slab per size class warm in normal operation.
+This policy was measured, not assumed: immediate unmapping made the
+disabled-heavy smoke perform about 9,062 map/unmap cycles and increased wall
+time from roughly 0.05 to 0.35 seconds.  The warm policy restored the case to
+0.04--0.06 seconds while still automatically unmapping excess empty slabs.
+`memory_release_unused()` and memory-pressure checks can return the warm slabs.
+
+### Integrated allocator and exact-term measurements
+
+The table compares the fresh Phase 5 pre-change baseline with the final
+release binary.  Every row has the same deterministic work cap and work
+counters.  Times and RSS are single short observations, not general speedup
+claims.  “Reserved” is current mapped/direct allocator reservation; “live” is
+logical outstanding allocator bytes.
+
+| Workload/cap | Revision | Exact work | Live / reserved / fragmentation | Reclaimed | Peak RSS / wall |
+| --- | --- | --- | ---: | ---: | ---: |
+| x2, off | old allocator | 12/118/23/14; proof length 16 | not available / 20,971,520 / not available | 0 | 3,328 KiB / 0.01 s |
+| x2, off | Phase 5 final | identical | 51,632 / 10,492,224 / 10,440,592 B | 0 | 3,456 KiB / 0.01 s |
+| disabled-heavy, off | old allocator | 1/1,001/1,001/2,001 | not available / 20,971,520 / not available | 0 | 5,248 KiB / about 0.05 s |
+| disabled-heavy, off | Phase 5 final | identical | 739,120 / 8,391,840 / 7,652,720 B | 0 | 5,120 KiB / 0.06 s |
+| LCC, given 500, off | old allocator | 501/258,858/562/76 | not available / 20,971,520 / not available | 0 | 6,016 KiB / 1.90 s |
+| LCC, given 500, off | Phase 5 final | identical | 2,097,576 / 13,639,568 / 11,541,992 B | 0 | 6,144 KiB / 1.95 s |
+| aK, given 200, off | old allocator | 201/84,789/340/58 | not available / 20,971,520 / not available | 0 | 15,488 KiB / 1.26 s |
+| aK, given 200, off | Phase 5 final | identical | 9,995,688 / 20,043,664 / 10,047,976 B | 2 MiB | 14,080 KiB / 1.35 s |
+
+The allocator-only aK build had 10,422,048 logical live bytes and 21,092,240
+reserved bytes.  The separate compact-term patch reduced the final values to
+9,995,688 and 20,043,664 bytes.  Relative to the original allocator, the final
+aK peak RSS observation is 1,408 KiB lower (9.1%) at the same fixed work;
+relative to the allocator-only representation, the paired `stats=all` peak RSS
+fell from 14,744 to 14,208 KiB.  LCC final wall time is 2.6% above its fresh
+baseline and aK is 7.1% above; both are below the roadmap's roughly 10%
+investigation threshold and include exact accounting on tens of millions of
+allocation calls.  RSS and small-run timing remain noisy.
+
+All four final modes (`off`, body compression, memory archive, mmap archive)
+retain identical LCC work 501/258,858/562/76 and aK work
+201/84,789/340/58, including identical final FPA counts (LCC 11,493 nodes /
+4,623 lists; aK 50,591 / 20,106).  Final archive modes also match the off-mode
+active sets.  The capped aK final modes report 2 MiB returned during execution;
+the synthetic allocator test is the clearer full-reclamation measurement.
+
+### Representation profile and decision
+
+The paired aK `stats=all` runs measured 2,005,677 allocated term headers with
+53,295 live at the cap.  Removing their redundant contiguous-argument pointer
+shrinks `struct term` from 32 to 24 bytes and reduced:
+
+- allocation traffic from 359,649,352 to 343,603,936 bytes (16,045,416 B);
+- logical live bytes from 10,421,984 to 9,995,624 (426,360 B);
+- current and peak reservation from 21,092,240 to 20,043,664 (1 MiB);
+- external peak RSS from 14,744 to 14,208 KiB in the paired observation.
+
+Given/generated/kept remained 201/84,789/340, and wall time remained 1.52
+seconds.  The final profile also measured literals at 106,632 allocations /
+6,672 live, attributes at 134 / 121, justifications at 119,767 / 6,738, and
+parajustifications at 40,591 / 202.  Literal packing would save at most about
+53 KiB live in this run but requires tagging or accessors across hundreds of
+direct field accesses.  Attribute and justification arenas have still smaller
+measured live payoff.  Term interning was rejected because term flags,
+containers, auxiliary/FPA state, and arguments are mutable.  None of those
+speculative representations was combined with the compact-term patch.
+
+### Final correctness and bounded commands
+
+All prover invocations used internal `max_seconds <= 20`, an external timeout
+of at most 30 seconds, and fixed `max_given` for AIM.  The principal commands
+were:
+
+```sh
+make -j1 all
+for n in 1 2 3 4 5 6; do timeout 30s make "test$n"; done
+timeout 30s make memory-tests
+CAP_SECONDS=30 timeout 150s benchmarks/run-memory-benchmarks.sh smoke
+CAP_SECONDS=30 timeout 150s benchmarks/run-memory-benchmarks.sh aim
+make -j1 all DEBUG=1
+timeout 30s make test1
+timeout 30s make memory-tests
+```
+
+The full release tests 1--6, debug build/test1, debug memory tests, allocator
+churn, compression/FPA lifecycle, 200,000-record bookkeeping, and ancestor
+memory/mmap/corruption tests pass.  The LADR library and all four focused tests
+were also built with ASan+UBSan and halt-on-error.  Allocator churn passed with
+leak detection enabled.  Initialized LADR tests passed with leak reporting
+disabled; a separate leak-enabled run reported only the known process-global
+symbol/parse registries (43,818 bytes in 912 allocations), with no invalid
+access or UB.
+
+x2 has the same 16-step proof in all four modes.  Normalized proof blocks are
+byte-identical, and every mode passes both `prooftrans expand` and
+`directproof`; memory and mmap modes emit complete theorem TSTP
+`CNFRefutation` blocks.  A fresh mmap format-3 aK checkpoint saved 5,329
+clauses at given 84 and exited through code 107.  Resume restored archive and
+proof metadata, passed all 18 verification hashes, and reached the fixed given
+cap.  Its kept-count divergence is the pre-existing general checkpoint
+selector/restart issue already recorded in Phases 3--4; Phase 5 changes no
+checkpoint format.
+
+No option changed default or completeness, no uncapped AIM run was started,
+and Phase 6 was not begun.
