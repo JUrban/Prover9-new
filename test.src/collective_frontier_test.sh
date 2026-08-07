@@ -9,11 +9,13 @@ trap 'rm -rf -- "$test_tmp"' EXIT HUP INT TERM
   > "$test_tmp/prover.out" 2> "$test_tmp/prover.err"
 
 grep -q 'THEOREM PROVED' "$test_tmp/prover.out"
-grep -Eq 'Search_loop: mode=discount, frontier=collective, active_indexed=[0-9]+, passive_indexed=0, delayed_demodulators=[1-9][0-9]*\.' \
+grep -Eq 'Search_loop: mode=discount, frontier=collective, active_indexed=[0-9]+, passive_indexed=0, delayed_demodulators=[0-9]+\.' \
   "$test_tmp/prover.out"
 grep -Eq 'Collective_frontier: batches_created=[1-9][0-9]*, completed=[1-9][0-9]*, pending=[1-9][0-9]*, peak=[1-9][0-9]*, ratio=1, skipped=[0-9]+, parent_materializations=0, activations=[1-9][0-9]*\.' \
   "$test_tmp/prover.out"
 grep -Eq 'Collective_work: paramod_pairs=[1-9][0-9]*, hyper_batches=[0-9]+\.' \
+  "$test_tmp/prover.out"
+grep -Eq 'Collective_hint_probes: scheduled=[1-9][0-9]*, expanded=[1-9][0-9]*, credit=(available|consumed)\.' \
   "$test_tmp/prover.out"
 grep -Eq 'Collective_memory: descriptor_bytes=[1-9][0-9]*, history_bytes=[1-9][0-9]*\.' \
   "$test_tmp/prover.out"
@@ -34,6 +36,18 @@ fi
   > "$test_tmp/direct.out"
 grep -q 'end of proof' "$test_tmp/parents.out"
 grep -q 'Directproof did' "$test_tmp/direct.out"
+
+# The optimization is independently switchable.  Turning it off must retain
+# exact hint matching/proof behavior while scheduling no early descriptors.
+sed 's/set(collective_hint_probes)\./clear(collective_hint_probes)./' \
+  "$repo_dir/test.src/collective_frontier.in" > "$test_tmp/no-probes.in"
+"$repo_dir/bin/prover9" < "$test_tmp/no-probes.in" \
+  > "$test_tmp/no-probes.out" 2> "$test_tmp/no-probes.err"
+grep -q 'THEOREM PROVED' "$test_tmp/no-probes.out"
+grep -Eq 'Collective_hint_probes: scheduled=0, expanded=0, credit=available\.' \
+  "$test_tmp/no-probes.out"
+grep -Eq 'total=2, redundant=[0-9]+, active=[0-9]+, matched=[1-9][0-9]*' \
+  "$test_tmp/no-probes.out"
 
 "$repo_dir/bin/prover9" < "$repo_dir/test.src/collective_hyper.in" \
   > "$test_tmp/hyper.out" 2> "$test_tmp/hyper.err"
@@ -56,7 +70,7 @@ if "$repo_dir/bin/prover9" < \
   exit 1
 fi
 grep -q 'SEARCH FAILED' "$test_tmp/historical-hyper.out"
-grep -Eq 'COLLECTIVE_TRACE kind=pos_hyper given=[0-9]+ epoch=[0-9]+ history_candidates=2 future_rejected=0 inactive_rejected=0 generated=1 kept=1\.' \
+grep -Eq 'COLLECTIVE_TRACE kind=pos_hyper given=[0-9]+ epoch=[0-9]+ history_candidates=2 future_rejected=0 inactive_rejected=0 generated=1 kept=1 hint_probe=0\.' \
   "$test_tmp/historical-hyper.out"
 grep -Eq 'Generated_by_rule: binary=0, hyper=1, ur=0, paramod=0, other=[0-9]+\.' \
   "$test_tmp/historical-hyper.out"

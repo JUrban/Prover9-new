@@ -5,6 +5,7 @@ assign(passive_store,compressed).
 assign(inference_frontier,collective).
 assign(hint_index,packed).
 assign(ancestor_store,mmap).
+set(collective_hint_probes).
 assign(stats,all).
 assign(max_seconds,30).
 set(hint_match_stats).

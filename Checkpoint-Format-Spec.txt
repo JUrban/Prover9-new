@@ -138,6 +138,8 @@ Keys (in order as written):
   collective_history_candidates <ull>
   collective_history_rejected_future <ull>
   collective_history_rejected_inactive <ull>
+  collective_hint_probes_scheduled <ull>
+  collective_hint_probes_expanded <ull>
   collective_batches_peak <ull>
                               Collective frontier cumulative/capacity state
   simplifier_epoch <ull>     Historical active/simplifier epoch
@@ -168,11 +170,12 @@ Present only when `search_loop=discount` and
 `inference_frontier=collective`.  All integers use the writer's native byte
 order and C representation.  The current layout is:
 
-  char[8]  magic = "P9COLL5\0"
+  char[8]  magic = "P9COLL6\0"
   uint64   activation_count
   uint64   pending_batch_count
   uint32   batch_turn
   uint32   givens_since_batch
+  uint32   hint_probe_credit          (exactly 0 or 1)
 
 Followed by `activation_count` history records:
 
@@ -195,10 +198,17 @@ Finally, `pending_batch_count` descriptors are written in queue order:
 
 `activation_limit` excludes activations newer than the descriptor;
 `snapshot_epoch` plus each history record's deactivation epoch reconstructs
-the clauses active when it was created.  `kind_bits` is the nonempty OR of
-paramodulation, positive-hyper, and negative-hyper bits.  Restore rejects a
-different magic, invalid Boolean/kind values, out-of-range cursors, truncated
-records, or trailing bytes.
+the clauses active when it was created.  `kind_bits` contains a nonempty OR
+of paramodulation, positive-hyper, and negative-hyper bits, plus an optional
+hint-probe marker.  The marker may occur only on the queue head while probe
+credit is consumed.  It is cleared after exactly one expansion; an ordinary
+FIFO expansion restores the credit.  Restore rejects an unsupported magic,
+invalid Boolean/kind values, an inconsistent probe marker, out-of-range
+cursors, truncated records, or trailing bytes.
+
+The reader remains backward-compatible with `P9COLL5`: that layout ends the
+header after `givens_since_batch`, has no hint-probe kind bit, and restores
+with probe credit available.
 
 Immutable historical clause clones and their FPA index are not serialized as
 a second copy of the clause database.  On resume they are rebuilt in

@@ -186,8 +186,14 @@ struct collective_deactivation_page {
 enum collective_batch_kind {
   COLLECTIVE_PARAMOD   = 1U,
   COLLECTIVE_POS_HYPER = 2U,
-  COLLECTIVE_NEG_HYPER = 4U
+  COLLECTIVE_NEG_HYPER = 4U,
+  COLLECTIVE_HINT_PROBE = 8U
 };
+
+#define COLLECTIVE_INFERENCE_MASK \
+  (COLLECTIVE_PARAMOD | COLLECTIVE_POS_HYPER | COLLECTIVE_NEG_HYPER)
+#define COLLECTIVE_KIND_MASK \
+  (COLLECTIVE_INFERENCE_MASK | COLLECTIVE_HINT_PROBE)
 
 struct collective_batch {
   unsigned long long given_id;
@@ -211,6 +217,7 @@ static struct collective_batch *Collective_batch_tail = NULL;
 static unsigned long long Collective_batch_count = 0;
 static BOOL Collective_batch_turn = FALSE;
 static unsigned Collective_givens_since_batch = 0;
+static BOOL Collective_hint_probe_credit = TRUE;
 
 /* Periodic automatic checkpoint state */
 static time_t Last_auto_ckpt_time = 0;       // wall-clock of last auto checkpoint
@@ -346,6 +353,7 @@ void collective_clear_state(void)
   Collective_batch_count = 0;
   Collective_batch_turn = FALSE;
   Collective_givens_since_batch = 0;
+  Collective_hint_probe_credit = TRUE;
 }
 
 static
@@ -368,6 +376,8 @@ void collective_reset_state(void)
   Stats.collective_history_candidates = 0;
   Stats.collective_history_rejected_future = 0;
   Stats.collective_history_rejected_inactive = 0;
+  Stats.collective_hint_probes_scheduled = 0;
+  Stats.collective_hint_probes_expanded = 0;
   Stats.collective_batches_pending = 0;
   Stats.collective_batches_peak = 0;
   Stats.collective_activation_entries = 0;
@@ -593,6 +603,43 @@ void collective_append_batch(struct collective_batch *b)
     Stats.collective_batches_peak = Collective_batch_count;
 }
 
+/* Give a newly activated hint-matched clause one prompt descriptor turn.
+   This is deliberately a bounded probe, not a second priority queue: the
+   probe consumes a credit which only an ordinary FIFO expansion restores.
+   Therefore even an infinite stream of hint matches cannot starve an older
+   finite descriptor. */
+static
+void collective_maybe_schedule_hint_probe(
+  Topform given, struct collective_batch *tail_before)
+{
+  struct collective_batch *b = Collective_batch_tail;
+
+  if (!flag(Opt->collective_hint_probes) ||
+      !Collective_hint_probe_credit ||
+      given->matching_hint == NULL ||
+      b == NULL || b == tail_before ||
+      b->given_id != given->id ||
+      b->snapshot_epoch != Simplifier_epoch ||
+      (b->kind & COLLECTIVE_PARAMOD) == 0)
+    return;
+
+  /* given_infer appends at most one combined descriptor.  If other work was
+     already queued, unlink that new tail and move it to the head in O(1). */
+  if (Collective_batch_head != b) {
+    if (tail_before == NULL || tail_before->next != b)
+      fatal_error("collective hint probe queue order corrupted");
+    tail_before->next = NULL;
+    Collective_batch_tail = tail_before;
+    b->next = Collective_batch_head;
+    Collective_batch_head = b;
+  }
+
+  b->kind |= COLLECTIVE_HINT_PROBE;
+  Collective_hint_probe_credit = FALSE;
+  Collective_batch_turn = TRUE;
+  Stats.collective_hint_probes_scheduled++;
+}
+
 static
 void collective_enqueue_batch(Topform given)
 {
@@ -655,6 +702,12 @@ void collective_finish_batch_turn(struct collective_batch *b)
 {
   if (Collective_batch_head != b)
     fatal_error("collective batch queue order corrupted");
+  if ((b->kind & COLLECTIVE_HINT_PROBE) != 0) {
+    b->kind &= ~COLLECTIVE_HINT_PROBE;
+    Stats.collective_hint_probes_expanded++;
+  }
+  else
+    Collective_hint_probe_credit = TRUE;
   Collective_batch_head = b->next;
   if (Collective_batch_head == NULL)
     Collective_batch_tail = NULL;
@@ -765,6 +818,7 @@ Prover_options init_prover_options(void)
   p->hint_match_once        = init_flag("hint_match_once",        FALSE);
   p->hint_trace             = init_flag("hint_trace",             FALSE);
   p->collective_trace       = init_flag("collective_trace",       FALSE);
+  p->collective_hint_probes = init_flag("collective_hint_probes",  FALSE);
   p->print_matched_hints    = init_flag("print_matched_hints",    FALSE);
   p->print_derivations      = init_flag("print_derivations",      FALSE);
   p->derivations_only       = init_flag("derivations_only",        TRUE);
@@ -1574,6 +1628,12 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             "Collective_work: paramod_pairs=%s, hyper_batches=%s.\n",
             comma_num(s.collective_pair_expansions),
             comma_num(s.collective_hyper_expansions));
+    fprintf(fp,
+            "Collective_hint_probes: scheduled=%s, expanded=%s, "
+            "credit=%s.\n",
+            comma_num(s.collective_hint_probes_scheduled),
+            comma_num(s.collective_hint_probes_expanded),
+            Collective_hint_probe_credit ? "available" : "consumed");
     fprintf(fp,
             "Collective_memory: descriptor_bytes=%s, history_bytes=%s.\n",
             comma_num(s.collective_descriptor_bytes),
@@ -5459,13 +5519,26 @@ static
 BOOL collective_expand_one_batch(void)
 {
   struct collective_batch *b;
+  BOOL hint_probe;
 
   if (Collective_batch_head == NULL)
     return FALSE;
 
   b = Collective_batch_head;
+  hint_probe = (b->kind & COLLECTIVE_HINT_PROBE) != 0;
 
-  if ((b->kind & (COLLECTIVE_POS_HYPER | COLLECTIVE_NEG_HYPER)) != 0) {
+  if ((b->kind & COLLECTIVE_INFERENCE_MASK) == 0 ||
+      (b->kind & ~COLLECTIVE_KIND_MASK) != 0)
+    fatal_error("unknown collective batch kind");
+
+  /* A hint probe advances one paramodulation pair before any one-shot hyper
+     work.  Hyper expansion can emit an unbounded number of conclusions, so
+     it remains on the ordinary fair queue and cannot masquerade as a bounded
+     probe. */
+  if ((b->kind & (COLLECTIVE_POS_HYPER | COLLECTIVE_NEG_HYPER)) != 0 &&
+      (!hint_probe ||
+       (b->kind & COLLECTIVE_PARAMOD) == 0 ||
+       b->cursor >= b->activation_limit)) {
     struct collective_history_filter filter;
     unsigned long long given_position;
     unsigned long long generated_before = Stats.generated;
@@ -5498,19 +5571,19 @@ BOOL collective_expand_one_batch(void)
     if (flag(Opt->collective_trace))
       printf("%sCOLLECTIVE_TRACE kind=%s given=%llu epoch=%u "
              "history_candidates=%llu future_rejected=%llu "
-             "inactive_rejected=%llu generated=%llu kept=%llu.\n",
+             "inactive_rejected=%llu generated=%llu kept=%llu "
+             "hint_probe=%d.\n",
              TPTP_PFX,
              hyper_kind == COLLECTIVE_POS_HYPER ? "pos_hyper" : "neg_hyper",
              b->given_id, b->snapshot_epoch, filter.accepted,
              filter.rejected_future, filter.rejected_inactive,
-             Stats.generated - generated_before, Stats.kept - kept_before);
+             Stats.generated - generated_before, Stats.kept - kept_before,
+             hint_probe);
     collective_finish_batch_turn(b);
     return TRUE;
   }
 
-  if ((b->kind & COLLECTIVE_PARAMOD) == 0 ||
-      (b->kind & ~(COLLECTIVE_PARAMOD | COLLECTIVE_POS_HYPER |
-                   COLLECTIVE_NEG_HYPER)) != 0)
+  if ((b->kind & COLLECTIVE_PARAMOD) == 0)
     fatal_error("unknown collective batch kind");
 
   while (b->cursor < b->activation_limit) {
@@ -5558,9 +5631,11 @@ BOOL collective_expand_one_batch(void)
       Stats.collective_pair_expansions++;
       if (flag(Opt->collective_trace))
         printf("%sCOLLECTIVE_TRACE kind=paramod given=%llu partner=%llu "
-               "epoch=%u generated=%llu kept=%llu historical=1.\n",
+               "epoch=%u generated=%llu kept=%llu historical=1 "
+               "hint_probe=%d.\n",
                TPTP_PFX, b->given_id, partner_id, b->snapshot_epoch,
-               Stats.generated - generated_before, Stats.kept - kept_before);
+               Stats.generated - generated_before, Stats.kept - kept_before,
+               hint_probe);
     }
     else
       Stats.collective_partners_skipped++;
@@ -5590,6 +5665,9 @@ BOOL collective_expand_one_batch(void)
 static
 void given_infer(Topform given)
 {
+  struct collective_batch *tail_before =
+    collective_frontier_mode() ? Collective_batch_tail : NULL;
+
   clock_start(Clocks.infer);
 
   if (flag(Opt->binary_resolution)) {
@@ -5668,6 +5746,9 @@ void given_infer(Topform given)
       free_context(ci);
     }
   }
+
+  if (collective_frontier_mode())
+    collective_maybe_schedule_hint_probe(given, tail_before);
 
   Current_inference_source = INFER_SOURCE_OTHER;
 
@@ -7934,9 +8015,10 @@ void write_collective_checkpoint(const char *dir)
   FILE *fp;
   unsigned long long i;
   struct collective_batch *b;
-  const char magic[8] = {'P','9','C','O','L','L','5','\0'};
+  const char magic[8] = {'P','9','C','O','L','L','6','\0'};
   uint32_t turn = Collective_batch_turn ? 1U : 0U;
   uint32_t givens_since_batch = Collective_givens_since_batch;
+  uint32_t hint_probe_credit = Collective_hint_probe_credit ? 1U : 0U;
 
   if (!collective_frontier_mode())
     return;
@@ -7949,7 +8031,8 @@ void write_collective_checkpoint(const char *dir)
              sizeof(Collective_activation_count), 1, fp) != 1 ||
       fwrite(&Collective_batch_count, sizeof(Collective_batch_count), 1, fp) != 1 ||
       fwrite(&turn, sizeof(turn), 1, fp) != 1 ||
-      fwrite(&givens_since_batch, sizeof(givens_since_batch), 1, fp) != 1)
+      fwrite(&givens_since_batch, sizeof(givens_since_batch), 1, fp) != 1 ||
+      fwrite(&hint_probe_credit, sizeof(hint_probe_credit), 1, fp) != 1)
     fatal_error("write_collective_checkpoint: header write failed");
 
   for (i = 0; i < Collective_activation_count; i++) {
@@ -7981,7 +8064,8 @@ void read_collective_checkpoint(const char *dir)
   char path[600], magic[8];
   FILE *fp;
   unsigned long long activations, batches, i;
-  uint32_t turn, givens_since_batch;
+  uint32_t turn, givens_since_batch, hint_probe_credit;
+  BOOL format6;
 
   if (!collective_frontier_mode())
     return;
@@ -7989,13 +8073,23 @@ void read_collective_checkpoint(const char *dir)
   fp = fopen(path, "rb");
   if (fp == NULL)
     fatal_error("resume: collective frontier state is missing");
-  if (fread(magic, sizeof(magic), 1, fp) != 1 ||
-      memcmp(magic, "P9COLL5", 7) != 0 ||
+  if (fread(magic, sizeof(magic), 1, fp) != 1)
+    fatal_error("resume: corrupt collective frontier header");
+  format6 = memcmp(magic, "P9COLL6", 7) == 0;
+  if ((!format6 && memcmp(magic, "P9COLL5", 7) != 0) ||
       fread(&activations, sizeof(activations), 1, fp) != 1 ||
       fread(&batches, sizeof(batches), 1, fp) != 1 ||
       fread(&turn, sizeof(turn), 1, fp) != 1 ||
       fread(&givens_since_batch, sizeof(givens_since_batch), 1, fp) != 1)
     fatal_error("resume: corrupt collective frontier header");
+  if (format6) {
+    if (fread(&hint_probe_credit, sizeof(hint_probe_credit), 1, fp) != 1)
+      fatal_error("resume: corrupt collective frontier probe state");
+  }
+  else
+    hint_probe_credit = 1U;
+  if (turn > 1 || hint_probe_credit > 1)
+    fatal_error("resume: invalid collective scheduler state");
 
   for (i = 0; i < activations; i++) {
     unsigned long long id;
@@ -8022,15 +8116,18 @@ void read_collective_checkpoint(const char *dir)
         b->activation_limit > Collective_activation_count)
       fatal_error("resume: invalid collective batch cursor");
     b->snapshot_epoch = epoch;
-    if (kind == 0 ||
-        (kind & ~(COLLECTIVE_PARAMOD | COLLECTIVE_POS_HYPER |
-                  COLLECTIVE_NEG_HYPER)) != 0)
+    if ((kind & COLLECTIVE_INFERENCE_MASK) == 0 ||
+        (kind & ~COLLECTIVE_KIND_MASK) != 0 ||
+        (!format6 && (kind & COLLECTIVE_HINT_PROBE) != 0) ||
+        ((kind & COLLECTIVE_HINT_PROBE) != 0 &&
+         (i != 0 || hint_probe_credit != 0)))
       fatal_error("resume: invalid collective batch kind");
     b->kind = kind;
     collective_append_batch(b);
   }
   Collective_batch_turn = turn != 0;
   Collective_givens_since_batch = givens_since_batch;
+  Collective_hint_probe_credit = hint_probe_credit != 0;
   if (fgetc(fp) != EOF)
     fatal_error("resume: trailing data in collective frontier state");
   fclose(fp);
@@ -8144,6 +8241,10 @@ void write_checkpoint(void)
             Stats.collective_history_rejected_future);
     fprintf(fp, "collective_history_rejected_inactive %llu\n",
             Stats.collective_history_rejected_inactive);
+    fprintf(fp, "collective_hint_probes_scheduled %llu\n",
+            Stats.collective_hint_probes_scheduled);
+    fprintf(fp, "collective_hint_probes_expanded %llu\n",
+            Stats.collective_hint_probes_expanded);
     fprintf(fp, "collective_batches_peak %llu\n",
             Stats.collective_batches_peak);
     fprintf(fp, "simplifier_epoch %u\n", Simplifier_epoch);
@@ -8432,6 +8533,24 @@ unsigned long long read_metadata_ull(FILE *fp, const char *key)
   fprintf(stderr, "WARNING: metadata key '%s' not found, using 0\n", key);
   return 0;
 }  /* read_metadata_ull */
+
+/* Optional cumulative fields let a newer binary resume an older checkpoint
+   without emitting a warning for counters that did not exist in that format. */
+static
+BOOL read_metadata_ull_if_present(FILE *fp, const char *key,
+                                  unsigned long long *value)
+{
+  char buf[256], name[128];
+  unsigned long long val;
+  while (fgets(buf, sizeof(buf), fp)) {
+    if (sscanf(buf, "%127s %llu", name, &val) == 2 &&
+        strcmp(name, key) == 0) {
+      *value = val;
+      return TRUE;
+    }
+  }
+  return FALSE;
+}
 
 /*************
  *
@@ -8847,6 +8966,14 @@ void resume_load_clauses(const char *dir)
       read_metadata_ull(fp, "collective_history_rejected_future");
     rewind(fp); Stats.collective_history_rejected_inactive =
       read_metadata_ull(fp, "collective_history_rejected_inactive");
+    Stats.collective_hint_probes_scheduled = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_hint_probes_scheduled",
+      &Stats.collective_hint_probes_scheduled);
+    Stats.collective_hint_probes_expanded = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_hint_probes_expanded",
+      &Stats.collective_hint_probes_expanded);
     rewind(fp); Stats.collective_batches_peak =
       read_metadata_ull(fp, "collective_batches_peak");
   }

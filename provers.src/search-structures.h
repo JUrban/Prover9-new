@@ -87,6 +87,7 @@ struct prover_options {
     hint_match_once,         // unindex hint immediately after first match
     hint_trace,              // exact committed-candidate hint tuple
     collective_trace,        // one line per collective batch expansion
+    collective_hint_probes,  // one bounded early expansion for hinted givens
     print_matched_hints,     // print matched/unmatched hints per proof
     print_derivations,       // print derivation for clauses in hitlist file
     derivations_only,        // exit after last hitlist derivation
@@ -331,6 +332,8 @@ struct prover_stats {
     collective_history_candidates,
     collective_history_rejected_future,
     collective_history_rejected_inactive,
+    collective_hint_probes_scheduled,
+    collective_hint_probes_expanded,
     collective_batches_pending,
     collective_batches_peak,
     collective_activation_entries,

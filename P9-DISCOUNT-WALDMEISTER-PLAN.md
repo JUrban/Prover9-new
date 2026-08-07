@@ -336,6 +336,28 @@ Implementation status on 2026-08-07:
   hint preprocessing floor.  These finite-boundary
   figures include deferred fair work and must not be extrapolated as a
   week-long reduction until the long-run acceptance experiment is run.
+- The first hint-aware scheduler increment is an opt-in bounded descriptor
+  probe, enabled by `collective_hint_probes`.  When a selected given has an exact
+  `matching_hint`, its newly appended combined descriptor may move to the
+  queue head to advance one eligible paramodulation pair.  One-shot hyper
+  expansion is explicitly ineligible because one such call can emit an
+  unbounded conclusion burst; it remains on the ordinary queue.  The probe
+  consumes a single credit, and only a subsequent ordinary FIFO expansion
+  restores it.  The marker is cleared before an incomplete descriptor rotates
+  to the tail.  Consequently there is at most one probe between ordinary turns,
+  so an unlimited stream of hint matches cannot starve older descriptors.
+  This spends no memory proportional to generated clauses and never
+  substitutes an approximate matcher for the unchanged exact `cl_process`
+  path.  It is an early feedback channel, not yet the promised lower-bound or
+  promising-pair cache for unseen conclusions.  The reason it is default-off
+  is measured rather than hypothetical: on the 250-given/10%-hint Osborn
+  boundary, an initial version that allowed one-shot hyper as a probe emitted
+  2,842 hyper conclusions and left 502 SOS clauses, versus zero and two with
+  probes disabled.  Restricting probes to one paramodulation pair reduced this
+  to 907 total generated and 21 SOS, close to the disabled run's 830 and two;
+  it used 15.52 versus 18.06 CPU seconds and the same 33,092-KiB peak RSS.
+  This is a useful bounded experiment, but it does not justify accepting more
+  frontier growth by default before solved-problem coverage is measured.
 - Focused equality and hyperresolution examples both prove in collective mode;
   equality proofs pass `prooftrans` and `directproof`, and the predicate-hyper
   proof passes `prooftrans`.  Mixed queues, activation/deactivation history,
@@ -348,12 +370,20 @@ Implementation status on 2026-08-07:
   traced to `symbols.txt`: the old whitespace-token parser stopped at the
   first quoted symbol name containing a space, so restored raw symbol numbers
   changed secondary equality orientation.  The reader is now line-based and
-  verifies every restored symbol number.  The collective binary checkpoint is
-  now format `P9COLL5` and records clashable eligibility for each activation.
+  verifies every restored symbol number.  Collective binary checkpoint format
+  `P9COLL5` first added clashable eligibility for each activation.
+  `P9COLL6` additionally preserves the bounded hint-probe scheduler credit
+  and its optional queue-head marker; the reader still accepts `P9COLL5`.
   A fresh persistent-history checkpoint at given 92 passed all 18 integrity
   hashes; its resumed and uninterrupted 200-given runs both ended at exactly 695
   generated, 566 kept, 162 usable, 161 SOS, 9 paramodulation pairs, 41 hyper
-  batches, 200 history clauses, and zero archive materializations.
+  batches, 200 history clauses, and zero archive materializations.  A fresh
+  `P9COLL6` checkpoint at given 109 captured consumed probe credit, passed all
+  18 hashes, and resumed to the exact uninterrupted 250-given probe boundary:
+  907 generated, 605 kept, 21 SOS, 47 paramodulation pairs, 40 hyper batches,
+  and 41 scheduled/expanded probes.  The same reader also resumed the old
+  `P9COLL5` given-92 checkpoint to its original 200-given counts with 18/18
+  hashes.
 - `passive_store=dense` now removes passive ownership from `Topform`,
   `Clist_pos`, selector AVL nodes, active indexes, and the live clause-ID
   table.  Given-selection rules and semantics are evaluated once while the
@@ -415,11 +445,12 @@ closes the known coverage bug.  The current index retains ordinary cloned
 term trees per given; a packed/hash-consed representation and a compact sparse
 deactivation map remain desirable before a week-long scale gate.  Phase 5
 also still needs a bounded promising-pair cache, useful lower bounds, and a
-hint-discovery channel for unmaterialized conclusions.  Every emitted
-candidate already passes the
-unchanged exact hint matcher and all ordinary passive selection heuristics,
-but hints cannot yet prioritize a conclusion before its fair descriptor is
-expanded.  The bounded checkpoint trace gate is now closed for both the
+hint-discovery channel for unmaterialized conclusions.  Exact matches on
+selected givens now provide a starvation-safe one-turn descriptor probe, and
+every emitted candidate passes the unchanged exact hint matcher and all
+ordinary passive selection heuristics.  However, unseen conclusions still
+cannot influence priority before their descriptor is expanded.  The bounded
+checkpoint trace gate is now closed for both the
 combined frontier and dense passive store, and dense inactive state is bounded
 by automatic compaction rather than growing for the life of the process.
 Phase 3 is not yet declared complete because the required Phase-1-to-dense
