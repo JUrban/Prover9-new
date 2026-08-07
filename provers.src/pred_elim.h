@@ -24,6 +24,7 @@
 #include "../ladr/clauses.h"
 #include "../ladr/clause_misc.h"
 #include "../ladr/ioutil.h"
+#include "../ladr/clause_store.h"
 
 /* INTRODUCTION
 */
@@ -34,7 +35,7 @@
 
 /* Public function prototypes from pred_elim.c */
 
-void predicate_elimination(Clist clauses, Clist disabled, BOOL echo);
+void predicate_elimination(Clist clauses, Clause_store disabled, BOOL echo);
 
 void set_pred_elim_timeout(int seconds);
 

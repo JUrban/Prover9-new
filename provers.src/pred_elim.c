@@ -241,7 +241,7 @@ Plist incorporate_new_clauses(Plist sos, Plist new, BOOL echo)
  *************/
 
 static
-Plist elim_relation(int symbol, Plist sos, Clist disabled, BOOL echo)
+Plist elim_relation(int symbol, Plist sos, Clause_store disabled, BOOL echo)
 {
   /* this does a naive given-clause loop */
   Plist usable = NULL;
@@ -267,7 +267,7 @@ Plist elim_relation(int symbol, Plist sos, Clist disabled, BOOL echo)
     Plist p;
     for (p = usable; p; p = p->next) {
       if (rsym_occurrences(symbol, p->v) > 0)
-	clist_append(p->v, disabled);
+	clause_store_append(disabled, p->v);
       else
 	without = plist_prepend(without, p->v);
     }
@@ -294,7 +294,7 @@ the end result do not have IDs.
 */
 
 /* PUBLIC */
-void predicate_elimination(Clist clauses, Clist disabled, BOOL echo)
+void predicate_elimination(Clist clauses, Clause_store disabled, BOOL echo)
 {
   Plist clauses2 = prepend_clist_to_plist(NULL, clauses);
   BOOL equality = equality_in_clauses(clauses2);  /* eq => different method */
@@ -345,4 +345,3 @@ void set_pred_elim_timeout(int seconds)
   Pred_elim_expired = FALSE;
   Pred_elim_check_counter = 0;
 }  /* set_pred_elim_timeout */
-

@@ -22,6 +22,7 @@
 #include "flatdemod.h"
 #include "backdemod.h"
 #include "compress.h"
+#include "clause_store.h"
 #include "weight.h"
 #include "hints.h"
 #include "clausify.h"

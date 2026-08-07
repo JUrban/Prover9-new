@@ -512,7 +512,7 @@ void clist_zap(Clist l)
     c = p->c;
     p = p->next;
     clist_remove(c, l);
-    if (c->containers == NULL)
+    if (c->containers == NULL && !c->disabled)
       zap_topform(c);
   }
   clist_free(l);
@@ -1043,4 +1043,3 @@ void fprint_clause_clist(FILE *fp, Clist lst)
   fprintf(fp, "end_of_list.\n");
   fflush(fp);
 }  /* fprint_clause_clist */
-

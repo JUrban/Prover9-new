@@ -180,7 +180,7 @@ void delete_clist(Clist l)
     c = p->c;
     p = p->next;
     clist_remove(c, l);
-    if (c->containers == NULL)
+    if (c->containers == NULL && !c->disabled)
       delete_clause(c);
   }
   clist_free(l);
@@ -272,4 +272,3 @@ void make_clause_basic(Topform c)
   for (lit = c->literals; lit; lit = lit->next)
     clear_all_nonbasic_marks(lit->atom);
 }  /* make_clause_basic */
-

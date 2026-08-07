@@ -786,6 +786,57 @@ Topform next_negative_clause_3(Clist_pos *ap, Clist_pos *bp, Clist_pos *cp)
   return next_neg;
 }  /* next_negative_clause_3 */
 
+static
+Topform next_negative_clause_store(Clist_pos *ap, Clist_pos *bp,
+                                   Clause_store store, size_t *position)
+{
+  Clist_pos a = *ap;
+  Clist_pos b = *bp;
+  size_t cpos = *position;
+  Topform ac = NULL, bc = NULL, cc = NULL, result = NULL;
+  int source = 0;
+
+  while (a != NULL && !negative_clause(a->c->literals))
+    a = a->next;
+  while (b != NULL && !negative_clause(b->c->literals))
+    b = b->next;
+  while (cpos < clause_store_length(store) &&
+         !negative_clause_possibly_compressed(clause_store_get(store, cpos)))
+    cpos++;
+
+  if (a != NULL) {
+    ac = a->c;
+    result = ac;
+    source = 1;
+  }
+  if (b != NULL) {
+    bc = b->c;
+    if (result == NULL || bc->id < result->id) {
+      result = bc;
+      source = 2;
+    }
+  }
+  if (cpos < clause_store_length(store)) {
+    cc = clause_store_get(store, cpos);
+    if (result == NULL || cc->id < result->id) {
+      result = cc;
+      source = 3;
+    }
+  }
+
+  if (source == 1)
+    a = a->next;
+  else if (source == 2)
+    b = b->next;
+  else if (source == 3)
+    cpos++;
+
+  *ap = a;
+  *bp = b;
+  *position = cpos;
+  return result;
+}  /* next_negative_clause_store */
+
 /*************
  *
  *   first_negative_clause()
@@ -879,27 +930,27 @@ Plist neg_clauses_and_descendants(Plist proof,
 
 /* PUBLIC */
 Plist neg_descendants(Topform top_neg,
-		      Clist a_list, Clist b_list, Clist c_list)
+		      Clist a_list, Clist b_list, Clause_store c_store)
 		      
 {
   Plist descendants = plist_prepend(NULL, top_neg);
-  Clist_pos a, b, c;
+  Clist_pos a, b;
+  size_t c_position = 0;
   Topform next;
 
-  sort_clist_by_id(c_list);
+  clause_store_sort_by_id(c_store);
 
   /* Get all descendants of top_neg that appear in a, b, or c. */
   
   a = a_list->first;
   b = b_list->first;
-  c = c_list->first;
 
-  next = next_negative_clause_3(&a, &b, &c);
+  next = next_negative_clause_store(&a, &b, c_store, &c_position);
   while (next) {
     Topform neg_parent = first_negative_parent(next);
     if (neg_parent && clause_plist_member(descendants, neg_parent, FALSE))
       descendants = insert_clause_into_plist(descendants, next, FALSE);
-    next = next_negative_clause_3(&a, &b, &c);
+    next = next_negative_clause_store(&a, &b, c_store, &c_position);
   }
   descendants = reverse_plist(descendants);  /* make it increasing */
   return descendants;
@@ -1309,4 +1360,3 @@ void multi_order_trial(Clist usable, Clist sos, BOOL echo)
   safe_free(trial_arr);
   zap_ilist(fsyms_list);
 }  /* multi_order_trial */
-

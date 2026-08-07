@@ -68,6 +68,9 @@ test6:
 memory-tests:
 	cd test.src && $(MAKE) memory-tests
 
+bookkeeping-tests:
+	cd test.src && $(MAKE) bookkeeping-tests
+
 clean:
 	cd ladr             && $(MAKE) realclean
 	cd apps.src         && $(MAKE) realclean

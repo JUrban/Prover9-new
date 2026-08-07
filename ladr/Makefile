@@ -105,7 +105,7 @@ TERM_OBJ = term.o termflag.o listterm.o tlist.o flatterm.o multiset.o\
 	   termorder.o parse.o accanon.o
 UNIF_OBJ = unify.o fpalist.o fpa.o discrim.o discrimb.o discrimw.o\
            dioph.o btu.o btm.o mindex.o basic.o attrib.o
-CLAS_OBJ = formula.o definitions.o literals.o topform.o clist.o\
+CLAS_OBJ = formula.o definitions.o literals.o topform.o clist.o clause_store.o\
 	   clauseid.o clauses.o\
 	   just.o cnf.o clausify.o parautil.o\
            pindex.o compress.o\

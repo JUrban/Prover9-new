@@ -148,7 +148,7 @@ static struct {
   // auxiliary clause lists
 
   Clist limbo;
-  Clist disabled;
+  Clause_store disabled;
   Plist empties;
 
   // indexing
@@ -692,7 +692,9 @@ static
 void update_memory_stats(void)
 {
   struct clause_compression_stats cs = clause_compression_get_stats();
+  struct clause_id_table_stats ids = clause_id_table_get_stats();
   Clist_pos p;
+  size_t i;
 
   Stats.compression_attempted = cs.attempted;
   Stats.compression_successful = cs.successful;
@@ -720,8 +722,8 @@ void update_memory_stats(void)
   Stats.disabled_full_clauses = 0;
   Stats.disabled_compressed_clauses = 0;
   if (Glob.disabled != NULL) {
-    for (p = Glob.disabled->first; p != NULL; p = p->next) {
-      Topform c = p->c;
+    for (i = 0; i < clause_store_length(Glob.disabled); i++) {
+      Topform c = clause_store_get(Glob.disabled, i);
       if (c->compressed != NULL) {
         Stats.disabled_compressed_clauses++;
         Stats.disabled_compressed_bytes += c->compressed_size;
@@ -736,6 +738,15 @@ void update_memory_stats(void)
       }
     }
   }
+
+  Stats.disabled_store_bytes = clause_store_allocated_bytes(Glob.disabled);
+  Stats.disabled_legacy_clist_bytes =
+    clause_store_legacy_clist_bytes(Glob.disabled);
+  Stats.clause_id_entries = ids.entries;
+  Stats.clause_id_pages = ids.pages;
+  Stats.clause_id_table_capacity = ids.table_capacity;
+  Stats.clause_id_table_bytes = ids.allocated_bytes;
+  Stats.clause_id_legacy_bytes = ids.legacy_bytes;
 
   Stats.allocator_reserved_kbytes =
     (unsigned long long) megs_malloced() * 1024;
@@ -761,7 +772,7 @@ void update_stats(void)
   Stats.sos_size = Glob.sos ? Glob.sos->length : 0;
   Stats.demodulators_size = Glob.demods ? Glob.demods->length : 0;
   Stats.limbo_size = Glob.limbo ? Glob.limbo->length : 0;
-  Stats.disabled_size = Glob.disabled ? Glob.disabled->length : 0;
+  Stats.disabled_size = clause_store_length(Glob.disabled);
   Stats.hints_size = Glob.hints ? Glob.hints->length : 0;
   Stats.kbyte_usage = bytes_palloced() / 1000;
   update_memory_stats();
@@ -835,6 +846,21 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
           comma_num(s.disabled_compressed_bytes),
           comma_num(s.disabled_compressed_clauses),
           comma_num(s.disabled_estimated_uncompressed_bytes));
+  fprintf(fp,
+          "Bookkeeping_bytes: disabled_store=%s (legacy_clist=%s, %.2f/clause), "
+          "clause_id_table=%s (legacy_hash=%s, entries=%s, pages=%s, "
+          "slots=%s, %.2f/entry).\n",
+          comma_num(s.disabled_store_bytes),
+          comma_num(s.disabled_legacy_clist_bytes),
+          s.disabled_size == 0 ? 0.0 :
+            (double) s.disabled_store_bytes / s.disabled_size,
+          comma_num(s.clause_id_table_bytes),
+          comma_num(s.clause_id_legacy_bytes),
+          comma_num(s.clause_id_entries),
+          comma_num(s.clause_id_pages),
+          comma_num(s.clause_id_table_capacity),
+          s.clause_id_entries == 0 ? 0.0 :
+            (double) s.clause_id_table_bytes / s.clause_id_entries);
   fprintf(fp,
           "Allocator_bytes: reserved=%s, palloc_cumulative=%s. "
           "FPA: nodes_live=%s, nodes_peak=%s, lists_live=%s, lists_peak=%s.\n",
@@ -2780,20 +2806,22 @@ void retain_disabled_clause(Topform c)
 {
   if (active_or_indexable_clause(c))
     fatal_error("retain_disabled_clause: clause is still active or indexed");
-  clist_append(c, Glob.disabled);
+  clause_store_append(Glob.disabled, c);
   compress_retained_clause(c);
 }  /* retain_disabled_clause */
 
 static
-void compress_retained_clist(Clist list)
+void compress_retained_store(Clause_store store)
 {
-  Clist_pos p;
-  if (!flag(Opt->compress_disabled) || list == NULL)
+  size_t i;
+  if (!flag(Opt->compress_disabled) || store == NULL)
     return;
-  for (p = list->first; p != NULL; p = p->next)
-    if (p->c->compressed == NULL)
-      compress_retained_clause(p->c);
-}  /* compress_retained_clist */
+  for (i = 0; i < clause_store_length(store); i++) {
+    Topform c = clause_store_get(store, i);
+    if (c->compressed == NULL)
+      compress_retained_clause(c);
+  }
+}  /* compress_retained_store */
 
 /*************
  *
@@ -2868,7 +2896,7 @@ void free_search_memory(void)
 					  flag(Opt->lex_dep_demod_sane)),
 		      DELETE, Clocks.index);
     clist_remove(c, Glob.demods);
-    if (c->containers == NULL)
+    if (c->containers == NULL && !c->disabled)
       delete_clause(c);
   }
   clist_free(Glob.demods);
@@ -2897,7 +2925,7 @@ void free_search_memory(void)
   lindex_destroy(Glob.clashable_idx);
   Glob.clashable_idx = NULL;
 
-  delete_clist(Glob.disabled);
+  clause_store_delete_clauses(Glob.disabled);
   Glob.disabled = NULL;
 
   if (Glob.hints->first) {
@@ -3729,7 +3757,7 @@ void back_demod(Topform demod)
   p = results;
   while(p != NULL) {
     Topform old = p->v;
-    if (!clist_member(old, Glob.disabled)) {
+    if (!clause_store_member(Glob.disabled, old)) {
       Topform new;
       if (flag(Opt->basic_paramodulation))
 	new = copy_clause_with_flag(old, nonbasic_flag());
@@ -3775,7 +3803,7 @@ void back_unit_deletion(Topform unit)
   p = results;
   while(p != NULL) {
     Topform old = p->v;
-    if (!clist_member(old, Glob.disabled)) {
+    if (!clause_store_member(Glob.disabled, old)) {
       Topform new;
       if (flag(Opt->basic_paramodulation))
 	new = copy_clause_with_flag(old, nonbasic_flag());
@@ -3846,7 +3874,7 @@ void disable_to_be_disabled(void)
     Plist descendants = NULL;
     Plist p;
 
-    sort_clist_by_id(Glob.disabled);
+    clause_store_sort_by_id(Glob.disabled);
 
     for (p = Glob.desc_to_be_disabled; p; p = p->next) {
       Topform c = p->v;
@@ -3859,7 +3887,8 @@ void disable_to_be_disabled(void)
       printf("\n%% Disable descendants (x means already disabled):\n");
       for (p = descendants; p; p = p->next) {
 	Topform d = p->v;
-	printf(" %llu%s", d->id, clist_member(d, Glob.disabled) ? "x" : "");
+	printf(" %llu%s", d->id,
+               clause_store_member(Glob.disabled, d) ? "x" : "");
 	if (++n % 10 == 0)
 	  printf("\n");
       }
@@ -3868,7 +3897,7 @@ void disable_to_be_disabled(void)
 
     for (p = descendants; p; p = p->next) {
       Topform d = p->v;
-      if (!clist_member(d, Glob.disabled))
+      if (!clause_store_member(Glob.disabled, d))
 	disable_clause(d);
     }
 
@@ -5300,67 +5329,83 @@ void basic_clause_properties(Clist sos, Clist usable)
  *************/
 
 static
+BOOL write_bare_clause(FILE *clause_fp, FILE *data_fp, Topform c,
+                       const char *list_name, int list_pos, int *file_pos,
+                       Plist *seen_tab, int seen_tab_size)
+{
+  BOOL was_compressed = c->compressed != NULL;
+  int is_shared;
+  Literals lit;
+  if (c->id == 0)
+    return FALSE;  /* skip clauses without IDs */
+  if (was_compressed && !materialize_clause(c))
+    fatal_error("write_bare_clause: invalid compressed clause");
+
+  is_shared = seen_tab != NULL && clause_plist_member(
+    seen_tab[c->id % seen_tab_size], c, TRUE);
+  if (!is_shared) {
+    if (seen_tab != NULL)
+      seen_tab[c->id % seen_tab_size] = insert_clause_into_plist(
+        seen_tab[c->id % seen_tab_size], c, TRUE);
+    fwrite_clause(clause_fp, c, CL_FORM_BARE);
+  }
+  fprintf(data_fp, "%s %d %llu %.17g %d", list_name,
+          is_shared ? list_pos : *file_pos,
+          c->id, c->weight, (int)c->initial);
+  if (is_shared)
+    fprintf(data_fp, " shared");
+  if (c->matching_hint != NULL)
+    fprintf(data_fp, " hint_match %d", (int)c->matching_hint->id);
+  if (c->used)
+    fprintf(data_fp, " used");
+  if (c->was_given)
+    fprintf(data_fp, " was_given");
+  if (c->last_matched_given > 0)
+    fprintf(data_fp, " last_matched %llu", c->last_matched_given);
+  if (strcmp(list_name, "hints") == 0 && hint_is_redundant(c))
+    fprintf(data_fp, " redundant_hint");
+  for (lit = c->literals; lit != NULL; lit = lit->next)
+    fprintf(data_fp, " aflags %u", (unsigned)lit->atom->private_flags);
+  fprintf(data_fp, "\n");
+  if (!is_shared)
+    (*file_pos)++;
+  if (was_compressed && !recompress_clause(c))
+    fatal_error("write_bare_clause: could not recompress clause");
+  return TRUE;
+}
+
+static
 int write_clist_bare(FILE *clause_fp, FILE *data_fp,
                      Clist lst, const char *list_name,
                      Plist *seen_tab, int seen_tab_size)
 {
   Clist_pos p;
-  int file_pos = 0;  /* position in .clauses file (non-shared only) */
-  int list_pos = 0;  /* position in original list (all entries) */
+  int file_pos = 0;
+  int list_pos = 0;
   for (p = lst->first; p != NULL; p = p->next) {
-    Topform c = p->c;
-    BOOL was_compressed = c->compressed != NULL;
-    if (c->id == 0)
-      continue;  /* skip clauses without IDs (e.g. unprocessed disabled) */
-    if (was_compressed && !materialize_clause(c))
-      fatal_error("write_clist_bare: invalid compressed clause");
-    /* Write-side dedup: if clause was already written to another list,
-       mark as shared in clause_data and skip the clause text. */
-    {
-      int is_shared = (seen_tab != NULL && clause_plist_member(
-              seen_tab[c->id % seen_tab_size], c, TRUE));
-      if (!is_shared) {
-        if (seen_tab != NULL)
-          seen_tab[c->id % seen_tab_size] =
-              insert_clause_into_plist(
-                  seen_tab[c->id % seen_tab_size], c, TRUE);
-        fwrite_clause(clause_fp, c, CL_FORM_BARE);
-      }
-      /* Position field: file_pos for non-shared (matches .clauses file),
-         list_pos for shared (used by interleaving logic on restore). */
-      fprintf(data_fp, "%s %d %llu %.17g %d", list_name,
-              is_shared ? list_pos : file_pos,
-              c->id, c->weight, (int)c->initial);
-      if (is_shared)
-        fprintf(data_fp, " shared");
-      if (c->matching_hint != NULL)
-        fprintf(data_fp, " hint_match %d", (int)c->matching_hint->id);
-      if (c->used)
-        fprintf(data_fp, " used");
-      if (c->was_given)
-        fprintf(data_fp, " was_given");
-      if (c->last_matched_given > 0)
-        fprintf(data_fp, " last_matched %llu", c->last_matched_given);
-      if (strcmp(list_name, "hints") == 0 && hint_is_redundant(c))
-        fprintf(data_fp, " redundant_hint");
-      /* Save atom private_flags for each literal (carries oriented_eq,
-         renamable_flip, maximal, selected marks - lost in text round-trip) */
-      {
-        Literals lit;
-        for (lit = c->literals; lit != NULL; lit = lit->next)
-          fprintf(data_fp, " aflags %u", (unsigned)lit->atom->private_flags);
-      }
-      fprintf(data_fp, "\n");
-      if (!is_shared)
-        file_pos++;
-    }
-    if (was_compressed && !recompress_clause(c))
-      fatal_error("write_clist_bare: could not recompress clause");
-    list_pos++;
+    if (write_bare_clause(clause_fp, data_fp, p->c, list_name, list_pos,
+                          &file_pos, seen_tab, seen_tab_size))
+      list_pos++;
   }
   fprintf(clause_fp, "end_of_list.\n");
   return list_pos;
 }  /* write_clist_bare */
+
+static
+int write_clause_store_bare(FILE *clause_fp, FILE *data_fp,
+                            Clause_store store, const char *list_name)
+{
+  size_t i;
+  int file_pos = 0;
+  int list_pos = 0;
+  for (i = 0; i < clause_store_length(store); i++) {
+    if (write_bare_clause(clause_fp, data_fp, clause_store_get(store, i),
+                          list_name, list_pos, &file_pos, NULL, 0))
+      list_pos++;
+  }
+  fprintf(clause_fp, "end_of_list.\n");
+  return list_pos;
+}  /* write_clause_store_bare */
 
 /*************
  *
@@ -5382,6 +5427,33 @@ unsigned long long hash_clist_ids(Clist lst)
     h = (h << 7) | (h >> 57);  /* rotate left 7 */
   }
   return h;
+}
+
+static
+unsigned long long hash_clause_store_ids(Clause_store store)
+{
+  unsigned long long h = 0;
+  size_t i;
+  for (i = 0; i < clause_store_length(store); i++) {
+    Topform c = clause_store_get(store, i);
+    /* Format 3 intentionally omits pre-elimination clauses without IDs. */
+    if (c->id != 0) {
+      h ^= c->id;
+      h = (h << 7) | (h >> 57);
+    }
+  }
+  return h;
+}
+
+static
+unsigned long long checkpointed_clause_store_count(Clause_store store)
+{
+  unsigned long long count = 0;
+  size_t i;
+  for (i = 0; i < clause_store_length(store); i++)
+    if (clause_store_get(store, i)->id != 0)
+      count++;
+  return count;
 }
 
 static
@@ -5442,6 +5514,7 @@ void write_checkpoint_hashes(const char *dir)
   fprintf(fp, "demods_ids %llu\n",    hash_clist_ids(Glob.demods));
   fprintf(fp, "hints_ids %llu\n",     hash_clist_ids(Glob.hints));
   fprintf(fp, "limbo_ids %llu\n",     hash_clist_ids(Glob.limbo));
+  fprintf(fp, "disabled_ids %llu\n",  hash_clause_store_ids(Glob.disabled));
   fprintf(fp, "sos_fpa %llu\n",       hash_clist_fpa_ids(Glob.sos));
   fprintf(fp, "usable_fpa %llu\n",    hash_clist_fpa_ids(Glob.usable));
   fprintf(fp, "hints_fpa %llu\n",     hash_clist_fpa_ids(Glob.hints));
@@ -5453,6 +5526,8 @@ void write_checkpoint_hashes(const char *dir)
   fprintf(fp, "demods_count %d\n",    Glob.demods->length);
   fprintf(fp, "hints_count %d\n",     Glob.hints->length);
   fprintf(fp, "limbo_count %d\n",     Glob.limbo->length);
+  fprintf(fp, "disabled_count %llu\n",
+          checkpointed_clause_store_count(Glob.disabled));
 
   fclose(fp);
 }
@@ -5487,6 +5562,8 @@ void verify_checkpoint_hashes(const char *dir)
       actual = hash_clist_ids(Glob.hints);
     else if (strcmp(key, "limbo_ids") == 0)
       actual = hash_clist_ids(Glob.limbo);
+    else if (strcmp(key, "disabled_ids") == 0)
+      actual = hash_clause_store_ids(Glob.disabled);
     else if (strcmp(key, "sos_fpa") == 0)
       actual = hash_clist_fpa_ids(Glob.sos);
     else if (strcmp(key, "usable_fpa") == 0)
@@ -5509,6 +5586,8 @@ void verify_checkpoint_hashes(const char *dir)
       actual = (unsigned long long) Glob.hints->length;
     else if (strcmp(key, "limbo_count") == 0)
       actual = (unsigned long long) Glob.limbo->length;
+    else if (strcmp(key, "disabled_count") == 0)
+      actual = checkpointed_clause_store_count(Glob.disabled);
     else
       continue;
 
@@ -5971,23 +6050,33 @@ void restore_checkpoint_formulas(const char *dir)
  *************/
 
 static
+void write_clause_justification(FILE *fp, Topform c)
+{
+  if (c->id != 0 && c->justification != NULL) {
+    String_buf sb = get_string_buf();
+    sb_write_just(sb, c->justification, NULL);
+    fprintf(fp, "%llu ", c->id);
+    fprint_sb(fp, sb);
+    fprintf(fp, "\n");
+    zap_string_buf(sb);
+  }
+}
+
+static
 void write_clist_justifications(FILE *fp, Clist lst)
 {
   Clist_pos p;
-  for (p = lst->first; p != NULL; p = p->next) {
-    Topform c = p->c;
-    if (c->id == 0 || c->justification == NULL)
-      continue;
-    {
-      String_buf sb = get_string_buf();
-      sb_write_just(sb, c->justification, NULL);
-      fprintf(fp, "%llu ", c->id);
-      fprint_sb(fp, sb);
-      fprintf(fp, "\n");
-      zap_string_buf(sb);
-    }
-  }
+  for (p = lst->first; p != NULL; p = p->next)
+    write_clause_justification(fp, p->c);
 }  /* write_clist_justifications */
+
+static
+void write_clause_store_justifications(FILE *fp, Clause_store store)
+{
+  size_t i;
+  for (i = 0; i < clause_store_length(store); i++)
+    write_clause_justification(fp, clause_store_get(store, i));
+}
 
 /*************
  *
@@ -6018,8 +6107,9 @@ void write_justifications(const char *dir)
     write_clist_justifications(fp, Glob.hints);
   if (Glob.limbo->length > 0)
     write_clist_justifications(fp, Glob.limbo);
-  if (flag(Opt->checkpoint_ancestors) && Glob.disabled->length > 0)
-    write_clist_justifications(fp, Glob.disabled);
+  if (flag(Opt->checkpoint_ancestors) &&
+      clause_store_length(Glob.disabled) > 0)
+    write_clause_store_justifications(fp, Glob.disabled);
 
   fclose(fp);
 }  /* write_justifications */
@@ -6332,12 +6422,13 @@ void write_checkpoint(void)
     }
 
     /* Disabled (ancestors for proof reconstruction) */
-    if (flag(Opt->checkpoint_ancestors) && Glob.disabled->length > 0) {
+    if (flag(Opt->checkpoint_ancestors) &&
+        clause_store_length(Glob.disabled) > 0) {
       snprintf(cpath, sizeof(cpath), "%s/disabled.clauses", tmpdir);
       fp = fopen(cpath, "w");
       if (fp) {
-        total_clauses += write_clist_bare(fp, data_fp, Glob.disabled,
-                                          "disabled", NULL, 0);
+        total_clauses += write_clause_store_bare(fp, data_fp, Glob.disabled,
+                                                 "disabled");
         fclose(fp);
       }
     }
@@ -7055,7 +7146,7 @@ void resume_load_clauses(const char *dir)
     while (loaded_disabled->first) {
       Topform c = loaded_disabled->first->c;
       clist_remove(c, loaded_disabled);
-      clist_append(c, Glob.disabled);
+      clause_store_append(Glob.disabled, c);
     }
     clist_zap(loaded_disabled);
   }
@@ -7079,7 +7170,8 @@ void resume_load_clauses(const char *dir)
   printf("\n%% Loaded from checkpoint: %s\n", dir);
   printf("%%   sos=%d, usable=%d, demods=%d, hints=%d, limbo=%d, disabled=%d\n",
          Glob.sos->length, Glob.usable->length, Glob.demods->length,
-         Glob.hints->length, Glob.limbo->length, Glob.disabled->length);
+         Glob.hints->length, Glob.limbo->length,
+         (int) clause_store_length(Glob.disabled));
   printf("%%   Stats: given=%llu, generated=%llu, kept=%llu, proofs=%llu\n",
          Stats.given, Stats.generated, Stats.kept, Stats.proofs);
   printf("%%   max_clause_id=%llu\n", max_clause_id);
@@ -7100,6 +7192,36 @@ int topform_id_qsort_compare(const void *a, const void *b)
   if (ca->id < cb->id) return -1;
   if (ca->id > cb->id) return  1;
   return 0;
+}
+
+static
+void collect_clause_fpa_ids(Topform c, Term *id_table, unsigned id_count)
+{
+  Literals lit;
+  for (lit = c->literals; lit != NULL; lit = lit->next) {
+    struct { Term t; int i; } stack[256];
+    int depth = 0;
+    stack[depth].t = lit->atom;
+    stack[depth].i = 0;
+    depth++;
+    while (depth > 0) {
+      Term t = stack[depth-1].t;
+      int child = stack[depth-1].i;
+      if (child >= ARITY(t)) {
+        if (FPA_ID(t) != 0 && FPA_ID(t) <= id_count)
+          id_table[FPA_ID(t)] = t;
+        depth--;
+      }
+      else {
+        stack[depth-1].i = child + 1;
+        if (depth < 256) {
+          stack[depth].t = ARG(t, child);
+          stack[depth].i = 0;
+          depth++;
+        }
+      }
+    }
+  }
 }
 
 /*************
@@ -7254,19 +7376,22 @@ void load_checkpoint_into_loop(void)
      AC_symbols) are process-local and empty in a fresh process.
      Scan for commutativity/associativity axioms to re-seed them. */
   if (flag(Opt->cac_redundancy)) {
-    Clist scan_lists[4];
+    Clist scan_lists[3];
     int li, seeded = 0;
+    size_t di;
     scan_lists[0] = Glob.usable;
     scan_lists[1] = Glob.sos;
     scan_lists[2] = Glob.demods;
-    scan_lists[3] = Glob.disabled;
-    for (li = 0; li < 4; li++) {
+    for (li = 0; li < 3; li++) {
       Clist_pos cp;
       for (cp = scan_lists[li]->first; cp != NULL; cp = cp->next) {
         if (seed_cac_properties(cp->c))
           seeded++;
       }
     }
+    for (di = 0; di < clause_store_length(Glob.disabled); di++)
+      if (seed_cac_properties(clause_store_get(Glob.disabled, di)))
+        seeded++;
     if (seeded > 0)
       printf("%%   Seeded %d CAC properties from checkpoint clauses.\n",
              seeded);
@@ -7355,68 +7480,17 @@ void load_checkpoint_into_loop(void)
             id_table[FPA_ID(v)] = v;
         }
         /* Collect all clause term IDs */
-        for (idx = 0; idx < n_all; idx++) {
-          Literals lit;
-          for (lit = all_clauses[idx]->literals; lit != NULL; lit = lit->next) {
-            Term atom = lit->atom;
-            /* Walk atom and all subterms (for back_demod index) */
-            {
-              struct { Term t; int i; } stk[256];
-              int sp = 0;
-              stk[sp].t = atom; stk[sp].i = 0; sp++;
-              while (sp > 0) {
-                Term t = stk[sp-1].t;
-                int ci = stk[sp-1].i;
-                if (ci >= ARITY(t)) {
-                  if (FPA_ID(t) != 0 && FPA_ID(t) <= id_count)
-                    id_table[FPA_ID(t)] = t;
-                  sp--;
-                } else {
-                  stk[sp-1].i = ci + 1;
-                  if (sp < 256) {
-                    stk[sp].t = ARG(t, ci);
-                    stk[sp].i = 0;
-                    sp++;
-                  }
-                }
-              }
-            }
-          }
-        }
+        for (idx = 0; idx < n_all; idx++)
+          collect_clause_fpa_ids(all_clauses[idx], id_table, id_count);
         /* Also walk hint and disabled clause terms */
         {
-          Clist extra_lists[2];
-          int li;
-          extra_lists[0] = Glob.hints;
-          extra_lists[1] = Glob.disabled;
-          for (li = 0; li < 2; li++) {
-            Clist_pos cp;
-            for (cp = extra_lists[li]->first; cp != NULL; cp = cp->next) {
-              Literals lit;
-              for (lit = cp->c->literals; lit != NULL; lit = lit->next) {
-                Term atom = lit->atom;
-                struct { Term t; int i; } stk[256];
-                int sp = 0;
-                stk[sp].t = atom; stk[sp].i = 0; sp++;
-                while (sp > 0) {
-                  Term t = stk[sp-1].t;
-                  int ci = stk[sp-1].i;
-                  if (ci >= ARITY(t)) {
-                    if (FPA_ID(t) != 0 && FPA_ID(t) <= id_count)
-                      id_table[FPA_ID(t)] = t;
-                    sp--;
-                  } else {
-                    stk[sp-1].i = ci + 1;
-                    if (sp < 256) {
-                      stk[sp].t = ARG(t, ci);
-                      stk[sp].i = 0;
-                      sp++;
-                    }
-                  }
-                }
-              }
-            }
-          }
+          Clist_pos cp;
+          size_t di;
+          for (cp = Glob.hints->first; cp != NULL; cp = cp->next)
+            collect_clause_fpa_ids(cp->c, id_table, id_count);
+          for (di = 0; di < clause_store_length(Glob.disabled); di++)
+            collect_clause_fpa_ids(clause_store_get(Glob.disabled, di),
+                                   id_table, id_count);
         }
 
         fpa_set_id_table(id_table, id_count);
@@ -7639,7 +7713,7 @@ void load_checkpoint_into_loop(void)
 
   /* Restored disabled clauses must remain materialized through FPA-ID,
      atom-flag, justification, hash, and hit-list restoration. */
-  compress_retained_clist(Glob.disabled);
+  compress_retained_store(Glob.disabled);
 
   /* 11. Update stats and print status */
   update_stats();
@@ -7647,7 +7721,7 @@ void load_checkpoint_into_loop(void)
   if (!flag(Opt->quiet)) {
     printf("%% Resumed: sos=%d, usable=%d, demods=%d, disabled=%d\n",
            Glob.sos->length, Glob.usable->length, Glob.demods->length,
-           Glob.disabled->length);
+           (int) clause_store_length(Glob.disabled));
     print_separator(stdout, "end of process initial clauses", TRUE);
     print_separator(stdout, "CLAUSES FOR SEARCH", TRUE);
   }
@@ -7768,7 +7842,7 @@ Prover_results search(Prover_input p)
     // Allocate auxiliary clause lists.
 
     Glob.limbo    = clist_init("limbo");
-    Glob.disabled = clist_init("disabled");
+    Glob.disabled = clause_store_init("disabled");
     Glob.empties  = NULL;
 
     if (p->resume_dir) {
@@ -7812,7 +7886,7 @@ Prover_results search(Prover_input p)
         if (!flag(Opt->quiet))
           print_separator(stdout, "PREDICATE ELIMINATION", TRUE);
         predicate_elimination(Glob.sos, Glob.disabled, !flag(Opt->quiet));
-        compress_retained_clist(Glob.disabled);
+        compress_retained_store(Glob.disabled);
         if (!flag(Opt->quiet))
           print_separator(stdout, "end predicate elimination", TRUE);
       }

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Bounded memory/correctness benchmark driver for Phases 0--2.
+# Bounded memory/correctness benchmark driver for Phases 0--3.
 
 set -eu
 
@@ -21,7 +21,7 @@ summarize()
   err=$3
   status=$4
   echo "===== $label (status=$status, external_cap=${cap_seconds}s) ====="
-  grep -E '^(Given|Usable|Disabled_compression|Clause_body_bytes|Allocator_bytes)' "$out" || true
+  grep -E '^(Given|Usable|Disabled_compression|Clause_body_bytes|Bookkeeping_bytes|Allocator_bytes)' "$out" || true
   grep -E 'User time|System time|Elapsed .* time|Maximum resident set size' "$err" || true
 }
 
@@ -102,8 +102,16 @@ case "$suite" in
     run_disabled_heavy off
     run_disabled_heavy on
     ;;
-  aim) ;;
-  *) echo "usage: $0 [smoke|aim|all]" >&2; exit 2;;
+  aim|bookkeeping) ;;
+  *) echo "usage: $0 [smoke|aim|bookkeeping|all]" >&2; exit 2;;
+esac
+
+case "$suite" in
+  bookkeeping|all)
+    timeout "$cap_seconds" make -C "$repo/test.src" bookkeeping_lifecycle_test
+    /usr/bin/time -v timeout "$cap_seconds" \
+      "$repo/test.src/bookkeeping_lifecycle_test" 1000000
+    ;;
 esac
 
 case "$suite" in

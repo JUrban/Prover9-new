@@ -86,7 +86,8 @@ struct topform {
   char   neg_compressed;  /* negative and compressed */
   char   subsumer;        /* has this clause back subsumed anything? */
   char   was_given;       /* was this clause selected as given? */
-  char   goal_derived;   /* descended from a denied goal (negated conjecture) */
+  char   goal_derived;    /* descended from a denied goal (negated conjecture) */
+  char   disabled;        /* member of the compact disabled-clause store */
 
 };
 

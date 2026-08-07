@@ -26,6 +26,14 @@
 
 /* Public definitions */
 
+struct clause_id_table_stats {
+  unsigned long long entries;
+  unsigned long long pages;
+  unsigned long long table_capacity;
+  unsigned long long allocated_bytes;
+  unsigned long long legacy_bytes;
+};
+
 /* End of public definitions */
 
 /* Public function prototypes from clauseid.c */
@@ -53,5 +61,7 @@ void clear_clause_id_tab(void);
 void register_clause_with_id(Topform c);
 
 Plist collect_formulas_from_id_tab(void);
+
+struct clause_id_table_stats clause_id_table_get_stats(void);
 
 #endif  /* conditional compilation of whole file */
