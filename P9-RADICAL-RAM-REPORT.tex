@@ -1,0 +1,568 @@
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[a4paper,margin=24mm]{geometry}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{hyperref}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!55!black,
+  urlcolor=blue!55!black,
+  pdftitle={Radical RAM Reduction in Prover9},
+  pdfauthor={Prover9 engineering report}
+}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  columns=fullflexible,
+  frame=single,
+  framesep=5pt,
+  rulecolor=\color{black!25},
+  showstringspaces=false
+}
+
+\newcommand{\setting}[1]{\texttt{#1}}
+\newcommand{\mib}{\,MiB}
+
+\title{Radical RAM Reduction in Prover9\\
+\large A DISCOUNT Loop, Compact State, and Waldmeister-Style Collective Inference}
+\author{Engineering report}
+\date{7 August 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Long AIM searches exhausted memory because millions of kept but unselected
+clauses remained fully materialized and indexed.  This work adds a DISCOUNT
+ownership boundary, dense cold passive storage, packed exact hints, compact
+proof history, and a Waldmeister-style collective inference frontier with a
+bounded conclusion cache.  The 4096-entry default changes the dominant
+passive term from millions of resident clauses to a configured bound for the
+tested paramodulation/hyperresolution strategy.  Short bounded experiments
+validate the implementation, but do not substitute for a week-long run.  The
+engineering forecast is 80--95\% less whole-process RAM, with 90\% as the
+planning midpoint.
+\end{abstract}
+
+\section{Executive summary}
+
+The archived statistics show the scale of the old state:
+
+\begin{center}
+\begin{tabular}{lrrrrr}
+\toprule
+Run & Given & SOS & Disabled & Hints & Memory (MiB) \\
+\midrule
+Osborn, 4000-given prefix & 4,000 & 588,252 & 577,347 & 310,153 & 2,626.98 \\
+Osborn proof              & 11,242 & 4,594,786 & 6,519,452 & 310,153 & 18,810.85 \\
+AAPERM long run           & 12,560 & 8,504,637 & 4,593,127 & 220,117 & 125,829.01 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Deleting or compressing disabled clauses helped but did not change this growth
+law.  At the 4000-given Osborn boundary, deleting almost all disabled clauses
+reduced memory from 2627 to 2037\,MiB, a useful 22\% reduction, while the
+unchanged 588,252-clause SOS remained dominant.
+
+The implemented design makes seven related changes:
+
+\begin{enumerate}
+  \item A DISCOUNT loop indexes and infers only with selected active clauses.
+  \item Passive clauses use dense selector records and serialized or
+        mmap-backed bodies rather than live clause graphs in active indexes.
+  \item Hints use a packed exact-matching representation rather than an FPA
+        forest of complete clause trees.
+  \item Collective descriptors represent complete inference sets without
+        first materializing every conclusion.
+  \item A bounded cache limits resident collective conclusions.
+  \item Optional promising scans expose low raw-weight candidates early, and
+        an optional global heap compares known keys while mandatory FIFO turns
+        preserve fairness.
+  \item Historical active state, proof parents, cursors, checksums, and
+        scheduler state are compact and checkpointable.
+\end{enumerate}
+
+With a cache of 4096, the old archived SOS counts imply structural resident
+collective-frontier reductions of 99.30\%, 99.91\%, and 99.95\%.  Those are
+count/capacity comparisons, not claims about total RSS.  Fixed hints, active
+clauses, history, proof data, descriptors, and allocator reservation remain.
+
+\section{Why the old architecture grew so large}
+
+The old loop behaved like an OTTER loop.  A kept clause could participate in
+simplification, subsumption, demodulation, and indexing before selection as a
+given clause.  Thus a passive clause was not cold or cheap: it retained a
+pointer-rich clause/literal/term graph, could become a demodulator, appeared in
+indexes, and contributed proof and later-disabled state.  The large fixed hint
+set added another term forest and matching index.
+
+\setting{../Plans-RAM-24.txt} correctly notes that the generated count is not a
+memory count: immediate tautologies and forward-subsumed candidates are
+deleted.  It also shows that disabled clauses matter at scale.  These facts do
+not overturn the central diagnosis.  The key ratios are millions of resident
+SOS clauses and passive demodulators versus only thousands of selected active
+clauses.
+
+The Waldmeister remedy is to separate active and passive facts strictly and
+represent a simultaneously generated set of critical pairs by compact state
+plus a fixed promising-pair buffer.  This implementation generalizes the
+principle from unit equational critical pairs to Prover9 paramodulation and
+positive/negative hyperresolution.
+
+\section{Implemented architecture}
+
+\subsection{DISCOUNT ownership boundary}
+
+The mode is selected with \setting{assign(search\_loop,discount)}.  Only
+selected clauses occur in active inference and simplification indexes.  A new
+candidate is simplified, weighed, hint-matched, filtered, and inserted into the
+passive selector without becoming active.  At selection it is refreshed
+against the current simplifier epoch.  If it changes, the ordinary copy/rewrite
+justification is produced and the result is requeued or deleted.  It becomes a
+demodulator or inference parent only after activation.  The legacy default
+remains \setting{search\_loop=otter}.
+
+\subsection{Dense cold passive storage}
+
+\setting{assign(passive\_store,dense)} removes passive ownership from live
+\setting{Topform} graphs, list positions, AVL selector nodes, active indexes,
+and the live clause-ID table.  A dense record retains the stable ID, exact
+selector metadata, hint ID, weight, simplifier epoch, delayed-demodulator bit,
+and selector membership.  Bodies and justifications are serialized in an
+append-only memory or mmap arena and materialized only when required.
+
+The arena compacts when dead historical records become excessive.  Selector
+heaps contain 32-bit record indexes and use lazy deletion.  Selection
+materializes and registers one clause before the normal refresh/activation
+path.
+
+\subsection{Proof history and bookkeeping}
+
+Disabled proof parents cannot simply be freed because proofs and deferred
+inference still refer to stable IDs.  The \setting{memory} and \setting{mmap}
+ancestor stores serialize proof-relevant clauses in an append-only checksummed
+archive and materialize them on demand.  A compact paged clause-ID table and
+slab release reduce always-resident overhead.  Activation and simplifier epochs
+needed by delayed inference are retained, and malformed versions, bounds,
+payloads, or checksums fail closed.
+
+\subsection{Packed exact hints}
+
+\setting{assign(hint\_index,packed)} removes live hint term trees and their
+ordinary FPA index.  It stores compressed bodies, dense mutable side tables,
+compact path/symbol feature bits, and a rewrite-symbol filter.  The filter is
+conservative; the original exact subsumption, equivalence, or rewrite test
+makes the decision.  Candidate hint IDs remain ordered so the existing first
+equivalent/last subsumed result is stable.  Differential tests cover matcher
+ID, raw and adjusted weight, labels, degradation, hint epoch, and proof result.
+
+\subsection{Collective inference frontier}
+
+\setting{assign(inference\_frontier,collective)} replaces eager generation of
+most paramodulation and hyperresolution conclusions by one descriptor per
+activated given.  A descriptor records partner ranges, rule bits, activation
+and deactivation epochs, a partner cursor, a conclusion cursor or promising
+threshold, a replay checksum, a known candidate key, and scheduler state.
+
+An append-only activation history and persistent historical FPA index recreate
+the active set visible when each descriptor was created.  Active bodies are
+shared directly.  Only bodies later deactivated transfer to history ownership,
+so this state grows with selected givens rather than generated or passive
+clauses.
+
+\subsection{Bounded candidates and resumable chunks}
+
+\setting{collective\_candidate\_cache} defaults to 4096 and bounds
+materialized conclusions emitted by collective paramodulation/hyperresolution.
+When the selector reaches the limit, expansion pauses while normal given
+selection drains resident candidates.  The budget includes current limbo
+state, preventing a single turn from overfilling it.
+
+\setting{collective\_candidate\_chunk} defaults to 64 and bounds raw
+conclusions passed through clause processing in one descriptor turn.  Partial
+inference units rotate fairly and resume later.  Generator-prefix mode checks
+a rolling prefix hash; promising mode checks the complete immutable raw
+sequence.  Nothing in a finite descriptor is silently discarded.  Every
+exposed conclusion uses the existing simplification, exact hint, filtering,
+weighting, proof-parent, and selection code.
+
+The bound does not presently cover an oversized initial SOS or separately
+enabled eager binary/UR rules.  The tested AIM strategy disables automatic
+inference and enables collective paramodulation and hyperresolution, covering
+the dominant generated frontier.
+
+\subsection{Optional promising scheduling}
+
+\setting{collective\_promising\_candidates} scans one immutable inference set
+and retains only the lowest chunk-sized set of keys
+\((\hbox{raw weight},\hbox{generator ordinal})\).  Other temporary clauses are
+deleted before IDs or hint state can observe them.  A partial descriptor stores
+the committed threshold and exact next key.
+
+\setting{collective\_promising\_scheduler} maintains a min-heap over
+descriptors whose next key is known.  With the default fair interval of 8, no
+more than seven priority turns occur before a mandatory FIFO turn.  FIFO
+discovers unknown keys and prevents starvation.  Raw weight is not a lower
+bound after simplification and hint adjustment, so both options remain off by
+default.
+
+\subsection{Checkpoint/restart}
+
+The current collective checkpoint magic is \setting{P9COLLA}.  It stores
+activation history, queue order, partial inference cursors, keys and checksums,
+hint-probe credit, and the priority/fairness cycle.  The heap is rebuilt
+canonically.  Readers remain compatible with \setting{P9COLL5} through
+\setting{P9COLL9}.
+
+\section{Semantic contract}
+
+The new mode does not reproduce the old OTTER given-clause sequence.  That
+sequence depends on eager operations over passive clauses, precisely the work
+being removed.  The intended guarantees are sound proofs, fair completion of
+finite collective inference sets, complete proof-parent reconstruction,
+historically correct active epochs, deterministic restart within a fixed
+configuration, and exact hint behavior whenever a candidate materializes.
+
+For a materialized normalized clause, exact hint behavior includes
+subsumption/equivalence, flipped equality, matcher ID, adjusted weight, labels,
+degradation, match-once and matcher limits, breadth-first hints, and hint age.
+An unseen conclusion cannot affect hint-prioritized selection before its
+descriptor is explored.  Starvation-safe hint probes exist, but substantially
+perturbed the tested frontier and therefore remain off by default.
+
+\section{How to build and use the implementation}
+
+\subsection{Build and smoke tests}
+
+\begin{lstlisting}[language=bash]
+cd /project/Prover9
+make all -j2
+make test1
+./test.src/discount_loop_test.sh
+./test.src/collective_frontier_test.sh
+\end{lstlisting}
+
+\setting{make memory-tests} runs focused storage and allocator lifecycle tests.
+Broader repository test targets should also be run before a release or long
+deployment.
+
+\subsection{Conservative AIM configuration}
+
+Place these settings after any automatic settings so they win:
+
+\begin{lstlisting}
+clear(auto_inference).
+set(paramodulation).
+set(hyper_resolution).
+
+assign(search_loop,discount).
+assign(passive_store,dense).
+assign(hint_index,packed).
+assign(inference_frontier,collective).
+assign(ancestor_store,mmap).
+
+assign(sos_limit,-1).
+assign(collective_given_ratio,4).
+assign(collective_candidate_chunk,64).
+assign(collective_candidate_cache,4096).
+
+clear(collective_hint_probes).
+clear(collective_promising_candidates).
+clear(collective_promising_scheduler).
+
+set(clocks).
+assign(stats,all).
+\end{lstlisting}
+
+This is the conservative measured setup: exact packed hints, dense passives,
+collective paramodulation/hyperresolution, a 4096-candidate cache, and FIFO
+descriptor scheduling.  Dense passive storage requires
+\setting{sos\_limit=-1}; collective mode requires DISCOUNT and a memory or mmap
+ancestor store.  A given ratio of 4 schedules one descriptor-expansion turn
+after four activations.  If SOS empties, the finite descriptor queue is still
+drained.
+
+The mmap stores use immediately unlinked temporary backing files.  This lets
+the operating system page cold records and lowers resident pressure, but still
+requires adequate local temporary-filesystem capacity.  The backing files are
+not restart files; Prover9 checkpoints provide restart.
+
+\subsection{Tighter-memory experiment}
+
+\begin{lstlisting}
+assign(collective_candidate_cache,64).
+set(collective_promising_candidates).
+clear(collective_promising_scheduler).
+\end{lstlisting}
+
+On the bounded Osborn prefix, per-set promising order gave the smallest SOS of
+the cache-64 variants.  Global priority is a separate experiment:
+
+\begin{lstlisting}
+set(collective_promising_scheduler).
+assign(collective_promising_fair_interval,8).
+\end{lstlisting}
+
+A cache of 64 is not known to be universally optimal.  It changes which
+deferred candidates become active early and can increase replay.  Begin at
+4096 for compatibility and coverage, then compare 1024, 256, and 64 on a
+representative solved suite.
+
+\subsection{Statistics, checkpoints, and proofs}
+
+Important full-statistics groups include \setting{Search\_loop},
+\setting{Passive\_refresh}, \setting{Collective\_frontier},
+\setting{Collective\_work}, \setting{Collective\_chunks}, the candidate-cache
+peak and stalls, promising scheduler counters, collective memory/history,
+clause-body and dense-passive bytes, hint storage, allocator accounting, and
+external RSS.  The cache peak includes initial preprocessing SOS occupancy.
+
+\begin{lstlisting}
+set(checkpoint_verify).
+assign(checkpoint_minutes,30).
+\end{lstlisting}
+
+After initialization, request an immediate checkpoint with
+\setting{kill -USR2 PROVER9\_PID}; resume and validate proofs with:
+
+\begin{lstlisting}[language=bash]
+bin/prover9 -r prover9_PID_ckpt_GIVEN
+bin/prooftrans expand < run.out > expanded-proof.out
+bin/directproof < run.out > direct-proof.out
+\end{lstlisting}
+
+\section{Measured bounded results}
+
+All AIM/Osborn experiments were intentionally restricted to hundreds of
+givens, 30 seconds, 256\,MiB, and a deterministic 10\% sample (31,014 hints).
+No week-long high-memory run was performed on the development host.
+
+\subsection{Component measurements}
+
+\begin{longtable}{>{\raggedright\arraybackslash}p{0.35\textwidth}
+                  >{\raggedright\arraybackslash}p{0.58\textwidth}}
+\toprule
+Change & Result \\
+\midrule
+\endhead
+Compressed passive bodies, 500 givens & 38.84 to 3.57 MB body storage
+(90.8\%); total RSS about 145 to 114.7\,MiB (21\%). \\
+Packed hints, 31,014 hints/100 givens & 43.0\,MiB compact-FPA RSS to
+32.2\,MiB packed RSS with exact matcher trace. \\
+Shared collective history & 88,976 estimated cloned-body bytes to 17,304
+retained bytes (80.6\%). \\
+Sparse deactivation/history & 34,048 to 19,584 structural bytes (42.5\%). \\
+Persistent collective scaffold & Descriptor/history/retained state 132,944
+to 46,808 bytes (64.8\%) at that revision. \\
+Synthetic ancestor archive, 100,000 records & 26.4 MB replaced graph estimate
+to 13.01 MB used+resident logical bytes (50.7\%); always-resident portion
+92.8\% lower. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Frontier results at 250 givens}
+
+\begin{center}
+\small
+\begin{tabular}{lrrrr}
+\toprule
+Configuration & Generated & Kept & SOS & Peak RSS \\
+\midrule
+Eager hyper, collective para & 34,709 & -- & 4,846 & ${\sim}$32.3\,MiB \\
+Collective, ratio 4, cache 4096 & 830 & 587 & 2 & 32,972\,KiB \\
+Cache 64, FIFO & 852 & 615 & 38 & 32,976\,KiB \\
+Cache 64, per-set promising & 873 & 588 & 8 & 33,108\,KiB \\
+Cache 64, promising + priority & 873 & 595 & 15 & 33,112\,KiB \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The corresponding wall/user times for the last four rows were
+17.13/16.73, 21.24/20.76, 18.50/17.77, and 16.61/16.25 seconds.  Against the
+eager-hyper attribution run, the corrected collective boundary generated
+97.6\% fewer clauses and retained 99.96\% fewer SOS clauses.  Peak RSS did not
+fall in this short comparison because all variants peaked during packed-hint
+preprocessing and the allocator floor, before frontier size dominated.
+
+The cache-64 comparison also cautions against choosing a default from one
+prefix.  Per-set promising order reduced SOS from 38 to 8, while global
+priority had only one real priority opportunity and ended at 15.  All are
+small relative to the eager frontier, but proof coverage must choose policy.
+
+\subsection{Checkpoint and proof evidence}
+
+Focused equality proofs pass both \setting{prooftrans} and
+\setting{directproof}.  Collective equality and hyperresolution proofs pass
+\setting{prooftrans}.  One-candidate chunks exercise replay, deferral, and
+cache stalls, and historical-hyper tests use a parent disabled after descriptor
+creation.  A \setting{P9COLL9} run resumed to the exact
+9324-generated/151-kept boundary with 18/18 hashes.  A \setting{P9COLLA} run
+captured nonzero fairness and six heap entries, then reproduced 13,611
+generated clauses, 11,854 priority turns, 1835 fair turns, heap peak 68, and
+18/18 hashes.  The current reader also reproduces older
+\setting{P9COLL5--P9COLL9} boundaries.
+
+\section{Expected RAM reduction}
+
+\subsection{Structural resident-count bound}
+
+For collective paramodulation/hyperresolution with a cache of 4096, and
+excluding initial SOS and eager rules outside the frontier:
+
+\begin{center}
+\begin{tabular}{lrrr}
+\toprule
+Archived state & Old SOS & Cache & Count reduction \\
+\midrule
+Osborn, 4000 givens & 588,252 & 4,096 & 99.30\% \\
+Osborn proof boundary & 4,594,786 & 4,096 & 99.91\% \\
+AAPERM long boundary & 8,504,637 & 4,096 & 99.95\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+This changes the asymptotic memory model from
+
+\begin{lstlisting}
+old = fixed hints + O(all kept passive bodies and indexes)
+new = packed hints + O(selected active/history) + O(cache limit)
+\end{lstlisting}
+
+At the archived Osborn proof there were 11,242 givens but 4.59 million SOS
+clauses; AAPERM had 12,560 givens and 8.50 million SOS clauses.  Replacing the
+latter scale by the former plus a fixed cache makes a radical whole-process
+reduction plausible.
+
+\subsection{Whole-process planning scenarios}
+
+The following values are scenarios, not benchmark promises:
+
+\begin{center}
+\begin{tabular}{lrrrr}
+\toprule
+Old reported memory & 80\% saved & 90\% saved & 95\% saved & 98\% saved \\
+\midrule
+Osborn 4000: 2,626.98 MiB & 525 & 263 & 131 & 53 \\
+Osborn proof: 18,810.85 MiB & 3,762 & 1,881 & 941 & 376 \\
+AAPERM: 125,829.01 MiB & 25,166 & 12,583 & 6,291 & 2,517 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The engineering forecast is:
+
+\begin{itemize}
+  \item capacity-plan minimum: 80\% lower total RAM;
+  \item likely planning midpoint: approximately 90\%;
+  \item plausible for strongly passive-dominated searches: 95\% or more;
+  \item not yet justified as a promise: 98--99\% total RSS, despite a
+        99\%+ resident-passive count reduction.
+\end{itemize}
+
+Uncertainty comes from changed search trajectories, full-size hint
+preprocessing, active/history term complexity, proof-archive growth, eager
+rules outside the collective frontier, and allocator high-water effects.
+
+\subsection{Acceptance experiment}
+
+On a suitable high-memory host, compare old and new modes using identical
+input/hint hashes and external limits, at least three workloads whose old peak
+RSS exceeds 100\,MB, periodic external RSS plus \setting{/usr/bin/time -v},
+full internal statistics, proof validation, and checkpoint/restart.  Report
+both equal-resource solved coverage and equal-given boundaries.  The gate
+should require at least 80\% lower external peak RSS and component accounting
+that explains at least 95\% of the delta.
+
+\section{Limitations and next work}
+
+\begin{enumerate}
+  \item Raw promising weight is not a lower bound after simplification or
+        hint adjustment; a safe hint-aware predictor remains research work.
+  \item Unmaterialized conclusions cannot match or subsume hints before their
+        descriptor is visited; every materialized conclusion is exact.
+  \item Binary and UR resolution remain eager and may exceed the cache.
+  \item Initial SOS can exceed a small cache and is drained, not rejected.
+  \item Historical bodies are shared ordinary term trees; packing immutable
+        retained history could shrink the active tail further.
+  \item The mode is fair and proof-tested but does not reproduce OTTER search
+        order; solved-problem coverage must determine default strategies.
+  \item Full 310,153-hint and week-long acceptance runs were intentionally not
+        performed on the low-RAM development host.
+\end{enumerate}
+
+\section{Implementation history and source map}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Commit & Main change \\
+\midrule
+\setting{8526000} & Compact DISCOUNT and initial Waldmeister path \\
+\setting{083c35d} & Bounded dense passive history and compaction \\
+\setting{f36c1c9} & Exact historical indexes for delayed hyper batches \\
+\setting{986bd6e} & Persistent versioned collective index \\
+\setting{3d05320} & Starvation-safe hint probes \\
+\setting{965feb2} & Shared active bodies in collective history \\
+\setting{b3cc296} & Sparse deactivation epochs \\
+\setting{9eeb048} & Resumable bounded hyper chunks \\
+\setting{2d59dad} & Bounded residency and paramodulation chunks \\
+\setting{01b51c2} & Per-set promising candidate buffer \\
+\setting{c5f92f0} & Global priority with FIFO fairness \\
+\setting{171e6be} & Tight-cache Osborn scheduler measurements \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Primary implementation and verification files are
+\setting{provers.src/search.c},
+\setting{provers.src/search-structures.h},
+\setting{provers.src/cold\_passive\_store.c},
+\setting{provers.src/cold\_passive\_store.h},
+\setting{test.src/collective\_frontier\_test.sh}, and
+\setting{test.src/discount\_loop\_test.sh}.  The detailed design and prior
+measurements are in \setting{P9-DISCOUNT-WALDMEISTER-PLAN.md},
+\setting{P9-MEMORY-RESULTS.md}, and \setting{Checkpoint-Format-Spec.txt}.
+
+\section{Conclusion}
+
+This is not a five-percent representation tweak.  It removes the architectural
+requirement that millions of passive conclusions be resident, fully
+materialized, and indexed.  The bounded prefixes demonstrate correct
+ownership, exact materialized hint behavior, bounded frontiers, deterministic
+restart, and drastic SOS-count reductions.  The remaining uncertainty is the
+whole-search trajectory and fixed/active tail, not whether the old passive
+growth remains.
+
+For current planning, assume 80--95\% less total RAM, use 90\% as the midpoint,
+retain OTTER mode for compatibility comparisons, and complete the long-run
+acceptance campaign before changing production defaults.
+
+\begin{thebibliography}{9}
+\bibitem{waldmeister}
+T. Hillenbrand,
+``Citius altius fortius: Lessons learned from the Theorem Prover Waldmeister,''
+2003/2004. DOI: \href{https://doi.org/10.1016/S1571-0661(04)80649-2}
+{10.1016/S1571-0661(04)80649-2}.
+
+\bibitem{ramplans}
+\setting{../Plans-RAM-24.txt}, archived project discussion and long-run
+statistics.
+
+\bibitem{measurements}
+\setting{P9-MEMORY-RESULTS.md}, bounded baseline and component measurements.
+
+\bibitem{design}
+\setting{P9-DISCOUNT-WALDMEISTER-PLAN.md}, design contract, implementation
+log, and acceptance gates.
+\end{thebibliography}
+
+\end{document}
