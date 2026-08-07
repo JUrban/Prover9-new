@@ -93,6 +93,24 @@ static BOOL collective_frontier_mode(void)
          str_ident(stringparm1(Opt->inference_frontier), "collective");
 }
 
+static BOOL collective_hyper_enabled(void)
+{
+  return collective_frontier_mode() &&
+         (flag(Opt->pos_hyper_resolution) ||
+          flag(Opt->neg_hyper_resolution));
+}
+
+static BOOL live_clash_index_needed(void)
+{
+  return flag(Opt->binary_resolution) ||
+         flag(Opt->neg_binary_resolution) ||
+         flag(Opt->pos_ur_resolution) ||
+         flag(Opt->neg_ur_resolution) ||
+         (!collective_frontier_mode() &&
+          (flag(Opt->pos_hyper_resolution) ||
+           flag(Opt->neg_hyper_resolution)));
+}
+
 static int configured_hint_fpa_depth(void)
 {
   if (str_ident(stringparm1(Opt->hint_index), "packed"))
@@ -146,8 +164,10 @@ static enum inference_source Current_inference_source = INFER_SOURCE_OTHER;
 /* A Waldmeister-style collective frontier delays the Cartesian product of
    one newly active clause with the active clauses visible at that moment.
    One descriptor is constant size.  The append-only activation history and
-   a dense deactivation-epoch side table let a descriptor reconstruct that
-   historical partner set without retaining Topform or Clist pointers. */
+   a dense deactivation-epoch side table identify the exact historical
+   partner set.  One immutable inference-only clause clone per activation is
+   retained and indexed once, so history grows with givens rather than with
+   generated/passive clauses and delayed batches do not rebuild FPA trees. */
 #define COLLECTIVE_ACT_PAGE_BITS 10
 #define COLLECTIVE_ACT_PAGE_SIZE (1U << COLLECTIVE_ACT_PAGE_BITS)
 #define COLLECTIVE_DEACT_PAGE_BITS 12
@@ -155,6 +175,7 @@ static enum inference_source Current_inference_source = INFER_SOURCE_OTHER;
 
 struct collective_activation_page {
   unsigned long long ids[COLLECTIVE_ACT_PAGE_SIZE];
+  Topform clauses[COLLECTIVE_ACT_PAGE_SIZE];
   unsigned char clashable[COLLECTIVE_ACT_PAGE_SIZE];
 };
 
@@ -181,6 +202,7 @@ static struct collective_activation_page **Collective_activation_pages = NULL;
 static size_t Collective_activation_page_capacity = 0;
 static size_t Collective_activation_page_count = 0;
 static unsigned long long Collective_activation_count = 0;
+static Lindex Collective_historical_idx = NULL;
 static struct collective_deactivation_page **Collective_deactivation_pages = NULL;
 static size_t Collective_deactivation_page_capacity = 0;
 static size_t Collective_deactivation_page_count = 0;
@@ -281,6 +303,24 @@ void collective_clear_state(void)
   size_t i;
   struct collective_batch *b;
 
+  if (Collective_historical_idx != NULL) {
+    unsigned long long position;
+    for (position = 0; position < Collective_activation_count; position++) {
+      size_t page_number =
+        (size_t) (position >> COLLECTIVE_ACT_PAGE_BITS);
+      unsigned offset =
+        (unsigned) (position & (COLLECTIVE_ACT_PAGE_SIZE - 1));
+      Topform c = Collective_activation_pages[page_number]->clauses[offset];
+      if (c != NULL) {
+        if (Collective_activation_pages[page_number]->clashable[offset])
+          lindex_update(Collective_historical_idx, c, DELETE);
+        zap_topform(c);
+      }
+    }
+    lindex_destroy(Collective_historical_idx);
+    Collective_historical_idx = NULL;
+  }
+
   for (i = 0; i < Collective_activation_page_count; i++)
     safe_free(Collective_activation_pages[i]);
   safe_free(Collective_activation_pages);
@@ -321,6 +361,13 @@ void collective_reset_state(void)
   Stats.collective_snapshot_rebuilds = 0;
   Stats.collective_snapshot_clauses = 0;
   Stats.collective_snapshot_clauses_peak = 0;
+  Stats.collective_history_clauses = 0;
+  Stats.collective_history_indexed_clauses = 0;
+  Stats.collective_history_clause_bytes = 0;
+  Stats.collective_history_queries = 0;
+  Stats.collective_history_candidates = 0;
+  Stats.collective_history_rejected_future = 0;
+  Stats.collective_history_rejected_inactive = 0;
   Stats.collective_batches_pending = 0;
   Stats.collective_batches_peak = 0;
   Stats.collective_activation_entries = 0;
@@ -430,6 +477,66 @@ BOOL collective_activation_clashable(unsigned long long position)
 }
 
 static
+Topform collective_activation_clause(unsigned long long position)
+{
+  size_t page_number = (size_t) (position >> COLLECTIVE_ACT_PAGE_BITS);
+  unsigned offset = (unsigned) (position & (COLLECTIVE_ACT_PAGE_SIZE - 1));
+  Topform c;
+  if (position >= Collective_activation_count ||
+      page_number >= Collective_activation_page_count)
+    fatal_error("collective historical clause cursor out of bounds");
+  c = Collective_activation_pages[page_number]->clauses[offset];
+  if (c == NULL)
+    fatal_error("collective historical clause is not materialized");
+  return c;
+}
+
+static
+Topform collective_copy_history_clause(Topform c)
+{
+  Topform copy;
+  if (c == NULL || c->compressed != NULL || c->literals == NULL)
+    fatal_error("collective history requires a materialized nonempty clause");
+  copy = copy_clause_with_flags(c);
+  copy->id = c->id;
+  copy->attributes = copy_attributes(c->attributes);
+  copy->weight = c->weight;
+  copy->semantics = c->semantics;
+  copy->simplifier_epoch = c->simplifier_epoch;
+  copy->normal_vars = c->normal_vars;
+  copy->used = c->used;
+  copy->initial = c->initial;
+  copy->was_given = c->was_given;
+  copy->cac_candidate = c->cac_candidate;
+  copy->delayed_demodulator = c->delayed_demodulator;
+  return copy;
+}
+
+static
+void collective_install_history_clause(unsigned long long position, Topform c)
+{
+  size_t page_number = (size_t) (position >> COLLECTIVE_ACT_PAGE_BITS);
+  unsigned offset = (unsigned) (position & (COLLECTIVE_ACT_PAGE_SIZE - 1));
+  Topform copy;
+  if (position >= Collective_activation_count ||
+      page_number >= Collective_activation_page_count)
+    fatal_error("collective history installation cursor out of bounds");
+  if (Collective_activation_pages[page_number]->clauses[offset] != NULL)
+    fatal_error("collective historical clause installed twice");
+  if (c->id != Collective_activation_pages[page_number]->ids[offset])
+    fatal_error("collective historical clause ID mismatch");
+  if (Collective_historical_idx == NULL) {
+    int fpa_depth = parm(Opt->fpa_depth);
+    Collective_historical_idx = lindex_init(
+      FPA, ORDINARY_UNIF, fpa_depth, FPA, ORDINARY_UNIF, fpa_depth);
+  }
+  copy = collective_copy_history_clause(c);
+  Collective_activation_pages[page_number]->clauses[offset] = copy;
+  if (Collective_activation_pages[page_number]->clashable[offset])
+    lindex_update(Collective_historical_idx, copy, INSERT);
+}
+
+static
 void collective_append_activation_id(unsigned long long id, BOOL clashable)
 {
   size_t page_number =
@@ -460,6 +567,7 @@ void collective_note_activation(Topform c, BOOL clashable)
   c->simplifier_epoch = Simplifier_epoch;
   collective_set_deactivation_epoch(c->id, 0);
   collective_append_activation_id(c->id, clashable);
+  collective_install_history_clause(Collective_activation_count - 1, c);
 }
 
 static
@@ -566,6 +674,29 @@ unsigned long long collective_history_bytes(void)
            sizeof(struct collective_deactivation_page) +
          (unsigned long long) Collective_deactivation_page_capacity *
            sizeof(*Collective_deactivation_pages);
+}
+
+static
+void collective_history_clause_stats(unsigned long long *clauses,
+                                     unsigned long long *indexed,
+                                     unsigned long long *bytes)
+{
+  unsigned long long position;
+  *clauses = 0;
+  *indexed = 0;
+  *bytes = 0;
+  for (position = 0; position < Collective_activation_count; position++) {
+    size_t page_number = (size_t) (position >> COLLECTIVE_ACT_PAGE_BITS);
+    unsigned offset =
+      (unsigned) (position & (COLLECTIVE_ACT_PAGE_SIZE - 1));
+    Topform c = Collective_activation_pages[page_number]->clauses[offset];
+    if (c != NULL) {
+      (*clauses)++;
+      if (Collective_activation_pages[page_number]->clashable[offset])
+        (*indexed)++;
+      *bytes += sizeof(struct topform) + clause_body_storage_bytes(c);
+    }
+  }
 }
 
 // How many statics are to be output?
@@ -1379,6 +1510,9 @@ void update_stats(void)
   Stats.collective_descriptor_bytes = Collective_batch_count *
                                       sizeof(struct collective_batch);
   Stats.collective_history_bytes = collective_history_bytes();
+  collective_history_clause_stats(&Stats.collective_history_clauses,
+                                   &Stats.collective_history_indexed_clauses,
+                                   &Stats.collective_history_clause_bytes);
   Stats.kbyte_usage = bytes_palloced() / 1000;
   update_memory_stats();
 }  /* update_stats */
@@ -1444,11 +1578,24 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             "Collective_memory: descriptor_bytes=%s, history_bytes=%s.\n",
             comma_num(s.collective_descriptor_bytes),
             comma_num(s.collective_history_bytes));
+    if (s.collective_snapshot_rebuilds != 0)
+      fprintf(fp,
+              "Collective_snapshots: rebuilds=%s, clauses_indexed=%s, "
+              "peak=%s.\n",
+              comma_num(s.collective_snapshot_rebuilds),
+              comma_num(s.collective_snapshot_clauses),
+              comma_num(s.collective_snapshot_clauses_peak));
     fprintf(fp,
-            "Collective_snapshots: rebuilds=%s, clauses_indexed=%s, peak=%s.\n",
-            comma_num(s.collective_snapshot_rebuilds),
-            comma_num(s.collective_snapshot_clauses),
-            comma_num(s.collective_snapshot_clauses_peak));
+            "Collective_history_index: clauses=%s, indexed=%s, "
+            "clause_bytes=%s, queries=%s, candidates=%s, "
+            "future_rejected=%s, inactive_rejected=%s.\n",
+            comma_num(s.collective_history_clauses),
+            comma_num(s.collective_history_indexed_clauses),
+            comma_num(s.collective_history_clause_bytes),
+            comma_num(s.collective_history_queries),
+            comma_num(s.collective_history_candidates),
+            comma_num(s.collective_history_rejected_future),
+            comma_num(s.collective_history_rejected_inactive));
   }
   fprintf(fp, "Hint_index: mode=%s, fpa_depth=%d, epoch=%llu.\n",
           stringparm1(Opt->hint_index), configured_hint_fpa_depth(),
@@ -5275,102 +5422,33 @@ void infer_outside_loop(Topform c)
   limbo_process(FALSE);
 }  /* infer_outside_loop */
 
-static
-Topform collective_parent_clause(unsigned long long id, BOOL *materialized)
-{
-  Topform c = find_clause_by_id(id);
-  *materialized = FALSE;
-  if (c != NULL) {
-    /* Passive clauses have IDs too, but activation history must never name
-       one.  This also catches accidental pointer ownership across the cold
-       passive boundary. */
-    if (!clist_member(c, Glob.usable))
-      fatal_error("collective parent is live but not active");
-    if (c->compressed != NULL)
-      fatal_error("collective active parent is unexpectedly compressed");
-    return c;
-  }
-
-  c = clause_store_materialize_by_id(id);
-  if (c == NULL)
-    fatal_error("collective parent is absent from active and ancestor stores");
-  *materialized = TRUE;
-  Stats.collective_parent_materializations++;
-  return c;
-}
-
-struct collective_snapshot {
-  Lindex index;
-  Plist indexed;
-  Plist materialized;
-  unsigned long long clause_count;
+struct collective_history_filter {
+  unsigned snapshot_epoch;
+  unsigned long long accepted;
+  unsigned long long rejected_future;
+  unsigned long long rejected_inactive;
 };
 
-/* Reconstruct the clashable index exactly as it existed when a delayed
-   batch was enqueued.  activation_limit excludes future activations;
-   snapshot_epoch excludes clauses already disabled at enqueue time while
-   retaining later-disabled clauses through the ancestor archive.  The
-   eligibility bit preserves restricted-denial behavior.  Insertion in
-   activation order also preserves FPA leaf order, which affects the order
-   in which hyperresolution submits conclusions to cl_process(). */
+/* The persistent index contains every historically clashable activation.
+   Filter each retrieved candidate against the descriptor epoch: a clone's
+   simplifier_epoch is its activation epoch, and the side table records the
+   first epoch at which it ceased to be active. */
 static
-struct collective_snapshot collective_build_snapshot(
-    struct collective_batch *b, Topform given)
+BOOL collective_history_clause_test(Topform c, void *data)
 {
-  struct collective_snapshot snapshot;
-  unsigned long long position;
-  int fpa_depth = parm(Opt->fpa_depth);
-
-  snapshot.index = lindex_init(FPA, ORDINARY_UNIF, fpa_depth,
-                               FPA, ORDINARY_UNIF, fpa_depth);
-  snapshot.indexed = NULL;
-  snapshot.materialized = NULL;
-  snapshot.clause_count = 0;
-
-  for (position = 0; position < b->activation_limit; position++) {
-    unsigned long long id = collective_activation_id(position);
-    unsigned deactivated = collective_deactivation_epoch(id);
-    BOOL materialized = FALSE;
-    Topform c;
-
-    if (!collective_activation_clashable(position) ||
-        (deactivated != 0 && deactivated <= b->snapshot_epoch))
-      continue;
-
-    if (id == b->given_id)
-      c = given;
-    else
-      c = collective_parent_clause(id, &materialized);
-
-    lindex_update(snapshot.index, c, INSERT);
-    snapshot.indexed = plist_prepend(snapshot.indexed, c);
-    snapshot.clause_count++;
-    if (materialized)
-      snapshot.materialized = plist_prepend(snapshot.materialized, c);
+  struct collective_history_filter *filter = data;
+  unsigned deactivated;
+  if (c->simplifier_epoch > filter->snapshot_epoch) {
+    filter->rejected_future++;
+    return FALSE;
   }
-
-  Stats.collective_snapshot_rebuilds++;
-  Stats.collective_snapshot_clauses += snapshot.clause_count;
-  if (snapshot.clause_count > Stats.collective_snapshot_clauses_peak)
-    Stats.collective_snapshot_clauses_peak = snapshot.clause_count;
-  return snapshot;
-}
-
-static
-void collective_destroy_snapshot(struct collective_snapshot *snapshot)
-{
-  Plist p;
-  for (p = snapshot->indexed; p != NULL; p = p->next)
-    lindex_update(snapshot->index, p->v, DELETE);
-  lindex_destroy(snapshot->index);
-  for (p = snapshot->materialized; p != NULL; p = p->next)
-    clause_store_release_materialized(p->v);
-  zap_plist(snapshot->indexed);
-  zap_plist(snapshot->materialized);
-  snapshot->index = NULL;
-  snapshot->indexed = NULL;
-  snapshot->materialized = NULL;
-  snapshot->clause_count = 0;
+  deactivated = collective_deactivation_epoch(c->id);
+  if (deactivated != 0 && deactivated <= filter->snapshot_epoch) {
+    filter->rejected_inactive++;
+    return FALSE;
+  }
+  filter->accepted++;
+  return TRUE;
 }
 
 /* Expand at most one historical active partner from the oldest round-robin
@@ -5388,36 +5466,44 @@ BOOL collective_expand_one_batch(void)
   b = Collective_batch_head;
 
   if ((b->kind & (COLLECTIVE_POS_HYPER | COLLECTIVE_NEG_HYPER)) != 0) {
-    BOOL materialized;
-    struct collective_snapshot snapshot;
-    unsigned long long snapshot_clause_count;
+    struct collective_history_filter filter;
+    unsigned long long given_position;
     unsigned long long generated_before = Stats.generated;
     unsigned long long kept_before = Stats.kept;
-    Topform given = collective_parent_clause(b->given_id, &materialized);
+    Topform given;
     unsigned hyper_kind = (b->kind & COLLECTIVE_POS_HYPER) != 0 ?
                           COLLECTIVE_POS_HYPER : COLLECTIVE_NEG_HYPER;
     int direction = hyper_kind == COLLECTIVE_POS_HYPER ? POS_RES : NEG_RES;
-    snapshot = collective_build_snapshot(b, given);
+    if (b->activation_limit == 0)
+      fatal_error("collective hyper batch has no activation history");
+    given_position = b->activation_limit - 1;
+    given = collective_activation_clause(given_position);
+    if (given->id != b->given_id)
+      fatal_error("collective hyper batch is not anchored by its given");
+    memset(&filter, 0, sizeof(filter));
+    filter.snapshot_epoch = b->snapshot_epoch;
     clock_start(Clocks.infer);
     Current_inference_source = INFER_SOURCE_HYPER;
-    hyper_resolution(given, direction, snapshot.index, cl_process);
+    hyper_resolution_with_clause_test(
+      given, direction, Collective_historical_idx,
+      collective_history_clause_test, &filter, cl_process);
     Current_inference_source = INFER_SOURCE_OTHER;
     clock_stop(Clocks.infer);
-    snapshot_clause_count = snapshot.clause_count;
-    collective_destroy_snapshot(&snapshot);
-    if (materialized)
-      clause_store_release_materialized(given);
     b->kind &= ~hyper_kind;
     Stats.collective_hyper_expansions++;
+    Stats.collective_history_queries++;
+    Stats.collective_history_candidates += filter.accepted;
+    Stats.collective_history_rejected_future += filter.rejected_future;
+    Stats.collective_history_rejected_inactive += filter.rejected_inactive;
     if (flag(Opt->collective_trace))
       printf("%sCOLLECTIVE_TRACE kind=%s given=%llu epoch=%u "
-             "snapshot_clauses=%llu generated=%llu kept=%llu "
-             "archived_parent=%d.\n",
+             "history_candidates=%llu future_rejected=%llu "
+             "inactive_rejected=%llu generated=%llu kept=%llu.\n",
              TPTP_PFX,
              hyper_kind == COLLECTIVE_POS_HYPER ? "pos_hyper" : "neg_hyper",
-             b->given_id, b->snapshot_epoch, snapshot_clause_count,
-             Stats.generated - generated_before, Stats.kept - kept_before,
-             materialized ? 1 : 0);
+             b->given_id, b->snapshot_epoch, filter.accepted,
+             filter.rejected_future, filter.rejected_inactive,
+             Stats.generated - generated_before, Stats.kept - kept_before);
     collective_finish_batch_turn(b);
     return TRUE;
   }
@@ -5428,9 +5514,9 @@ BOOL collective_expand_one_batch(void)
     fatal_error("unknown collective batch kind");
 
   while (b->cursor < b->activation_limit) {
-    unsigned long long partner_id = collective_activation_id(b->cursor++);
+    unsigned long long partner_position = b->cursor++;
+    unsigned long long partner_id = collective_activation_id(partner_position);
     unsigned deactivated = collective_deactivation_epoch(partner_id);
-    BOOL given_materialized, partner_materialized = FALSE;
     Topform given, partner;
     BOOL good_given, good_pair;
 
@@ -5439,11 +5525,10 @@ BOOL collective_expand_one_batch(void)
       continue;
     }
 
-    given = collective_parent_clause(b->given_id, &given_materialized);
-    if (partner_id == b->given_id)
-      partner = given;
-    else
-      partner = collective_parent_clause(partner_id, &partner_materialized);
+    given = collective_activation_clause(b->activation_limit - 1);
+    partner = collective_activation_clause(partner_position);
+    if (given->id != b->given_id || partner->id != partner_id)
+      fatal_error("collective paramodulation history ID mismatch");
 
     good_given = (b->given_id <
                     (unsigned long long) parm(Opt->para_restr_beg) ||
@@ -5473,20 +5558,12 @@ BOOL collective_expand_one_batch(void)
       Stats.collective_pair_expansions++;
       if (flag(Opt->collective_trace))
         printf("%sCOLLECTIVE_TRACE kind=paramod given=%llu partner=%llu "
-               "epoch=%u generated=%llu kept=%llu given_archived=%d "
-               "partner_archived=%d.\n",
+               "epoch=%u generated=%llu kept=%llu historical=1.\n",
                TPTP_PFX, b->given_id, partner_id, b->snapshot_epoch,
-               Stats.generated - generated_before, Stats.kept - kept_before,
-               given_materialized ? 1 : 0,
-               partner_materialized ? 1 : 0);
+               Stats.generated - generated_before, Stats.kept - kept_before);
     }
     else
       Stats.collective_partners_skipped++;
-
-    if (partner_materialized)
-      clause_store_release_materialized(partner);
-    if (given_materialized)
-      clause_store_release_materialized(given);
 
     collective_finish_batch_turn(b);
     return TRUE;
@@ -5830,7 +5907,8 @@ void make_inferences(void)
 	if (!restricted_denial(activated))
 	  index_clashable(activated, INSERT);
 	collective_note_activation(
-	  activated, Glob.use_clash_idx && !restricted_denial(activated));
+	  activated,
+	  collective_hyper_enabled() && !restricted_denial(activated));
 	given_infer(activated);
       }
     }
@@ -6324,12 +6402,7 @@ void index_and_process_initial_clauses(void)
 
   // Index Usable clauses if hyper, UR, or binary-res are set.
 
-  Glob.use_clash_idx = (flag(Opt->binary_resolution) ||
-			flag(Opt->neg_binary_resolution) ||
-			flag(Opt->pos_hyper_resolution) ||
-			flag(Opt->neg_hyper_resolution) ||
-			flag(Opt->pos_ur_resolution) ||
-			flag(Opt->neg_ur_resolution));
+  Glob.use_clash_idx = live_clash_index_needed();
 
   // Allocate and initialize indexes (even if they won't be used).
 
@@ -6613,7 +6686,7 @@ void index_and_process_initial_clauses(void)
       /* The initial indexing loop above includes restricted denials; later
          activations deliberately do not.  Record what was actually indexed,
          rather than recomputing eligibility during historical replay. */
-      collective_note_activation(p->c, Glob.use_clash_idx);
+      collective_note_activation(p->c, collective_hyper_enabled());
 
   {
     int rp_interval = parm(Opt->report_preprocessing);
@@ -8063,6 +8136,14 @@ void write_checkpoint(void)
             Stats.collective_snapshot_clauses);
     fprintf(fp, "collective_snapshot_clauses_peak %llu\n",
             Stats.collective_snapshot_clauses_peak);
+    fprintf(fp, "collective_history_queries %llu\n",
+            Stats.collective_history_queries);
+    fprintf(fp, "collective_history_candidates %llu\n",
+            Stats.collective_history_candidates);
+    fprintf(fp, "collective_history_rejected_future %llu\n",
+            Stats.collective_history_rejected_future);
+    fprintf(fp, "collective_history_rejected_inactive %llu\n",
+            Stats.collective_history_rejected_inactive);
     fprintf(fp, "collective_batches_peak %llu\n",
             Stats.collective_batches_peak);
     fprintf(fp, "simplifier_epoch %u\n", Simplifier_epoch);
@@ -8758,6 +8839,14 @@ void resume_load_clauses(const char *dir)
       read_metadata_ull(fp, "collective_snapshot_clauses");
     rewind(fp); Stats.collective_snapshot_clauses_peak =
       read_metadata_ull(fp, "collective_snapshot_clauses_peak");
+    rewind(fp); Stats.collective_history_queries =
+      read_metadata_ull(fp, "collective_history_queries");
+    rewind(fp); Stats.collective_history_candidates =
+      read_metadata_ull(fp, "collective_history_candidates");
+    rewind(fp); Stats.collective_history_rejected_future =
+      read_metadata_ull(fp, "collective_history_rejected_future");
+    rewind(fp); Stats.collective_history_rejected_inactive =
+      read_metadata_ull(fp, "collective_history_rejected_inactive");
     rewind(fp); Stats.collective_batches_peak =
       read_metadata_ull(fp, "collective_batches_peak");
   }
@@ -9246,12 +9335,7 @@ void load_checkpoint_into_loop(void)
      in-process save+reload testing and cross-process resume alike) */
 
   /* Initialize indexes */
-  Glob.use_clash_idx = (flag(Opt->binary_resolution) ||
-                        flag(Opt->neg_binary_resolution) ||
-                        flag(Opt->pos_hyper_resolution) ||
-                        flag(Opt->neg_hyper_resolution) ||
-                        flag(Opt->pos_ur_resolution) ||
-                        flag(Opt->neg_ur_resolution));
+  Glob.use_clash_idx = live_clash_index_needed();
 
   set_fpa_hash_threshold(parm(Opt->fpa_hash_threshold));
   set_discrim_hash_threshold(parm(Opt->discrim_hash_threshold));
@@ -9274,6 +9358,22 @@ void load_checkpoint_into_loop(void)
                  stringparm1(Opt->multiple_interps),
                  parm(Opt->eval_limit),
                  parm(Opt->eval_var_limit));
+
+  /* Rebuild the immutable inference history before resuming any delayed
+     descriptor.  At this point active, passive, and disabled checkpoint
+     clauses are still materialized and registered by ID; replaying activation
+     order gives the persistent FPA leaves the same relative ID ordering as
+     the uninterrupted run. */
+  if (collective_frontier_mode()) {
+    unsigned long long position;
+    for (position = 0; position < Collective_activation_count; position++) {
+      unsigned long long id = collective_activation_id(position);
+      Topform c = find_clause_by_id(id);
+      if (c == NULL)
+        fatal_error("resume: historical activation clause is missing");
+      collective_install_history_clause(position, c);
+    }
+  }
 
   /* 4-8. Orient, index all checkpoint clauses in CLAUSE ID ORDER.
      The original run indexed clauses in the order they were discovered

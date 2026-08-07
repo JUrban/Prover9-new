@@ -346,6 +346,8 @@ static
 void clash_recurse(Clash first,
 		   Clash p,
 		   BOOL (*sat_test) (Literals),
+		   Clash_clause_test clause_test,
+		   void *clause_test_data,
 		   Just_type rule,
 		   void (*proc_proc) (Topform))
 {
@@ -405,7 +407,9 @@ void clash_recurse(Clash first,
       stack[top].phase = 1;
       if (fnd_atom != NULL) {
         Literals slit = atom_to_literal(fnd_atom);
-        if ((*sat_test)(slit)) {
+        if ((*sat_test)(slit) &&
+            (clause_test == NULL ||
+             (*clause_test)(slit->atom->container, clause_test_data))) {
           cp->clashed = TRUE;
           cp->flipped = FALSE;
           cp->sat_lit = slit;
@@ -441,7 +445,9 @@ void clash_recurse(Clash first,
       Term fnd_atom = mindex_retrieve_next(cp->mate_pos);
       if (fnd_atom != NULL) {
         Literals slit = atom_to_literal(fnd_atom);
-        if ((*sat_test)(slit)) {
+        if ((*sat_test)(slit) &&
+            (clause_test == NULL ||
+             (*clause_test)(slit->atom->container, clause_test_data))) {
           cp->clashed = TRUE;
           cp->flipped = FALSE;
           cp->sat_lit = slit;
@@ -482,7 +488,9 @@ void clash_recurse(Clash first,
         stack[top].phase = 3;
         if (fnd_atom != NULL) {
           Literals slit = atom_to_literal(fnd_atom);
-          if ((*sat_test)(slit)) {
+          if ((*sat_test)(slit) &&
+              (clause_test == NULL ||
+               (*clause_test)(slit->atom->container, clause_test_data))) {
             cp->clashed = TRUE;
             cp->flipped = TRUE;
             cp->sat_lit = slit;
@@ -522,7 +530,9 @@ void clash_recurse(Clash first,
       Term fnd_atom = mindex_retrieve_next(cp->mate_pos);
       if (fnd_atom != NULL) {
         Literals slit = atom_to_literal(fnd_atom);
-        if ((*sat_test)(slit)) {
+        if ((*sat_test)(slit) &&
+            (clause_test == NULL ||
+             (*clause_test)(slit->atom->container, clause_test_data))) {
           cp->clashed = TRUE;
           cp->flipped = TRUE;
           cp->sat_lit = slit;
@@ -632,6 +642,17 @@ void clash(Clash c,
 	   Just_type rule,
 	   void (*proc_proc) (Topform))
 {
-  clash_recurse(c, c, sat_test, rule, proc_proc);
+  clash_recurse(c, c, sat_test, NULL, NULL, rule, proc_proc);
 }  /* clash */
 
+/* PUBLIC */
+void clash_with_clause_test(Clash c,
+			    BOOL (*sat_test) (Literals),
+			    Clash_clause_test clause_test,
+			    void *clause_test_data,
+			    Just_type rule,
+			    void (*proc_proc) (Topform))
+{
+  clash_recurse(c, c, sat_test, clause_test, clause_test_data,
+                rule, proc_proc);
+}  /* clash_with_clause_test */

@@ -35,6 +35,8 @@ resolvents.
 
 typedef struct clash  * Clash;
 
+typedef BOOL (*Clash_clause_test)(Topform, void *);
+
 struct clash {
   BOOL       clashable;
   BOOL       clashed;
@@ -68,6 +70,13 @@ void clash(Clash c,
 	   BOOL (*sat_test) (Literals),
 	   Just_type rule,
 	   void (*proc_proc) (Topform));
+
+void clash_with_clause_test(Clash c,
+			    BOOL (*sat_test) (Literals),
+			    Clash_clause_test clause_test,
+			    void *clause_test_data,
+			    Just_type rule,
+			    void (*proc_proc) (Topform));
 
 void set_clash_deadline(time_t deadline);
 

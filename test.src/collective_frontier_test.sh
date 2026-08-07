@@ -11,11 +11,13 @@ trap 'rm -rf -- "$test_tmp"' EXIT HUP INT TERM
 grep -q 'THEOREM PROVED' "$test_tmp/prover.out"
 grep -Eq 'Search_loop: mode=discount, frontier=collective, active_indexed=[0-9]+, passive_indexed=0, delayed_demodulators=[1-9][0-9]*\.' \
   "$test_tmp/prover.out"
-grep -Eq 'Collective_frontier: batches_created=[1-9][0-9]*, completed=[1-9][0-9]*, pending=[1-9][0-9]*, peak=[1-9][0-9]*, ratio=1, skipped=[0-9]+, parent_materializations=[1-9][0-9]*, activations=[1-9][0-9]*\.' \
+grep -Eq 'Collective_frontier: batches_created=[1-9][0-9]*, completed=[1-9][0-9]*, pending=[1-9][0-9]*, peak=[1-9][0-9]*, ratio=1, skipped=[0-9]+, parent_materializations=0, activations=[1-9][0-9]*\.' \
   "$test_tmp/prover.out"
 grep -Eq 'Collective_work: paramod_pairs=[1-9][0-9]*, hyper_batches=[0-9]+\.' \
   "$test_tmp/prover.out"
 grep -Eq 'Collective_memory: descriptor_bytes=[1-9][0-9]*, history_bytes=[1-9][0-9]*\.' \
+  "$test_tmp/prover.out"
+grep -Eq 'Collective_history_index: clauses=[1-9][0-9]*, indexed=[0-9]+, clause_bytes=[1-9][0-9]*, queries=[0-9]+, candidates=[0-9]+, future_rejected=[0-9]+, inactive_rejected=[0-9]+\.' \
   "$test_tmp/prover.out"
 grep -Eq 'Hint_index: mode=packed, fpa_depth=0, epoch=[1-9][0-9]*\.' \
   "$test_tmp/prover.out"
@@ -40,7 +42,7 @@ grep -Eq 'Generated_by_rule: binary=0, hyper=[1-9][0-9]*, ur=0, paramod=0, other
   "$test_tmp/hyper.out"
 grep -Eq 'Collective_work: paramod_pairs=0, hyper_batches=[1-9][0-9]*\.' \
   "$test_tmp/hyper.out"
-grep -Eq 'Collective_snapshots: rebuilds=[1-9][0-9]*, clauses_indexed=[1-9][0-9]*, peak=[1-9][0-9]*\.' \
+grep -Eq 'Collective_history_index: clauses=[1-9][0-9]*, indexed=[1-9][0-9]*, clause_bytes=[1-9][0-9]*, queries=[1-9][0-9]*, candidates=[1-9][0-9]*, future_rejected=[1-9][0-9]*, inactive_rejected=[0-9]+\.' \
   "$test_tmp/hyper.out"
 "$repo_dir/bin/prooftrans" parents_only < "$test_tmp/hyper.out" \
   > "$test_tmp/hyper-parents.out"
@@ -54,11 +56,13 @@ if "$repo_dir/bin/prover9" < \
   exit 1
 fi
 grep -q 'SEARCH FAILED' "$test_tmp/historical-hyper.out"
-grep -Eq 'COLLECTIVE_TRACE kind=pos_hyper given=[0-9]+ epoch=[0-9]+ snapshot_clauses=3 generated=1 kept=1 archived_parent=1\.' \
+grep -Eq 'COLLECTIVE_TRACE kind=pos_hyper given=[0-9]+ epoch=[0-9]+ history_candidates=2 future_rejected=0 inactive_rejected=0 generated=1 kept=1\.' \
   "$test_tmp/historical-hyper.out"
 grep -Eq 'Generated_by_rule: binary=0, hyper=1, ur=0, paramod=0, other=[0-9]+\.' \
   "$test_tmp/historical-hyper.out"
-grep -Eq 'Collective_frontier: .*parent_materializations=2, activations=[0-9]+\.' \
+grep -Eq 'Collective_frontier: .*parent_materializations=0, activations=[0-9]+\.' \
+  "$test_tmp/historical-hyper.out"
+grep -Eq 'Collective_history_index: clauses=6, indexed=6, clause_bytes=[1-9][0-9]*, queries=1, candidates=2, future_rejected=0, inactive_rejected=0\.' \
   "$test_tmp/historical-hyper.out"
 grep -Eq 'New_demodulators=1 .*Back_demodulated=2\.' \
   "$test_tmp/historical-hyper.out"

@@ -125,7 +125,9 @@ BOOL neg_hyper_sat_test(Literals lit)
 
 static
 void hyper_sat_atom(BOOL flipped, Literals slit, Term atom, int pos_or_neg,
-		    Lindex idx, void (*proc_proc) (Topform))
+		    Lindex idx, Clash_clause_test clause_test,
+		    void *clause_test_data,
+		    void (*proc_proc) (Topform))
 {
   BOOL positive = (pos_or_neg == POS_RES);
   Context sat_subst = get_context();
@@ -144,6 +146,11 @@ void hyper_sat_atom(BOOL flipped, Literals slit, Term atom, int pos_or_neg,
     Clash p = NULL;
     Clash first = NULL;
     Literals nlit;
+    if (clause_test != NULL &&
+        !(*clause_test)(nuc, clause_test_data)) {
+      fnd_atom = mindex_retrieve_next(mate_pos);
+      continue;
+    }
     for (nlit = nuc->literals; nlit; nlit = nlit->next) {
       p = append_clash(p);
       if (first == NULL)
@@ -170,10 +177,10 @@ void hyper_sat_atom(BOOL flipped, Literals slit, Term atom, int pos_or_neg,
 	}
       }
     }  /* for each literal of nucleus */
-    clash(first,
-	  positive ? pos_hyper_sat_test : neg_hyper_sat_test,
-	  HYPER_RES_JUST,
-	  proc_proc);
+    clash_with_clause_test(
+      first,
+      positive ? pos_hyper_sat_test : neg_hyper_sat_test,
+      clause_test, clause_test_data, HYPER_RES_JUST, proc_proc);
     zap_clash(first);
     fnd_atom = mindex_retrieve_next(mate_pos);
   }  /* for each found nucleus atom */
@@ -189,15 +196,18 @@ void hyper_sat_atom(BOOL flipped, Literals slit, Term atom, int pos_or_neg,
 
 static
 void hyper_satellite(Topform c, int pos_or_neg, Lindex idx,
+		     Clash_clause_test clause_test, void *clause_test_data,
 		     void (*proc_proc) (Topform))
 {
   Literals slit;
   for (slit = c->literals; slit; slit = slit->next) {
     if (!Ordered || maximal_literal(c->literals, slit, FLAG_CHECK)) {
-      hyper_sat_atom(FALSE, slit, slit->atom, pos_or_neg, idx, proc_proc);
+      hyper_sat_atom(FALSE, slit, slit->atom, pos_or_neg, idx,
+                     clause_test, clause_test_data, proc_proc);
       if (pos_eq(slit)) {
 	Term flip = top_flip(slit->atom);
-	hyper_sat_atom(TRUE, slit, flip, pos_or_neg, idx, proc_proc);
+	hyper_sat_atom(TRUE, slit, flip, pos_or_neg, idx,
+                       clause_test, clause_test_data, proc_proc);
 	zap_top_flip(flip);
       }
     }  /* if sat is ok */
@@ -212,6 +222,7 @@ void hyper_satellite(Topform c, int pos_or_neg, Lindex idx,
 
 static
 void hyper_nucleus(Topform c, int pos_or_neg, Lindex idx,
+		   Clash_clause_test clause_test, void *clause_test_data,
 		   void (*proc_proc) (Topform))
 {
   BOOL positive = (pos_or_neg == POS_RES);
@@ -236,10 +247,10 @@ void hyper_nucleus(Topform c, int pos_or_neg, Lindex idx,
       p->sat_subst = get_context();
     }
   }
-  clash(first,
-	positive ? pos_hyper_sat_test : neg_hyper_sat_test,
-	HYPER_RES_JUST,
-	proc_proc);
+  clash_with_clause_test(
+    first,
+    positive ? pos_hyper_sat_test : neg_hyper_sat_test,
+    clause_test, clause_test_data, HYPER_RES_JUST, proc_proc);
   free_context(nuc_subst);
   zap_clash(first);  /* This also frees satellite contexts. */
 }  /* hyper_nucleus */
@@ -258,13 +269,25 @@ Hyperresolution.
 void hyper_resolution(Topform c, int pos_or_neg, Lindex idx,
 		      void (*proc_proc) (Topform))
 {
+  hyper_resolution_with_clause_test(c, pos_or_neg, idx, NULL, NULL,
+                                    proc_proc);
+}  /* hyper_resolution */
+
+/* PUBLIC */
+void hyper_resolution_with_clause_test(Topform c, int pos_or_neg, Lindex idx,
+				       Clash_clause_test clause_test,
+				       void *clause_test_data,
+				       void (*proc_proc) (Topform))
+{
   if (pos_or_neg == POS_RES ?
       positive_clause(c->literals) :
       negative_clause(c->literals))
-    hyper_satellite(c, pos_or_neg, idx, proc_proc);
+    hyper_satellite(c, pos_or_neg, idx, clause_test, clause_test_data,
+                    proc_proc);
   else
-    hyper_nucleus(c, pos_or_neg, idx, proc_proc);
-}  /* hyper_resolution */
+    hyper_nucleus(c, pos_or_neg, idx, clause_test, clause_test_data,
+                  proc_proc);
+}  /* hyper_resolution_with_clause_test */
 
 /*************
  *

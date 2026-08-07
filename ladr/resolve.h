@@ -55,6 +55,11 @@ unsigned long long res_instance_prunes();
 void hyper_resolution(Topform c, int pos_or_neg, Lindex idx,
 		      void (*proc_proc) (Topform));
 
+void hyper_resolution_with_clause_test(Topform c, int pos_or_neg, Lindex idx,
+				       Clash_clause_test clause_test,
+				       void *clause_test_data,
+				       void (*proc_proc) (Topform));
+
 void ur_resolution(Topform c, int target_constraint, Lindex idx,
 		   void (*proc_proc) (Topform));
 

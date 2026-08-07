@@ -134,6 +134,10 @@ Keys (in order as written):
   collective_snapshot_rebuilds <ull>
   collective_snapshot_clauses <ull>
   collective_snapshot_clauses_peak <ull>
+  collective_history_queries <ull>
+  collective_history_candidates <ull>
+  collective_history_rejected_future <ull>
+  collective_history_rejected_inactive <ull>
   collective_batches_peak <ull>
                               Collective frontier cumulative/capacity state
   simplifier_epoch <ull>     Historical active/simplifier epoch
@@ -178,8 +182,8 @@ Followed by `activation_count` history records:
 
 The clashable bit is distinct from active membership.  In particular, a
 restricted denial can be active without having been inserted into the
-resolution index.  Historical hyper snapshots replay only entries whose bit
-is one.
+resolution index.  The persistent historical hyper index contains only
+entries whose bit is one.
 
 Finally, `pending_batch_count` descriptors are written in queue order:
 
@@ -195,6 +199,12 @@ the clauses active when it was created.  `kind_bits` is the nonempty OR of
 paramodulation, positive-hyper, and negative-hyper bits.  Restore rejects a
 different magic, invalid Boolean/kind values, out-of-range cursors, truncated
 records, or trailing bytes.
+
+Immutable historical clause clones and their FPA index are not serialized as
+a second copy of the clause database.  On resume they are rebuilt in
+activation order from `usable.clauses` and `disabled.clauses` before disabled
+clauses are returned to the compact ancestor store.  This preserves relative
+FPA answer ordering while keeping the checkpoint representation canonical.
 
 Source: search.c, write_collective_checkpoint(),
 read_collective_checkpoint().

@@ -300,26 +300,40 @@ Implementation status on 2026-08-07:
   activations newer than the descriptor and lost clauses disabled after its
   creation.  Those figures remain useful as attribution data, not as the
   result of the corrected calculus.
-- The corrected historical hyper snapshot uses the descriptor's activation
-  limit and simplifier epoch.  It excludes future clauses, includes clauses
-  active at creation even if they have since been disabled, reconstructs FPA
-  leaf order by replaying activation order, and releases the temporary index
-  and archived parents after one expansion.  A regression back-rewrites both
-  a nucleus and a required satellite before expansion; the batch materializes
-  both historical parents and generates the conclusion that a live-index
-  lookup misses.  If SOS empties, the scheduler drains descriptors regardless
-  of the ratio, so the knob changes fair interleaving rather than imposing a
+- The corrected historical-hyper implementation uses the descriptor's
+  activation limit and simplifier epoch.  It excludes future clauses and
+  includes clauses active at creation even if they have since been disabled.
+  The first correct scaffold rebuilt a temporary FPA index in activation
+  order and materialized later-disabled parents for each expansion.  A focused
+  regression back-rewrites both a nucleus and a required satellite before
+  expansion and still requires the historical conclusion that a live-index
+  lookup misses.
+- The scaffold is now replaced by a reusable persistent historical index.
+  Each activation contributes one immutable inference-only clause clone and,
+  when hyper-clashable, indexes that clone once.  Paramodulation reads clones
+  by activation position; hyperresolution filters index hits by activation and
+  deactivation epoch.  Thus this state grows with selected givens (11,242 in
+  the archived full Osborn proof), not with the millions of generated,
+  passive, or disabled clauses.  Collective-hyper-only runs no longer maintain
+  a duplicate live clashable index.  The later-disabled regression now uses
+  zero ancestor materializations.  If SOS empties, the scheduler still drains
+  descriptors, so the ratio changes fair interleaving rather than imposing a
   hard candidate cap.
 - With historical snapshots, the same bounded 31,014-hint/250-given `N=4`
   Osborn run generated 830 clauses, kept 587, and retained only 2 SOS clauses,
   with 199 usable clauses and 248 pending constant-size descriptors.  It
-  expanded 11 paramodulation pairs and 51 hyper batches; the hyper snapshots
-  indexed 1,315 historical clauses in total and at most 50 at once.  Against
+  expanded 11 paramodulation pairs and 51 hyper batches.  The temporary
+  snapshot scaffold indexed 1,315 historical clauses in total and at most 50
+  at once.  Against
   the eager-hyper attribution baseline, this is 97.6% fewer generated clauses
   and 99.96% fewer resident passives at the boundary.  Against the flawed
   live-index collective prototype, it is 83.1% fewer generated and 99.7%
-  fewer passive clauses.  The run used 16.5 CPU seconds and 33,088 KiB peak
-  RSS, still the packed-hint preprocessing floor.  These finite-boundary
+  fewer passive clauses.  The persistent implementation retains 250 history
+  clauses occupying an estimated 88,976 body/header bytes, performs zero
+  ancestor materializations, and reports 504 rejected future index hits.  It
+  uses 15.44 CPU seconds and 33,092 KiB peak RSS versus 16.48 seconds and
+  33,088 KiB for repeated snapshot rebuilding; the peak remains the packed-
+  hint preprocessing floor.  These finite-boundary
   figures include deferred fair work and must not be extrapolated as a
   week-long reduction until the long-run acceptance experiment is run.
 - Focused equality and hyperresolution examples both prove in collective mode;
@@ -328,17 +342,18 @@ Implementation status on 2026-08-07:
   the scheduler ratio/cursor, and all rule bits are checkpointed.  Collective
   resume deliberately rebuilds active FPA indexes because the existing
   serialized clashable trie lost leaf multiplicity needed for identical raw
-  hyper enumeration.  Historical batches independently rebuild their exact
-  epoch-local FPA index.  The remaining deterministic-resume divergence was
+  hyper enumeration.  Historical batches instead rebuild their persistent
+  filtered index from activation history during resume.  The remaining
+  deterministic-resume divergence was
   traced to `symbols.txt`: the old whitespace-token parser stopped at the
   first quoted symbol name containing a space, so restored raw symbol numbers
   changed secondary equality orientation.  The reader is now line-based and
   verifies every restored symbol number.  The collective binary checkpoint is
   now format `P9COLL5` and records clashable eligibility for each activation.
-  A fresh snapshot-era checkpoint at given 74 passed all 18 integrity hashes;
-  its resumed and uninterrupted 200-given runs both ended at exactly 695
+  A fresh persistent-history checkpoint at given 92 passed all 18 integrity
+  hashes; its resumed and uninterrupted 200-given runs both ended at exactly 695
   generated, 566 kept, 162 usable, 161 SOS, 9 paramodulation pairs, 41 hyper
-  batches, and 860 cumulatively indexed snapshot clauses.
+  batches, 200 history clauses, and zero archive materializations.
 - `passive_store=dense` now removes passive ownership from `Topform`,
   `Clist_pos`, selector AVL nodes, active indexes, and the live clause-ID
   table.  Given-selection rules and semantics are evaluated once while the
@@ -394,13 +409,14 @@ clause.
 The full 310,153-hint acceptance run is intentionally not being executed on
 the current low-RAM host.  The 10% sample is an implementation/regression
 gate, not a claim that the Phase 4 80% full-input gate has already passed.
-The Phase 5 gate is not yet claimed.  Hyper batches now reconstruct the exact
-historical active set and the focused later-disabled-parent regression closes
-the known coverage bug.  However, rebuilding an ordinary temporary FPA index
-for every hyper batch is a correctness scaffold; the final design should use
-Waldmeister's persistent/versioned historical normal-form index, plus a
-lower-bound promising-pair cache and a hint-discovery channel for
-unmaterialized conclusions.  Every emitted candidate already passes the
+The Phase 5 gate is not yet claimed.  Hyper batches now query a persistent
+versioned historical index and the focused later-disabled-parent regression
+closes the known coverage bug.  The current index retains ordinary cloned
+term trees per given; a packed/hash-consed representation and a compact sparse
+deactivation map remain desirable before a week-long scale gate.  Phase 5
+also still needs a bounded promising-pair cache, useful lower bounds, and a
+hint-discovery channel for unmaterialized conclusions.  Every emitted
+candidate already passes the
 unchanged exact hint matcher and all ordinary passive selection heuristics,
 but hints cannot yet prioritize a conclusion before its fair descriptor is
 expanded.  The bounded checkpoint trace gate is now closed for both the
@@ -408,5 +424,6 @@ combined frontier and dense passive store, and dense inactive state is bounded
 by automatic compaction rather than growing for the life of the process.
 Phase 3 is not yet declared complete because the required Phase-1-to-dense
 per-passive 80% result still needs a bounded synthetic/million-record
-measurement.  Phase 5 still requires the persistent index, hint-aware
-discovery/lower-bound scheduling, and long-run completeness/performance gates.
+measurement.  Phase 5 still requires hint-aware discovery/lower-bound
+scheduling, compact history storage, and long-run completeness/performance
+gates.
