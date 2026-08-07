@@ -83,21 +83,14 @@ static unsigned Arg_mem;  /* memory (pointers) for arrays of args */
 static
 Term get_term(int arity)
 {
-  /* This is a little tricky.  The pointers to the subterms are
-     in an array (p->args) that is just after (contiguous with)
-     the term.
+  /* The pointers to the subterms are stored immediately after the compact
+     term header and are addressed by ARG()/ARGS().
 
      private_symbol is not initialized.
      args array is not initialized.
    */
   Term p = get_mem(PTRS_TERM + arity);  /* non-initialized memory */
   p->arity = arity;
-  if (arity == 0)
-    p->args = NULL;
-  else {
-    void **v = (void **) p;
-    p->args = (Term *) (v + PTRS_TERM);  /* just after the (struct term) */
-  }
   p->private_flags = 0;
   p->container = NULL;
   p->u.vp = NULL;
@@ -2592,4 +2585,3 @@ int any_const_sn(int n)
     init_any_consts();
   return AnyConsts[n];
 }  /* any_const_sn */
-

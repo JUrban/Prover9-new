@@ -617,7 +617,7 @@ Term formula_to_term(Formula f)
 {
   /* Iterative conversion using a stack of {Formula src, Term dst, int child}.
    * We build terms top-down: create the parent Term, then push entries
-   * that say "fill dst->args[child] with the conversion of src".
+   * that say "fill ARG(dst, child) with the conversion of src".
    */
   typedef struct { Formula src; Term dst; int child; } Ftt_entry;
   int stack_cap = 1000;
@@ -687,7 +687,7 @@ Term formula_to_term(Formula f)
           fatal_error("formula_to_term: malloc failed");
         for (i = 0; i < nops; i++)
           chain_terms[i] = get_rigid_term(sym, 2);
-        /* Link them: chain_terms[i]->args[1] = chain_terms[i+1] */
+        /* Link them: ARG(chain_terms[i], 1) = chain_terms[i+1] */
         for (i = 0; i < nops - 1; i++)
           ARG(chain_terms[i], 1) = chain_terms[i + 1];
         t = chain_terms[0];
@@ -697,7 +697,7 @@ Term formula_to_term(Formula f)
         stack[top].src = cur->kids[cur->arity - 1];
         stack[top].dst = chain_terms[nops - 1];
         stack[top].child = 1;
-        /* Each chain_terms[i]->args[0] gets kids[i]. Push them. */
+        /* Each ARG(chain_terms[i], 0) gets kids[i]. Push them. */
         for (i = nops - 1; i >= 0; i--) {
           top++;
           if (top >= stack_cap) { stack_cap *= 2; stack = safe_realloc(stack, stack_cap * sizeof(*stack)); }
@@ -2802,6 +2802,5 @@ void rename_these_bound_vars(Formula f, Ilist vars)
   }
   safe_free(stack);
 }  /* rename_these_bound_vars */
-
 
 

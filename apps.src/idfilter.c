@@ -98,7 +98,7 @@ int main(int argc, char **argv)
     /* assume positive equality unit */
     Topform d = p->v;
     Literals lit = d->literals;
-    Term alpha = lit->atom->args[0];
+    Term alpha = ARG(lit->atom, 0);
     mark_oriented_eq(lit->atom);  /* don not check for termination */
     if (assoc_comm_symbols())
       ac_canonical(lit->atom, -1);
@@ -152,4 +152,3 @@ int main(int argc, char **argv)
   exit(0);
 
 }  /* main */
-

@@ -350,7 +350,7 @@ int main(int argc, char **argv)
       /* assume positive equality unit */
       Topform d = p->v;
       Literals lit = d->literals;
-      Term alpha = lit->atom->args[0];
+      Term alpha = ARG(lit->atom, 0);
       mark_oriented_eq(lit->atom);     /* do not check for termination */
       mindex_update(Demod_index, alpha, INSERT);
     }
@@ -368,4 +368,3 @@ int main(int argc, char **argv)
   printf("%% Generated=%llu, Kept=%llu.\n", Generated, Kept);
   exit(0);
 }  /* main */
-

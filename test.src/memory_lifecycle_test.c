@@ -49,6 +49,19 @@ static BOOL literal_flags_ident(Literals a, Literals b)
   return a == NULL && b == NULL;
 }
 
+static void compact_term_layout_test(void)
+{
+  Term t = term("compact_layout_f(a,b)");
+  size_t expected = BYTES_POINTER == 8 ? 24 : 16;
+  CHECK(sizeof(struct term) == expected,
+        "term header omits a redundant argument-array pointer");
+  CHECK(ARGS(t) == (Term *) (t + 1),
+        "term argument array immediately follows its compact header");
+  CHECK(ARITY(t) == 2 && CONSTANT(ARG(t, 0)) && CONSTANT(ARG(t, 1)),
+        "compact term argument access preserves parsed structure");
+  zap_term(t);
+}
+
 static void compression_shape_test(void)
 {
   enum { WIDTH = 300, DEPTH = 300, LITERALS = 1100 };
@@ -386,6 +399,7 @@ static void fpa_hash_invariant_test(void)
 int main(void)
 {
   init_standard_ladr();
+  compact_term_layout_test();
   compression_round_trip_test();
   fpa_pruning_test();
   fpa_hash_invariant_test();

@@ -86,7 +86,6 @@ struct term {
   int            private_symbol; /* const/func/pred/var symbol ID */
   unsigned short arity;          /* number of auguments */
   FLAGS_TYPE     private_flags;  /* for marking terms in various ways */
-  Term           *args;          /* array (size arity) of pointers to args */
   void           *container;     /* containing object */
   union {
     unsigned     id;             /* unique ID, probably for FPA indexing */
@@ -109,10 +108,10 @@ struct term {
 #define ARITY(t)    ((t)->arity)
 
 /* to get the i-th argument of a term (make sure i is in [0..arity-1]) */
-#define ARG(t,i)    ((t)->args[i])
+#define ARG(t,i)    (((Term *) ((t) + 1))[i])
 
-/* to get the array of arguments */
-#define ARGS(t)    ((t)->args)
+/* The argument array immediately follows each rigid term header. */
+#define ARGS(t)    (ARITY(t) == 0 ? NULL : (Term *) ((t) + 1))
 
 /* Match any constant (_AnyConst) in hints (Veroff/Justermans, 2016) */
 #define MATCH_HINTS_ANYCONST TRUE
