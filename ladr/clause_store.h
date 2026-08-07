@@ -40,6 +40,11 @@ void clause_store_append(Clause_store store, Topform c);
    Topform remains registered and stored. */
 BOOL clause_store_archive_clause(Clause_store store, Topform c);
 
+/* Archive the appended clause through a temporary serialization copy, then
+   leave the original materialized body alive but detached from the store and
+   ID table.  The caller assumes ownership of that original Topform. */
+BOOL clause_store_archive_clause_preserve(Clause_store store, Topform c);
+
 BOOL clause_store_member(Clause_store store, Topform c);
 
 size_t clause_store_length(Clause_store store);

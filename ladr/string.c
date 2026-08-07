@@ -388,7 +388,8 @@ Example: 1234567890 becomes "1,234,567,890"
 If comma formatting is disabled, returns plain number string.
 */
 
-#define COMMA_NUM_BUFFERS 8
+/* Statistics lines can format more than eight values in one fprintf. */
+#define COMMA_NUM_BUFFERS 16
 #define COMMA_NUM_SIZE 32  /* enough for 64-bit with commas */
 
 /* PUBLIC */
@@ -423,4 +424,3 @@ char *comma_num(unsigned long long n)
 
   return buf;
 }  /* comma_num */
-

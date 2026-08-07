@@ -19,7 +19,7 @@ grep -Eq 'Collective_hint_probes: scheduled=[1-9][0-9]*, expanded=[1-9][0-9]*, c
   "$test_tmp/prover.out"
 grep -Eq 'Collective_memory: descriptor_bytes=[1-9][0-9]*, history_bytes=[1-9][0-9]*\.' \
   "$test_tmp/prover.out"
-grep -Eq 'Collective_history_index: clauses=[1-9][0-9]*, indexed=[0-9]+, clause_bytes=[1-9][0-9]*, queries=[0-9]+, candidates=[0-9]+, future_rejected=[0-9]+, inactive_rejected=[0-9]+\.' \
+grep -Eq 'Collective_history_index: clauses=[1-9][0-9]*, indexed=[0-9]+, shared=[0-9]+, retained=[0-9]+, retained_clause_bytes=[0-9]+, queries=[0-9]+, candidates=[0-9]+, future_rejected=[0-9]+, inactive_rejected=[0-9]+\.' \
   "$test_tmp/prover.out"
 grep -Eq 'Hint_index: mode=packed, fpa_depth=0, epoch=[1-9][0-9]*\.' \
   "$test_tmp/prover.out"
@@ -56,7 +56,7 @@ grep -Eq 'Generated_by_rule: binary=0, hyper=[1-9][0-9]*, ur=0, paramod=0, other
   "$test_tmp/hyper.out"
 grep -Eq 'Collective_work: paramod_pairs=0, hyper_batches=[1-9][0-9]*\.' \
   "$test_tmp/hyper.out"
-grep -Eq 'Collective_history_index: clauses=[1-9][0-9]*, indexed=[1-9][0-9]*, clause_bytes=[1-9][0-9]*, queries=[1-9][0-9]*, candidates=[1-9][0-9]*, future_rejected=[1-9][0-9]*, inactive_rejected=[0-9]+\.' \
+grep -Eq 'Collective_history_index: clauses=[1-9][0-9]*, indexed=[1-9][0-9]*, shared=[0-9]+, retained=[0-9]+, retained_clause_bytes=[0-9]+, queries=[1-9][0-9]*, candidates=[1-9][0-9]*, future_rejected=[1-9][0-9]*, inactive_rejected=[0-9]+\.' \
   "$test_tmp/hyper.out"
 "$repo_dir/bin/prooftrans" parents_only < "$test_tmp/hyper.out" \
   > "$test_tmp/hyper-parents.out"
@@ -76,7 +76,7 @@ grep -Eq 'Generated_by_rule: binary=0, hyper=1, ur=0, paramod=0, other=[0-9]+\.'
   "$test_tmp/historical-hyper.out"
 grep -Eq 'Collective_frontier: .*parent_materializations=0, activations=[0-9]+\.' \
   "$test_tmp/historical-hyper.out"
-grep -Eq 'Collective_history_index: clauses=6, indexed=6, clause_bytes=[1-9][0-9]*, queries=1, candidates=2, future_rejected=0, inactive_rejected=0\.' \
+grep -Eq 'Collective_history_index: clauses=6, indexed=6, shared=4, retained=2, retained_clause_bytes=[1-9][0-9]*, queries=1, candidates=2, future_rejected=0, inactive_rejected=0\.' \
   "$test_tmp/historical-hyper.out"
 grep -Eq 'New_demodulators=1 .*Back_demodulated=2\.' \
   "$test_tmp/historical-hyper.out"

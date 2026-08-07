@@ -210,11 +210,12 @@ The reader remains backward-compatible with `P9COLL5`: that layout ends the
 header after `givens_since_batch`, has no hint-probe kind bit, and restores
 with probe credit available.
 
-Immutable historical clause clones and their FPA index are not serialized as
-a second copy of the clause database.  On resume they are rebuilt in
-activation order from `usable.clauses` and `disabled.clauses` before disabled
-clauses are returned to the compact ancestor store.  This preserves relative
-FPA answer ordering while keeping the checkpoint representation canonical.
+Shared/retained historical bodies and their FPA index are not serialized as a
+second copy of the clause database.  On resume the index is rebuilt in
+activation order from `usable.clauses` and `disabled.clauses`; active Topforms
+are referenced directly, and disabled bodies transfer to history ownership as
+they return to the compact ancestor store.  This preserves relative FPA answer
+ordering while keeping the checkpoint representation canonical.
 
 Source: search.c, write_collective_checkpoint(),
 read_collective_checkpoint().

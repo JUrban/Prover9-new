@@ -327,6 +327,8 @@ struct prover_stats {
     collective_snapshot_clauses_peak,
     collective_history_clauses,
     collective_history_indexed_clauses,
+    collective_history_shared_clauses,
+    collective_history_retained_clauses,
     collective_history_clause_bytes,
     collective_history_queries,
     collective_history_candidates,

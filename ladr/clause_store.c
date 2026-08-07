@@ -533,6 +533,49 @@ BOOL clause_store_archive_clause(Clause_store store, Topform c)
 }
 
 /* PUBLIC */
+BOOL clause_store_archive_clause_preserve(Clause_store store, Topform c)
+{
+  size_t i;
+  unsigned long long offset;
+  Topform source;
+
+  if (store == NULL || c == NULL || store->mode == CLAUSE_STORE_ARCHIVE_OFF ||
+      c->is_formula || c->compressed != NULL || c->literals == NULL)
+    return FALSE;
+  for (i = store->length; i > 0; i--)
+    if (store->refs[i-1] == (uintptr_t) c)
+      break;
+  if (i == 0)
+    return FALSE;
+
+  /* append_record compresses its input destructively.  Serialize a transient
+     deep copy so indexes can continue to refer to the original term nodes. */
+  source = copy_clause_ija(c);
+  source->matching_hint = c->matching_hint;
+  source->last_matched_given = c->last_matched_given;
+  source->weight = c->weight;
+  source->proof_tree_weight_cache = c->proof_tree_weight_cache;
+  source->semantics = c->semantics;
+  source->normal_vars = c->normal_vars;
+  source->used = c->used;
+  source->initial = c->initial;
+  source->subsumer = c->subsumer;
+  source->was_given = c->was_given;
+  source->goal_derived = c->goal_derived;
+  if (!append_record(store, source, &offset)) {
+    delete_clause(source);
+    return FALSE;
+  }
+  delete_clause(source);
+
+  if (!archive_clause_id(c, offset))
+    fatal_error("clause_store_archive_clause_preserve: ID replacement failed");
+  store->refs[i-1] = offset_ref(offset);
+  c->disabled = 0;
+  return TRUE;
+}
+
+/* PUBLIC */
 BOOL clause_store_member(Clause_store store, Topform c)
 {
   return store != NULL && c != NULL && c->disabled;

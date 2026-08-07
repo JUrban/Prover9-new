@@ -321,7 +321,13 @@ void collective_clear_state(void)
       if (c != NULL) {
         if (Collective_activation_pages[page_number]->clashable[offset])
           lindex_update(Collective_historical_idx, c, DELETE);
-        zap_topform(c);
+        /* Active clauses are shared with Usable and remain owned by the
+           ordinary search state.  Archived/deactivated clauses are detached
+           from the ID table and owned solely by collective history. */
+        if (!c->official_id)
+          delete_clause(c);
+        else
+          c->collective_history = 0;
       }
     }
     lindex_destroy(Collective_historical_idx);
@@ -371,6 +377,8 @@ void collective_reset_state(void)
   Stats.collective_snapshot_clauses_peak = 0;
   Stats.collective_history_clauses = 0;
   Stats.collective_history_indexed_clauses = 0;
+  Stats.collective_history_shared_clauses = 0;
+  Stats.collective_history_retained_clauses = 0;
   Stats.collective_history_clause_bytes = 0;
   Stats.collective_history_queries = 0;
   Stats.collective_history_candidates = 0;
@@ -502,32 +510,10 @@ Topform collective_activation_clause(unsigned long long position)
 }
 
 static
-Topform collective_copy_history_clause(Topform c)
-{
-  Topform copy;
-  if (c == NULL || c->compressed != NULL || c->literals == NULL)
-    fatal_error("collective history requires a materialized nonempty clause");
-  copy = copy_clause_with_flags(c);
-  copy->id = c->id;
-  copy->attributes = copy_attributes(c->attributes);
-  copy->weight = c->weight;
-  copy->semantics = c->semantics;
-  copy->simplifier_epoch = c->simplifier_epoch;
-  copy->normal_vars = c->normal_vars;
-  copy->used = c->used;
-  copy->initial = c->initial;
-  copy->was_given = c->was_given;
-  copy->cac_candidate = c->cac_candidate;
-  copy->delayed_demodulator = c->delayed_demodulator;
-  return copy;
-}
-
-static
 void collective_install_history_clause(unsigned long long position, Topform c)
 {
   size_t page_number = (size_t) (position >> COLLECTIVE_ACT_PAGE_BITS);
   unsigned offset = (unsigned) (position & (COLLECTIVE_ACT_PAGE_SIZE - 1));
-  Topform copy;
   if (position >= Collective_activation_count ||
       page_number >= Collective_activation_page_count)
     fatal_error("collective history installation cursor out of bounds");
@@ -535,15 +521,19 @@ void collective_install_history_clause(unsigned long long position, Topform c)
     fatal_error("collective historical clause installed twice");
   if (c->id != Collective_activation_pages[page_number]->ids[offset])
     fatal_error("collective historical clause ID mismatch");
+  if (c->compressed != NULL || c->literals == NULL)
+    fatal_error("collective history requires a materialized nonempty clause");
   if (Collective_historical_idx == NULL) {
     int fpa_depth = parm(Opt->fpa_depth);
     Collective_historical_idx = lindex_init(
       FPA, ORDINARY_UNIF, fpa_depth, FPA, ORDINARY_UNIF, fpa_depth);
   }
-  copy = collective_copy_history_clause(c);
-  Collective_activation_pages[page_number]->clauses[offset] = copy;
+  /* The active clause body is immutable.  Share it until disable/archive,
+     when ownership is transferred to collective history. */
+  c->collective_history = 1;
+  Collective_activation_pages[page_number]->clauses[offset] = c;
   if (Collective_activation_pages[page_number]->clashable[offset])
-    lindex_update(Collective_historical_idx, copy, INSERT);
+    lindex_update(Collective_historical_idx, c, INSERT);
 }
 
 static
@@ -732,11 +722,15 @@ unsigned long long collective_history_bytes(void)
 static
 void collective_history_clause_stats(unsigned long long *clauses,
                                      unsigned long long *indexed,
+                                     unsigned long long *shared,
+                                     unsigned long long *retained,
                                      unsigned long long *bytes)
 {
   unsigned long long position;
   *clauses = 0;
   *indexed = 0;
+  *shared = 0;
+  *retained = 0;
   *bytes = 0;
   for (position = 0; position < Collective_activation_count; position++) {
     size_t page_number = (size_t) (position >> COLLECTIVE_ACT_PAGE_BITS);
@@ -747,7 +741,12 @@ void collective_history_clause_stats(unsigned long long *clauses,
       (*clauses)++;
       if (Collective_activation_pages[page_number]->clashable[offset])
         (*indexed)++;
-      *bytes += sizeof(struct topform) + clause_body_storage_bytes(c);
+      if (c->official_id)
+        (*shared)++;
+      else {
+        (*retained)++;
+        *bytes += sizeof(struct topform) + clause_body_storage_bytes(c);
+      }
     }
   }
 }
@@ -1566,6 +1565,8 @@ void update_stats(void)
   Stats.collective_history_bytes = collective_history_bytes();
   collective_history_clause_stats(&Stats.collective_history_clauses,
                                    &Stats.collective_history_indexed_clauses,
+                                   &Stats.collective_history_shared_clauses,
+                                   &Stats.collective_history_retained_clauses,
                                    &Stats.collective_history_clause_bytes);
   Stats.kbyte_usage = bytes_palloced() / 1000;
   update_memory_stats();
@@ -1646,11 +1647,13 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
               comma_num(s.collective_snapshot_clauses),
               comma_num(s.collective_snapshot_clauses_peak));
     fprintf(fp,
-            "Collective_history_index: clauses=%s, indexed=%s, "
-            "clause_bytes=%s, queries=%s, candidates=%s, "
+            "Collective_history_index: clauses=%s, indexed=%s, shared=%s, "
+            "retained=%s, retained_clause_bytes=%s, queries=%s, candidates=%s, "
             "future_rejected=%s, inactive_rejected=%s.\n",
             comma_num(s.collective_history_clauses),
             comma_num(s.collective_history_indexed_clauses),
+            comma_num(s.collective_history_shared_clauses),
+            comma_num(s.collective_history_retained_clauses),
             comma_num(s.collective_history_clause_bytes),
             comma_num(s.collective_history_queries),
             comma_num(s.collective_history_candidates),
@@ -3874,6 +3877,26 @@ void compress_retained_clause(Topform c)
     fatal_error("compress_retained_clause: invalid clause");
 }  /* compress_retained_clause */
 
+/* Archive proof/attribute state without destroying a body that the
+   persistent collective index still references.  Once the archive owns the
+   proof-facing representation, history needs only the immutable inference
+   body and stable ID. */
+static
+BOOL archive_retained_clause(Clause_store store, Topform c)
+{
+  if (!c->collective_history)
+    return clause_store_archive_clause(store, c);
+
+  if (!clause_store_archive_clause_preserve(store, c))
+    return FALSE;
+  zap_just(c->justification);
+  c->justification = NULL;
+  zap_attributes(c->attributes);
+  c->attributes = NULL;
+  c->matching_hint = NULL;
+  return TRUE;
+}
+
 static
 void retain_disabled_clause(Topform c)
 {
@@ -3893,7 +3916,7 @@ void retain_disabled_clause(Topform c)
       compress_retained_clause(c);
   }
   else if (!str_ident(stringparm1(Opt->ancestor_store), "off")) {
-    if (!clause_store_archive_clause(Glob.disabled, c))
+    if (!archive_retained_clause(Glob.disabled, c))
       fatal_error("retain_disabled_clause: ancestor archive failed");
   }
   else
@@ -3912,7 +3935,7 @@ void compress_retained_store(Clause_store store)
       continue;
     Topform c = clause_store_get(store, i);
     if (archive && c->id != 0 && !c->is_formula) {
-      if (!clause_store_archive_clause(store, c))
+      if (!archive_retained_clause(store, c))
         fatal_error("compress_retained_store: ancestor archive failed");
     }
     else if (c->compressed == NULL) {

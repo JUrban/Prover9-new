@@ -315,6 +315,66 @@ static void archive_round_trip(Clause_store_archive_mode mode)
         "archive teardown removes every tagged ID entry");
 }
 
+static void archive_preserve_body_test(Clause_store_archive_mode mode)
+{
+  Clause_store store = clause_store_init("ancestor-preserve-test");
+  Topform original, expected, materialized;
+  Literals original_body;
+  unsigned long long id;
+  int attr = attribute_name_to_id("ancestor_payload");
+
+  CHECK(clause_store_enable_archive(store, mode),
+        "preserve-body ancestor backing initializes");
+  original = clause("p(f(x,a)) | h(x) = k(a).");
+  orient_equalities(original, FALSE);
+  original->literals->atom->private_flags |= (FLAGS_TYPE) 0x80;
+  original->attributes = set_term_attribute(original->attributes, attr,
+                                             term("payload(g(x),b)"));
+  original->justification = input_just();
+  original->weight = 23.5;
+  original->semantics = 9;
+  original->initial = 1;
+  original->was_given = 1;
+  assign_clause_id(original);
+  id = original->id;
+  original_body = original->literals;
+  expected = copy_clause_ija(original);
+  expected->weight = original->weight;
+  expected->semantics = original->semantics;
+  expected->initial = original->initial;
+  expected->was_given = original->was_given;
+
+  clause_store_append(store, original);
+  CHECK(clause_store_archive_clause_preserve(store, original),
+        "ancestor archives without consuming indexed body");
+  CHECK(original->literals == original_body && original->compressed == NULL &&
+        original->id == id && !original->official_id && !original->disabled,
+        "preserved Topform retains the exact body nodes and stable ID");
+  CHECK(clause_id_is_archived(id) && find_clause_by_id(id) == NULL,
+        "preserved body is detached while archive owns the public ID");
+
+  materialized = clause_store_materialize(store, 0);
+  CHECK(materialized != NULL &&
+        clause_ident(materialized->literals, expected->literals) &&
+        clause_flags_ident(materialized, expected) &&
+        materialized->weight == 23.5 && materialized->semantics == 9 &&
+        materialized->initial && materialized->was_given,
+        "preserve-body archive retains body, flags, and scalar metadata");
+  CHECK(materialized != NULL &&
+        get_term_attribute(materialized->attributes, attr, 1) != NULL &&
+        materialized->justification != NULL,
+        "preserve-body archive retains proof and attribute metadata");
+
+  clause_store_release_materialized(materialized);
+  delete_clause(original);
+  zap_just(expected->justification);
+  expected->justification = NULL;
+  zap_topform(expected);
+  clause_store_delete_clauses(store);
+  CHECK(find_clause_by_id(id) == NULL,
+        "preserve-body archive teardown removes the tagged ID");
+}
+
 int main(void)
 {
   struct clause_id_table_stats ids;
@@ -325,8 +385,10 @@ int main(void)
   justification_all_types_test();
   justification_codec_test();
   archive_round_trip(CLAUSE_STORE_ARCHIVE_MEMORY);
+  archive_preserve_body_test(CLAUSE_STORE_ARCHIVE_MEMORY);
 #ifndef __EMSCRIPTEN__
   archive_round_trip(CLAUSE_STORE_ARCHIVE_MMAP);
+  archive_preserve_body_test(CLAUSE_STORE_ARCHIVE_MMAP);
 #endif
   ids = clause_id_table_get_stats();
   CHECK(ids.entries == 0 && ids.pages == 0,

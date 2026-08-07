@@ -309,16 +309,20 @@ Implementation status on 2026-08-07:
   expansion and still requires the historical conclusion that a live-index
   lookup misses.
 - The scaffold is now replaced by a reusable persistent historical index.
-  Each activation contributes one immutable inference-only clause clone and,
-  when hyper-clashable, indexes that clone once.  Paramodulation reads clones
-  by activation position; hyperresolution filters index hits by activation and
+  An activation indexes its already-materialized active Topform directly,
+  rather than allocating a second inference-only clause tree.  If that clause
+  is later disabled, the ancestor store serializes proof metadata through a
+  transient one-clause copy and transfers the original immutable body to
+  history ownership.  Paramodulation reads these shared/retained bodies by
+  activation position; hyperresolution filters index hits by activation and
   deactivation epoch.  Thus this state grows with selected givens (11,242 in
   the archived full Osborn proof), not with the millions of generated,
-  passive, or disabled clauses.  Collective-hyper-only runs no longer maintain
-  a duplicate live clashable index.  The later-disabled regression now uses
-  zero ancestor materializations.  If SOS empties, the scheduler still drains
-  descriptors, so the ratio changes fair interleaving rather than imposing a
-  hard candidate cap.
+  passive, or disabled clauses, and it does not duplicate bodies that remain
+  active.  Collective-hyper-only runs no longer maintain a duplicate live
+  clashable index.  The later-disabled regression now uses zero ancestor
+  materializations.  If SOS empties, the scheduler still drains descriptors,
+  so the ratio changes fair interleaving rather than imposing a hard candidate
+  cap.
 - With historical snapshots, the same bounded 31,014-hint/250-given `N=4`
   Osborn run generated 830 clauses, kept 587, and retained only 2 SOS clauses,
   with 199 usable clauses and 248 pending constant-size descriptors.  It
@@ -329,11 +333,13 @@ Implementation status on 2026-08-07:
   and 99.96% fewer resident passives at the boundary.  Against the flawed
   live-index collective prototype, it is 83.1% fewer generated and 99.7%
   fewer passive clauses.  The persistent implementation retains 250 history
-  clauses occupying an estimated 88,976 body/header bytes, performs zero
-  ancestor materializations, and reports 504 rejected future index hits.  It
-  uses 15.44 CPU seconds and 33,092 KiB peak RSS versus 16.48 seconds and
-  33,088 KiB for repeated snapshot rebuilding; the peak remains the packed-
-  hint preprocessing floor.  These finite-boundary
+  clauses.  The original persistent-clone implementation occupied an
+  estimated 88,976 body/header bytes.  Direct ownership sharing keeps 199
+  active bodies without duplication and retains only 51 deactivated bodies,
+  occupying 17,304 incremental bytes: an 80.6% reduction with identical search
+  counts.  The shared run used 16.71 CPU seconds and 33,096 KiB peak RSS; the
+  four-KiB peak difference is measurement noise at the packed-hint preprocessing
+  floor.  These finite-boundary
   figures include deferred fair work and must not be extrapolated as a
   week-long reduction until the long-run acceptance experiment is run.
 - The first hint-aware scheduler increment is an opt-in bounded descriptor
@@ -383,7 +389,10 @@ Implementation status on 2026-08-07:
   907 generated, 605 kept, 21 SOS, 47 paramodulation pairs, 40 hyper batches,
   and 41 scheduled/expanded probes.  The same reader also resumed the old
   `P9COLL5` given-92 checkpoint to its original 200-given counts with 18/18
-  hashes.
+  hashes.  After direct history-body sharing, a fresh checkpoint at given 87
+  again passed 18/18 hashes and resumed to the uninterrupted conservative
+  boundary: 830 generated, 587 kept, 199 usable, two SOS, 11 paramodulation
+  pairs, and 51 hyper batches.
 - `passive_store=dense` now removes passive ownership from `Topform`,
   `Clist_pos`, selector AVL nodes, active indexes, and the live clause-ID
   table.  Given-selection rules and semantics are evaluated once while the
@@ -441,9 +450,10 @@ the current low-RAM host.  The 10% sample is an implementation/regression
 gate, not a claim that the Phase 4 80% full-input gate has already passed.
 The Phase 5 gate is not yet claimed.  Hyper batches now query a persistent
 versioned historical index and the focused later-disabled-parent regression
-closes the known coverage bug.  The current index retains ordinary cloned
-term trees per given; a packed/hash-consed representation and a compact sparse
-deactivation map remain desirable before a week-long scale gate.  Phase 5
+closes the known coverage bug.  Active history bodies are now shared, while
+only deactivated historical versions remain as ordinary term trees; a packed
+representation for those retained versions and a compact sparse deactivation
+map remain desirable before a week-long scale gate.  Phase 5
 also still needs a bounded promising-pair cache, useful lower bounds, and a
 hint-discovery channel for unmaterialized conclusions.  Exact matches on
 selected givens now provide a starvation-safe one-turn descriptor probe, and
