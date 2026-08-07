@@ -404,6 +404,18 @@ Implementation status on 2026-08-07:
   KiB and CPU time was 16.73 seconds.  This validates non-perturbation on the
   safe short run; it does not pretend to measure the limit's intended benefit
   on the archived multi-hundred-thousand-passive runs.
+  A second run deliberately lowered the cache to 64.  The 378-clause initial
+  and preprocessing population is outside the collective bound, after which
+  504 cache-full stalls forced selection to drain it.  At 250 givens the run
+  had generated 852 clauses, kept 615, and retained 38 SOS clauses; it used
+  138 hyper turns (109 emitted conclusions and two deferred turns) and had
+  not yet reached a paramodulation pair.  It completed in 21.24 seconds with
+  32,976 KiB peak RSS.  The modest size increase still remains far below the
+  eager frontier, but the rule mix shows that FIFO descriptor discovery can
+  materially alter a tight-cache search.  The next scheduler increment must
+  therefore compare promising unselected conclusions across descriptors,
+  while retaining an explicit fair fallback, rather than merely shrinking
+  the cache further.
 - The first hint-aware scheduler increment is an opt-in bounded descriptor
   probe, enabled by `collective_hint_probes`.  When a selected given has an exact
   `matching_hint`, its newly appended combined descriptor may move to the
