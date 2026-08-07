@@ -1,0 +1,34 @@
+clear(print_initial_clauses).
+clear(print_given).
+clear(auto_inference).
+set(collective_trace).
+assign(search_loop,discount).
+assign(passive_store,compressed).
+assign(inference_frontier,collective).
+assign(collective_given_ratio,4).
+assign(ancestor_store,memory).
+assign(stats,all).
+assign(max_given,4).
+assign(max_seconds,10).
+set(hyper_resolution).
+
+% These are active before the nucleus is selected.
+formulas(usable).
+  P(f(a)).
+  Q.
+end_of_list.
+
+% Age selection activates the nucleus first.  The equality is then made a
+% demodulator and disables P(f(a)) before the four-given delay expires.
+% A correct historical hyper index must nevertheless retain P(f(a)) in the
+% nucleus batch and must not substitute the later P(b) replacement.
+formulas(sos).
+  -P(f(a)) | -Q | R(a).
+  f(a) = b.
+  A.
+  B.
+end_of_list.
+
+formulas(goals).
+  R(a).
+end_of_list.

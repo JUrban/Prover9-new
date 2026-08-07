@@ -262,9 +262,10 @@ Implementation status on 2026-08-07:
   mmap ancestor store).  Each activated given creates constant-size queued
   descriptor instead of eagerly enumerating its complete paramodulation and
   positive/negative-hyper sets.  The descriptor retains a paramodulation cursor
-  into an append-only activation history and expand one historical partner
-  at a time.  Hyper descriptors are one-shot sets evaluated against the
-  active index when their fair turn arrives.  Every concrete conclusion still
+  into an append-only activation history and expands one historical partner
+  at a time.  Hyper descriptors are one-shot sets evaluated against a
+  temporary FPA index that reconstructs the active set at the descriptor's
+  creation epoch.  Every concrete conclusion still
   enters the unchanged `cl_process` path, so normalization, exact hint
   matching, weight/degradation updates, filtering, and proof construction are
   performed before it can enter SOS.
@@ -273,7 +274,9 @@ Implementation status on 2026-08-07:
   below can reduce the expansion rate.  It records activation
   and deactivation epochs in paged dense tables, materializes disabled parents
   from the ancestor archive, accounts for descriptors/history separately,
-  and serializes the mixed descriptor queue in checkpoints.  A new
+  and serializes the mixed descriptor queue in checkpoints.  One clashable
+  eligibility bit per activation distinguishes active restricted denials from
+  clauses that were actually in the historical resolution index.  A new
   `collective_trace` option reports each expansion, its parent IDs, generated
   and kept counts, and archive materializations.  Per-rule generation counters
   identified hyperresolution, rather than paramodulation, as the later
@@ -291,29 +294,51 @@ Implementation status on 2026-08-07:
   stayed within 30 seconds and 256 MiB.
 - `collective_given_ratio=N` makes the fair expansion rate explicit (default
   1).  Hyper and paramodulation state for an activation are now combined in
-  one descriptor.  With `N=4` at the same 250-given boundary, the current
-  implementation generated 4,907 clauses and retained 777 SOS clauses.
-  Relative to the eager-hyper attribution baseline this is 85.9% fewer
-  generated clauses and 84.0% fewer resident passives.  The 248 pending
-  descriptors used 9,920 bytes, the run took 17.5 seconds, and peak RSS again
-  stayed at the 32.3 MiB preprocessing floor.  If SOS empties, the scheduler
-  drains descriptors regardless of the ratio, so the knob changes fair
-  interleaving rather than imposing a hard or completeness-destroying
-  candidate cap.  Fairness here refers to descriptor scheduling; the full
-  calculus-completeness argument still depends on the historical-index work
-  listed below.
+  one descriptor.  The first `N=4` implementation evaluated a delayed hyper
+  batch against the *current* active index.  At 250 givens it generated 4,907
+  clauses and retained 777 SOS clauses, but that index incorrectly admitted
+  activations newer than the descriptor and lost clauses disabled after its
+  creation.  Those figures remain useful as attribution data, not as the
+  result of the corrected calculus.
+- The corrected historical hyper snapshot uses the descriptor's activation
+  limit and simplifier epoch.  It excludes future clauses, includes clauses
+  active at creation even if they have since been disabled, reconstructs FPA
+  leaf order by replaying activation order, and releases the temporary index
+  and archived parents after one expansion.  A regression back-rewrites both
+  a nucleus and a required satellite before expansion; the batch materializes
+  both historical parents and generates the conclusion that a live-index
+  lookup misses.  If SOS empties, the scheduler drains descriptors regardless
+  of the ratio, so the knob changes fair interleaving rather than imposing a
+  hard candidate cap.
+- With historical snapshots, the same bounded 31,014-hint/250-given `N=4`
+  Osborn run generated 830 clauses, kept 587, and retained only 2 SOS clauses,
+  with 199 usable clauses and 248 pending constant-size descriptors.  It
+  expanded 11 paramodulation pairs and 51 hyper batches; the hyper snapshots
+  indexed 1,315 historical clauses in total and at most 50 at once.  Against
+  the eager-hyper attribution baseline, this is 97.6% fewer generated clauses
+  and 99.96% fewer resident passives at the boundary.  Against the flawed
+  live-index collective prototype, it is 83.1% fewer generated and 99.7%
+  fewer passive clauses.  The run used 16.5 CPU seconds and 33,088 KiB peak
+  RSS, still the packed-hint preprocessing floor.  These finite-boundary
+  figures include deferred fair work and must not be extrapolated as a
+  week-long reduction until the long-run acceptance experiment is run.
 - Focused equality and hyperresolution examples both prove in collective mode;
   equality proofs pass `prooftrans` and `directproof`, and the predicate-hyper
   proof passes `prooftrans`.  Mixed queues, activation/deactivation history,
   the scheduler ratio/cursor, and all rule bits are checkpointed.  Collective
   resume deliberately rebuilds active FPA indexes because the existing
   serialized clashable trie lost leaf multiplicity needed for identical raw
-  hyper enumeration.  The remaining deterministic-resume divergence was
+  hyper enumeration.  Historical batches independently rebuild their exact
+  epoch-local FPA index.  The remaining deterministic-resume divergence was
   traced to `symbols.txt`: the old whitespace-token parser stopped at the
   first quoted symbol name containing a space, so restored raw symbol numbers
   changed secondary equality orientation.  The reader is now line-based and
-  verifies every restored symbol number.  A fresh ratio-4 checkpoint resumes
-  to exactly 4,907 generated, 1,247 kept, and 777 SOS clauses at 250 givens.
+  verifies every restored symbol number.  The collective binary checkpoint is
+  now format `P9COLL5` and records clashable eligibility for each activation.
+  A fresh snapshot-era checkpoint at given 74 passed all 18 integrity hashes;
+  its resumed and uninterrupted 200-given runs both ended at exactly 695
+  generated, 566 kept, 162 usable, 161 SOS, 9 paramodulation pairs, 41 hyper
+  batches, and 860 cumulatively indexed snapshot clauses.
 - `passive_store=dense` now removes passive ownership from `Topform`,
   `Clist_pos`, selector AVL nodes, active indexes, and the live clause-ID
   table.  Given-selection rules and semantics are evaluated once while the
@@ -332,8 +357,9 @@ Implementation status on 2026-08-07:
   attributes, and only the Topform flags needed at activation.  Passive IDs
   are detached from the live ID table and registered again only on activation;
   the general archive is reserved for actual disabled proof ancestors.
-- On the bounded 31,014-hint/250-given Osborn run, dedicated-arena mode is
-  search-identical to compressed DISCOUNT: 4,907 generated, 1,247 kept,
+- Before the historical-hyper correction, the bounded 31,014-hint/250-given
+  Osborn run showed dedicated-arena mode search-identical to compressed
+  DISCOUNT: 4,907 generated, 1,247 kept,
   198 usable, 777 SOS, 145 demodulators, 31,014 hints, and 28,564 active hints.
   It reports zero passive active-index entries and 630 delayed demodulators.
   Live passive payload is 42,517 bytes (26,187 body and 16,330 justification
@@ -368,17 +394,19 @@ clause.
 The full 310,153-hint acceptance run is intentionally not being executed on
 the current low-RAM host.  The 10% sample is an implementation/regression
 gate, not a claim that the Phase 4 80% full-input gate has already passed.
-The Phase 5 gate is not yet claimed.  Hyper batches currently query the active
-index at expansion time; they do not yet use Waldmeister's persistent
-historical normal-form/index structure, a lower-bound promising-pair cache, or
-a hint-discovery channel for unmaterialized conclusions.  This is sound (all
-emitted conclusions have concrete proof parents) and exact for every candidate
-that is materialized, but the completeness/coverage argument for delayed
-hyper sets remains an acceptance item.  The bounded checkpoint trace gate is
-now closed for both the combined frontier and dense passive store, and dense
-inactive state is bounded by automatic compaction rather than growing for the
-life of the process.  Phase 3 is not yet declared complete because the
-required Phase-1-to-dense per-passive 80% result still needs a bounded
-synthetic/million-record measurement.  Phase 5 also requires
-historical/versioned active indexes and a hint-aware discovery/lower-bound
-channel before its completeness gate can be claimed.
+The Phase 5 gate is not yet claimed.  Hyper batches now reconstruct the exact
+historical active set and the focused later-disabled-parent regression closes
+the known coverage bug.  However, rebuilding an ordinary temporary FPA index
+for every hyper batch is a correctness scaffold; the final design should use
+Waldmeister's persistent/versioned historical normal-form index, plus a
+lower-bound promising-pair cache and a hint-discovery channel for
+unmaterialized conclusions.  Every emitted candidate already passes the
+unchanged exact hint matcher and all ordinary passive selection heuristics,
+but hints cannot yet prioritize a conclusion before its fair descriptor is
+expanded.  The bounded checkpoint trace gate is now closed for both the
+combined frontier and dense passive store, and dense inactive state is bounded
+by automatic compaction rather than growing for the life of the process.
+Phase 3 is not yet declared complete because the required Phase-1-to-dense
+per-passive 80% result still needs a bounded synthetic/million-record
+measurement.  Phase 5 still requires the persistent index, hint-aware
+discovery/lower-bound scheduling, and long-run completeness/performance gates.

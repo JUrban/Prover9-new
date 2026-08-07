@@ -40,8 +40,27 @@ grep -Eq 'Generated_by_rule: binary=0, hyper=[1-9][0-9]*, ur=0, paramod=0, other
   "$test_tmp/hyper.out"
 grep -Eq 'Collective_work: paramod_pairs=0, hyper_batches=[1-9][0-9]*\.' \
   "$test_tmp/hyper.out"
+grep -Eq 'Collective_snapshots: rebuilds=[1-9][0-9]*, clauses_indexed=[1-9][0-9]*, peak=[1-9][0-9]*\.' \
+  "$test_tmp/hyper.out"
 "$repo_dir/bin/prooftrans" parents_only < "$test_tmp/hyper.out" \
   > "$test_tmp/hyper-parents.out"
 grep -q 'end of proof' "$test_tmp/hyper-parents.out"
+
+if "$repo_dir/bin/prover9" < \
+     "$repo_dir/test.src/collective_historical_hyper.in" \
+     > "$test_tmp/historical-hyper.out" \
+     2> "$test_tmp/historical-hyper.err"; then
+  echo 'historical hyper fixture unexpectedly completed successfully' >&2
+  exit 1
+fi
+grep -q 'SEARCH FAILED' "$test_tmp/historical-hyper.out"
+grep -Eq 'COLLECTIVE_TRACE kind=pos_hyper given=[0-9]+ epoch=[0-9]+ snapshot_clauses=3 generated=1 kept=1 archived_parent=1\.' \
+  "$test_tmp/historical-hyper.out"
+grep -Eq 'Generated_by_rule: binary=0, hyper=1, ur=0, paramod=0, other=[0-9]+\.' \
+  "$test_tmp/historical-hyper.out"
+grep -Eq 'Collective_frontier: .*parent_materializations=2, activations=[0-9]+\.' \
+  "$test_tmp/historical-hyper.out"
+grep -Eq 'New_demodulators=1 .*Back_demodulated=2\.' \
+  "$test_tmp/historical-hyper.out"
 
 echo 'collective_frontier_test: PASS'

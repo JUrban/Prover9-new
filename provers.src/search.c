@@ -155,6 +155,7 @@ static enum inference_source Current_inference_source = INFER_SOURCE_OTHER;
 
 struct collective_activation_page {
   unsigned long long ids[COLLECTIVE_ACT_PAGE_SIZE];
+  unsigned char clashable[COLLECTIVE_ACT_PAGE_SIZE];
 };
 
 struct collective_deactivation_page {
@@ -317,6 +318,9 @@ void collective_reset_state(void)
   Stats.collective_hyper_expansions = 0;
   Stats.collective_partners_skipped = 0;
   Stats.collective_parent_materializations = 0;
+  Stats.collective_snapshot_rebuilds = 0;
+  Stats.collective_snapshot_clauses = 0;
+  Stats.collective_snapshot_clauses_peak = 0;
   Stats.collective_batches_pending = 0;
   Stats.collective_batches_peak = 0;
   Stats.collective_activation_entries = 0;
@@ -415,7 +419,18 @@ unsigned long long collective_activation_id(unsigned long long position)
 }
 
 static
-void collective_append_activation_id(unsigned long long id)
+BOOL collective_activation_clashable(unsigned long long position)
+{
+  size_t page_number = (size_t) (position >> COLLECTIVE_ACT_PAGE_BITS);
+  unsigned offset = (unsigned) (position & (COLLECTIVE_ACT_PAGE_SIZE - 1));
+  if (position >= Collective_activation_count ||
+      page_number >= Collective_activation_page_count)
+    fatal_error("collective clashable cursor out of bounds");
+  return Collective_activation_pages[page_number]->clashable[offset] != 0;
+}
+
+static
+void collective_append_activation_id(unsigned long long id, BOOL clashable)
 {
   size_t page_number =
     (size_t) (Collective_activation_count >> COLLECTIVE_ACT_PAGE_BITS);
@@ -429,12 +444,14 @@ void collective_append_activation_id(unsigned long long id)
     Collective_activation_page_count++;
   }
   Collective_activation_pages[page_number]->ids[offset] = id;
+  Collective_activation_pages[page_number]->clashable[offset] =
+    clashable ? 1 : 0;
   Collective_activation_count++;
   (void) collective_deactivation_page(id, TRUE);
 }
 
 static
-void collective_note_activation(Topform c)
+void collective_note_activation(Topform c, BOOL clashable)
 {
   if (!collective_frontier_mode())
     return;
@@ -442,7 +459,7 @@ void collective_note_activation(Topform c)
     fatal_error("collective activation requires a stable clause ID");
   c->simplifier_epoch = Simplifier_epoch;
   collective_set_deactivation_epoch(c->id, 0);
-  collective_append_activation_id(c->id);
+  collective_append_activation_id(c->id, clashable);
 }
 
 static
@@ -497,11 +514,12 @@ void collective_enqueue_hyper_batch(Topform given, unsigned kind)
       Collective_batch_tail->given_id == given->id &&
       Collective_batch_tail->snapshot_epoch == Simplifier_epoch) {
     Collective_batch_tail->kind |= kind;
+    Collective_batch_tail->activation_limit = Collective_activation_count;
     return;
   }
   b = safe_calloc(1, sizeof(*b));
   b->given_id = given->id;
-  b->activation_limit = 1;
+  b->activation_limit = Collective_activation_count;
   b->snapshot_epoch = Simplifier_epoch;
   b->kind = kind;
   collective_append_batch(b);
@@ -1426,6 +1444,11 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             "Collective_memory: descriptor_bytes=%s, history_bytes=%s.\n",
             comma_num(s.collective_descriptor_bytes),
             comma_num(s.collective_history_bytes));
+    fprintf(fp,
+            "Collective_snapshots: rebuilds=%s, clauses_indexed=%s, peak=%s.\n",
+            comma_num(s.collective_snapshot_rebuilds),
+            comma_num(s.collective_snapshot_clauses),
+            comma_num(s.collective_snapshot_clauses_peak));
   }
   fprintf(fp, "Hint_index: mode=%s, fpa_depth=%d, epoch=%llu.\n",
           stringparm1(Opt->hint_index), configured_hint_fpa_depth(),
@@ -5276,6 +5299,80 @@ Topform collective_parent_clause(unsigned long long id, BOOL *materialized)
   return c;
 }
 
+struct collective_snapshot {
+  Lindex index;
+  Plist indexed;
+  Plist materialized;
+  unsigned long long clause_count;
+};
+
+/* Reconstruct the clashable index exactly as it existed when a delayed
+   batch was enqueued.  activation_limit excludes future activations;
+   snapshot_epoch excludes clauses already disabled at enqueue time while
+   retaining later-disabled clauses through the ancestor archive.  The
+   eligibility bit preserves restricted-denial behavior.  Insertion in
+   activation order also preserves FPA leaf order, which affects the order
+   in which hyperresolution submits conclusions to cl_process(). */
+static
+struct collective_snapshot collective_build_snapshot(
+    struct collective_batch *b, Topform given)
+{
+  struct collective_snapshot snapshot;
+  unsigned long long position;
+  int fpa_depth = parm(Opt->fpa_depth);
+
+  snapshot.index = lindex_init(FPA, ORDINARY_UNIF, fpa_depth,
+                               FPA, ORDINARY_UNIF, fpa_depth);
+  snapshot.indexed = NULL;
+  snapshot.materialized = NULL;
+  snapshot.clause_count = 0;
+
+  for (position = 0; position < b->activation_limit; position++) {
+    unsigned long long id = collective_activation_id(position);
+    unsigned deactivated = collective_deactivation_epoch(id);
+    BOOL materialized = FALSE;
+    Topform c;
+
+    if (!collective_activation_clashable(position) ||
+        (deactivated != 0 && deactivated <= b->snapshot_epoch))
+      continue;
+
+    if (id == b->given_id)
+      c = given;
+    else
+      c = collective_parent_clause(id, &materialized);
+
+    lindex_update(snapshot.index, c, INSERT);
+    snapshot.indexed = plist_prepend(snapshot.indexed, c);
+    snapshot.clause_count++;
+    if (materialized)
+      snapshot.materialized = plist_prepend(snapshot.materialized, c);
+  }
+
+  Stats.collective_snapshot_rebuilds++;
+  Stats.collective_snapshot_clauses += snapshot.clause_count;
+  if (snapshot.clause_count > Stats.collective_snapshot_clauses_peak)
+    Stats.collective_snapshot_clauses_peak = snapshot.clause_count;
+  return snapshot;
+}
+
+static
+void collective_destroy_snapshot(struct collective_snapshot *snapshot)
+{
+  Plist p;
+  for (p = snapshot->indexed; p != NULL; p = p->next)
+    lindex_update(snapshot->index, p->v, DELETE);
+  lindex_destroy(snapshot->index);
+  for (p = snapshot->materialized; p != NULL; p = p->next)
+    clause_store_release_materialized(p->v);
+  zap_plist(snapshot->indexed);
+  zap_plist(snapshot->materialized);
+  snapshot->index = NULL;
+  snapshot->indexed = NULL;
+  snapshot->materialized = NULL;
+  snapshot->clause_count = 0;
+}
+
 /* Expand at most one historical active partner from the oldest round-robin
    batch.  Both paramodulation directions for that pair are performed before
    yielding.  Conclusions still go through cl_process(), including exact
@@ -5292,27 +5389,33 @@ BOOL collective_expand_one_batch(void)
 
   if ((b->kind & (COLLECTIVE_POS_HYPER | COLLECTIVE_NEG_HYPER)) != 0) {
     BOOL materialized;
+    struct collective_snapshot snapshot;
+    unsigned long long snapshot_clause_count;
     unsigned long long generated_before = Stats.generated;
     unsigned long long kept_before = Stats.kept;
     Topform given = collective_parent_clause(b->given_id, &materialized);
     unsigned hyper_kind = (b->kind & COLLECTIVE_POS_HYPER) != 0 ?
                           COLLECTIVE_POS_HYPER : COLLECTIVE_NEG_HYPER;
     int direction = hyper_kind == COLLECTIVE_POS_HYPER ? POS_RES : NEG_RES;
+    snapshot = collective_build_snapshot(b, given);
     clock_start(Clocks.infer);
     Current_inference_source = INFER_SOURCE_HYPER;
-    hyper_resolution(given, direction, Glob.clashable_idx, cl_process);
+    hyper_resolution(given, direction, snapshot.index, cl_process);
     Current_inference_source = INFER_SOURCE_OTHER;
     clock_stop(Clocks.infer);
+    snapshot_clause_count = snapshot.clause_count;
+    collective_destroy_snapshot(&snapshot);
     if (materialized)
       clause_store_release_materialized(given);
     b->kind &= ~hyper_kind;
     Stats.collective_hyper_expansions++;
     if (flag(Opt->collective_trace))
       printf("%sCOLLECTIVE_TRACE kind=%s given=%llu epoch=%u "
-             "generated=%llu kept=%llu archived_parent=%d.\n",
+             "snapshot_clauses=%llu generated=%llu kept=%llu "
+             "archived_parent=%d.\n",
              TPTP_PFX,
              hyper_kind == COLLECTIVE_POS_HYPER ? "pos_hyper" : "neg_hyper",
-             b->given_id, b->snapshot_epoch,
+             b->given_id, b->snapshot_epoch, snapshot_clause_count,
              Stats.generated - generated_before, Stats.kept - kept_before,
              materialized ? 1 : 0);
     collective_finish_batch_turn(b);
@@ -5726,7 +5829,8 @@ void make_inferences(void)
       if (activated != NULL && clist_member(activated, Glob.usable)) {
 	if (!restricted_denial(activated))
 	  index_clashable(activated, INSERT);
-	collective_note_activation(activated);
+	collective_note_activation(
+	  activated, Glob.use_clash_idx && !restricted_denial(activated));
 	given_infer(activated);
       }
     }
@@ -6506,7 +6610,10 @@ void index_and_process_initial_clauses(void)
      because that phase can replace or disable input usable clauses. */
   if (collective_frontier_mode())
     for (p = Glob.usable->first; p != NULL; p = p->next)
-      collective_note_activation(p->c);
+      /* The initial indexing loop above includes restricted denials; later
+         activations deliberately do not.  Record what was actually indexed,
+         rather than recomputing eligibility during historical replay. */
+      collective_note_activation(p->c, Glob.use_clash_idx);
 
   {
     int rp_interval = parm(Opt->report_preprocessing);
@@ -7754,7 +7861,7 @@ void write_collective_checkpoint(const char *dir)
   FILE *fp;
   unsigned long long i;
   struct collective_batch *b;
-  const char magic[8] = {'P','9','C','O','L','L','4','\0'};
+  const char magic[8] = {'P','9','C','O','L','L','5','\0'};
   uint32_t turn = Collective_batch_turn ? 1U : 0U;
   uint32_t givens_since_batch = Collective_givens_since_batch;
 
@@ -7775,8 +7882,10 @@ void write_collective_checkpoint(const char *dir)
   for (i = 0; i < Collective_activation_count; i++) {
     unsigned long long id = collective_activation_id(i);
     uint32_t deactivated = collective_deactivation_epoch(id);
+    uint32_t clashable = collective_activation_clashable(i) ? 1U : 0U;
     if (fwrite(&id, sizeof(id), 1, fp) != 1 ||
-        fwrite(&deactivated, sizeof(deactivated), 1, fp) != 1)
+        fwrite(&deactivated, sizeof(deactivated), 1, fp) != 1 ||
+        fwrite(&clashable, sizeof(clashable), 1, fp) != 1)
       fatal_error("write_collective_checkpoint: history write failed");
   }
   for (b = Collective_batch_head; b != NULL; b = b->next) {
@@ -7808,7 +7917,7 @@ void read_collective_checkpoint(const char *dir)
   if (fp == NULL)
     fatal_error("resume: collective frontier state is missing");
   if (fread(magic, sizeof(magic), 1, fp) != 1 ||
-      memcmp(magic, "P9COLL4", 7) != 0 ||
+      memcmp(magic, "P9COLL5", 7) != 0 ||
       fread(&activations, sizeof(activations), 1, fp) != 1 ||
       fread(&batches, sizeof(batches), 1, fp) != 1 ||
       fread(&turn, sizeof(turn), 1, fp) != 1 ||
@@ -7817,11 +7926,14 @@ void read_collective_checkpoint(const char *dir)
 
   for (i = 0; i < activations; i++) {
     unsigned long long id;
-    uint32_t deactivated;
+    uint32_t deactivated, clashable;
     if (fread(&id, sizeof(id), 1, fp) != 1 ||
-        fread(&deactivated, sizeof(deactivated), 1, fp) != 1)
+        fread(&deactivated, sizeof(deactivated), 1, fp) != 1 ||
+        fread(&clashable, sizeof(clashable), 1, fp) != 1)
       fatal_error("resume: truncated collective activation history");
-    collective_append_activation_id(id);
+    if (clashable > 1)
+      fatal_error("resume: invalid collective clashable flag");
+    collective_append_activation_id(id, clashable != 0);
     collective_set_deactivation_epoch(id, deactivated);
   }
   for (i = 0; i < batches; i++) {
@@ -7945,6 +8057,12 @@ void write_checkpoint(void)
             Stats.collective_partners_skipped);
     fprintf(fp, "collective_parent_materializations %llu\n",
             Stats.collective_parent_materializations);
+    fprintf(fp, "collective_snapshot_rebuilds %llu\n",
+            Stats.collective_snapshot_rebuilds);
+    fprintf(fp, "collective_snapshot_clauses %llu\n",
+            Stats.collective_snapshot_clauses);
+    fprintf(fp, "collective_snapshot_clauses_peak %llu\n",
+            Stats.collective_snapshot_clauses_peak);
     fprintf(fp, "collective_batches_peak %llu\n",
             Stats.collective_batches_peak);
     fprintf(fp, "simplifier_epoch %u\n", Simplifier_epoch);
@@ -8634,6 +8752,12 @@ void resume_load_clauses(const char *dir)
       read_metadata_ull(fp, "collective_partners_skipped");
     rewind(fp); Stats.collective_parent_materializations =
       read_metadata_ull(fp, "collective_parent_materializations");
+    rewind(fp); Stats.collective_snapshot_rebuilds =
+      read_metadata_ull(fp, "collective_snapshot_rebuilds");
+    rewind(fp); Stats.collective_snapshot_clauses =
+      read_metadata_ull(fp, "collective_snapshot_clauses");
+    rewind(fp); Stats.collective_snapshot_clauses_peak =
+      read_metadata_ull(fp, "collective_snapshot_clauses_peak");
     rewind(fp); Stats.collective_batches_peak =
       read_metadata_ull(fp, "collective_batches_peak");
   }
@@ -9322,7 +9446,8 @@ void load_checkpoint_into_loop(void)
               fatal_error("resume: active history does not match usable set");
             index_literals_fpa_only(c, INSERT, Clocks.index, FALSE);
             index_back_demod(c, INSERT, Clocks.index, flag(Opt->back_demod));
-            index_clashable(c, INSERT);
+            if (collective_activation_clashable(position))
+              index_clashable(c, INSERT);
           }
         }
       }
