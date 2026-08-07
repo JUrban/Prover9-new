@@ -88,6 +88,7 @@ struct prover_options {
     hint_trace,              // exact committed-candidate hint tuple
     collective_trace,        // one line per collective batch expansion
     collective_hint_probes,  // one bounded early expansion for hinted givens
+    collective_promising_candidates, // raw-weight order within inference set
     print_matched_hints,     // print matched/unmatched hints per proof
     print_derivations,       // print derivation for clauses in hitlist file
     derivations_only,        // exit after last hitlist derivation
@@ -330,6 +331,9 @@ struct prover_stats {
     collective_raw_candidates_peak,
     collective_candidate_cache_peak,
     collective_candidate_cache_stalls,
+    collective_promising_scans,
+    collective_promising_considered,
+    collective_promising_buffer_peak,
     collective_partners_skipped,
     collective_parent_materializations,
     collective_snapshot_rebuilds,

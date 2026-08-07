@@ -60,6 +60,25 @@ grep -Eq 'Collective_candidate_cache: limit=4, peak=4, stalls=[1-9][0-9]*\.' \
   > "$test_tmp/paramod-chunk1-parents.out"
 grep -q 'end of proof' "$test_tmp/paramod-chunk1-parents.out"
 
+# Waldmeister-style promising enumeration scans the immutable pair, buffers
+# only the lowest raw-weight/ordinal candidate, and resumes above that key.
+# It may choose a different sound search, but must retain exact processing,
+# bounded residency, deterministic replay, and a translatable proof.
+sed '1i set(collective_promising_candidates).\nassign(collective_candidate_cache,4).\nassign(collective_candidate_chunk,1).' \
+  "$repo_dir/test.src/collective_frontier.in" > "$test_tmp/promising.in"
+"$repo_dir/bin/prover9" < "$test_tmp/promising.in" \
+  > "$test_tmp/promising.out" 2> "$test_tmp/promising.err"
+grep -q 'THEOREM PROVED' "$test_tmp/promising.out"
+grep -Eq 'Collective_chunks: limit=1, emitted=[1-9][0-9]*, replayed=[1-9][0-9]*, deferred_turns=[1-9][0-9]*, raw_peak=([2-9]|[1-9][0-9]+)\.' \
+  "$test_tmp/promising.out"
+grep -Eq 'Collective_candidate_cache: limit=4, peak=4, stalls=[1-9][0-9]*\.' \
+  "$test_tmp/promising.out"
+grep -Eq 'Collective_promising: enabled=1, scans=[1-9][0-9]*, considered=[1-9][0-9]*, buffer_peak=1\.' \
+  "$test_tmp/promising.out"
+"$repo_dir/bin/prooftrans" expand < "$test_tmp/promising.out" \
+  > "$test_tmp/promising-parents.out"
+grep -q 'end of proof' "$test_tmp/promising-parents.out"
+
 # The optimization is independently switchable.  Turning it off must retain
 # exact hint matching/proof behavior while scheduling no early descriptors.
 sed 's/set(collective_hint_probes)\./clear(collective_hint_probes)./' \

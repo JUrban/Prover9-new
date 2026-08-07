@@ -416,6 +416,36 @@ Implementation status on 2026-08-07:
   therefore compare promising unselected conclusions across descriptors,
   while retaining an explicit fair fallback, rather than merely shrinking
   the cache further.
+- The first promising-buffer increment is implemented behind the default-off
+  `collective_promising_candidates` flag.  For one immutable hyper set or
+  paramodulation pair, a turn scans the raw stream and retains only its lowest
+  `collective_candidate_chunk` keys, ordered deterministically by raw clause
+  weight and generator ordinal.  Raw clauses outside that fixed buffer are
+  deleted before IDs or hint state can observe them.  A partial descriptor
+  stores the last committed key, the exact next raw key, and a checksum of the
+  complete sequence; the next fair turn rescans, verifies the checksum, and
+  continues strictly above the saved key.  Thus every finite conclusion is
+  eventually materialized, but promising candidates reach the unchanged
+  `cl_process`/exact hint matcher before heavier siblings.  Raw weight is a
+  useful predictor, not a conservative bound on post-simplification or
+  hint-adjusted selector weight, so the option remains experimental and
+  default-off until the global descriptor scheduler and hint-discovery
+  channel are evaluated together.  With a one-clause buffer/cache-four, the
+  focused equality proof used 209 scans, emitted 183 conclusions, replayed
+  273, and preserved a valid translated proof; the focused hyper proof also
+  passed with six scans and a one-clause observed buffer peak.
+  On the same cache-64/250-given Osborn boundary as the FIFO comparison, the
+  promising scan retained eight SOS clauses instead of 38 (78.9% fewer) and
+  kept 588 instead of 615.  It performed the same 138 hyper turns, 136
+  completed sets, 504 cache stalls, and raw peak of 282, while scanning 544
+  eligible conclusions and exposing 127 rather than 109.  Generated clauses
+  rose slightly from 852 to 873, but user CPU fell from 20.76 to 17.77
+  seconds and wall time from 21.24 to 18.50 seconds.  Peak RSS was 33,108 KiB
+  versus 32,976 KiB; the 132-KiB difference includes allocator noise and the
+  deliberate descriptor growth from 14,000 to 22,000 bytes for saved
+  threshold/next keys.  This is encouraging short-prefix evidence that the
+  bounded buffer improves resident candidate quality, not a solved-problem
+  coverage result or a substitute for cross-descriptor scheduling.
 - The first hint-aware scheduler increment is an opt-in bounded descriptor
   probe, enabled by `collective_hint_probes`.  When a selected given has an exact
   `matching_hint`, its newly appended combined descriptor may move to the
@@ -455,8 +485,10 @@ Implementation status on 2026-08-07:
   `P9COLL6` additionally preserves the bounded hint-probe scheduler credit
   and its optional queue-head marker.  `P9COLL7` adds each partial hyper set's
   conclusion cursor and structural prefix checksum.  `P9COLL8` generalizes
-  those same-width fields to a hyper set or paramodulation pair; the reader
-  still accepts `P9COLL5`, `P9COLL6`, and `P9COLL7`.
+  those same-width fields to a hyper set or paramodulation pair.  `P9COLL9`
+  adds the promising threshold/next raw keys and distinguishes full-sequence
+  checksums from legacy generator-prefix cursors; the reader still accepts
+  `P9COLL5` through `P9COLL8`.
   A fresh persistent-history checkpoint at given 92 passed all 18 integrity
   hashes; its resumed and uninterrupted 200-given runs both ended at exactly 695
   generated, 566 kept, 162 usable, 161 SOS, 9 paramodulation pairs, 41 hyper
@@ -489,6 +521,14 @@ Implementation status on 2026-08-07:
   observed cache peak of four.  The current reader also restored the older
   `P9COLL7`, `P9COLL6`, and `P9COLL5` checkpoints with 18/18 hashes and their
   original final generated/kept boundaries.
+  A `P9COLL9` checkpoint at given 62 contained 43 nonzero promising cursors
+  among 46 pending descriptors and passed all 18 integrity hashes.  Its
+  resumed and uninterrupted cache-four/chunk-one runs both ended at exactly
+  9,324 generated, 151 kept, 9,387 physical paramodulation turns, 1,009
+  completed pairs, 9,200 emitted conclusions, 54,495 replays, and 70,269 raw
+  candidates considered by the promising buffer.  The current reader also
+  resumed the older partial-paramodulation `P9COLL8` checkpoint to its exact
+  9,449-generated/151-kept boundary with 18/18 hashes.
 - `passive_store=dense` now removes passive ownership from `Topform`,
   `Clist_pos`, selector AVL nodes, active indexes, and the live clause-ID
   table.  Given-selection rules and semantics are evaluated once while the
@@ -550,11 +590,11 @@ closes the known coverage bug, and one expansion can no longer commit an
 unbounded hyper-conclusion burst.  Active history bodies are now shared, only
 deactivated historical versions remain as ordinary term trees, and
 deactivation epochs use a sparse map.  A packed representation for retained
-versions remains desirable before a week-long scale gate.  Phase 5 still
-needs conservative descriptor lower bounds so the bounded selector cache is
-filled from globally more promising pairs instead of FIFO alone and can avoid
-so much repeated raw generation, plus a hint-discovery channel for
-unmaterialized conclusions.  Exact matches on
+versions remains desirable before a week-long scale gate.  The optional
+promising scan now stores each visited inference unit's exact next raw-weight
+key, but Phase 5 still needs a fair global scheduler over those known keys and
+a conservative treatment of simplification/hint adjustments.  It also needs
+a hint-discovery channel for unmaterialized conclusions.  Exact matches on
 selected givens now provide a starvation-safe one-turn descriptor probe, and
 every emitted candidate passes the unchanged exact hint matcher and all
 ordinary passive selection heuristics.  However, unseen conclusions still

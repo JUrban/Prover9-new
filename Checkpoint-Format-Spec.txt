@@ -137,6 +137,9 @@ Keys (in order as written):
   collective_raw_candidates_peak <ull>
   collective_candidate_cache_peak <ull>
   collective_candidate_cache_stalls <ull>
+  collective_promising_scans <ull>
+  collective_promising_considered <ull>
+  collective_promising_buffer_peak <ull>
   collective_partners_skipped <ull>
   collective_parent_materializations <ull>
   collective_snapshot_rebuilds <ull>
@@ -175,10 +178,10 @@ Source: search.c, write_checkpoint().
 ------------------------------------------------------------------------
 
 Present only when `search_loop=discount` and
-`inference_frontier=collective`.  All integers use the writer's native byte
-order and C representation.  The current layout is:
+`inference_frontier=collective`.  All scalar fields use the writer's native
+byte order and C representation.  The current layout is:
 
-  char[8]  magic = "P9COLL8\0"
+  char[8]  magic = "P9COLL9\0"
   uint64   activation_count
   uint64   pending_batch_count
   uint32   batch_turn
@@ -204,19 +207,24 @@ Finally, `pending_batch_count` descriptors are written in queue order:
   uint64   paramodulation_cursor
   uint64   activation_limit
   uint64   inference_conclusion_cursor
-  uint64   inference_prefix_hash
+  uint64   inference_sequence_or_prefix_hash
+  double   inference_order_weight
+  uint64   inference_order_ordinal
+  double   inference_next_weight
+  uint64   inference_next_ordinal
   uint32   snapshot_epoch
   uint32   kind_bits
 
 `activation_limit` excludes activations newer than the descriptor;
 `snapshot_epoch` plus each history record's deactivation epoch reconstructs
 the clauses active when it was created.  `kind_bits` contains a nonempty OR
-of paramodulation, positive-hyper, and negative-hyper bits, plus an optional
-hint-probe marker.  The marker may occur only on the queue head while probe
-credit is consumed.  It is cleared after exactly one expansion; an ordinary
-FIFO expansion restores the credit.  Restore rejects an unsupported magic,
-invalid Boolean/kind values, an inconsistent probe marker, out-of-range
-cursors, truncated records, or trailing bytes.
+of paramodulation, positive-hyper, and negative-hyper bits, plus optional
+hint-probe and promising-cursor markers.  The hint-probe marker may occur only
+on the queue head while probe credit is consumed.  It is cleared after exactly
+one expansion; an ordinary FIFO expansion restores the credit.  Restore
+rejects an unsupported magic, invalid Boolean/kind values, an inconsistent
+probe marker, out-of-range cursors, invalid promising keys, truncated records,
+or trailing bytes.
 
 `inference_conclusion_cursor` is the number of raw conclusions already
 committed from the current hyper set or paramodulation pair.  Each fair turn
@@ -229,13 +237,28 @@ different conclusions.  A nonzero cursor therefore requires a pending
 inference kind and carries its prefix checksum; both fields are zero when no
 partial inference is pending.
 
-The reader remains backward-compatible with `P9COLL5`, `P9COLL6`, and
-`P9COLL7`.  `P9COLL5` ends the header after `givens_since_batch`, has no
-hint-probe kind bit, and restores with probe credit available.
-`P9COLL7` has the same descriptor width as `P9COLL8`, but permits a nonzero
-conclusion cursor only while a hyper bit is pending; its fields are restored
-as the generalized cursor and checksum.  `P9COLL5` and `P9COLL6` omit both
-fields and restore them as zero.
+If the promising-cursor marker is present, the cursor instead counts raw
+conclusions already committed in increasing `(raw clause weight, generator
+ordinal)` order.  Every turn regenerates and checksums the complete immutable
+sequence, drops keys through `(inference_order_weight,
+inference_order_ordinal)`, and retains at most
+`collective_candidate_chunk` subsequent lowest keys in a temporary bounded
+buffer.  Only those buffered clauses enter `cl_process`, in key order.  The
+sequence checksum must agree on every rescan.  `(inference_next_weight,
+inference_next_ordinal)` is the exact minimum raw key not yet committed and is
+strictly greater than the committed threshold.  It is persisted now so a
+later scheduler can compare collective set entries without changing this file
+format again.  All four ordering fields and the marker are zero when there is
+no partial promising inference.
+
+The reader remains backward-compatible with `P9COLL5`, `P9COLL6`,
+`P9COLL7`, and `P9COLL8`.  `P9COLL5` ends the header after
+`givens_since_batch`, has no hint-probe kind bit, and restores with probe
+credit available.  `P9COLL7` and `P9COLL8` have a shorter descriptor ending
+after the cursor/checksum pair; those fields retain generator-prefix
+semantics.  `P9COLL7` permits a nonzero cursor only while a hyper bit is
+pending, whereas `P9COLL8` generalized it to paramodulation pairs.
+`P9COLL5` and `P9COLL6` omit both cursor fields and restore them as zero.
 
 Shared/retained historical bodies and their FPA index are not serialized as a
 second copy of the clause database.  On resume the index is rebuilt in

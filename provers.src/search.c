@@ -187,13 +187,17 @@ enum collective_batch_kind {
   COLLECTIVE_PARAMOD   = 1U,
   COLLECTIVE_POS_HYPER = 2U,
   COLLECTIVE_NEG_HYPER = 4U,
-  COLLECTIVE_HINT_PROBE = 8U
+  COLLECTIVE_HINT_PROBE = 8U,
+  /* This descriptor's current inference unit is being enumerated in
+     deterministic raw-weight order rather than raw generator order. */
+  COLLECTIVE_PROMISING_CURSOR = 16U
 };
 
 #define COLLECTIVE_INFERENCE_MASK \
   (COLLECTIVE_PARAMOD | COLLECTIVE_POS_HYPER | COLLECTIVE_NEG_HYPER)
 #define COLLECTIVE_KIND_MASK \
-  (COLLECTIVE_INFERENCE_MASK | COLLECTIVE_HINT_PROBE)
+  (COLLECTIVE_INFERENCE_MASK | COLLECTIVE_HINT_PROBE | \
+   COLLECTIVE_PROMISING_CURSOR)
 
 struct collective_batch {
   unsigned long long given_id;
@@ -201,6 +205,10 @@ struct collective_batch {
   unsigned long long activation_limit;
   unsigned long long conclusion_cursor;
   unsigned long long conclusion_prefix_hash;
+  double conclusion_order_weight;
+  unsigned long long conclusion_order_ordinal;
+  double conclusion_next_weight;
+  unsigned long long conclusion_next_ordinal;
   unsigned snapshot_epoch;
   unsigned kind;
   struct collective_batch *next;
@@ -417,6 +425,9 @@ void collective_reset_state(void)
   Stats.collective_raw_candidates_peak = 0;
   Stats.collective_candidate_cache_peak = 0;
   Stats.collective_candidate_cache_stalls = 0;
+  Stats.collective_promising_scans = 0;
+  Stats.collective_promising_considered = 0;
+  Stats.collective_promising_buffer_peak = 0;
   Stats.collective_partners_skipped = 0;
   Stats.collective_parent_materializations = 0;
   Stats.collective_snapshot_rebuilds = 0;
@@ -885,6 +896,8 @@ Prover_options init_prover_options(void)
   p->hint_trace             = init_flag("hint_trace",             FALSE);
   p->collective_trace       = init_flag("collective_trace",       FALSE);
   p->collective_hint_probes = init_flag("collective_hint_probes",  FALSE);
+  p->collective_promising_candidates =
+    init_flag("collective_promising_candidates", FALSE);
   p->print_matched_hints    = init_flag("print_matched_hints",    FALSE);
   p->print_derivations      = init_flag("print_derivations",      FALSE);
   p->derivations_only       = init_flag("derivations_only",        TRUE);
@@ -1717,6 +1730,13 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             parm(Opt->collective_candidate_cache),
             comma_num(s.collective_candidate_cache_peak),
             comma_num(s.collective_candidate_cache_stalls));
+    fprintf(fp,
+            "Collective_promising: enabled=%d, scans=%s, considered=%s, "
+            "buffer_peak=%s.\n",
+            flag(Opt->collective_promising_candidates),
+            comma_num(s.collective_promising_scans),
+            comma_num(s.collective_promising_considered),
+            comma_num(s.collective_promising_buffer_peak));
     fprintf(fp,
             "Collective_hint_probes: scheduled=%s, expanded=%s, "
             "credit=%s.\n",
@@ -5607,12 +5627,29 @@ struct collective_candidate_chunk {
   unsigned long long limit;
   unsigned long long seen;
   unsigned long long emitted;
+  unsigned long long eligible;
+  unsigned long long replayed;
   unsigned long long rolling_hash;
   unsigned long long expected_prefix_hash;
   unsigned long long replay_prefix_hash;
   unsigned long long committed_prefix_hash;
   BOOL replay_prefix_captured;
   BOOL committed_prefix_captured;
+  BOOL promising;
+  BOOL threshold_present;
+  double threshold_weight;
+  unsigned long long threshold_ordinal;
+  struct collective_promising_candidate *buffer;
+  unsigned long long buffer_count;
+  BOOL next_key_present;
+  double next_weight;
+  unsigned long long next_ordinal;
+};
+
+struct collective_promising_candidate {
+  Topform clause;
+  double weight;
+  unsigned long long ordinal;
 };
 
 #define COLLECTIVE_REPLAY_HASH_SEED 1469598103934665603ULL
@@ -5630,17 +5667,92 @@ unsigned long long collective_replay_hash_clause(
   return hint_trace_mix_u32(h, 0xc011ec7eU);
 }
 
+static int collective_candidate_key_compare(
+  double weight_a, unsigned long long ordinal_a,
+  double weight_b, unsigned long long ordinal_b)
+{
+  if (weight_a < weight_b)
+    return -1;
+  else if (weight_a > weight_b)
+    return 1;
+  else if (ordinal_a < ordinal_b)
+    return -1;
+  else if (ordinal_a > ordinal_b)
+    return 1;
+  else
+    return 0;
+}
+
+static void collective_promising_note_next(
+  struct collective_candidate_chunk *chunk,
+  double weight, unsigned long long ordinal)
+{
+  if (!chunk->next_key_present ||
+      collective_candidate_key_compare(weight, ordinal,
+                                       chunk->next_weight,
+                                       chunk->next_ordinal) < 0) {
+    chunk->next_key_present = TRUE;
+    chunk->next_weight = weight;
+    chunk->next_ordinal = ordinal;
+  }
+}
+
+/* Retain the smallest `limit` raw keys after the committed threshold.  The
+   buffer is fixed-size; a displaced or uncompetitive raw conclusion is
+   deleted before any clause ID or hint state can observe it. */
+static void collective_promising_insert(
+  struct collective_candidate_chunk *chunk, Topform c,
+  double weight, unsigned long long ordinal)
+{
+  unsigned long long at = 0;
+  struct collective_promising_candidate candidate;
+
+  while (at < chunk->buffer_count &&
+         collective_candidate_key_compare(
+           chunk->buffer[at].weight, chunk->buffer[at].ordinal,
+           weight, ordinal) < 0)
+    at++;
+
+  candidate.clause = c;
+  candidate.weight = weight;
+  candidate.ordinal = ordinal;
+
+  if (chunk->buffer_count < chunk->limit) {
+    if (at < chunk->buffer_count)
+      memmove(chunk->buffer + at + 1, chunk->buffer + at,
+              (size_t) (chunk->buffer_count - at) *
+                sizeof(*chunk->buffer));
+    chunk->buffer[at] = candidate;
+    chunk->buffer_count++;
+  }
+  else if (at >= chunk->limit) {
+    collective_promising_note_next(chunk, weight, ordinal);
+    delete_clause(c);
+  }
+  else {
+    struct collective_promising_candidate displaced =
+      chunk->buffer[chunk->limit - 1];
+    collective_promising_note_next(
+      chunk, displaced.weight, displaced.ordinal);
+    delete_clause(displaced.clause);
+    if (at + 1 < chunk->limit)
+      memmove(chunk->buffer + at + 1, chunk->buffer + at,
+              (size_t) (chunk->limit - at - 1) *
+                sizeof(*chunk->buffer));
+    chunk->buffer[at] = candidate;
+  }
+}
+
 /* A collective hyper set is replayable from immutable historical parents.
    Discard the already-committed prefix before it reaches clause IDs, hints,
    or passive storage, commit at most one bounded chunk, and discard the
    remainder so the descriptor can revisit it on a later fair turn. */
-static
-void collective_chunk_process(Topform c, void *data)
+static void collective_chunk_process(Topform c, void *data)
 {
   struct collective_candidate_chunk *chunk = data;
   unsigned long long ordinal = chunk->seen++;
 
-  if (ordinal == chunk->skip) {
+  if (!chunk->promising && ordinal == chunk->skip) {
     chunk->replay_prefix_hash = chunk->rolling_hash;
     chunk->replay_prefix_captured = TRUE;
     if (chunk->replay_prefix_hash != chunk->expected_prefix_hash)
@@ -5648,6 +5760,24 @@ void collective_chunk_process(Topform c, void *data)
   }
   chunk->rolling_hash =
     collective_replay_hash_clause(chunk->rolling_hash, c);
+
+  if (chunk->promising) {
+    double weight = clause_weight(c->literals);
+    if (!isfinite(weight))
+      fatal_error("collective promising candidate has non-finite weight");
+    if (chunk->threshold_present &&
+        collective_candidate_key_compare(
+          weight, ordinal, chunk->threshold_weight,
+          chunk->threshold_ordinal) <= 0) {
+      chunk->replayed++;
+      delete_clause(c);
+    }
+    else {
+      chunk->eligible++;
+      collective_promising_insert(chunk, c, weight, ordinal);
+    }
+    return;
+  }
 
   if (ordinal < chunk->skip)
     delete_clause(c);
@@ -5661,6 +5791,137 @@ void collective_chunk_process(Topform c, void *data)
   }
   else
     delete_clause(c);
+}
+
+static void collective_reset_conclusion_state(struct collective_batch *b)
+{
+  b->kind &= ~COLLECTIVE_PROMISING_CURSOR;
+  b->conclusion_cursor = 0;
+  b->conclusion_prefix_hash = 0;
+  b->conclusion_order_weight = 0;
+  b->conclusion_order_ordinal = 0;
+  b->conclusion_next_weight = 0;
+  b->conclusion_next_ordinal = 0;
+}
+
+static void collective_chunk_init(
+  struct collective_candidate_chunk *chunk, struct collective_batch *b)
+{
+  memset(chunk, 0, sizeof(*chunk));
+  chunk->skip = b->conclusion_cursor;
+  chunk->limit = collective_candidate_budget();
+  if (chunk->limit == 0)
+    fatal_error("collective expansion has no candidate-cache space");
+  chunk->rolling_hash = COLLECTIVE_REPLAY_HASH_SEED;
+  chunk->promising =
+    (b->kind & COLLECTIVE_PROMISING_CURSOR) != 0 ||
+    (b->conclusion_cursor == 0 &&
+     flag(Opt->collective_promising_candidates));
+
+  if (chunk->promising) {
+    if (b->conclusion_cursor != 0) {
+      chunk->threshold_present = TRUE;
+      chunk->threshold_weight = b->conclusion_order_weight;
+      chunk->threshold_ordinal = b->conclusion_order_ordinal;
+      chunk->expected_prefix_hash = b->conclusion_prefix_hash;
+    }
+    chunk->buffer = safe_calloc((size_t) chunk->limit,
+                                sizeof(*chunk->buffer));
+  }
+  else
+    chunk->expected_prefix_hash = b->conclusion_cursor == 0 ?
+      COLLECTIVE_REPLAY_HASH_SEED : b->conclusion_prefix_hash;
+}
+
+/* Finish one complete raw enumeration.  Prefix mode commits generator-order
+   chunks.  Promising mode instead commits the smallest raw-weight/ordinal
+   keys after its saved threshold and verifies the checksum of the entire
+   immutable sequence on every rescan. */
+static BOOL collective_chunk_finish(
+  struct collective_candidate_chunk *chunk, struct collective_batch *b,
+  char *inference_name)
+{
+  BOOL complete;
+
+  if (!chunk->promising) {
+    if (chunk->seen < chunk->skip)
+      fatal_error(inference_name);
+    if (!chunk->replay_prefix_captured) {
+      chunk->replay_prefix_hash = chunk->rolling_hash;
+      chunk->replay_prefix_captured = TRUE;
+    }
+    if (chunk->replay_prefix_hash != chunk->expected_prefix_hash)
+      fatal_error(inference_name);
+    if (!chunk->committed_prefix_captured) {
+      chunk->committed_prefix_hash = chunk->rolling_hash;
+      chunk->committed_prefix_captured = TRUE;
+    }
+    chunk->replayed = chunk->skip;
+    complete = chunk->seen <= chunk->skip + chunk->emitted;
+    if (!complete) {
+      b->kind &= ~COLLECTIVE_PROMISING_CURSOR;
+      b->conclusion_cursor = chunk->skip + chunk->emitted;
+      b->conclusion_prefix_hash = chunk->committed_prefix_hash;
+      b->conclusion_order_weight = 0;
+      b->conclusion_order_ordinal = 0;
+      b->conclusion_next_weight = 0;
+      b->conclusion_next_ordinal = 0;
+    }
+    else
+      collective_reset_conclusion_state(b);
+  }
+  else {
+    unsigned long long i;
+    double last_weight = 0;
+    unsigned long long last_ordinal = 0;
+
+    if (chunk->threshold_present &&
+        chunk->rolling_hash != chunk->expected_prefix_hash)
+      fatal_error(inference_name);
+    if (chunk->replayed != b->conclusion_cursor)
+      fatal_error("collective promising replay rank changed");
+
+    chunk->emitted = chunk->buffer_count;
+    if (chunk->emitted > 0) {
+      last_weight = chunk->buffer[chunk->emitted - 1].weight;
+      last_ordinal = chunk->buffer[chunk->emitted - 1].ordinal;
+    }
+    for (i = 0; i < chunk->emitted; i++)
+      cl_process(chunk->buffer[i].clause);
+
+    complete = chunk->eligible == chunk->emitted;
+    Stats.collective_promising_scans++;
+    Stats.collective_promising_considered += chunk->eligible;
+    if (chunk->emitted > Stats.collective_promising_buffer_peak)
+      Stats.collective_promising_buffer_peak = chunk->emitted;
+    if (!complete) {
+      if (chunk->emitted == 0 || !chunk->next_key_present)
+        fatal_error("collective promising scan lost its next key");
+      b->kind |= COLLECTIVE_PROMISING_CURSOR;
+      b->conclusion_cursor += chunk->emitted;
+      b->conclusion_prefix_hash = chunk->rolling_hash;
+      b->conclusion_order_weight = last_weight;
+      b->conclusion_order_ordinal = last_ordinal;
+      b->conclusion_next_weight = chunk->next_weight;
+      b->conclusion_next_ordinal = chunk->next_ordinal;
+      if (collective_candidate_key_compare(
+            b->conclusion_order_weight, b->conclusion_order_ordinal,
+            b->conclusion_next_weight, b->conclusion_next_ordinal) >= 0)
+        fatal_error("collective promising next key is not increasing");
+    }
+    else
+      collective_reset_conclusion_state(b);
+    safe_free(chunk->buffer);
+    chunk->buffer = NULL;
+  }
+
+  if (chunk->seen > Stats.collective_raw_candidates_peak)
+    Stats.collective_raw_candidates_peak = chunk->seen;
+  Stats.collective_candidates_emitted += chunk->emitted;
+  Stats.collective_candidates_replayed += chunk->replayed;
+  if (!complete)
+    Stats.collective_deferred_turns++;
+  return complete;
 }
 
 static struct collective_candidate_chunk *Current_collective_chunk = NULL;
@@ -5741,52 +6002,21 @@ BOOL collective_expand_one_batch(void)
       fatal_error("collective hyper batch is not anchored by its given");
     memset(&filter, 0, sizeof(filter));
     filter.snapshot_epoch = b->snapshot_epoch;
-    memset(&chunk, 0, sizeof(chunk));
-    chunk.skip = b->conclusion_cursor;
-    chunk.limit = collective_candidate_budget();
-    if (chunk.limit == 0)
-      fatal_error("collective expansion has no candidate-cache space");
-    chunk.rolling_hash = COLLECTIVE_REPLAY_HASH_SEED;
-    chunk.expected_prefix_hash = b->conclusion_cursor == 0 ?
-      COLLECTIVE_REPLAY_HASH_SEED : b->conclusion_prefix_hash;
+    collective_chunk_init(&chunk, b);
     clock_start(Clocks.infer);
     Current_inference_source = INFER_SOURCE_HYPER;
     Current_collective_chunk = &chunk;
     hyper_resolution_with_clause_test(
       given, direction, Collective_historical_idx,
       collective_history_clause_test, &filter, collective_chunk_cl_process);
+    if (collective_chunk_finish(
+          &chunk, b, "collective hyper replay order changed")) {
+      b->kind &= ~hyper_kind;
+      Stats.collective_hyper_sets_completed++;
+    }
     Current_collective_chunk = NULL;
     Current_inference_source = INFER_SOURCE_OTHER;
     clock_stop(Clocks.infer);
-    if (chunk.seen < chunk.skip)
-      fatal_error("collective hyper replay order changed");
-    if (!chunk.replay_prefix_captured) {
-      /* The cursor can equal the regenerated set size. */
-      chunk.replay_prefix_hash = chunk.rolling_hash;
-      chunk.replay_prefix_captured = TRUE;
-    }
-    if (chunk.replay_prefix_hash != chunk.expected_prefix_hash)
-      fatal_error("collective hyper replay prefix changed");
-    if (!chunk.committed_prefix_captured) {
-      /* The set ended before filling this turn's conclusion budget. */
-      chunk.committed_prefix_hash = chunk.rolling_hash;
-      chunk.committed_prefix_captured = TRUE;
-    }
-    if (chunk.seen > Stats.collective_raw_candidates_peak)
-      Stats.collective_raw_candidates_peak = chunk.seen;
-    Stats.collective_candidates_emitted += chunk.emitted;
-    Stats.collective_candidates_replayed += chunk.skip;
-    if (chunk.seen > chunk.skip + chunk.emitted) {
-      b->conclusion_cursor = chunk.skip + chunk.emitted;
-      b->conclusion_prefix_hash = chunk.committed_prefix_hash;
-      Stats.collective_deferred_turns++;
-    }
-    else {
-      b->kind &= ~hyper_kind;
-      b->conclusion_cursor = 0;
-      b->conclusion_prefix_hash = 0;
-      Stats.collective_hyper_sets_completed++;
-    }
     Stats.collective_hyper_expansions++;
     Stats.collective_history_queries++;
     Stats.collective_history_candidates += filter.accepted;
@@ -5851,14 +6081,7 @@ BOOL collective_expand_one_batch(void)
       unsigned long long kept_before = Stats.kept;
       struct collective_candidate_chunk chunk;
       BOOL complete;
-      memset(&chunk, 0, sizeof(chunk));
-      chunk.skip = b->conclusion_cursor;
-      chunk.limit = collective_candidate_budget();
-      if (chunk.limit == 0)
-        fatal_error("collective expansion has no candidate-cache space");
-      chunk.rolling_hash = COLLECTIVE_REPLAY_HASH_SEED;
-      chunk.expected_prefix_hash = b->conclusion_cursor == 0 ?
-        COLLECTIVE_REPLAY_HASH_SEED : b->conclusion_prefix_hash;
+      collective_chunk_init(&chunk, b);
       clock_start(Clocks.infer);
       Current_inference_source = INFER_SOURCE_PARAMOD;
       Current_collective_chunk = &chunk;
@@ -5866,37 +6089,15 @@ BOOL collective_expand_one_batch(void)
                      collective_chunk_cl_process);
       para_from_into(partner, cf, given, ci, TRUE,
                      collective_chunk_cl_process);
+      complete = collective_chunk_finish(
+        &chunk, b, "collective paramodulation replay order changed");
       Current_collective_chunk = NULL;
       Current_inference_source = INFER_SOURCE_OTHER;
       clock_stop(Clocks.infer);
       free_context(cf);
       free_context(ci);
-      if (chunk.seen < chunk.skip)
-        fatal_error("collective paramodulation replay order changed");
-      if (!chunk.replay_prefix_captured) {
-        chunk.replay_prefix_hash = chunk.rolling_hash;
-        chunk.replay_prefix_captured = TRUE;
-      }
-      if (chunk.replay_prefix_hash != chunk.expected_prefix_hash)
-        fatal_error("collective paramodulation replay prefix changed");
-      if (!chunk.committed_prefix_captured) {
-        chunk.committed_prefix_hash = chunk.rolling_hash;
-        chunk.committed_prefix_captured = TRUE;
-      }
-      if (chunk.seen > Stats.collective_raw_candidates_peak)
-        Stats.collective_raw_candidates_peak = chunk.seen;
-      Stats.collective_candidates_emitted += chunk.emitted;
-      Stats.collective_candidates_replayed += chunk.skip;
-      complete = chunk.seen <= chunk.skip + chunk.emitted;
-      if (!complete) {
-        b->conclusion_cursor = chunk.skip + chunk.emitted;
-        b->conclusion_prefix_hash = chunk.committed_prefix_hash;
-        Stats.collective_deferred_turns++;
-      }
-      else {
+      if (complete) {
         b->cursor++;
-        b->conclusion_cursor = 0;
-        b->conclusion_prefix_hash = 0;
         Stats.collective_pair_expansions++;
       }
       Stats.collective_pair_turns++;
@@ -8301,7 +8502,7 @@ void write_collective_checkpoint(const char *dir)
   FILE *fp;
   unsigned long long i;
   struct collective_batch *b;
-  const char magic[8] = {'P','9','C','O','L','L','8','\0'};
+  const char magic[8] = {'P','9','C','O','L','L','9','\0'};
   uint32_t turn = Collective_batch_turn ? 1U : 0U;
   uint32_t givens_since_batch = Collective_givens_since_batch;
   uint32_t hint_probe_credit = Collective_hint_probe_credit ? 1U : 0U;
@@ -8340,6 +8541,14 @@ void write_collective_checkpoint(const char *dir)
                sizeof(b->conclusion_cursor), 1, fp) != 1 ||
         fwrite(&b->conclusion_prefix_hash,
                sizeof(b->conclusion_prefix_hash), 1, fp) != 1 ||
+        fwrite(&b->conclusion_order_weight,
+               sizeof(b->conclusion_order_weight), 1, fp) != 1 ||
+        fwrite(&b->conclusion_order_ordinal,
+               sizeof(b->conclusion_order_ordinal), 1, fp) != 1 ||
+        fwrite(&b->conclusion_next_weight,
+               sizeof(b->conclusion_next_weight), 1, fp) != 1 ||
+        fwrite(&b->conclusion_next_ordinal,
+               sizeof(b->conclusion_next_ordinal), 1, fp) != 1 ||
         fwrite(&epoch, sizeof(epoch), 1, fp) != 1 ||
         fwrite(&kind, sizeof(kind), 1, fp) != 1)
       fatal_error("write_collective_checkpoint: descriptor write failed");
@@ -8355,7 +8564,7 @@ void read_collective_checkpoint(const char *dir)
   FILE *fp;
   unsigned long long activations, batches, i;
   uint32_t turn, givens_since_batch, hint_probe_credit;
-  BOOL format6, format7, format8;
+  BOOL format6, format7, format8, format9;
 
   if (!collective_frontier_mode())
     return;
@@ -8365,17 +8574,18 @@ void read_collective_checkpoint(const char *dir)
     fatal_error("resume: collective frontier state is missing");
   if (fread(magic, sizeof(magic), 1, fp) != 1)
     fatal_error("resume: corrupt collective frontier header");
+  format9 = memcmp(magic, "P9COLL9", 7) == 0;
   format8 = memcmp(magic, "P9COLL8", 7) == 0;
   format7 = memcmp(magic, "P9COLL7", 7) == 0;
   format6 = memcmp(magic, "P9COLL6", 7) == 0;
-  if ((!format8 && !format7 && !format6 &&
+  if ((!format9 && !format8 && !format7 && !format6 &&
        memcmp(magic, "P9COLL5", 7) != 0) ||
       fread(&activations, sizeof(activations), 1, fp) != 1 ||
       fread(&batches, sizeof(batches), 1, fp) != 1 ||
       fread(&turn, sizeof(turn), 1, fp) != 1 ||
       fread(&givens_since_batch, sizeof(givens_since_batch), 1, fp) != 1)
     fatal_error("resume: corrupt collective frontier header");
-  if (format6 || format7 || format8) {
+  if (format6 || format7 || format8 || format9) {
     if (fread(&hint_probe_credit, sizeof(hint_probe_credit), 1, fp) != 1)
       fatal_error("resume: corrupt collective frontier probe state");
   }
@@ -8403,7 +8613,7 @@ void read_collective_checkpoint(const char *dir)
         fread(&b->cursor, sizeof(b->cursor), 1, fp) != 1 ||
         fread(&b->activation_limit, sizeof(b->activation_limit), 1, fp) != 1)
       fatal_error("resume: truncated collective batch queue");
-    if (format7 || format8) {
+    if (format7 || format8 || format9) {
       if (fread(&b->conclusion_cursor,
                 sizeof(b->conclusion_cursor), 1, fp) != 1 ||
           fread(&b->conclusion_prefix_hash,
@@ -8414,6 +8624,17 @@ void read_collective_checkpoint(const char *dir)
       b->conclusion_cursor = 0;
       b->conclusion_prefix_hash = 0;
     }
+    if (format9) {
+      if (fread(&b->conclusion_order_weight,
+                sizeof(b->conclusion_order_weight), 1, fp) != 1 ||
+          fread(&b->conclusion_order_ordinal,
+                sizeof(b->conclusion_order_ordinal), 1, fp) != 1 ||
+          fread(&b->conclusion_next_weight,
+                sizeof(b->conclusion_next_weight), 1, fp) != 1 ||
+          fread(&b->conclusion_next_ordinal,
+                sizeof(b->conclusion_next_ordinal), 1, fp) != 1)
+        fatal_error("resume: truncated collective promising cursor");
+    }
     if (fread(&epoch, sizeof(epoch), 1, fp) != 1 ||
         fread(&kind, sizeof(kind), 1, fp) != 1)
       fatal_error("resume: truncated collective batch queue");
@@ -8423,11 +8644,30 @@ void read_collective_checkpoint(const char *dir)
     b->snapshot_epoch = epoch;
     if ((kind & COLLECTIVE_INFERENCE_MASK) == 0 ||
         (kind & ~COLLECTIVE_KIND_MASK) != 0 ||
-        (!format8 && !format7 && !format6 &&
+        (!format9 && !format8 && !format7 && !format6 &&
          (kind & COLLECTIVE_HINT_PROBE) != 0) ||
+        (!format9 && (kind & COLLECTIVE_PROMISING_CURSOR) != 0) ||
         (format7 && b->conclusion_cursor != 0 &&
          (kind & (COLLECTIVE_POS_HYPER | COLLECTIVE_NEG_HYPER)) == 0) ||
         (b->conclusion_cursor == 0 && b->conclusion_prefix_hash != 0) ||
+        (b->conclusion_cursor == 0 &&
+         ((kind & COLLECTIVE_PROMISING_CURSOR) != 0 ||
+          b->conclusion_order_weight != 0 ||
+          b->conclusion_order_ordinal != 0 ||
+          b->conclusion_next_weight != 0 ||
+          b->conclusion_next_ordinal != 0)) ||
+        (b->conclusion_cursor != 0 &&
+         (kind & COLLECTIVE_PROMISING_CURSOR) == 0 &&
+         (b->conclusion_order_weight != 0 ||
+          b->conclusion_order_ordinal != 0 ||
+          b->conclusion_next_weight != 0 ||
+          b->conclusion_next_ordinal != 0)) ||
+        ((kind & COLLECTIVE_PROMISING_CURSOR) != 0 &&
+         (!isfinite(b->conclusion_order_weight) ||
+          !isfinite(b->conclusion_next_weight) ||
+          collective_candidate_key_compare(
+            b->conclusion_order_weight, b->conclusion_order_ordinal,
+            b->conclusion_next_weight, b->conclusion_next_ordinal) >= 0)) ||
         ((kind & COLLECTIVE_HINT_PROBE) != 0 &&
          (i != 0 || hint_probe_credit != 0)))
       fatal_error("resume: invalid collective batch kind");
@@ -8548,6 +8788,12 @@ void write_checkpoint(void)
             Stats.collective_candidate_cache_peak);
     fprintf(fp, "collective_candidate_cache_stalls %llu\n",
             Stats.collective_candidate_cache_stalls);
+    fprintf(fp, "collective_promising_scans %llu\n",
+            Stats.collective_promising_scans);
+    fprintf(fp, "collective_promising_considered %llu\n",
+            Stats.collective_promising_considered);
+    fprintf(fp, "collective_promising_buffer_peak %llu\n",
+            Stats.collective_promising_buffer_peak);
     fprintf(fp, "collective_partners_skipped %llu\n",
             Stats.collective_partners_skipped);
     fprintf(fp, "collective_parent_materializations %llu\n",
@@ -9308,6 +9554,18 @@ void resume_load_clauses(const char *dir)
     rewind(fp); (void) read_metadata_ull_if_present(
       fp, "collective_candidate_cache_stalls",
       &Stats.collective_candidate_cache_stalls);
+    Stats.collective_promising_scans = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_promising_scans",
+      &Stats.collective_promising_scans);
+    Stats.collective_promising_considered = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_promising_considered",
+      &Stats.collective_promising_considered);
+    Stats.collective_promising_buffer_peak = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_promising_buffer_peak",
+      &Stats.collective_promising_buffer_peak);
     rewind(fp); Stats.collective_partners_skipped =
       read_metadata_ull(fp, "collective_partners_skipped");
     rewind(fp); Stats.collective_parent_materializations =
