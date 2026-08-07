@@ -57,6 +57,7 @@ static struct prover_attributes Att;     // Prover9 accepted attributes
 static struct prover_stats Stats;        // Prover9 statistics
 static struct prover_clocks Clocks;      // Prover9 clocks
 static Cold_passive_store Dense_body_store = NULL;
+static unsigned long long Dense_arena_bytes_reclaimed = 0;
 
 /* Progress callback for shared-memory IPC (set by -cores scheduler) */
 static Search_progress_fn Progress_callback = NULL;
@@ -1206,6 +1207,10 @@ void update_memory_stats(void)
   Stats.dense_passive_arena_backing_bytes = ps.backing_bytes;
   Stats.dense_passive_arena_materializations = ps.materializations;
   Stats.dense_passive_arena_validation_failures = ps.validation_failures;
+  dense_passive_compaction_stats(&Stats.dense_passive_compactions,
+                                 &Stats.dense_passive_records_reclaimed);
+  Stats.dense_passive_arena_bytes_reclaimed =
+    Dense_arena_bytes_reclaimed;
   if (dense_passive_mode()) {
     struct dense_payload_context payload;
     memset(&payload, 0, sizeof(payload));
@@ -1489,7 +1494,6 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
     fprintf(fp,
             "Dense_passive: records=%s, record_bytes=%s, heap_bytes=%s, "
             "arena_records=%s, arena_record_bytes=%s, arena_backing=%s, "
-            "arena_materialized=%s, validation_failures=%s, "
             "allocated_bytes_per_active=%.2f.\n",
             comma_num(s.dense_passive_records),
             comma_num(s.dense_passive_record_bytes),
@@ -1497,13 +1501,21 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             comma_num(s.dense_passive_arena_records),
             comma_num(s.dense_passive_arena_record_bytes),
             comma_num(s.dense_passive_arena_backing_bytes),
-            comma_num(s.dense_passive_arena_materializations),
-            comma_num(s.dense_passive_arena_validation_failures),
             s.dense_passive_records == 0 ? 0.0 :
             (double) (s.dense_passive_record_bytes +
                       s.dense_passive_heap_bytes +
                       s.dense_passive_arena_backing_bytes) /
             s.dense_passive_records);
+  if (dense_passive_mode())
+    fprintf(fp,
+            "Dense_passive_gc: arena_materialized=%s, "
+            "validation_failures=%s, compactions=%s, "
+            "records_reclaimed=%s, arena_bytes_reclaimed=%s.\n",
+            comma_num(s.dense_passive_arena_materializations),
+            comma_num(s.dense_passive_arena_validation_failures),
+            comma_num(s.dense_passive_compactions),
+            comma_num(s.dense_passive_records_reclaimed),
+            comma_num(s.dense_passive_arena_bytes_reclaimed));
   fprintf(fp,
           "Hint_store: compressed=%s, body_bytes=%s, estimated_full=%s.\n",
           comma_num(s.hint_compressed_clauses),
@@ -3549,10 +3561,44 @@ static Cold_passive_store new_dense_body_store(void)
   return store;
 }
 
+struct dense_relocate_context {
+  Cold_passive_store source;
+  Cold_passive_store destination;
+};
+
+static size_t relocate_dense_passive(size_t old_position, void *context)
+{
+  struct dense_relocate_context *ctx = context;
+  return cold_passive_store_clone_record(ctx->source, old_position,
+                                         ctx->destination);
+}
+
+static void compact_dense_passive_store(void)
+{
+  Cold_passive_store old_store = Dense_body_store;
+  Cold_passive_store new_store = new_dense_body_store();
+  struct cold_passive_store_stats old_stats =
+    cold_passive_store_get_stats(old_store);
+  struct cold_passive_store_stats new_stats;
+  struct dense_relocate_context ctx;
+  ctx.source = old_store;
+  ctx.destination = new_store;
+  dense_passive_compact(relocate_dense_passive, &ctx);
+  cold_passive_store_inherit_counters(new_store, old_store);
+  new_stats = cold_passive_store_get_stats(new_store);
+  if (old_stats.record_bytes >= new_stats.record_bytes)
+    Dense_arena_bytes_reclaimed +=
+      old_stats.record_bytes - new_stats.record_bytes;
+  Dense_body_store = new_store;
+  cold_passive_store_free(old_store);
+}  /* compact_dense_passive_store */
+
 static size_t archive_dense_passive(Topform c)
 {
   if (c == NULL || c->id == 0 || active_or_indexable_clause(c))
     fatal_error("archive_dense_passive: clause is not a detached passive");
+  if (dense_passive_compaction_needed())
+    compact_dense_passive_store();
   return cold_passive_store_archive(Dense_body_store, c);
 }  /* archive_dense_passive */
 
@@ -3766,6 +3812,7 @@ void free_search_memory(void)
   reset_selector_indexes();
   cold_passive_store_free(Dense_body_store);
   Dense_body_store = NULL;
+  Dense_arena_bytes_reclaimed = 0;
 
   if (Glob.hints->first) {
     Clist_pos p;
@@ -8898,6 +8945,7 @@ void load_checkpoint_into_loop(void)
   Glob.disabled = new_disabled_store();
   cold_passive_store_free(Dense_body_store);
   Dense_body_store = dense_passive_mode() ? new_dense_body_store() : NULL;
+  Dense_arena_bytes_reclaimed = 0;
 
   /* Clear clause ID hash table so stale entries don't shadow
      newly-loaded clauses (critical for in-process save+reload). */
@@ -9615,6 +9663,7 @@ Prover_results search(Prover_input p)
     Glob.empties  = NULL;
     cold_passive_store_free(Dense_body_store);
     Dense_body_store = NULL;
+    Dense_arena_bytes_reclaimed = 0;
     if (dense_passive_mode()) {
       if (str_ident(stringparm1(Opt->ancestor_store), "off"))
         fatal_error("passive_store=dense requires ancestor_store=memory or mmap");

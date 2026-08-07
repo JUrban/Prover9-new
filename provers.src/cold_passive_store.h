@@ -42,6 +42,16 @@ BOOL cold_passive_store_payload_sizes(
   unsigned long long *justification_bytes,
   unsigned long long *logical_body_bytes);
 
+/* Copy one validated immutable record into a fresh arena. */
+size_t cold_passive_store_clone_record(Cold_passive_store source,
+                                       size_t position,
+                                       Cold_passive_store destination);
+
+/* Preserve cumulative diagnostic counters when replacing an arena by a
+   compacted copy. */
+void cold_passive_store_inherit_counters(Cold_passive_store destination,
+                                         Cold_passive_store source);
+
 BOOL cold_passive_store_sync(Cold_passive_store store);
 
 struct cold_passive_store_stats

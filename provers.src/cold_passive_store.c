@@ -112,9 +112,10 @@ static BOOL ensure_backing(Cold_passive_store store, size_t needed)
     return TRUE;
   capacity = store->capacity == 0 ? 4096 : store->capacity;
   while (capacity < needed) {
-    if (capacity > SIZE_MAX / 2)
+    size_t grown = capacity + capacity / 2;
+    if (grown <= capacity)
       return FALSE;
-    capacity *= 2;
+    capacity = grown;
   }
   if (store->mode == COLD_PASSIVE_MEMORY) {
     store->backing = safe_realloc(store->backing, capacity);
@@ -372,6 +373,33 @@ BOOL cold_passive_store_payload_sizes(
   if (logical_body_bytes != NULL)
     *logical_body_bytes = view.logical_body_size;
   return TRUE;
+}
+
+size_t cold_passive_store_clone_record(Cold_passive_store source,
+                                       size_t position,
+                                       Cold_passive_store destination)
+{
+  struct cold_record_view view;
+  size_t new_position;
+  if (source == NULL || destination == NULL || source == destination ||
+      !record_view(source, position, &view) ||
+      destination->size > SIZE_MAX - view.total ||
+      !ensure_backing(destination, destination->size + view.total))
+    return SIZE_MAX;
+  new_position = destination->size;
+  memcpy(destination->backing + destination->size, view.record, view.total);
+  destination->size += view.total;
+  destination->records++;
+  return new_position;
+}
+
+void cold_passive_store_inherit_counters(Cold_passive_store destination,
+                                         Cold_passive_store source)
+{
+  if (destination != NULL && source != NULL) {
+    destination->materializations += source->materializations;
+    destination->validation_failures += source->validation_failures;
+  }
 }
 
 BOOL cold_passive_store_sync(Cold_passive_store store)

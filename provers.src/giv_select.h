@@ -50,6 +50,9 @@ struct dense_passive_view {
 typedef void (*Dense_passive_visit_fn)(
   const struct dense_passive_view *view, void *context);
 
+typedef size_t (*Dense_passive_relocate_fn)(size_t old_position,
+                                            void *context);
+
 void configure_dense_passive(BOOL enabled,
                              Dense_passive_archive_fn archive_fn,
                              Dense_passive_activate_fn activate_fn);
@@ -67,6 +70,14 @@ void dense_passive_memory(unsigned long long *record_bytes,
                           unsigned long long *records);
 
 unsigned long long dense_passive_delayed_demodulators(void);
+
+BOOL dense_passive_compaction_needed(void);
+
+void dense_passive_compact(Dense_passive_relocate_fn relocate,
+                           void *context);
+
+void dense_passive_compaction_stats(unsigned long long *compactions,
+                                    unsigned long long *records_reclaimed);
 
 void init_giv_select(Plist rules);
 

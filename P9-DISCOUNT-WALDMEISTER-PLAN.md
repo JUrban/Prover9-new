@@ -349,6 +349,14 @@ Implementation status on 2026-08-07:
   hashes passed.  As in the older format, ID-zero pre-elimination scratch
   clauses are intentionally not serialized, so their diagnostic disabled
   count is not a semantic restart invariant.
+- Dense record and heap arrays now grow by 1.5x instead of 2x.  When at least
+  1,024 historical records exist and inactive records reach half the active
+  population, the selector compacts to active records, rebuilds every binary
+  heap, and copies only live immutable bodies into a fresh memory/mmap arena.
+  Clause IDs, selector cycle counters, exact double weights, hint IDs, and
+  epochs do not change.  In the bounded checkpoint-resume run, one compaction
+  reclaimed 349 selector records and 30,477 bytes of dead arena records; the
+  run retained exact search counts and passed all checkpoint hashes.
 
 The allocation table explains why body compression alone cannot be radical.
 At 200 givens with 31,014 hints, hint-dominated FPA structures occupy about
@@ -367,10 +375,10 @@ a hint-discovery channel for unmaterialized conclusions.  This is sound (all
 emitted conclusions have concrete proof parents) and exact for every candidate
 that is materialized, but the completeness/coverage argument for delayed
 hyper sets remains an acceptance item.  The bounded checkpoint trace gate is
-now closed for both the combined frontier and dense passive store.  Phase 3 is
-not yet declared complete: selector heaps and the passive arena are
-append-only between restarts, so inactive records must be compacted/recycled
-before week-long acceptance, and the required Phase-1-to-dense per-passive 80%
-scale result still needs a bounded synthetic/million-record measurement.
-Phase 5 also requires historical/versioned active indexes and a hint-aware
-discovery/lower-bound channel before its completeness gate can be claimed.
+now closed for both the combined frontier and dense passive store, and dense
+inactive state is bounded by automatic compaction rather than growing for the
+life of the process.  Phase 3 is not yet declared complete because the
+required Phase-1-to-dense per-passive 80% result still needs a bounded
+synthetic/million-record measurement.  Phase 5 also requires
+historical/versioned active indexes and a hint-aware discovery/lower-bound
+channel before its completeness gate can be claimed.

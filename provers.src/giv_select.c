@@ -90,6 +90,17 @@ static size_t Dense_record_count = 0;
 static size_t Dense_record_capacity = 0;
 static size_t Dense_active_count = 0;
 static unsigned Dense_selector_count = 0;
+static unsigned long long Dense_compactions = 0;
+static unsigned long long Dense_records_reclaimed = 0;
+
+static size_t dense_grow_capacity(size_t current, size_t element_size,
+                                  char *where)
+{
+  size_t capacity = current == 0 ? 64 : current + current / 2;
+  if (capacity <= current || capacity > SIZE_MAX / element_size)
+    fatal_error(where);
+  return capacity;
+}
 
 /*
  * memory management
@@ -224,6 +235,24 @@ unsigned long long dense_passive_delayed_demodulators(void)
   return count;
 }  /* dense_passive_delayed_demodulators */
 
+/* PUBLIC */
+BOOL dense_passive_compaction_needed(void)
+{
+  size_t inactive = Dense_record_count - Dense_active_count;
+  return Dense_passive && Dense_record_count >= 1024 && inactive >= 256 &&
+         inactive >= (Dense_active_count + 1) / 2;
+}
+
+/* PUBLIC */
+void dense_passive_compaction_stats(unsigned long long *compactions,
+                                    unsigned long long *records_reclaimed)
+{
+  if (compactions != NULL)
+    *compactions = Dense_compactions;
+  if (records_reclaimed != NULL)
+    *records_reclaimed = Dense_records_reclaimed;
+}
+
 static int dense_compare(Giv_select gs, uint32_t ai, uint32_t bi)
 {
   struct dense_passive_record *a = &Dense_records[ai];
@@ -247,11 +276,9 @@ static void dense_heap_push(Giv_select gs, uint32_t record)
 {
   size_t i;
   if (gs->dense_size == gs->dense_capacity) {
-    size_t capacity = gs->dense_capacity == 0 ? 64 :
-                      gs->dense_capacity * 2;
-    if (capacity < gs->dense_capacity ||
-        capacity > SIZE_MAX / sizeof(uint32_t))
-      fatal_error("dense_heap_push: capacity overflow");
+    size_t capacity = dense_grow_capacity(gs->dense_capacity,
+                                          sizeof(uint32_t),
+                                          "dense_heap_push: capacity overflow");
     gs->dense_heap = safe_realloc(gs->dense_heap,
                                   capacity * sizeof(uint32_t));
     gs->dense_capacity = capacity;
@@ -302,6 +329,84 @@ static void dense_heap_prune(Giv_select gs)
     dense_heap_remove_root(gs);
   }
 }
+
+/* PUBLIC */
+void dense_passive_compact(Dense_passive_relocate_fn relocate,
+                           void *context)
+{
+  struct dense_passive_record *old_records = Dense_records;
+  size_t old_count = Dense_record_count;
+  size_t active = Dense_active_count;
+  size_t capacity = 0;
+  size_t i, n = 0;
+  Plist p;
+
+  if (!Dense_passive || relocate == NULL)
+    fatal_error("dense_passive_compact: invalid state or callback");
+  if (active != 0) {
+    capacity = active + active / 8 + 16;
+    if (capacity < active ||
+        capacity > SIZE_MAX / sizeof(struct dense_passive_record))
+      fatal_error("dense_passive_compact: capacity overflow");
+    Dense_records = safe_malloc(capacity * sizeof(*Dense_records));
+  }
+  else
+    Dense_records = NULL;
+
+  for (i = 0; i < old_count; i++) {
+    if ((old_records[i].flags & DENSE_PASSIVE_ACTIVE) != 0) {
+      struct dense_passive_record r = old_records[i];
+      r.store_position = relocate(r.store_position, context);
+      if (r.store_position == SIZE_MAX)
+        fatal_error("dense_passive_compact: passive relocation failed");
+      Dense_records[n++] = r;
+    }
+  }
+  if (n != active)
+    fatal_error("dense_passive_compact: active-record count mismatch");
+  safe_free(old_records);
+  Dense_record_count = active;
+  Dense_record_capacity = capacity;
+
+  High.occurrences = 0;
+  for (p = High.selectors; p != NULL; p = p->next) {
+    Giv_select gs = p->v;
+    safe_free(gs->dense_heap);
+    gs->dense_heap = NULL;
+    gs->dense_size = 0;
+    gs->dense_capacity = 0;
+    gs->dense_active = 0;
+  }
+  Low.occurrences = 0;
+  for (p = Low.selectors; p != NULL; p = p->next) {
+    Giv_select gs = p->v;
+    safe_free(gs->dense_heap);
+    gs->dense_heap = NULL;
+    gs->dense_size = 0;
+    gs->dense_capacity = 0;
+    gs->dense_active = 0;
+  }
+
+  for (i = 0; i < active; i++) {
+    struct dense_passive_record *r = &Dense_records[i];
+    for (p = High.selectors; p != NULL; p = p->next) {
+      Giv_select gs = p->v;
+      if ((r->selector_mask & (1ULL << gs->dense_bit)) != 0) {
+        dense_heap_push(gs, (uint32_t) i);
+        High.occurrences++;
+      }
+    }
+    for (p = Low.selectors; p != NULL; p = p->next) {
+      Giv_select gs = p->v;
+      if ((r->selector_mask & (1ULL << gs->dense_bit)) != 0) {
+        dense_heap_push(gs, (uint32_t) i);
+        Low.occurrences++;
+      }
+    }
+  }
+  Dense_compactions++;
+  Dense_records_reclaimed += old_count - active;
+}  /* dense_passive_compact */
 
 static size_t selector_size(Giv_select gs)
 {
@@ -367,6 +472,8 @@ void reset_selector_indexes(void)
   Dense_record_count = 0;
   Dense_record_capacity = 0;
   Dense_active_count = 0;
+  Dense_compactions = 0;
+  Dense_records_reclaimed = 0;
   Sos_size = 0;
 }  /* reset_selector_indexes */
 
@@ -573,11 +680,9 @@ static void dense_insert_passive(Topform c)
   if (r.store_position == SIZE_MAX)
     fatal_error("dense_insert_passive: archive failed");
   if (Dense_record_count == Dense_record_capacity) {
-    size_t capacity = Dense_record_capacity == 0 ? 64 :
-                      Dense_record_capacity * 2;
-    if (capacity < Dense_record_capacity ||
-        capacity > SIZE_MAX / sizeof(struct dense_passive_record))
-      fatal_error("dense_insert_passive: capacity overflow");
+    size_t capacity = dense_grow_capacity(
+      Dense_record_capacity, sizeof(struct dense_passive_record),
+      "dense_insert_passive: capacity overflow");
     Dense_records = safe_realloc(Dense_records,
                                   capacity * sizeof(*Dense_records));
     Dense_record_capacity = capacity;

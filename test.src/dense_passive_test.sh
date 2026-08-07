@@ -28,7 +28,9 @@ test "$compressed_counts" = "$dense_counts"
 
 grep -Eq 'Search_loop: mode=discount, frontier=collective, active_indexed=[0-9]+, passive_indexed=0, delayed_demodulators=[0-9]+\.' \
   "$test_tmp/dense.out"
-grep -Eq 'Dense_passive: records=[1-9][0-9]*, record_bytes=[1-9][0-9]*, heap_bytes=[1-9][0-9]*, arena_records=[1-9][0-9]*, arena_record_bytes=[1-9][0-9]*, arena_backing=[1-9][0-9]*, arena_materialized=[1-9][0-9]*, validation_failures=0,' \
+grep -Eq 'Dense_passive: records=[1-9][0-9]*, record_bytes=[1-9][0-9]*, heap_bytes=[1-9][0-9]*, arena_records=[1-9][0-9]*, arena_record_bytes=[1-9][0-9]*, arena_backing=[1-9][0-9]*,' \
+  "$test_tmp/dense.out"
+grep -Eq 'Dense_passive_gc: arena_materialized=[1-9][0-9]*, validation_failures=0, compactions=[0-9]+, records_reclaimed=[0-9]+, arena_bytes_reclaimed=[0-9]+\.' \
   "$test_tmp/dense.out"
 grep -Eq 'avl_node \(  32\)[[:space:]]+0[[:space:]]+0[[:space:]]+0' \
   "$test_tmp/dense.out"
