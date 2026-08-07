@@ -339,12 +339,8 @@ BOOL anc_subsume(Topform c, Topform d, BOOL use_prf_weight)
       cost_c = proof_tree_weight(c);
       cost_d = proof_tree_weight(d);
     } else {
-      Plist anc_c = get_clause_ancestors(c);
-      Plist anc_d = get_clause_ancestors(d);
-      cost_c = proof_length(anc_c);
-      cost_d = proof_length(anc_d);
-      zap_plist(anc_c);
-      zap_plist(anc_d);
+      cost_c = proof_dag_size(c);
+      cost_d = proof_dag_size(d);
     }
     return cost_c <= cost_d;
   }

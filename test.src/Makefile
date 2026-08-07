@@ -11,7 +11,7 @@ CFLAGS = $(XFLAGS) -g  -O0 -Wall
 # CFLAGS = $(XFLAGS) -pg -O -Wall
 # CFLAGS = $(XFLAGS)  -Wall -pedantic
 
-PROGRAMS = avltest memory_lifecycle_test bookkeeping_lifecycle_test
+PROGRAMS = avltest memory_lifecycle_test bookkeeping_lifecycle_test ancestor_store_test ancestor_store_scale_test
 
 all: ladr apps
 
@@ -39,14 +39,24 @@ memory_lifecycle_test: memory_lifecycle_test.o ../ladr/libladr.a
 bookkeeping_lifecycle_test: bookkeeping_lifecycle_test.o ../ladr/libladr.a
 	$(CC) $(CFLAGS) -o bookkeeping_lifecycle_test bookkeeping_lifecycle_test.o ../ladr/libladr.a -lm
 
+ancestor_store_test: ancestor_store_test.o ../ladr/libladr.a
+	$(CC) $(CFLAGS) -o ancestor_store_test ancestor_store_test.o ../ladr/libladr.a -lm
+
+ancestor_store_scale_test: ancestor_store_scale_test.o ../ladr/libladr.a
+	$(CC) $(CFLAGS) -o ancestor_store_scale_test ancestor_store_scale_test.o ../ladr/libladr.a -lm
+
 bookkeeping_lifecycle_test.o: ../ladr/topform.h ../ladr/clause_store.h ../ladr/clauseid.h
 
-memory-tests: memory_lifecycle_test bookkeeping_lifecycle_test
+memory-tests: memory_lifecycle_test bookkeeping_lifecycle_test ancestor_store_test
 	./memory_lifecycle_test
 	./bookkeeping_lifecycle_test
+	./ancestor_store_test
 
 bookkeeping-tests: bookkeeping_lifecycle_test
 	./bookkeeping_lifecycle_test
+
+ancestor-store-scale: ancestor_store_scale_test
+	./ancestor_store_scale_test
 
 tptp_test: tptp_test.o
 	$(CC) $(CFLAGS) -o tptp_test tptp_test.o ../ladr/libladr.a -lm

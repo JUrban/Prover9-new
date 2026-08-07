@@ -88,6 +88,8 @@ struct topform {
   char   was_given;       /* was this clause selected as given? */
   char   goal_derived;    /* descended from a denied goal (negated conjecture) */
   char   disabled;        /* member of the compact disabled-clause store */
+  char   archive_materialized; /* temporary object decoded from record */
+  char   cac_candidate;   /* add stable ID to the CAC trigger set when kept */
 
 };
 

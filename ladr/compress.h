@@ -49,6 +49,12 @@ Term uncompress_term(char *s, int *ip);
 
 char *compress_term(Term t);
 
+/* Versioned, bounds-checkable term representation used by persistent
+   ancestor records.  The returned byte array is owned by the caller. */
+BOOL encode_term_versioned(Term t, char **data, unsigned *size);
+
+Term decode_term_versioned(const char *data, unsigned size);
+
 Clause_compress_result compress_clause(Topform c);
 
 void uncompress_clause(Topform c);

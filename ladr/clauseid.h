@@ -46,6 +46,17 @@ void unassign_clause_id(Topform c);
 
 Topform find_clause_by_id(unsigned long long id);
 
+/* Archived entries are tagged offsets, never Topform pointers. */
+BOOL archive_clause_id(Topform c, unsigned long long offset);
+
+BOOL clause_id_is_archived(unsigned long long id);
+
+BOOL clause_id_archive_offset(unsigned long long id,
+                              unsigned long long *offset);
+
+void unassign_archived_clause_id(unsigned long long id,
+                                 unsigned long long offset);
+
 void fprint_clause_id_tab(FILE *fp);
 
 void p_clause_id_tab();

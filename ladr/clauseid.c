@@ -32,7 +32,7 @@ typedef struct clause_id_page * Clause_id_page;
 struct clause_id_page {
   unsigned long long page_number;
   unsigned count;
-  Topform clauses[CLAUSE_ID_PAGE_SIZE];
+  uintptr_t entries[CLAUSE_ID_PAGE_SIZE];
 };
 
 static Clause_id_page *Topform_id_pages = NULL;
@@ -41,6 +41,41 @@ static size_t Topform_id_page_count = 0;
 static size_t Topform_id_page_tombstones = 0;
 static unsigned long long Topform_id_entries = 0;
 static unsigned long long Topform_id_count = 0;  /* 64-bit to prevent overflow */
+
+#define ARCHIVE_TAG ((uintptr_t) 1)
+
+static Clause_id_page find_id_page(unsigned long long page_number);
+
+static
+BOOL archived_entry(uintptr_t entry)
+{
+  return (entry & ARCHIVE_TAG) != 0;
+}
+
+static
+uintptr_t archive_entry(unsigned long long offset)
+{
+  if (offset > (unsigned long long) (UINTPTR_MAX >> 1))
+    fatal_error("archive_entry: ancestor-store offset overflow");
+  return ((uintptr_t) offset << 1) | ARCHIVE_TAG;
+}
+
+static
+unsigned long long entry_archive_offset(uintptr_t entry)
+{
+  return (unsigned long long) (entry >> 1);
+}
+
+static
+uintptr_t find_id_entry(unsigned long long id)
+{
+  Clause_id_page page;
+  if (id == 0)
+    return 0;
+  page = find_id_page(id >> CLAUSE_ID_PAGE_BITS);
+  return page == NULL ? 0 :
+    page->entries[(unsigned) (id & (CLAUSE_ID_PAGE_SIZE - 1))];
+}
 
 static
 size_t page_hash(unsigned long long n)
@@ -137,19 +172,19 @@ void register_id(Topform c)
   unsigned long long page_number = c->id >> CLAUSE_ID_PAGE_BITS;
   unsigned offset = (unsigned) (c->id & (CLAUSE_ID_PAGE_SIZE - 1));
   Clause_id_page page;
-  Topform old;
+  uintptr_t old;
 
   if (c->id == 0)
     fatal_error("register_id: clause has no ID");
-  old = find_clause_by_id(c->id);
-  if (old != NULL && old != c)
+  old = find_id_entry(c->id);
+  if (old != 0 && old != (uintptr_t) c)
     fatal_error("register_id: duplicate clause ID");
-  if (old == c) {
+  if (old == (uintptr_t) c) {
     c->official_id = 1;
     return;
   }
   page = get_id_page(page_number);
-  page->clauses[offset] = c;
+  page->entries[offset] = (uintptr_t) c;
   page->count++;
   Topform_id_entries++;
   c->official_id = 1;
@@ -231,11 +266,11 @@ void unassign_clause_id(Topform c)
     Clause_id_page page = i == (size_t) -1 ? NULL : Topform_id_pages[i];
 
     if (page == NULL || page == PAGE_TOMBSTONE ||
-        page->clauses[offset] != c) {
+        page->entries[offset] != (uintptr_t) c) {
       p_clause(c);
       fatal_error("unassign_clause_id, cannot find clause.");
     }
-    page->clauses[offset] = NULL;
+    page->entries[offset] = 0;
     page->count--;
     Topform_id_entries--;
     if (page->count == 0) {
@@ -273,13 +308,79 @@ This routine retrieves the clause with the given ID number
 /* PUBLIC */
 Topform find_clause_by_id(unsigned long long id)
 {
+  uintptr_t entry = find_id_entry(id);
+  return entry == 0 || archived_entry(entry) ? NULL : (Topform) entry;
+}  /* find_clause_by_id */
+
+/* PUBLIC */
+BOOL archive_clause_id(Topform c, unsigned long long offset)
+{
+  Clause_id_page page;
+  unsigned slot;
+  if (c == NULL || !c->official_id || c->id == 0)
+    return FALSE;
+  page = find_id_page(c->id >> CLAUSE_ID_PAGE_BITS);
+  slot = (unsigned) (c->id & (CLAUSE_ID_PAGE_SIZE - 1));
+  if (page == NULL || page->entries[slot] != (uintptr_t) c)
+    return FALSE;
+  page->entries[slot] = archive_entry(offset);
+  c->official_id = 0;
+  return TRUE;
+}  /* archive_clause_id */
+
+/* PUBLIC */
+BOOL clause_id_is_archived(unsigned long long id)
+{
+  uintptr_t entry = find_id_entry(id);
+  return entry != 0 && archived_entry(entry);
+}  /* clause_id_is_archived */
+
+/* PUBLIC */
+BOOL clause_id_archive_offset(unsigned long long id,
+                              unsigned long long *offset)
+{
+  uintptr_t entry = find_id_entry(id);
+  if (entry == 0 || !archived_entry(entry) || offset == NULL)
+    return FALSE;
+  *offset = entry_archive_offset(entry);
+  return TRUE;
+}  /* clause_id_archive_offset */
+
+/* PUBLIC */
+void unassign_archived_clause_id(unsigned long long id,
+                                 unsigned long long offset)
+{
+  unsigned long long page_number;
+  unsigned slot;
+  size_t i;
   Clause_id_page page;
   if (id == 0)
-    return NULL;
-  page = find_id_page(id >> CLAUSE_ID_PAGE_BITS);
-  return page == NULL ? NULL :
-    page->clauses[(unsigned) (id & (CLAUSE_ID_PAGE_SIZE - 1))];
-}  /* find_clause_by_id */
+    return;
+  page_number = id >> CLAUSE_ID_PAGE_BITS;
+  slot = (unsigned) (id & (CLAUSE_ID_PAGE_SIZE - 1));
+  i = page_slot(page_number, FALSE);
+  page = i == (size_t) -1 ? NULL : Topform_id_pages[i];
+  if (page == NULL || page == PAGE_TOMBSTONE ||
+      page->entries[slot] != archive_entry(offset))
+    fatal_error("unassign_archived_clause_id: cannot find archive entry");
+  page->entries[slot] = 0;
+  page->count--;
+  Topform_id_entries--;
+  if (page->count == 0) {
+    safe_free(page);
+    Topform_id_pages[i] = PAGE_TOMBSTONE;
+    Topform_id_page_count--;
+    Topform_id_page_tombstones++;
+    if (Topform_id_page_count == 0) {
+      safe_free(Topform_id_pages);
+      Topform_id_pages = NULL;
+      Topform_id_page_capacity = 0;
+      Topform_id_page_tombstones = 0;
+    }
+    else if (Topform_id_page_tombstones > Topform_id_page_count)
+      resize_page_table(Topform_id_page_capacity);
+  }
+}  /* unassign_archived_clause_id */
 
 /*************
  *
@@ -302,8 +403,8 @@ void fprint_clause_id_tab(FILE *fp)
     if (page != NULL && page != PAGE_TOMBSTONE) {
       unsigned j;
       for (j = 0; j < CLAUSE_ID_PAGE_SIZE; j++)
-        if (page->clauses[j] != NULL)
-          fprint_clause(fp, page->clauses[j]);
+        if (page->entries[j] != 0 && !archived_entry(page->entries[j]))
+          fprint_clause(fp, (Topform) page->entries[j]);
     }
   }
   fflush(fp);
@@ -475,7 +576,9 @@ Plist collect_formulas_from_id_tab(void)
     if (page != NULL && page != PAGE_TOMBSTONE) {
       unsigned j;
       for (j = 0; j < CLAUSE_ID_PAGE_SIZE; j++) {
-        Topform c = page->clauses[j];
+        uintptr_t entry = page->entries[j];
+        Topform c = entry == 0 || archived_entry(entry) ? NULL :
+                    (Topform) entry;
         if (c != NULL && c->is_formula)
           result = insert_clause_into_plist(result, c, TRUE);
       }

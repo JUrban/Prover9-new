@@ -185,6 +185,11 @@ Just append_just(Just j1, Just j2);
 
 Just copy_justification(Just j);
 
+/* Versioned compact representation used by the append-only ancestor store. */
+BOOL encode_justification(Just j, char **data, unsigned *size);
+
+Just decode_justification(const char *data, unsigned size);
+
 char *jstring(Just j);
 
 int jmap1(I3list map, int i);
@@ -205,11 +210,19 @@ void zap_just(Just just);
 
 Ilist get_parents(Just just, BOOL all);
 
+/* May return an archive-materialized clone; release it with
+   clause_store_release_materialized() after use. */
 Topform first_negative_parent(Topform c);
 
 Plist get_clause_ancestors(Topform c);
 
 int proof_length(Plist proof);
+
+int proof_dag_size(Topform c);
+
+int first_negative_parent_id(Topform c);
+
+int first_negative_parent_id_by_id(unsigned long long id);
 
 int proof_tree_weight(Topform c);
 

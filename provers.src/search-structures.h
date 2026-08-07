@@ -235,7 +235,8 @@ struct prover_options {
     eq_defs,             // fold, unfold, pass
     literal_selection,   // maximal, etc.
     stats,               // none, some, lots, all
-    multiple_interps;    // false_in_all, false_in_some
+    multiple_interps,    // false_in_all, false_in_some
+    ancestor_store;      // off, memory, mmap
 };
 
 // Clocks
@@ -308,6 +309,12 @@ struct prover_stats {
     disabled_estimated_uncompressed_bytes,
     disabled_full_clauses,
     disabled_compressed_clauses,
+    ancestor_records,
+    ancestor_record_bytes,
+    ancestor_backing_bytes,
+    ancestor_handle_bytes,
+    ancestor_materializations,
+    ancestor_validation_failures,
     disabled_store_bytes,
     disabled_legacy_clist_bytes,
     clause_id_entries,

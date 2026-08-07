@@ -236,6 +236,33 @@ Term decode_varint_term(const unsigned char *data, unsigned size)
   return root;
 }  /* decode_varint_term */
 
+/* PUBLIC */
+BOOL encode_term_versioned(Term t, char **data, unsigned *size)
+{
+  String_buf sb;
+  unsigned n;
+
+  if (t == NULL || data == NULL || size == NULL)
+    return FALSE;
+  sb = get_string_buf();
+  sb_append_char(sb, (char) CLAUSE_COMPRESS_MAGIC);
+  sb_append_char(sb, (char) CLAUSE_COMPRESS_VERSION);
+  append_varint_term(sb, t);
+  n = (unsigned) sb_size(sb);
+  *data = sb_to_malloc_char_array(sb);
+  *size = n;
+  zap_string_buf(sb);
+  return TRUE;
+}  /* encode_term_versioned */
+
+/* PUBLIC */
+Term decode_term_versioned(const char *data, unsigned size)
+{
+  if (data == NULL)
+    return NULL;
+  return decode_varint_term((const unsigned char *) data, size);
+}  /* decode_term_versioned */
+
 /* Convert the right-associated clause term produced by lits_to_term() back
    to literals by transferring atom ownership.  Unlike term_to_literals(),
    this does not copy atoms and therefore retains every private term flag. */

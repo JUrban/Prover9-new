@@ -63,6 +63,9 @@ Plist neg_clauses_and_descendants(Plist proof,
 
 Plist neg_descendants(Topform top_neg,
 		      Clist a_list, Clist b_list, Clause_store c_store);
+
+Ilist neg_descendant_ids(int top_neg_id,
+			 Clist a_list, Clist b_list, Clause_store c_store);
 		      
 
 void check_constant_sharing(Plist clauses);

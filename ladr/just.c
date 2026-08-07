@@ -17,6 +17,9 @@
 */
 
 #include "just.h"
+#include "compress.h"
+#include "clause_store.h"
+#include <stdint.h>
 
 /* Private definitions and types */
 
@@ -850,6 +853,397 @@ Just copy_justification(Just j)
   }
   return head;
 }  /* copy_justification */
+
+/* The ancestor-store encoding is deliberately independent of the printed
+   justification syntax.  In particular it retains IVY data and INSTANCE
+   substitution terms, both of which the legacy term parser cannot round
+   trip.  Integers are zig-zag varints; lists carry explicit counts. */
+
+static
+void just_put_uvarint(String_buf sb, uint64_t value)
+{
+  do {
+    unsigned byte = (unsigned) (value & 0x7f);
+    value >>= 7;
+    if (value != 0)
+      byte |= 0x80;
+    sb_append_char(sb, (char) byte);
+  } while (value != 0);
+}
+
+static
+void just_put_int(String_buf sb, int value)
+{
+  int64_t wide = value;
+  uint64_t zz = ((uint64_t) wide << 1) ^ (uint64_t) (wide >> 63);
+  just_put_uvarint(sb, zz);
+}
+
+static
+void just_put_bytes(String_buf sb, const char *data, unsigned size)
+{
+  unsigned i;
+  just_put_uvarint(sb, size);
+  for (i = 0; i < size; i++)
+    sb_append_char(sb, data[i]);
+}
+
+static
+void just_put_ilist(String_buf sb, Ilist p)
+{
+  Ilist q;
+  unsigned count = 0;
+  for (q = p; q != NULL; q = q->next)
+    count++;
+  just_put_uvarint(sb, count);
+  for (q = p; q != NULL; q = q->next)
+    just_put_int(sb, q->i);
+}
+
+static
+void just_put_i3list(String_buf sb, I3list p)
+{
+  I3list q;
+  unsigned count = 0;
+  for (q = p; q != NULL; q = q->next)
+    count++;
+  just_put_uvarint(sb, count);
+  for (q = p; q != NULL; q = q->next) {
+    just_put_int(sb, q->i);
+    just_put_int(sb, q->j);
+    just_put_int(sb, q->k);
+  }
+}
+
+static
+BOOL just_put_terms(String_buf sb, Plist p)
+{
+  Plist q;
+  unsigned count = 0;
+  for (q = p; q != NULL; q = q->next)
+    count++;
+  just_put_uvarint(sb, count);
+  for (q = p; q != NULL; q = q->next) {
+    char *data = NULL;
+    unsigned size = 0;
+    if (!encode_term_versioned((Term) q->v, &data, &size))
+      return FALSE;
+    just_put_bytes(sb, data, size);
+    safe_free(data);
+  }
+  return TRUE;
+}
+
+/* PUBLIC */
+BOOL encode_justification(Just j, char **data, unsigned *size)
+{
+  String_buf sb;
+  Just p;
+  unsigned count = 0;
+  BOOL ok = TRUE;
+
+  if (data == NULL || size == NULL)
+    return FALSE;
+  for (p = j; p != NULL; p = p->next)
+    count++;
+  sb = get_string_buf();
+  sb_append(sb, "P9J");
+  sb_append_char(sb, 1);
+  just_put_uvarint(sb, count);
+  for (p = j; p != NULL && ok; p = p->next) {
+    just_put_uvarint(sb, (unsigned) p->type);
+    switch (p->type) {
+    case INPUT_JUST:
+    case GOAL_JUST:
+      break;
+    case DENY_JUST:
+    case CLAUSIFY_JUST:
+    case COPY_JUST:
+    case PROPOSITIONAL_JUST:
+    case NEW_SYMBOL_JUST:
+    case BACK_DEMOD_JUST:
+    case BACK_UNIT_DEL_JUST:
+    case FLIP_JUST:
+    case XX_JUST:
+    case MERGE_JUST:
+    case EVAL_JUST:
+      just_put_int(sb, p->u.id);
+      break;
+    case EXPAND_DEF_JUST:
+    case BINARY_RES_JUST:
+    case HYPER_RES_JUST:
+    case UR_RES_JUST:
+    case UNIT_DEL_JUST:
+    case FACTOR_JUST:
+    case XXRES_JUST:
+      just_put_ilist(sb, p->u.lst);
+      break;
+    case DEMOD_JUST:
+      just_put_i3list(sb, p->u.demod);
+      break;
+    case PARA_JUST:
+    case PARA_FX_JUST:
+    case PARA_IX_JUST:
+    case PARA_FX_IX_JUST:
+      just_put_int(sb, p->u.para->from_id);
+      just_put_int(sb, p->u.para->into_id);
+      just_put_ilist(sb, p->u.para->from_pos);
+      just_put_ilist(sb, p->u.para->into_pos);
+      break;
+    case INSTANCE_JUST:
+      just_put_int(sb, p->u.instance->parent_id);
+      ok = just_put_terms(sb, p->u.instance->pairs);
+      break;
+    case IVY_JUST:
+      just_put_uvarint(sb, (unsigned) p->u.ivy->type);
+      just_put_int(sb, p->u.ivy->parent1);
+      just_put_int(sb, p->u.ivy->parent2);
+      just_put_ilist(sb, p->u.ivy->pos1);
+      just_put_ilist(sb, p->u.ivy->pos2);
+      ok = just_put_terms(sb, p->u.ivy->pairs);
+      break;
+    default:
+      ok = FALSE;
+      break;
+    }
+  }
+  if (!ok || sb_size(sb) < 0) {
+    zap_string_buf(sb);
+    return FALSE;
+  }
+  *size = (unsigned) sb_size(sb);
+  *data = sb_to_malloc_char_array(sb);
+  zap_string_buf(sb);
+  return TRUE;
+}  /* encode_justification */
+
+struct just_reader {
+  const unsigned char *data;
+  unsigned size;
+  unsigned offset;
+  BOOL ok;
+};
+
+static
+uint64_t just_get_uvarint(struct just_reader *r)
+{
+  uint64_t value = 0;
+  int shift = 0;
+  int count = 0;
+  while (r->offset < r->size && count < 10) {
+    unsigned byte = r->data[r->offset++];
+    if (count == 9 && (byte & 0xfe) != 0) {
+      r->ok = FALSE;
+      return 0;
+    }
+    value |= ((uint64_t) (byte & 0x7f)) << shift;
+    count++;
+    if ((byte & 0x80) == 0)
+      return value;
+    shift += 7;
+  }
+  r->ok = FALSE;
+  return 0;
+}
+
+static
+int just_get_int(struct just_reader *r)
+{
+  uint64_t zz = just_get_uvarint(r);
+  int64_t value = (int64_t) ((zz >> 1) ^ (uint64_t) -(int64_t) (zz & 1));
+  if (!r->ok || value < INT_MIN || value > INT_MAX) {
+    r->ok = FALSE;
+    return 0;
+  }
+  return (int) value;
+}
+
+static
+Ilist just_get_ilist(struct just_reader *r)
+{
+  uint64_t count = just_get_uvarint(r), i;
+  Ilist head = NULL;
+  Ilist *tail = &head;
+  if (!r->ok || count > r->size - r->offset) {
+    r->ok = FALSE;
+    return NULL;
+  }
+  for (i = 0; i < count && r->ok; i++) {
+    Ilist n = get_ilist();
+    n->i = just_get_int(r);
+    n->next = NULL;
+    *tail = n;
+    tail = &n->next;
+  }
+  if (!r->ok) {
+    zap_ilist(head);
+    return NULL;
+  }
+  return head;
+}
+
+static
+I3list just_get_i3list(struct just_reader *r)
+{
+  uint64_t count = just_get_uvarint(r), i;
+  I3list head = NULL;
+  I3list *tail = &head;
+  if (!r->ok || count > (r->size - r->offset) / 3 + 1) {
+    r->ok = FALSE;
+    return NULL;
+  }
+  for (i = 0; i < count && r->ok; i++) {
+    I3list n = get_i3list();
+    n->i = just_get_int(r);
+    n->j = just_get_int(r);
+    n->k = just_get_int(r);
+    n->next = NULL;
+    *tail = n;
+    tail = &n->next;
+  }
+  if (!r->ok) {
+    zap_i3list(head);
+    return NULL;
+  }
+  return head;
+}
+
+static
+Plist just_get_terms(struct just_reader *r)
+{
+  uint64_t count = just_get_uvarint(r), i;
+  Plist head = NULL;
+  Plist *tail = &head;
+  if (!r->ok || count > r->size - r->offset) {
+    r->ok = FALSE;
+    return NULL;
+  }
+  for (i = 0; i < count && r->ok; i++) {
+    uint64_t n = just_get_uvarint(r);
+    Term t;
+    Plist q;
+    if (!r->ok || n > UINT_MAX || n > r->size - r->offset) {
+      r->ok = FALSE;
+      break;
+    }
+    t = decode_term_versioned((const char *) r->data + r->offset,
+                              (unsigned) n);
+    if (t == NULL) {
+      r->ok = FALSE;
+      break;
+    }
+    r->offset += (unsigned) n;
+    q = get_plist();
+    q->v = t;
+    q->next = NULL;
+    *tail = q;
+    tail = &q->next;
+  }
+  if (!r->ok) {
+    zap_plist_of_terms(head);
+    return NULL;
+  }
+  return head;
+}
+
+/* PUBLIC */
+Just decode_justification(const char *data, unsigned size)
+{
+  struct just_reader r;
+  uint64_t count, i;
+  Just head = NULL;
+  Just *tail = &head;
+
+  if (data == NULL || size < 5 || memcmp(data, "P9J\1", 4) != 0)
+    return NULL;
+  r.data = (const unsigned char *) data;
+  r.size = size;
+  r.offset = 4;
+  r.ok = TRUE;
+  count = just_get_uvarint(&r);
+  if (!r.ok || count > size - r.offset)
+    r.ok = FALSE;
+  for (i = 0; i < count && r.ok; i++) {
+    uint64_t type = just_get_uvarint(&r);
+    Just j;
+    if (!r.ok || type >= UNKNOWN_JUST) {
+      r.ok = FALSE;
+      break;
+    }
+    j = get_just();
+    j->type = (Just_type) type;
+    j->next = NULL;
+    *tail = j;
+    tail = &j->next;
+    switch (j->type) {
+    case INPUT_JUST:
+    case GOAL_JUST:
+      break;
+    case DENY_JUST:
+    case CLAUSIFY_JUST:
+    case COPY_JUST:
+    case PROPOSITIONAL_JUST:
+    case NEW_SYMBOL_JUST:
+    case BACK_DEMOD_JUST:
+    case BACK_UNIT_DEL_JUST:
+    case FLIP_JUST:
+    case XX_JUST:
+    case MERGE_JUST:
+    case EVAL_JUST:
+      j->u.id = just_get_int(&r);
+      break;
+    case EXPAND_DEF_JUST:
+    case BINARY_RES_JUST:
+    case HYPER_RES_JUST:
+    case UR_RES_JUST:
+    case UNIT_DEL_JUST:
+    case FACTOR_JUST:
+    case XXRES_JUST:
+      j->u.lst = just_get_ilist(&r);
+      break;
+    case DEMOD_JUST:
+      j->u.demod = just_get_i3list(&r);
+      break;
+    case PARA_JUST:
+    case PARA_FX_JUST:
+    case PARA_IX_JUST:
+    case PARA_FX_IX_JUST:
+      j->u.para = get_parajust();
+      j->u.para->from_id = just_get_int(&r);
+      j->u.para->into_id = just_get_int(&r);
+      j->u.para->from_pos = just_get_ilist(&r);
+      j->u.para->into_pos = just_get_ilist(&r);
+      break;
+    case INSTANCE_JUST:
+      j->u.instance = get_instancejust();
+      j->u.instance->parent_id = just_get_int(&r);
+      j->u.instance->pairs = just_get_terms(&r);
+      break;
+    case IVY_JUST:
+      j->u.ivy = get_ivyjust();
+      {
+        uint64_t ivy_type = just_get_uvarint(&r);
+        if (ivy_type >= UNKNOWN_JUST)
+          r.ok = FALSE;
+        j->u.ivy->type = (Just_type) ivy_type;
+      }
+      j->u.ivy->parent1 = just_get_int(&r);
+      j->u.ivy->parent2 = just_get_int(&r);
+      j->u.ivy->pos1 = just_get_ilist(&r);
+      j->u.ivy->pos2 = just_get_ilist(&r);
+      j->u.ivy->pairs = just_get_terms(&r);
+      break;
+    default:
+      r.ok = FALSE;
+      break;
+    }
+  }
+  if (!r.ok || r.offset != size) {
+    zap_just(head);
+    return NULL;
+  }
+  return head;
+}  /* decode_justification */
 
 /*************
  *
@@ -3149,17 +3543,48 @@ Ilist get_parents(Just just, BOOL all)
 /* PUBLIC */
 Topform first_negative_parent(Topform c)
 {
+  int id = first_negative_parent_id(c);
+  Topform parent;
+  if (id == 0)
+    return NULL;
+  parent = find_clause_by_id((unsigned) id);
+  if (parent == NULL && clause_id_is_archived((unsigned) id))
+    parent = clause_store_materialize_by_id((unsigned) id);
+  return parent;
+}  /* first_negative_parent */
+
+/* PUBLIC */
+int first_negative_parent_id(Topform c)
+{
   Ilist parents = get_parents(c->justification, TRUE);
   Ilist p;
-  Topform first_neg = NULL;
-  for (p = parents; p && first_neg == NULL; p = p->next) {
-    Topform c = find_clause_by_id(p->i);
-    if (negative_clause_possibly_compressed(c))
-      first_neg = c;
+  int result = 0;
+  for (p = parents; p != NULL && result == 0; p = p->next) {
+    BOOL known;
+    if (clause_negative_by_id((unsigned) p->i, &known) && known)
+      result = p->i;
   }
-  zap_ilist(p);
-  return first_neg;
-}  /* first_negative_parent */
+  zap_ilist(parents);
+  return result;
+}  /* first_negative_parent_id */
+
+/* PUBLIC */
+int first_negative_parent_id_by_id(unsigned long long id)
+{
+  Topform c = find_clause_by_id(id);
+  Ilist parents, p;
+  int result = 0;
+  if (c != NULL)
+    return first_negative_parent_id(c);
+  parents = clause_parents_by_id(id);
+  for (p = parents; p != NULL && result == 0; p = p->next) {
+    BOOL known;
+    if (clause_negative_by_id((unsigned) p->i, &known) && known)
+      result = p->i;
+  }
+  zap_ilist(parents);
+  return result;
+}  /* first_negative_parent_id_by_id */
 
 /*************
  *
@@ -3185,6 +3610,11 @@ Plist get_clanc(int id, Plist anc)
     zap_ilist(tmp);
 
     c = find_clause_by_id(cur_id);
+    if (c == NULL && clause_id_is_archived((unsigned) cur_id)) {
+      c = clause_store_materialize_by_id((unsigned) cur_id);
+      if (c == NULL)
+        fatal_error("get_clanc: corrupt archived ancestor");
+    }
     if (c == NULL) {
       /* Parent clause was deleted (back-subsumed, weight-limited, etc.).
          Skip this branch - ancestor set is incomplete but safe.
@@ -3193,7 +3623,7 @@ Plist get_clanc(int id, Plist anc)
       continue;
     }
 
-    if (!plist_member(anc, c)) {
+    if (!clause_plist_member(anc, c, TRUE)) {
       anc = insert_clause_into_plist(anc, c, TRUE);
       parents = get_parents(c->justification, TRUE);
       for (p = parents; p; p = p->next) {
@@ -3201,6 +3631,8 @@ Plist get_clanc(int id, Plist anc)
       }
       zap_ilist(parents);
     }
+    else
+      clause_store_release_materialized(c);
   }
   return anc;
 }  /* get_clanc */
@@ -3214,7 +3646,9 @@ Plist get_clanc(int id, Plist anc)
 /* DOCUMENTATION
 This routine returns the Plist of clauses that are ancestors of Topform c,
 including clause c.  The result is sorted (increasing) by ID.
-Clause bodies are not accessed or materialized by this routine.
+Archived nodes are validated and materialized for this returned proof DAG.
+Callers that do not transfer ownership must call
+clause_store_release_materialized_plist() before discarding the Plist.
 */
 
 /* PUBLIC */
@@ -3240,8 +3674,10 @@ Plist get_clause_ancestors(Topform c)
     if (p->i == 0) continue;
     sub = get_clanc(p->i, NULL);
     for (q = sub; q; q = q->next) {
-      if (!plist_member(anc, q->v))
+      if (!clause_plist_member(anc, q->v, TRUE))
         anc = insert_clause_into_plist(anc, q->v, TRUE);
+      else
+        clause_store_release_materialized((Topform) q->v);
     }
     zap_plist(sub);
   }
@@ -3263,6 +3699,52 @@ int proof_length(Plist proof)
 {
   return plist_count(proof);
 }  /* proof_length */
+
+static
+Ilist ancestor_ids(Topform c)
+{
+  Ilist seen = NULL, work = NULL;
+  Ilist roots, p;
+  if (c == NULL)
+    return NULL;
+  if (c->id != 0)
+    work = ilist_prepend(work, (int) c->id);
+  else {
+    roots = get_parents(c->justification, TRUE);
+    for (p = roots; p != NULL; p = p->next)
+      work = ilist_prepend(work, p->i);
+    zap_ilist(roots);
+  }
+  while (work != NULL) {
+    int id = work->i;
+    Ilist old = work;
+    Ilist parents;
+    work = work->next;
+    old->next = NULL;
+    zap_ilist(old);
+    if (id == 0 || ilist_member(seen, id))
+      continue;
+    if (find_clause_by_id((unsigned) id) == NULL &&
+        !clause_id_is_archived((unsigned) id))
+      continue;
+    seen = ilist_insert_up(seen, id);
+    parents = clause_parents_by_id((unsigned) id);
+    for (p = parents; p != NULL; p = p->next)
+      if (!ilist_member(seen, p->i))
+        work = ilist_prepend(work, p->i);
+    zap_ilist(parents);
+  }
+  return seen;
+}
+
+/* PUBLIC */
+int proof_dag_size(Topform c)
+{
+  Ilist ids = ancestor_ids(c);
+  int count = ilist_count(ids) + (c != NULL && c->id == 0 ? 1 : 0);
+  zap_ilist(ids);
+  return count;
+}  /* proof_dag_size */
 
 /*************
  *
@@ -3287,84 +3769,43 @@ multiplicity in the result.
 /* PUBLIC */
 int proof_tree_weight(Topform c)
 {
-  /* Memoized DAG evaluation computing the tree-leaf count.
-     f(c) = 1 if c has no clause parents; else sum of f(p) over
-     clause parents p (DAG, so shared ancestors are counted with
-     multiplicity in the result).  Iterative postorder DFS with
-     the per-clause cache used both as the persistent store and
-     as the in-call "computed" marker.
-
-     Per-clause cache amortizes cost across the many anc_subsume
-     calls that re-evaluate the same clause's weight.
-     Justifications are immutable so cached values never go stale.
-     The "parent vanished from id table" (gc) case: the cache
-     snapshots the more accurate value computed before the purge,
-     which is the conservative direction (larger weight, preferring
-     c's earlier alternative in tie-breaking).
-
-     Lazy DFS: seed the worklist with c only; push parents only
-     when we hit a non-cached node.  Cached nodes prune the walk
-     immediately.  This avoids the previous get_clause_ancestors
-     pre-pass that walked the entire DAG even when most subtrees
-     were cached. */
-  Plist worklist;
-
+  Ilist ids, q;
+  I2list weights = NULL;
+  int result = 1;
   if (c == NULL)
     return 0;
   if (c->proof_tree_weight_cache >= 0)
     return c->proof_tree_weight_cache;
-
-  worklist = plist_prepend(NULL, c);
-
-  while (worklist != NULL) {
-    Topform cur = worklist->v;
-    Ilist parents;
-    BOOL all_done;
-    int sum;
-
-    /* Already computed (in this call or a prior one): pop and continue. */
-    if (cur->proof_tree_weight_cache >= 0) {
-      worklist = plist_pop(worklist);
-      continue;
+  ids = ancestor_ids(c);
+  for (q = ids; q != NULL; q = q->next) {
+    Ilist parents = clause_parents_by_id((unsigned) q->i), p;
+    int sum = 0;
+    for (p = parents; p != NULL; p = p->next) {
+      int w = assoc(weights, p->i);
+      sum += w == INT_MIN ? 1 : w;
     }
-
-    parents = get_parents(cur->justification, TRUE);
-    if (parents == NULL) {
-      /* Input clause: leaf contributes 1. */
-      cur->proof_tree_weight_cache = 1;
-      worklist = plist_pop(worklist);
-      continue;
-    }
-
-    /* Sum cached parent weights; push uncached parents and revisit. */
-    all_done = TRUE;
-    sum = 0;
-    {
-      Ilist p;
-      for (p = parents; p; p = p->next) {
-        Topform pc = find_clause_by_id(p->i);
-        if (pc == NULL) {
-          /* Parent vanished (e.g., purged by gc).  Treat as leaf
-             with weight 1 -- conservative, keeps the metric finite. */
-          sum += 1;
-        } else if (pc->proof_tree_weight_cache >= 0) {
-          sum += pc->proof_tree_weight_cache;
-        } else {
-          worklist = plist_prepend(worklist, pc);
-          all_done = FALSE;
-        }
-      }
-    }
+    weights = alist_insert(weights, q->i, sum == 0 ? 1 : sum);
     zap_ilist(parents);
-
-    if (all_done) {
-      cur->proof_tree_weight_cache = (sum == 0 ? 1 : sum);
-      worklist = plist_pop(worklist);
-    }
-    /* else: parents were pushed; revisit cur after they're done. */
   }
-
-  return c->proof_tree_weight_cache >= 0 ? c->proof_tree_weight_cache : 1;
+  if (c->id == 0) {
+    Ilist parents = get_parents(c->justification, TRUE), p;
+    int sum = 0;
+    for (p = parents; p != NULL; p = p->next) {
+      int w = assoc(weights, p->i);
+      sum += w == INT_MIN ? 1 : w;
+    }
+    result = sum == 0 ? 1 : sum;
+    zap_ilist(parents);
+  }
+  else {
+    result = assoc(weights, (int) c->id);
+    if (result == INT_MIN)
+      result = 1;
+  }
+  c->proof_tree_weight_cache = result;
+  zap_i2list(weights);
+  zap_ilist(ids);
+  return result;
 }  /* proof_tree_weight */
 
 /*************
@@ -3508,7 +3949,8 @@ void mark_parents_as_used(Topform c)
   Ilist p;
   for (p = parents; p; p = p->next) {
     Topform parent = find_clause_by_id(p->i);
-    parent->used = TRUE;
+    if (parent != NULL)
+      parent->used = TRUE;
   }
   zap_ilist(parents);
 }  /* mark_parents_as_used */
@@ -3534,19 +3976,17 @@ Iterative: collect all ancestors, then compute levels bottom-up (by ID order).
 /* PUBLIC */
 int clause_level(Topform c)
 {
-  Plist ancestors, q;
+  Ilist ancestors, q;
   I2list levels;
   int level;
 
-  /* get_clanc returns ancestors sorted by ID (ascending). */
-  ancestors = get_clanc(c->id, NULL);
+  ancestors = ancestor_ids(c);
 
   /* Process in ID order: parents always have smaller IDs, so their
      levels are computed before they are needed. */
   levels = NULL;
   for (q = ancestors; q; q = q->next) {
-    Topform a = q->v;
-    Ilist parents = get_parents(a->justification, TRUE);
+    Ilist parents = clause_parents_by_id((unsigned) q->i);
     Ilist p;
     int max = -1;
     for (p = parents; p; p = p->next) {
@@ -3554,13 +3994,25 @@ int clause_level(Topform c)
       if (parent_level != INT_MIN)
         max = IMAX(max, parent_level);
     }
-    levels = alist_insert(levels, a->id, max + 1);
+    levels = alist_insert(levels, q->i, max + 1);
     zap_ilist(parents);
   }
 
-  level = assoc(levels, c->id);
+  if (c->id == 0) {
+    Ilist parents = get_parents(c->justification, TRUE), p;
+    int max = -1;
+    for (p = parents; p != NULL; p = p->next) {
+      int parent_level = assoc(levels, p->i);
+      if (parent_level != INT_MIN)
+        max = IMAX(max, parent_level);
+    }
+    level = max + 1;
+    zap_ilist(parents);
+  }
+  else
+    level = assoc(levels, (int) c->id);
   zap_i2list(levels);
-  zap_plist(ancestors);
+  zap_ilist(ancestors);
   return level;
 }  /* clause_level */
 

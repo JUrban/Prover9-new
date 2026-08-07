@@ -18,6 +18,7 @@
 
 #include "ioutil.h"
 #include "compress.h"
+#include "clause_store.h"
 
 /* Preprocessing progress report - defined in top_input.c */
 extern void preprocessing_report_check(const char *phase, int count,
@@ -535,9 +536,16 @@ void sb_tstp_write_clause_jmap(String_buf sb, Topform c, I3list map)
     Ilist parents = get_parents(just, FALSE);
     if (parents) {
       Topform parent = find_clause_by_id(parents->i);
+      BOOL release_parent = FALSE;
+      if (parent == NULL && clause_id_is_archived((unsigned) parents->i)) {
+        parent = clause_store_materialize_by_id((unsigned) parents->i);
+        release_parent = TRUE;
+      }
       if (parent && parent->is_formula &&
           parent->justification && parent->justification->type == INPUT_JUST)
         promote_to_axiom = TRUE;
+      if (release_parent)
+        clause_store_release_materialized(parent);
       zap_ilist(parents);
     }
   }
@@ -547,9 +555,16 @@ void sb_tstp_write_clause_jmap(String_buf sb, Topform c, I3list map)
     Ilist parents = get_parents(just, FALSE);
     if (parents) {
       Topform parent = find_clause_by_id(parents->i);
+      BOOL release_parent = FALSE;
+      if (parent == NULL && clause_id_is_archived((unsigned) parents->i)) {
+        parent = clause_store_materialize_by_id((unsigned) parents->i);
+        release_parent = TRUE;
+      }
       if (parent && parent->is_formula &&
           parent->justification && parent->justification->type == GOAL_JUST)
         promote_to_neg_conj = TRUE;
+      if (release_parent)
+        clause_store_release_materialized(parent);
       zap_ilist(parents);
     }
   }

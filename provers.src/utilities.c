@@ -786,57 +786,6 @@ Topform next_negative_clause_3(Clist_pos *ap, Clist_pos *bp, Clist_pos *cp)
   return next_neg;
 }  /* next_negative_clause_3 */
 
-static
-Topform next_negative_clause_store(Clist_pos *ap, Clist_pos *bp,
-                                   Clause_store store, size_t *position)
-{
-  Clist_pos a = *ap;
-  Clist_pos b = *bp;
-  size_t cpos = *position;
-  Topform ac = NULL, bc = NULL, cc = NULL, result = NULL;
-  int source = 0;
-
-  while (a != NULL && !negative_clause(a->c->literals))
-    a = a->next;
-  while (b != NULL && !negative_clause(b->c->literals))
-    b = b->next;
-  while (cpos < clause_store_length(store) &&
-         !negative_clause_possibly_compressed(clause_store_get(store, cpos)))
-    cpos++;
-
-  if (a != NULL) {
-    ac = a->c;
-    result = ac;
-    source = 1;
-  }
-  if (b != NULL) {
-    bc = b->c;
-    if (result == NULL || bc->id < result->id) {
-      result = bc;
-      source = 2;
-    }
-  }
-  if (cpos < clause_store_length(store)) {
-    cc = clause_store_get(store, cpos);
-    if (result == NULL || cc->id < result->id) {
-      result = cc;
-      source = 3;
-    }
-  }
-
-  if (source == 1)
-    a = a->next;
-  else if (source == 2)
-    b = b->next;
-  else if (source == 3)
-    cpos++;
-
-  *ap = a;
-  *bp = b;
-  *position = cpos;
-  return result;
-}  /* next_negative_clause_store */
-
 /*************
  *
  *   first_negative_clause()
@@ -883,8 +832,12 @@ Plist neg_clauses_and_descendants(Plist proof,
 
   Topform next = next_negative_clause_3(&a, &b, &c);
   while (next) {
-    Topform neg_parent = first_negative_parent(next);
-    if (neg_parent && clause_plist_member(descendents, neg_parent, FALSE))
+    int parent_id = first_negative_parent_id(next);
+    Plist d;
+    BOOL parent_seen = FALSE;
+    for (d = descendents; d != NULL && !parent_seen; d = d->next)
+      parent_seen = ((Topform) d->v)->id == (unsigned) parent_id;
+    if (parent_id != 0 && parent_seen)
       descendents = insert_clause_into_plist(descendents, next, FALSE);
     next = next_negative_clause_3(&a, &b, &c);
   }
@@ -933,28 +886,92 @@ Plist neg_descendants(Topform top_neg,
 		      Clist a_list, Clist b_list, Clause_store c_store)
 		      
 {
-  Plist descendants = plist_prepend(NULL, top_neg);
-  Clist_pos a, b;
-  size_t c_position = 0;
-  Topform next;
-
-  clause_store_sort_by_id(c_store);
-
-  /* Get all descendants of top_neg that appear in a, b, or c. */
-  
-  a = a_list->first;
-  b = b_list->first;
-
-  next = next_negative_clause_store(&a, &b, c_store, &c_position);
-  while (next) {
-    Topform neg_parent = first_negative_parent(next);
-    if (neg_parent && clause_plist_member(descendants, neg_parent, FALSE))
-      descendants = insert_clause_into_plist(descendants, next, FALSE);
-    next = next_negative_clause_store(&a, &b, c_store, &c_position);
+  Ilist ids = neg_descendant_ids((int) top_neg->id, a_list, b_list, c_store);
+  Ilist p;
+  Plist descendants = NULL;
+  for (p = ids; p != NULL; p = p->next) {
+    Topform c = find_clause_by_id((unsigned) p->i);
+    if (c == NULL && clause_id_is_archived((unsigned) p->i))
+      c = clause_store_materialize_by_id((unsigned) p->i);
+    if (c != NULL)
+      descendants = insert_clause_into_plist(descendants, c, TRUE);
   }
-  descendants = reverse_plist(descendants);  /* make it increasing */
+  zap_ilist(ids);
   return descendants;
 }  /* neg_descendants */
+
+static
+int next_negative_clause_store_id(Clist_pos *ap, Clist_pos *bp,
+                                  Clause_store store, size_t *position)
+{
+  Clist_pos a = *ap, b = *bp;
+  size_t cpos = *position;
+  unsigned long long aid = 0, bid = 0, cid = 0, result = 0;
+  int source = 0;
+
+  while (a != NULL && !negative_clause(a->c->literals))
+    a = a->next;
+  while (b != NULL && !negative_clause(b->c->literals))
+    b = b->next;
+  while (cpos < clause_store_length(store) &&
+         (!clause_store_negative(store, cpos) ||
+          clause_store_id(store, cpos) == 0))
+    cpos++;
+  if (a != NULL) {
+    aid = a->c->id;
+    result = aid;
+    source = 1;
+  }
+  if (b != NULL) {
+    bid = b->c->id;
+    if (source == 0 || bid < result) {
+      result = bid;
+      source = 2;
+    }
+  }
+  if (cpos < clause_store_length(store)) {
+    cid = clause_store_id(store, cpos);
+    if (source == 0 || cid < result) {
+      result = cid;
+      source = 3;
+    }
+  }
+  if (source == 1)
+    a = a->next;
+  else if (source == 2)
+    b = b->next;
+  else if (source == 3)
+    cpos++;
+  *ap = a;
+  *bp = b;
+  *position = cpos;
+  if (result > INT_MAX)
+    fatal_error("next_negative_clause_store_id: clause ID exceeds justification range");
+  return (int) result;
+}  /* next_negative_clause_store_id */
+
+/* Archive-safe variant: only stable IDs and record metadata are retained.
+   The three already ID-ordered sources are merged without materialization or
+   a quadratic sorted-insertion pass. */
+Ilist neg_descendant_ids(int top_neg_id,
+			 Clist a_list, Clist b_list, Clause_store c_store)
+{
+  Ilist descendants = ilist_prepend(NULL, top_neg_id);
+  Clist_pos a = a_list->first, b = b_list->first;
+  size_t cpos = 0;
+  int next;
+
+  clause_store_sort_by_id(c_store);
+  next = next_negative_clause_store_id(&a, &b, c_store, &cpos);
+  while (next != 0) {
+    int parent = first_negative_parent_id_by_id((unsigned) next);
+    if (parent != 0 && ilist_member(descendants, parent) &&
+        !ilist_member(descendants, next))
+      descendants = ilist_prepend(descendants, next);
+    next = next_negative_clause_store_id(&a, &b, c_store, &cpos);
+  }
+  return reverse_ilist(descendants);
+}  /* neg_descendant_ids */
 
 /*************
  *

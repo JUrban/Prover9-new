@@ -163,8 +163,8 @@ static struct {
 
   // other stuff
 
-  Plist desc_to_be_disabled;   // Descendents of these to be disabled
-  Plist cac_clauses;           // Clauses that trigger back CAC check
+  Ilist desc_to_be_disabled;   // Stable IDs whose descendants are disabled
+  Ilist cac_clauses;           // Stable IDs that trigger back CAC check
 
   BOOL searching;      // set to TRUE when first given is selected
   BOOL initialized;    // has this structure been initialized?
@@ -418,6 +418,11 @@ Prover_options init_prover_options(void)
   p->multiple_interps = init_stringparm("multiple_interps", 2,
 					"false_in_all",
 					"false_in_some");
+
+  p->ancestor_store = init_stringparm("ancestor_store", 3,
+				      "off",
+				      "memory",
+				      "mmap");
 
   // Flag and parm Dependencies.  These cause other flags and parms
   // to be changed.  The changes happen immediately and can be undone
@@ -693,6 +698,7 @@ void update_memory_stats(void)
 {
   struct clause_compression_stats cs = clause_compression_get_stats();
   struct clause_id_table_stats ids = clause_id_table_get_stats();
+  struct clause_store_stats as = clause_store_get_stats(Glob.disabled);
   Clist_pos p;
   size_t i;
 
@@ -723,7 +729,10 @@ void update_memory_stats(void)
   Stats.disabled_compressed_clauses = 0;
   if (Glob.disabled != NULL) {
     for (i = 0; i < clause_store_length(Glob.disabled); i++) {
-      Topform c = clause_store_get(Glob.disabled, i);
+      Topform c;
+      if (clause_store_position_is_archived(Glob.disabled, i))
+        continue;
+      c = clause_store_get(Glob.disabled, i);
       if (c->compressed != NULL) {
         Stats.disabled_compressed_clauses++;
         Stats.disabled_compressed_bytes += c->compressed_size;
@@ -738,6 +747,15 @@ void update_memory_stats(void)
       }
     }
   }
+  Stats.disabled_compressed_clauses += as.records;
+  Stats.disabled_compressed_bytes += as.body_bytes;
+  Stats.disabled_estimated_uncompressed_bytes += as.logical_body_bytes;
+  Stats.ancestor_records = as.records;
+  Stats.ancestor_record_bytes = as.record_bytes;
+  Stats.ancestor_backing_bytes = as.backing_bytes;
+  Stats.ancestor_handle_bytes = as.handle_bytes;
+  Stats.ancestor_materializations = as.materializations;
+  Stats.ancestor_validation_failures = as.validation_failures;
 
   Stats.disabled_store_bytes = clause_store_allocated_bytes(Glob.disabled);
   Stats.disabled_legacy_clist_bytes =
@@ -846,6 +864,13 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
           comma_num(s.disabled_compressed_bytes),
           comma_num(s.disabled_compressed_clauses),
           comma_num(s.disabled_estimated_uncompressed_bytes));
+  fprintf(fp,
+          "Ancestor_store: records=%s, record_bytes=%s, backing_bytes=%s, "
+          "handle_bytes=%s, materialized=%s, validation_failures=%s.\n",
+          comma_num(s.ancestor_records), comma_num(s.ancestor_record_bytes),
+          comma_num(s.ancestor_backing_bytes), comma_num(s.ancestor_handle_bytes),
+          comma_num(s.ancestor_materializations),
+          comma_num(s.ancestor_validation_failures));
   fprintf(fp,
           "Bookkeeping_bytes: disabled_store=%s (legacy_clist=%s, %.2f/clause), "
           "clause_id_table=%s (legacy_hash=%s, entries=%s, pages=%s, "
@@ -1968,6 +1993,8 @@ void fprint_clause_tptp(FILE *fp, Topform c, BOOL full_fof)
   if (tptp_name &&
       (primary_type == INPUT_JUST || primary_type == GOAL_JUST)) {
     Topform orig = find_clause_by_id((int) c->id);
+    if (orig == NULL && c->archive_materialized)
+      orig = c;
     if (orig && orig->formula) {
       if (primary_type == GOAL_JUST) {
         /* Conjecture leaf, followed by its assume_negation node.  The
@@ -2480,6 +2507,8 @@ void fprint_proof_tptp(FILE *fp, Plist proof)
        table is printed as an FOF leaf, so it needs FOF (named) variable
        style; genuine CNF clauses use PROLOG_STYLE for uppercase variables. */
     Topform orig = find_clause_by_id((int) c->id);
+    if (orig == NULL && c->archive_materialized)
+      orig = c;
     BOOL fof_out = c->is_formula ||
                    (orig != NULL && orig->formula != NULL && c->justification &&
                     (c->justification->type == INPUT_JUST ||
@@ -2791,6 +2820,46 @@ BOOL active_or_indexable_clause(Topform c)
 }  /* active_or_indexable_clause */
 
 static
+Topform hint_by_id(unsigned long long id)
+{
+  Clist_pos p;
+  if (id == 0 || Glob.hints == NULL)
+    return NULL;
+  for (p = Glob.hints->first; p != NULL; p = p->next)
+    if (p->c->id == id)
+      return p->c;
+  return NULL;
+}
+
+static
+void restore_archive_hint_links(Plist clauses)
+{
+  Plist p;
+  for (p = clauses; p != NULL; p = p->next) {
+    Topform c = p->v;
+    if (c->archive_materialized) {
+      unsigned long long id = clause_store_matching_hint_id(c->id);
+      c->matching_hint = hint_by_id(id);
+    }
+  }
+}
+
+static
+Clause_store new_disabled_store(void)
+{
+  Clause_store store = clause_store_init("disabled");
+  if (str_ident(stringparm1(Opt->ancestor_store), "memory")) {
+    if (!clause_store_enable_archive(store, CLAUSE_STORE_ARCHIVE_MEMORY))
+      fatal_error("new_disabled_store: cannot initialize memory backing");
+  }
+  else if (str_ident(stringparm1(Opt->ancestor_store), "mmap")) {
+    if (!clause_store_enable_archive(store, CLAUSE_STORE_ARCHIVE_MMAP))
+      fatal_error("new_disabled_store: cannot initialize mmap backing");
+  }
+  return store;
+}  /* new_disabled_store */
+
+static
 void compress_retained_clause(Topform c)
 {
   if (!flag(Opt->compress_disabled))
@@ -2807,19 +2876,49 @@ void retain_disabled_clause(Topform c)
   if (active_or_indexable_clause(c))
     fatal_error("retain_disabled_clause: clause is still active or indexed");
   clause_store_append(Glob.disabled, c);
-  compress_retained_clause(c);
+  /* Pre-elimination scratch clauses can be disabled before IDs are assigned.
+     They cannot be proof ancestors or checkpoint entries; keep the Phase 2
+     representation rather than perturbing the deterministic ID sequence.
+     Formula placeholders likewise remain live because formulas.txt is the
+     established checkpoint namespace for them. */
+  if (c->id == 0 || c->is_formula) {
+    if (!str_ident(stringparm1(Opt->ancestor_store), "off") &&
+        compress_clause(c) == CLAUSE_COMPRESS_INVALID)
+      fatal_error("retain_disabled_clause: invalid pre-ID clause");
+    else if (str_ident(stringparm1(Opt->ancestor_store), "off"))
+      compress_retained_clause(c);
+  }
+  else if (!str_ident(stringparm1(Opt->ancestor_store), "off")) {
+    if (!clause_store_archive_clause(Glob.disabled, c))
+      fatal_error("retain_disabled_clause: ancestor archive failed");
+  }
+  else
+    compress_retained_clause(c);
 }  /* retain_disabled_clause */
 
 static
 void compress_retained_store(Clause_store store)
 {
   size_t i;
-  if (!flag(Opt->compress_disabled) || store == NULL)
+  BOOL archive = !str_ident(stringparm1(Opt->ancestor_store), "off");
+  if ((!flag(Opt->compress_disabled) && !archive) || store == NULL)
     return;
   for (i = 0; i < clause_store_length(store); i++) {
+    if (clause_store_position_is_archived(store, i))
+      continue;
     Topform c = clause_store_get(store, i);
-    if (c->compressed == NULL)
-      compress_retained_clause(c);
+    if (archive && c->id != 0 && !c->is_formula) {
+      if (!clause_store_archive_clause(store, c))
+        fatal_error("compress_retained_store: ancestor archive failed");
+    }
+    else if (c->compressed == NULL) {
+      if (archive) {
+        if (compress_clause(c) == CLAUSE_COMPRESS_INVALID)
+          fatal_error("compress_retained_store: invalid pre-ID clause");
+      }
+      else
+        compress_retained_clause(c);
+    }
   }
 }  /* compress_retained_store */
 
@@ -2925,6 +3024,11 @@ void free_search_memory(void)
   lindex_destroy(Glob.clashable_idx);
   Glob.clashable_idx = NULL;
 
+  zap_ilist(Glob.cac_clauses);
+  Glob.cac_clauses = NULL;
+  zap_ilist(Glob.desc_to_be_disabled);
+  Glob.desc_to_be_disabled = NULL;
+
   clause_store_delete_clauses(Glob.disabled);
   Glob.disabled = NULL;
 
@@ -2953,23 +3057,26 @@ void handle_proof_and_maybe_exit(Topform empty_clause)
 
   assign_clause_id(empty_clause);
   proof = get_clause_ancestors(empty_clause);
+  restore_archive_hint_links(proof);
   materialized = materialize_clauses(proof);
 
   if (!flag(Opt->reuse_denials) && Glob.horn) {
     Topform c = first_negative_clause(proof);
-    if (clause_member_plist(Glob.desc_to_be_disabled, c)) {
+    if (ilist_member(Glob.desc_to_be_disabled, (int) c->id)) {
       if (!flag(Opt->quiet)) {
 	printf("%% Redundant proof: ");
 	f_clause(empty_clause);
       }
       recompress_clauses(materialized);
       zap_plist(materialized);
+      clause_store_release_materialized_plist(proof);
       zap_plist(proof);
       return;
     }
     else
       /* Descendants of c will be disabled when it is safe to do so. */
-      Glob.desc_to_be_disabled = plist_prepend(Glob.desc_to_be_disabled, c);
+      Glob.desc_to_be_disabled =
+        ilist_prepend(Glob.desc_to_be_disabled, (int) c->id);
   }
 
   /* Mark parents as used only for non-redundant proofs.  If done earlier,
@@ -3258,10 +3365,11 @@ void handle_proof_and_maybe_exit(Topform empty_clause)
   zap_plist(materialized);
   actions_in_proof(proof, &Att);  /* this can exit */
 
+  clause_store_release_materialized_plist(proof);
+  zap_plist(proof);
+
   if (at_parm_limit(Stats.proofs, Opt->max_proofs))
     done_with_search(MAX_PROOFS_EXIT);  /* does not return */
-
-  zap_plist(proof);
 }  // handle_proof_and_maybe_exit
 
 /*************
@@ -3397,7 +3505,7 @@ void cl_process_simplify(Topform c)
     // If comm or assoc, make a note of it.
     // Also simplify C or AC redundant literals to $T.
     if (cac_redundancy(c, !flag(Opt->quiet)))
-      Glob.cac_clauses = plist_prepend(Glob.cac_clauses, c);
+      c->cac_candidate = 1;
     clock_stop(Clocks.redundancy);
   }
 }  // cl_process_simplify
@@ -3477,6 +3585,7 @@ void print_derivation(Topform cl)
   Plist proof, materialized, p;
   static int pfcount = 0;
   proof = get_clause_ancestors(cl);
+  restore_archive_hint_links(proof);
   materialized = materialize_clauses(proof);
   pfcount++;
   print_separator(stdout, "PROOF", TRUE);
@@ -3488,13 +3597,14 @@ void print_derivation(Topform cl)
   print_separator(stdout, "end of proof", TRUE);
   recompress_clauses(materialized);
   zap_plist(materialized);
+  clause_store_release_materialized_plist(proof);
+  zap_plist(proof);
 
   if (flag(Opt->derivations_only) && Hsize > 0
       && cl->id >= (unsigned) HIT_LIST[Hsize - 1]) {
     printf("\n%% %d derivations completed.  Terminating execution.\n", Hsize);
     done_with_search(ACTION_EXIT);  /* clean exit via longjmp */
   }
-  zap_plist(proof);
 }  /* print_derivation */
 
 static
@@ -3503,6 +3613,7 @@ void hint_derivation(Topform cl)
   Plist proof, materialized, p;
   static int pfcount = 0;
   proof = get_clause_ancestors(cl);
+  restore_archive_hint_links(proof);
   materialized = materialize_clauses(proof);
   pfcount++;
   print_separator(stdout, "PROOF", TRUE);
@@ -3514,6 +3625,7 @@ void hint_derivation(Topform cl)
   print_separator(stdout, "end of proof", TRUE);
   recompress_clauses(materialized);
   zap_plist(materialized);
+  clause_store_release_materialized_plist(proof);
   zap_plist(proof);
 }  /* hint_derivation */
 
@@ -3525,6 +3637,8 @@ void cl_process_keep(Topform c)
     renumber_variables(c, MAX_VARS);
   if (c->id == 0)
     assign_clause_id(c);  // unit conflict or input: already has ID
+  if (c->cac_candidate && !ilist_member(Glob.cac_clauses, (int) c->id))
+    Glob.cac_clauses = ilist_prepend(Glob.cac_clauses, (int) c->id);
   if (flag(Opt->print_derivations) && on_hit_list(c->id))
     print_derivation(c);
   if (To_trace_id != 0 && c->id == To_trace_id) {
@@ -3871,24 +3985,27 @@ void disable_to_be_disabled(void)
 {
   if (Glob.desc_to_be_disabled) {
 
-    Plist descendants = NULL;
-    Plist p;
+    Ilist descendants = NULL;
+    Ilist p;
 
     clause_store_sort_by_id(Glob.disabled);
 
     for (p = Glob.desc_to_be_disabled; p; p = p->next) {
-      Topform c = p->v;
-      Plist x = neg_descendants(c,Glob.usable,Glob.sos,Glob.disabled);
-      descendants = plist_cat(descendants, x);
+      Ilist x = neg_descendant_ids(p->i, Glob.usable, Glob.sos,
+                                  Glob.disabled);
+      Ilist q;
+      for (q = x; q != NULL; q = q->next)
+        if (!ilist_member(descendants, q->i))
+          descendants = ilist_insert_up(descendants, q->i);
+      zap_ilist(x);
     }
     
     if (!flag(Opt->quiet)) {
       int n = 0;
       printf("\n%% Disable descendants (x means already disabled):\n");
       for (p = descendants; p; p = p->next) {
-	Topform d = p->v;
-	printf(" %llu%s", d->id,
-               clause_store_member(Glob.disabled, d) ? "x" : "");
+	printf(" %d%s", p->i,
+               clause_id_is_archived((unsigned) p->i) ? "x" : "");
 	if (++n % 10 == 0)
 	  printf("\n");
       }
@@ -3896,13 +4013,13 @@ void disable_to_be_disabled(void)
     }
 
     for (p = descendants; p; p = p->next) {
-      Topform d = p->v;
-      if (!clause_store_member(Glob.disabled, d))
+      Topform d = find_clause_by_id((unsigned) p->i);
+      if (d != NULL)
 	disable_clause(d);
     }
 
-    zap_plist(descendants);
-    zap_plist(Glob.desc_to_be_disabled);
+    zap_ilist(descendants);
+    zap_ilist(Glob.desc_to_be_disabled);
     Glob.desc_to_be_disabled = NULL;
   }
 }  /* disable_to_be_disabled */
@@ -4119,7 +4236,7 @@ void limbo_process(BOOL pre_search)
 
     // Check if we should do back CAC simplification.
 
-    if (plist_member(Glob.cac_clauses, c)) {
+    if (ilist_member(Glob.cac_clauses, (int) c->id)) {
       back_cac_simplify();
     }
 
@@ -5242,6 +5359,7 @@ Prover_results collect_prover_results(BOOL xproofs)
     Plist materialized;
     /* Results own a printable proof DAG, so materialization is intentional
        here and lasts until zap_prover_results(). */
+    restore_archive_hint_links(proof);
     materialized = materialize_clauses(proof);
     zap_plist(materialized);
     results->proofs = plist_append(results->proofs, proof);
@@ -5399,9 +5517,17 @@ int write_clause_store_bare(FILE *clause_fp, FILE *data_fp,
   int file_pos = 0;
   int list_pos = 0;
   for (i = 0; i < clause_store_length(store); i++) {
-    if (write_bare_clause(clause_fp, data_fp, clause_store_get(store, i),
+    Topform c = clause_store_materialize(store, i);
+    if (c == NULL)
+      fatal_error("write_clause_store_bare: corrupt ancestor record");
+    if (c->archive_materialized) {
+      unsigned long long hint_id = clause_store_matching_hint_id(c->id);
+      c->matching_hint = hint_by_id(hint_id);
+    }
+    if (write_bare_clause(clause_fp, data_fp, c,
                           list_name, list_pos, &file_pos, NULL, 0))
       list_pos++;
+    clause_store_release_materialized(c);
   }
   fprintf(clause_fp, "end_of_list.\n");
   return list_pos;
@@ -5435,10 +5561,10 @@ unsigned long long hash_clause_store_ids(Clause_store store)
   unsigned long long h = 0;
   size_t i;
   for (i = 0; i < clause_store_length(store); i++) {
-    Topform c = clause_store_get(store, i);
+    unsigned long long id = clause_store_id(store, i);
     /* Format 3 intentionally omits pre-elimination clauses without IDs. */
-    if (c->id != 0) {
-      h ^= c->id;
+    if (id != 0) {
+      h ^= id;
       h = (h << 7) | (h >> 57);
     }
   }
@@ -5451,7 +5577,7 @@ unsigned long long checkpointed_clause_store_count(Clause_store store)
   unsigned long long count = 0;
   size_t i;
   for (i = 0; i < clause_store_length(store); i++)
-    if (clause_store_get(store, i)->id != 0)
+    if (clause_store_id(store, i) != 0)
       count++;
   return count;
 }
@@ -6074,8 +6200,13 @@ static
 void write_clause_store_justifications(FILE *fp, Clause_store store)
 {
   size_t i;
-  for (i = 0; i < clause_store_length(store); i++)
-    write_clause_justification(fp, clause_store_get(store, i));
+  for (i = 0; i < clause_store_length(store); i++) {
+    Topform c = clause_store_materialize(store, i);
+    if (c == NULL)
+      fatal_error("write_clause_store_justifications: corrupt ancestor record");
+    write_clause_justification(fp, c);
+    clause_store_release_materialized(c);
+  }
 }
 
 /*************
@@ -6263,6 +6394,9 @@ void write_checkpoint(void)
   FILE *fp;
   int n;
 
+  if (!clause_store_sync(Glob.disabled))
+    fatal_error("write_checkpoint: cannot synchronize ancestor store");
+
   /* Build directory names */
   n = snprintf(finaldir, sizeof(finaldir),
                "prover9_%d_ckpt_%llu", getpid(), Stats.given);
@@ -6328,18 +6462,18 @@ void write_checkpoint(void)
     }
     /* Save cac_clauses IDs (commutativity/associativity/AC triggers) */
     if (Glob.cac_clauses != NULL) {
-      Plist p;
+      Ilist p;
       fprintf(fp, "cac_clauses");
       for (p = Glob.cac_clauses; p; p = p->next)
-        fprintf(fp, " %llu", ((Topform) p->v)->id);
+        fprintf(fp, " %d", p->i);
       fprintf(fp, "\n");
     }
     /* Save desc_to_be_disabled clause IDs (may be NULL at checkpoint time) */
     if (Glob.desc_to_be_disabled != NULL) {
-      Plist p;
+      Ilist p;
       fprintf(fp, "desc_to_be_disabled");
       for (p = Glob.desc_to_be_disabled; p; p = p->next)
-        fprintf(fp, " %llu", ((Topform) p->v)->id);
+        fprintf(fp, " %d", p->i);
       fprintf(fp, "\n");
     }
     /* Save hoisted function-local statics */
@@ -7242,7 +7376,13 @@ void load_checkpoint_into_loop(void)
   Clist_pos p;
   int fpa_depth;
 
-  /* 0a. Clear clause ID hash table so stale entries don't shadow
+  /* 0a. Drop the old disabled/archive store before clearing its tagged ID
+     entries.  This matters for the in-process save+reload harness; a fresh
+     resume process reaches the same empty state. */
+  clause_store_delete_clauses(Glob.disabled);
+  Glob.disabled = new_disabled_store();
+
+  /* Clear clause ID hash table so stale entries don't shadow
      newly-loaded clauses (critical for in-process save+reload). */
   clear_clause_id_tab();
 
@@ -7326,7 +7466,7 @@ void load_checkpoint_into_loop(void)
   /* Clear and restore Glob.cac_clauses from saved IDs.
      Must clear first - in-process reload leaves stale entries. */
   if (Glob.cac_clauses != NULL) {
-    zap_plist(Glob.cac_clauses);
+    zap_ilist(Glob.cac_clauses);
     Glob.cac_clauses = NULL;
   }
   if (Resume_cac_ids != NULL) {
@@ -7334,9 +7474,9 @@ void load_checkpoint_into_loop(void)
     /* Iterate backward: IDs were written head-to-tail, plist_prepend
        reverses, so backward iteration preserves original order. */
     for (i = Resume_cac_count - 1; i >= 0; i--) {
-      Topform c = find_clause_by_id(Resume_cac_ids[i]);
-      if (c != NULL) {
-        Glob.cac_clauses = plist_prepend(Glob.cac_clauses, c);
+      if (find_clause_by_id(Resume_cac_ids[i]) != NULL) {
+        Glob.cac_clauses =
+          ilist_prepend(Glob.cac_clauses, (int) Resume_cac_ids[i]);
         restored++;
       }
     }
@@ -7348,15 +7488,15 @@ void load_checkpoint_into_loop(void)
 
   /* Clear and restore Glob.desc_to_be_disabled from saved IDs. */
   if (Glob.desc_to_be_disabled != NULL) {
-    zap_plist(Glob.desc_to_be_disabled);
+    zap_ilist(Glob.desc_to_be_disabled);
     Glob.desc_to_be_disabled = NULL;
   }
   if (Resume_dtbd_ids != NULL) {
     int i, restored = 0;
     for (i = Resume_dtbd_count - 1; i >= 0; i--) {
-      Topform c = find_clause_by_id(Resume_dtbd_ids[i]);
-      if (c != NULL) {
-        Glob.desc_to_be_disabled = plist_prepend(Glob.desc_to_be_disabled, c);
+      if (find_clause_by_id(Resume_dtbd_ids[i]) != NULL) {
+        Glob.desc_to_be_disabled =
+          ilist_prepend(Glob.desc_to_be_disabled, (int) Resume_dtbd_ids[i]);
         restored++;
       }
     }
@@ -7842,7 +7982,7 @@ Prover_results search(Prover_input p)
     // Allocate auxiliary clause lists.
 
     Glob.limbo    = clist_init("limbo");
-    Glob.disabled = clause_store_init("disabled");
+    Glob.disabled = new_disabled_store();
     Glob.empties  = NULL;
 
     if (p->resume_dir) {
