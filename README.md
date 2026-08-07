@@ -66,16 +66,39 @@ temporarily for printing, proof expansion, or checkpoint serialization. The
 option is exact (it does not make search incomplete) and is currently default
 off.
 
+For longer ancestor-heavy searches, `assign(ancestor_store, memory).` replaces
+each cold, official-ID clause by an immutable versioned record and retains only
+a tagged offset in the disabled store and ID table.  Use
+`assign(ancestor_store, mmap).` for the same exact representation backed by a
+private temporary mmap file; `off` is the default.  Both archive modes retain
+stable IDs, all proof flags and attributes, compact justifications and parent
+IDs, and materialize only the requested final proof DAG.  Record bounds,
+version, reserved fields, and header/payload checksums are validated before a
+record is used.  A bad record aborts proof/checkpoint use instead of emitting a
+possibly unsound proof.
+
+The mmap file is unlinked immediately and exists only for the running process.
+Crash/restart remains the job of the architecture-neutral format-3 checkpoint:
+checkpoint output materializes records to the established textual format, and
+restart reconstructs the selected archive mode.  Existing checkpoints remain
+readable, and non-clause formula placeholders stay in the existing
+`formulas.txt` path.  See `P9-ANCESTOR-STORE.md` for the format and ownership
+contract.
+
 Normal statistics report compression attempts, successes, skips,
 materializations and recompressions, along with active/full/compact logical
 body bytes, allocator-reserved bytes, and live/peak FPA node/list counts.
 Logical bytes are not process RSS: the early-phase allocator reuses its 20 MB
 slabs but does not return them to the operating system.
 
-Run `make memory-tests` for the focused format and FPA lifecycle regression.
+Run `make memory-tests` for the focused body, FPA, bookkeeping, ancestor-format,
+corruption, mmap, and proof-DAG lifecycle regressions.  Run
+`make -C test.src ancestor-store-scale` for the bounded 20,000-record accounting
+test.
 `benchmarks/run-memory-benchmarks.sh smoke` runs the bounded proof and
-disabled-heavy comparisons; `... all` also runs the two capped AIM cases when
-the supplied AIM corpus is available.
+disabled-heavy comparisons across `off`, body-only compression, `memory`, and
+`mmap`; `... all` also runs the two capped AIM cases when the supplied AIM
+corpus is available.
 
 ---
 

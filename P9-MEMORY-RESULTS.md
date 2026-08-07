@@ -1,7 +1,8 @@
-# Prover9 AIM memory results (Phases 0--3)
+# Prover9 AIM memory results (Phases 0--4)
 
 Date: 2026-08-07 (Europe/Berlin)
 Base revision: `b36df4c06d5794dd98e42335f191dd41d7abd2ab`
+Phase 4 starting revision: `9172cd401095a10aebf5b90f835715baeca0aaca`
 Release flags: `-O2 -Wall`; debug flags: `-g -O0` (prover sources also
 define `DEBUG`)
 Host compiler: GCC 13.3.0
@@ -222,4 +223,108 @@ CAP_SECONDS=30 timeout 150s benchmarks/run-memory-benchmarks.sh aim
 The checkpoint contained 57 in-memory disabled clauses, of which eight had
 official IDs and were serialized. This is the existing format-3 behavior;
 Phase 3 neither drops additional proof ancestors nor assigns IDs to previously
-ID-zero pre-elimination clauses. Phase 4 was not started.
+ID-zero pre-elimination clauses.  The Phase 4 results below supersede that
+historical handoff statement.
+
+## Phase 4 append-only ancestor-store results
+
+### Synthetic scale and retained allocation
+
+The bounded 100,000-record driver used an official-ID input clause with one
+binary atom, one unary function, an attribute-free input justification, and
+the same disabled-store/ID-table ownership as Prover9:
+
+| Quantity | Phase 4 value |
+| --- | ---: |
+| Records / used record bytes | 100,000 / 11,100,000 B |
+| Backing capacity | 16,777,216 B |
+| Handle vector / paged ID table | 1,048,656 / 858,032 B |
+| Resident handle+ID logical bytes | 1,906,688 B (19.067/record) |
+| Used record+resident logical bytes | 13,006,688 B (130.067/record) |
+| Estimated replaced live graph+bookkeeping | 26,400,000 B (264.000/record) |
+| Peak RSS / wall | 14,464 KB / 0.63 s |
+
+The used-record comparison reduces logical retained allocation by 13,393,312
+bytes (50.7%).  The always-resident handle/ID portion is 92.8% below the
+estimated replaced graph and bookkeeping.  `backing capacity` is reported
+separately: geometric high-water is real allocated/address-space capacity, not
+used record bytes, and RSS also includes the complete process and mapped-page
+residency.
+
+Reproduce with:
+
+```sh
+make -C test.src ancestor_store_scale_test
+/usr/bin/time -v test.src/ancestor_store_scale_test 100000
+```
+
+### Integrated exact workloads
+
+All modes below used the same release binary.  `compressed` means the Phase 2
+`compress_disabled` option without archive records.  The slash-separated work
+columns are given/generated/kept/disabled.
+
+| Workload/cap | Mode | Exact work | Records / used bytes / backing | Peak RSS / wall |
+| --- | --- | --- | ---: | ---: |
+| x2 proof | off | 12/118/23/14; length 16 | 0 / 0 / 0 B | 3,328 KB / 0.01 s |
+| x2 proof | compressed | identical proof/work | 0 / 0 / 0 B | 3,328 KB / 0.01 s |
+| x2 proof | memory | identical proof/work | 9 / 1,276 / 4,096 B | 3,328 KB / 0.01 s |
+| x2 proof | mmap | identical proof/work | 9 / 1,276 / 4,096 B | 3,456 KB / 0.01 s |
+| disabled-heavy | off | 1/1,001/1,001/2,001 | 0 / 0 / 0 B | 5,248 KB / 0.05 s |
+| disabled-heavy | compressed | identical work | 0 / 0 / 0 B | 5,248 KB / 0.04 s |
+| disabled-heavy | memory | identical work | 1,000 / 119,000 / 131,072 B | 5,248 KB / 0.05 s |
+| disabled-heavy | mmap | identical work | 1,000 / 119,000 / 131,072 B | 5,120 KB / 0.06 s |
+| LCC, given 500 | off | 501/258,858/562/76 | 0 / 0 / 0 B | 6,016 KB / 1.93 s |
+| LCC, given 500 | compressed | identical work | 0 / 0 / 0 B | 6,016 KB / 1.88 s |
+| LCC, given 500 | memory | identical work | 54 / 8,367 / 16,384 B | 6,016 KB / 1.87 s |
+| LCC, given 500 | mmap | identical work | 54 / 8,367 / 16,384 B | 6,016 KB / 1.84 s |
+| aK, given 200 | off | 201/84,789/340/58 | 0 / 0 / 0 B | 15,488 KB / 1.36 s |
+| aK, given 200 | compressed | identical work | 0 / 0 / 0 B | 15,360 KB / 1.49 s |
+| aK, given 200 | memory | identical work | 9 / 1,152 / 4,096 B | 15,488 KB / 1.39 s |
+| aK, given 200 | mmap | identical work | 9 / 1,152 / 4,096 B | 15,360 KB / 1.43 s |
+
+The disabled-heavy workload has 1,001 official-ID clauses and 1,000 archived
+records; the other 1,001 disabled objects are pre-ID elimination clauses kept
+in the exact Phase 2 representation.  Its full bodies are 432,064 B, while the
+compressed body payload is 34,006 B and the archive records are 119,000 used
+bytes.  Thus Phase 4 pays for proof metadata that Phase 2 leaves in live
+objects, but deletes the much larger `Topform`/literal/term/justification graph.
+
+No archive-mode capped workload is more than 5.2% slower than `off` in these
+single short observations, and the direction varies by workload.  This is
+within short-run noise and below the 10% regression threshold; it is not a
+speedup claim.  RSS is flat because each workload fits the same allocator/page
+plateau and AIM hint/active storage dominates its few archived records.
+
+Reproduce with per-prover internal and external caps:
+
+```sh
+CAP_SECONDS=30 timeout 120s benchmarks/run-memory-benchmarks.sh smoke
+CAP_SECONDS=30 timeout 150s benchmarks/run-memory-benchmarks.sh aim
+```
+
+### Proof, corruption, sanitizer, and checkpoint evidence
+
+- x2's archive proof is accepted by `prooftrans parents_only` and
+  `directproof`; native proof content and all work counters match `off` and
+  `compressed`.  Archive TSTP output reports Theorem and contains a complete
+  `SZS output start CNFRefutation` / end block.
+- `ancestor_store_test` passes in memory and mmap modes.  It explicitly rejects
+  a changed version, a corrupt total bound, and payload CRC damage, then
+  verifies the restored bytes remain usable and that validation counters
+  increase.  It exercises proof-DAG on-demand materialization and all compact
+  justification families used by the engine.
+- The full LADR library and focused ancestor/memory tests pass ASan+UBSan with
+  `detect_leaks=1`, `halt_on_error=1`, and no invalid access, undefined
+  behavior, or lifecycle leak.
+- A fresh mmap aK checkpoint at given 29 had eight archived ancestors (1,011
+  used bytes, 4,096-byte backing) and materialized them into the unchanged
+  format-3 checkpoint.  Resume passed 18/18 hashes and reconstructed sos=65,
+  usable=37, demods=0, disabled=8.  It subsequently hit the known
+  `avl_insert, item already there` checkpoint restore defect.  This defect is
+  already documented for non-archive restores, so it limits the general
+  deterministic-restart claim but does not indicate archive corruption or a
+  mismatched checkpoint hash.
+
+No uncapped AIM search was run, no capped non-proof result is treated as a
+logical failure, and Phase 5 was not started.

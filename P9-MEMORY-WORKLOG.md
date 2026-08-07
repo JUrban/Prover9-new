@@ -1,7 +1,8 @@
-# Prover9 AIM memory worklog (Phases 0--3)
+# Prover9 AIM memory worklog (Phases 0--4)
 
 Date: 2026-08-07 (Europe/Berlin)
 Base revision: `b36df4c06d5794dd98e42335f191dd41d7abd2ab`
+Phase 4 starting revision: `9172cd401095a10aebf5b90f835715baeca0aaca`
 Compiler: GCC 13.3.0; GNU Make 4.3
 
 The worktree was clean at the start. `make all` is the authoritative
@@ -183,7 +184,7 @@ excludes the unchanged 112-byte `Topform` and allocator metadata.
   checkpoint hashes deliberately cover the serialized, official-ID subset.
 - The two pre-existing checkpoint divergences above remain out of Phase 3.
 
-## Exact next actions after Phase 3
+## Phase 3 handoff (completed below)
 
 1. Before Phase 4 implementation, specify the compact proof-record ownership,
    versioning, bounds checks, and proof-checker reconstruction contract.
@@ -193,4 +194,104 @@ excludes the unchanged 112-byte `Topform` and allocator metadata.
 3. Independently diagnose the aK kept/SOS resume divergence and LCC AVL restore
    failure before relying on checkpoint equivalence for a Phase 4 record log.
 
-Phase 4 was not started.
+These were the Phase 3 handoff items.  The Phase 4 design, implementation, and
+bounded evidence follow.
+
+## Phase 4 versioned ancestor store
+
+The detailed ownership, binary layout, validation, and checkpoint contract is
+in `P9-ANCESTOR-STORE.md`.  The implementation adds the exact string option
+`ancestor_store = off | memory | mmap`, default `off`.  Archive modes use the
+Phase 2 body encoder, a new versioned term encoder for formulas/attributes, and
+a versioned compact justification encoder covering every current LADR
+justification variant.  Each record also carries an immediately readable array
+of parent IDs.
+
+Once an official-ID disabled clause has left all active indexes, the store
+appends its record, atomically replaces both owning references by low-bit
+tagged offsets, and frees the `Topform`, literals, terms, attributes, and
+justification graph.  ID-zero pre-elimination clauses remain Phase 2 compressed
+so assigning a synthetic ID cannot perturb search order.  Formula placeholders
+remain resident because the established format-3 `formulas.txt` namespace owns
+their restart representation.  The `Topform` additions reuse padding;
+`sizeof(struct topform)` remains 112 on the measurement host.
+
+Parent-only operations no longer assume that every ID maps to a pointer.
+Proof DAG size/tree weight, ancestor subsumption cost, negative-parent walks,
+CAC triggers, and delayed denial disabling use stable IDs or record metadata.
+Final native/TSTP proof output, proof expansion, generic formula-parent output,
+checkpoint serialization, and returned prover results materialize scoped
+clones.  Archived hint matchers store the hint ID and relink to the separate
+hint namespace for output.  Every scoped clone path was audited for release,
+including proof-limit and derivation-only exits.
+
+The 96-byte header and every multibyte integer are explicitly little-endian.
+Readers reject bad offsets, truncated headers, magic/version/header-size
+mismatches, nonzero reserved fields, header CRC mismatch, arithmetic overflow,
+section/parent bounds mismatch, payload CRC mismatch, and invalid nested term
+or justification encoding.  Metadata operations required by proof or
+checkpoint correctness fail fatally on damage; materialization APIs return a
+visible failure and never a partial clause.  The corruption counter is printed
+with normal statistics.
+
+`memory` grows a heap byte vector geometrically.  `mmap` grows an unlinked
+temporary file with `ftruncate`/`MAP_SHARED` and calls `msync` before checkpoint
+serialization.  The mmap file is an ephemeral backing, not a competing restart
+format.  Checkpoint format 3 is unchanged and architecture-neutral: records
+are validated/materialized into the same text, flags, and justification files,
+then reconstructed in the selected backing after restore.  Old checkpoints
+without the option migrate to the default `off` path.
+
+### Phase 4 verification
+
+- Sequential release build, project `test1`, and `make memory-tests` pass.
+  The new focused test runs both memory and mmap backings; round-trips clauses,
+  private term flags, weights, attributes, parent arrays, and proof flags;
+  covers paramodulation, demodulation, IVY, and INSTANCE records; builds a final
+  proof DAG; rejects corrupt version, size, and payload records; syncs; and
+  returns every store and ID-page allocation to baseline.
+- The LADR library plus the ancestor-store and existing memory lifecycle tests
+  pass ASan+UBSan with leak detection and halt-on-error enabled.
+- x2 has identical given/generated/kept counts (12/118/23), proof length 16,
+  and proof content under `off`, Phase 2 compression, `memory`, and `mmap`.
+  Both `prooftrans parents_only` and `directproof` accept the archive proof;
+  TSTP output contains a complete `CNFRefutation` block and theorem status.
+- Capped LCC and aK prefixes have identical work, active sets, and FPA counters
+  in all four modes.  LCC is 501/258,858/562/76 at its given cap; aK is
+  201/84,789/340/58.
+- A fresh mmap-backed aK format-3 checkpoint at given 29 serialized 5,235
+  clauses, including eight archived official-ID ancestors.  Resume passed all
+  18 hashes and reconstructed sos=65, usable=37, disabled=8.  It later reached
+  the repository's pre-existing `avl_insert, item already there` restore fault.
+  The same family of AVL/selector restart defects is documented above for
+  option-off/Phase 2 runs, so Phase 4 claims checkpoint representation and
+  verification compatibility, not a repaired general restart algorithm.
+
+### Phase 4 decisions and remaining risks
+
+- The feature stays default off.  Exact bounded work and proof results are
+  strong enough to expose the option, but not to change defaults without a
+  longer ancestor-heavy soak and broader proof corpus.
+- A 96-byte fixed header and exact proof metadata can outweigh a tiny clause.
+  The scale result is favorable for the measured representative clause, while
+  body-only Phase 2 compression remains useful when record metadata dominates.
+- The mmap backing can reduce heap/RSS pressure only when the kernel can evict
+  cold pages; these short tests fit in the same RSS plateaus.  The unlinked file
+  intentionally cannot recover an uncheckpointed crash.
+- Compact parent IDs inherit the existing justification layer's signed-int
+  parent range even though the record and clause ID fields are 64-bit.  This is
+  a pre-existing representational limit, not widened in Phase 4.
+- The outstanding deterministic-restart AVL/selector failure remains the first
+  correctness follow-up.  Phase 5 was not started.
+
+## Next three actions after Phase 4
+
+1. Diagnose and repair the format-3 AVL/selector duplicate on aK and the
+   related option-off resume divergence, then repeat full-run checkpoint
+   equality with all ancestor modes.
+2. Run a longer deterministic ancestor-heavy AIM soak, with fixed work/time
+   caps, to locate the heap-slab and mmap page-cache crossover and quantify
+   record metadata by justification class.
+3. Expand the proof corpus across native, TSTP, expanded, IVY, hints, CAC, and
+   denial-reuse paths, comparing normalized proof DAGs and checker results for
+   `off`, `memory`, and `mmap`.

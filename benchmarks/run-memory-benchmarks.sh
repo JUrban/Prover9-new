@@ -1,5 +1,5 @@
 #!/bin/sh
-# Bounded memory/correctness benchmark driver for Phases 0--3.
+# Bounded memory/correctness benchmark driver for Phases 0--4.
 
 set -eu
 
@@ -21,8 +21,20 @@ summarize()
   err=$3
   status=$4
   echo "===== $label (status=$status, external_cap=${cap_seconds}s) ====="
-  grep -E '^(Given|Usable|Disabled_compression|Clause_body_bytes|Bookkeeping_bytes|Allocator_bytes)' "$out" || true
+  grep -E '^(Given|Usable|Disabled_compression|Clause_body_bytes|Ancestor_store|Bookkeeping_bytes|Allocator_bytes)' "$out" || true
   grep -E 'User time|System time|Elapsed .* time|Maximum resident set size' "$err" || true
+}
+
+settings_for_mode()
+{
+  case "$1" in
+    off)        printf '%s\n' 'clear(compress_disabled).' 'assign(ancestor_store,off).' ;;
+    compressed|on)
+                printf '%s\n' 'set(compress_disabled).' 'assign(ancestor_store,off).' ;;
+    memory)     printf '%s\n' 'clear(compress_disabled).' 'assign(ancestor_store,memory).' ;;
+    mmap)       printf '%s\n' 'clear(compress_disabled).' 'assign(ancestor_store,mmap).' ;;
+    *) echo "unknown mode: $1" >&2; return 1 ;;
+  esac
 }
 
 run_file()
@@ -32,12 +44,11 @@ run_file()
   mode=$3
   max_given=$4
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/p9-memory-bench.XXXXXX")
-  if [ "$mode" = on ]; then setting='set(compress_disabled).';
-  else setting='clear(compress_disabled).'; fi
   set +e
   {
     sed -n 'p' "$input"
-    printf '%s\n' "$setting" "assign(max_given,$max_given)." \
+    settings_for_mode "$mode"
+    printf '%s\n' "assign(max_given,$max_given)." \
       'assign(max_seconds,20).' 'clear(print_proofs).'
   } | /usr/bin/time -v timeout "$cap_seconds" "$prover" \
       > "$tmp/out" 2> "$tmp/err"
@@ -52,11 +63,10 @@ run_x2()
 {
   mode=$1
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/p9-memory-x2.XXXXXX")
-  if [ "$mode" = on ]; then setting='set(compress_disabled).';
-  else setting='clear(compress_disabled).'; fi
   {
     sed -n 'p' "$repo/prover9.examples/x2.in"
-    printf '%s\n' "$setting" 'assign(max_seconds,20).'
+    settings_for_mode "$mode"
+    printf '%s\n' 'assign(max_seconds,20).'
   } | /usr/bin/time -v timeout "$cap_seconds" "$prover" \
       > "$tmp/out" 2> "$tmp/err"
   timeout "$cap_seconds" "$repo/bin/prooftrans" parents_only \
@@ -70,14 +80,14 @@ run_disabled_heavy()
 {
   mode=$1
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/p9-memory-disabled.XXXXXX")
-  if [ "$mode" = on ]; then setting='set(compress_disabled).';
-  else setting='clear(compress_disabled).'; fi
   set +e
   {
     printf '%s\n' 'clear(auto).' 'set(binary_resolution).' \
       'set(back_subsume).' 'clear(print_initial_clauses).' \
       'clear(print_given).' 'clear(print_proofs).' \
-      'assign(max_given,1).' 'assign(max_seconds,10).' "$setting" \
+      'assign(max_given,1).' 'assign(max_seconds,10).'
+    settings_for_mode "$mode"
+    printf '%s\n' \
       'formulas(sos).'
     i=1
     while [ "$i" -le 1000 ]; do
@@ -98,9 +108,13 @@ case "$suite" in
   smoke|all)
     timeout "$cap_seconds" make -C "$repo" memory-tests
     run_x2 off
-    run_x2 on
+    run_x2 compressed
+    run_x2 memory
+    run_x2 mmap
     run_disabled_heavy off
-    run_disabled_heavy on
+    run_disabled_heavy compressed
+    run_disabled_heavy memory
+    run_disabled_heavy mmap
     ;;
   aim|bookkeeping) ;;
   *) echo "usage: $0 [smoke|aim|bookkeeping|all]" >&2; exit 2;;
@@ -117,8 +131,12 @@ esac
 case "$suite" in
   aim|all)
     run_file LCC_to_aK1 "$aim_dir/LCC_to_aK1.in" off 500
-    run_file LCC_to_aK1 "$aim_dir/LCC_to_aK1.in" on 500
+    run_file LCC_to_aK1 "$aim_dir/LCC_to_aK1.in" compressed 500
+    run_file LCC_to_aK1 "$aim_dir/LCC_to_aK1.in" memory 500
+    run_file LCC_to_aK1 "$aim_dir/LCC_to_aK1.in" mmap 500
     run_file aK1_nil3_a "$aim_dir/aK1_nil3_a.in" off 200
-    run_file aK1_nil3_a "$aim_dir/aK1_nil3_a.in" on 200
+    run_file aK1_nil3_a "$aim_dir/aK1_nil3_a.in" compressed 200
+    run_file aK1_nil3_a "$aim_dir/aK1_nil3_a.in" memory 200
+    run_file aK1_nil3_a "$aim_dir/aK1_nil3_a.in" mmap 200
     ;;
 esac
