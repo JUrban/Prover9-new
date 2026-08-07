@@ -342,6 +342,16 @@ Implementation status on 2026-08-07:
   floor.  These finite-boundary
   figures include deferred fair work and must not be extrapolated as a
   week-long reduction until the long-run acceptance experiment is run.
+- Deactivation epochs are now stored only for clauses that actually became
+  inactive.  The previous table allocated a 16-KiB 4,096-ID page as soon as
+  any given in that ID region was activated, even though active state is epoch
+  zero; sparse given IDs could therefore make it grow much faster than the
+  activation count.  An open-addressed ID-to-epoch table reduces structural
+  history storage at the same boundary from 34,048 to 19,584 bytes (42.5%) for
+  51 deactivations.  Descriptors, retained bodies, and structural history
+  together occupy 46,808 bytes versus 132,944 in the original persistent-clone
+  implementation, a 64.8% reduction with identical search counts.  The fresh
+  given-87 checkpoint still restores all 18 hashes and the exact boundary.
 - The first hint-aware scheduler increment is an opt-in bounded descriptor
   probe, enabled by `collective_hint_probes`.  When a selected given has an exact
   `matching_hint`, its newly appended combined descriptor may move to the
@@ -450,10 +460,10 @@ the current low-RAM host.  The 10% sample is an implementation/regression
 gate, not a claim that the Phase 4 80% full-input gate has already passed.
 The Phase 5 gate is not yet claimed.  Hyper batches now query a persistent
 versioned historical index and the focused later-disabled-parent regression
-closes the known coverage bug.  Active history bodies are now shared, while
-only deactivated historical versions remain as ordinary term trees; a packed
-representation for those retained versions and a compact sparse deactivation
-map remain desirable before a week-long scale gate.  Phase 5
+closes the known coverage bug.  Active history bodies are now shared, only
+deactivated historical versions remain as ordinary term trees, and
+deactivation epochs use a sparse map.  A packed representation for retained
+versions remains desirable before a week-long scale gate.  Phase 5
 also still needs a bounded promising-pair cache, useful lower bounds, and a
 hint-discovery channel for unmaterialized conclusions.  Exact matches on
 selected givens now provide a starvation-safe one-turn descriptor probe, and

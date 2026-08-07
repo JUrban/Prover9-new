@@ -164,14 +164,12 @@ static enum inference_source Current_inference_source = INFER_SOURCE_OTHER;
 /* A Waldmeister-style collective frontier delays the Cartesian product of
    one newly active clause with the active clauses visible at that moment.
    One descriptor is constant size.  The append-only activation history and
-   a dense deactivation-epoch side table identify the exact historical
-   partner set.  One immutable inference-only clause clone per activation is
-   retained and indexed once, so history grows with givens rather than with
-   generated/passive clauses and delayed batches do not rebuild FPA trees. */
+   a sparse deactivation-epoch side table identify the exact historical
+   partner set.  Active clause bodies are shared with the persistent index;
+   disabled versions transfer to history ownership, so history grows with
+   givens rather than with generated/passive clauses. */
 #define COLLECTIVE_ACT_PAGE_BITS 10
 #define COLLECTIVE_ACT_PAGE_SIZE (1U << COLLECTIVE_ACT_PAGE_BITS)
-#define COLLECTIVE_DEACT_PAGE_BITS 12
-#define COLLECTIVE_DEACT_PAGE_SIZE (1U << COLLECTIVE_DEACT_PAGE_BITS)
 
 struct collective_activation_page {
   unsigned long long ids[COLLECTIVE_ACT_PAGE_SIZE];
@@ -179,8 +177,10 @@ struct collective_activation_page {
   unsigned char clashable[COLLECTIVE_ACT_PAGE_SIZE];
 };
 
-struct collective_deactivation_page {
-  unsigned epochs[COLLECTIVE_DEACT_PAGE_SIZE];
+struct collective_deactivation_entry {
+  unsigned long long id;
+  unsigned epoch;
+  unsigned reserved;
 };
 
 enum collective_batch_kind {
@@ -209,9 +209,9 @@ static size_t Collective_activation_page_capacity = 0;
 static size_t Collective_activation_page_count = 0;
 static unsigned long long Collective_activation_count = 0;
 static Lindex Collective_historical_idx = NULL;
-static struct collective_deactivation_page **Collective_deactivation_pages = NULL;
-static size_t Collective_deactivation_page_capacity = 0;
-static size_t Collective_deactivation_page_count = 0;
+static struct collective_deactivation_entry *Collective_deactivations = NULL;
+static size_t Collective_deactivation_capacity = 0;
+static size_t Collective_deactivation_count = 0;
 static struct collective_batch *Collective_batch_head = NULL;
 static struct collective_batch *Collective_batch_tail = NULL;
 static unsigned long long Collective_batch_count = 0;
@@ -342,13 +342,10 @@ void collective_clear_state(void)
   Collective_activation_page_count = 0;
   Collective_activation_count = 0;
 
-  for (i = 0; i < Collective_deactivation_page_capacity; i++)
-    if (Collective_deactivation_pages[i] != NULL)
-      safe_free(Collective_deactivation_pages[i]);
-  safe_free(Collective_deactivation_pages);
-  Collective_deactivation_pages = NULL;
-  Collective_deactivation_page_capacity = 0;
-  Collective_deactivation_page_count = 0;
+  safe_free(Collective_deactivations);
+  Collective_deactivations = NULL;
+  Collective_deactivation_capacity = 0;
+  Collective_deactivation_count = 0;
 
   while (Collective_batch_head != NULL) {
     b = Collective_batch_head;
@@ -389,6 +386,7 @@ void collective_reset_state(void)
   Stats.collective_batches_pending = 0;
   Stats.collective_batches_peak = 0;
   Stats.collective_activation_entries = 0;
+  Stats.collective_deactivation_entries = 0;
   Stats.collective_descriptor_bytes = 0;
   Stats.collective_history_bytes = 0;
 }
@@ -413,63 +411,85 @@ void collective_grow_activation_pages(size_t need)
   Collective_activation_page_capacity = new_capacity;
 }
 
-static
-void collective_grow_deactivation_pages(size_t need)
+static size_t collective_deactivation_hash(unsigned long long id)
 {
-  size_t old_capacity = Collective_deactivation_page_capacity;
-  size_t new_capacity = old_capacity == 0 ? 16 : old_capacity;
-  struct collective_deactivation_page **p;
-  while (new_capacity < need) {
-    if (new_capacity > ((size_t) -1) / 2)
-      fatal_error("collective deactivation page table overflow");
-    new_capacity *= 2;
-  }
-  p = safe_calloc(new_capacity, sizeof(*p));
-  if (Collective_deactivation_pages != NULL) {
-    memcpy(p, Collective_deactivation_pages, old_capacity * sizeof(*p));
-    safe_free(Collective_deactivation_pages);
-  }
-  Collective_deactivation_pages = p;
-  Collective_deactivation_page_capacity = new_capacity;
+  id ^= id >> 30;
+  id *= 0xbf58476d1ce4e5b9ULL;
+  id ^= id >> 27;
+  id *= 0x94d049bb133111ebULL;
+  id ^= id >> 31;
+  return (size_t) id;
 }
 
-static
-struct collective_deactivation_page *collective_deactivation_page(
-    unsigned long long id, BOOL create)
+static size_t collective_deactivation_slot(
+  struct collective_deactivation_entry *table, size_t capacity,
+  unsigned long long id)
 {
-  unsigned long long page_number = id >> COLLECTIVE_DEACT_PAGE_BITS;
-  struct collective_deactivation_page *p;
-  if (page_number > (unsigned long long) ((size_t) -1))
-    fatal_error("collective clause ID exceeds addressable page table");
-  if ((size_t) page_number >= Collective_deactivation_page_capacity) {
-    if (!create)
-      return NULL;
-    collective_grow_deactivation_pages((size_t) page_number + 1);
-  }
-  p = Collective_deactivation_pages[(size_t) page_number];
-  if (p == NULL && create) {
-    p = safe_calloc(1, sizeof(*p));
-    Collective_deactivation_pages[(size_t) page_number] = p;
-    Collective_deactivation_page_count++;
-  }
-  return p;
+  size_t slot = collective_deactivation_hash(id) & (capacity - 1);
+  while (table[slot].id != 0 && table[slot].id != id)
+    slot = (slot + 1) & (capacity - 1);
+  return slot;
+}
+
+static void collective_resize_deactivations(size_t new_capacity)
+{
+  struct collective_deactivation_entry *old = Collective_deactivations;
+  size_t old_capacity = Collective_deactivation_capacity;
+  size_t i;
+  Collective_deactivations = safe_calloc(new_capacity, sizeof(*old));
+  Collective_deactivation_capacity = new_capacity;
+  for (i = 0; i < old_capacity; i++)
+    if (old[i].id != 0) {
+      size_t slot = collective_deactivation_slot(
+        Collective_deactivations, new_capacity, old[i].id);
+      Collective_deactivations[slot] = old[i];
+    }
+  safe_free(old);
 }
 
 static
 unsigned collective_deactivation_epoch(unsigned long long id)
 {
-  struct collective_deactivation_page *p =
-    collective_deactivation_page(id, FALSE);
-  return p == NULL ? 0 :
-    p->epochs[(unsigned) (id & (COLLECTIVE_DEACT_PAGE_SIZE - 1))];
+  size_t slot;
+  if (id == 0 || Collective_deactivation_capacity == 0)
+    return 0;
+  slot = collective_deactivation_slot(Collective_deactivations,
+                                      Collective_deactivation_capacity, id);
+  return Collective_deactivations[slot].id == id ?
+         Collective_deactivations[slot].epoch : 0;
 }
 
 static
 void collective_set_deactivation_epoch(unsigned long long id, unsigned epoch)
 {
-  struct collective_deactivation_page *p =
-    collective_deactivation_page(id, TRUE);
-  p->epochs[(unsigned) (id & (COLLECTIVE_DEACT_PAGE_SIZE - 1))] = epoch;
+  size_t slot;
+  if (id == 0)
+    fatal_error("collective deactivation requires a stable clause ID");
+  if (epoch == 0) {
+    if (Collective_deactivation_capacity != 0) {
+      slot = collective_deactivation_slot(Collective_deactivations,
+                                          Collective_deactivation_capacity,
+                                          id);
+      if (Collective_deactivations[slot].id == id)
+        Collective_deactivations[slot].epoch = 0;
+    }
+    return;
+  }
+  if (Collective_deactivation_capacity == 0)
+    collective_resize_deactivations(16);
+  else if ((Collective_deactivation_count + 1) * 4 >=
+           Collective_deactivation_capacity * 3) {
+    if (Collective_deactivation_capacity > ((size_t) -1) / 2)
+      fatal_error("collective deactivation table overflow");
+    collective_resize_deactivations(Collective_deactivation_capacity * 2);
+  }
+  slot = collective_deactivation_slot(Collective_deactivations,
+                                      Collective_deactivation_capacity, id);
+  if (Collective_deactivations[slot].id == 0) {
+    Collective_deactivations[slot].id = id;
+    Collective_deactivation_count++;
+  }
+  Collective_deactivations[slot].epoch = epoch;
 }
 
 static
@@ -554,7 +574,6 @@ void collective_append_activation_id(unsigned long long id, BOOL clashable)
   Collective_activation_pages[page_number]->clashable[offset] =
     clashable ? 1 : 0;
   Collective_activation_count++;
-  (void) collective_deactivation_page(id, TRUE);
 }
 
 static
@@ -713,10 +732,8 @@ unsigned long long collective_history_bytes(void)
            sizeof(struct collective_activation_page) +
          (unsigned long long) Collective_activation_page_capacity *
            sizeof(*Collective_activation_pages) +
-         (unsigned long long) Collective_deactivation_page_count *
-           sizeof(struct collective_deactivation_page) +
-         (unsigned long long) Collective_deactivation_page_capacity *
-           sizeof(*Collective_deactivation_pages);
+         (unsigned long long) Collective_deactivation_capacity *
+           sizeof(*Collective_deactivations);
 }
 
 static
@@ -1560,6 +1577,7 @@ void update_stats(void)
   Stats.delayed_demodulators = delayed_demodulator_count();
   Stats.collective_batches_pending = Collective_batch_count;
   Stats.collective_activation_entries = Collective_activation_count;
+  Stats.collective_deactivation_entries = Collective_deactivation_count;
   Stats.collective_descriptor_bytes = Collective_batch_count *
                                       sizeof(struct collective_batch);
   Stats.collective_history_bytes = collective_history_bytes();
@@ -1636,9 +1654,11 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             comma_num(s.collective_hint_probes_expanded),
             Collective_hint_probe_credit ? "available" : "consumed");
     fprintf(fp,
-            "Collective_memory: descriptor_bytes=%s, history_bytes=%s.\n",
+            "Collective_memory: descriptor_bytes=%s, history_bytes=%s, "
+            "deactivations=%s.\n",
             comma_num(s.collective_descriptor_bytes),
-            comma_num(s.collective_history_bytes));
+            comma_num(s.collective_history_bytes),
+            comma_num(s.collective_deactivation_entries));
     if (s.collective_snapshot_rebuilds != 0)
       fprintf(fp,
               "Collective_snapshots: rebuilds=%s, clauses_indexed=%s, "

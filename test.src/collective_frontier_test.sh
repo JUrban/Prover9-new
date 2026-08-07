@@ -17,9 +17,9 @@ grep -Eq 'Collective_work: paramod_pairs=[1-9][0-9]*, hyper_batches=[0-9]+\.' \
   "$test_tmp/prover.out"
 grep -Eq 'Collective_hint_probes: scheduled=[1-9][0-9]*, expanded=[1-9][0-9]*, credit=(available|consumed)\.' \
   "$test_tmp/prover.out"
-grep -Eq 'Collective_memory: descriptor_bytes=[1-9][0-9]*, history_bytes=[1-9][0-9]*\.' \
+grep -Eq 'Collective_memory: descriptor_bytes=[1-9][0-9]*, history_bytes=[1-9][0-9]*, deactivations=14\.' \
   "$test_tmp/prover.out"
-grep -Eq 'Collective_history_index: clauses=[1-9][0-9]*, indexed=[0-9]+, shared=[0-9]+, retained=[0-9]+, retained_clause_bytes=[0-9]+, queries=[0-9]+, candidates=[0-9]+, future_rejected=[0-9]+, inactive_rejected=[0-9]+\.' \
+grep -Eq 'Collective_history_index: clauses=30, indexed=0, shared=16, retained=14, retained_clause_bytes=[1-9][0-9]*, queries=0, candidates=0, future_rejected=0, inactive_rejected=0\.' \
   "$test_tmp/prover.out"
 grep -Eq 'Hint_index: mode=packed, fpa_depth=0, epoch=[1-9][0-9]*\.' \
   "$test_tmp/prover.out"

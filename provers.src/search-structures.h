@@ -339,6 +339,7 @@ struct prover_stats {
     collective_batches_pending,
     collective_batches_peak,
     collective_activation_entries,
+    collective_deactivation_entries,
     collective_descriptor_bytes,
     collective_history_bytes,
     compression_attempted,

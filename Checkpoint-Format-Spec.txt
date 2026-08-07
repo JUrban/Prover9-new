@@ -186,7 +186,9 @@ Followed by `activation_count` history records:
 The clashable bit is distinct from active membership.  In particular, a
 restricted denial can be active without having been inserted into the
 resolution index.  The persistent historical hyper index contains only
-entries whose bit is one.
+entries whose bit is one.  Although every activation record carries its
+deactivation epoch on disk, the runtime map stores only nonzero epochs; active
+clauses consume no deactivation-map entry.
 
 Finally, `pending_batch_count` descriptors are written in queue order:
 
