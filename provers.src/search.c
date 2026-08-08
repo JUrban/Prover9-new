@@ -237,6 +237,7 @@ struct collective_batch {
   unsigned long long conclusion_next_ordinal;
   unsigned snapshot_epoch;
   unsigned kind;
+  unsigned long long candidate_ordinal;
   Para_iterator para_iterator;
   Hyper_iterator hyper_iterator;
   size_t priority_heap_index;
@@ -274,6 +275,40 @@ static unsigned Collective_balanced_lane = COLLECTIVE_LANE_PARAMOD;
 static unsigned Collective_balanced_lane_credit = 0;
 static unsigned Collective_balanced_turns_since_oldest = 0;
 static BOOL Collective_drain_mode = FALSE;
+
+/* Phase-4 candidate windows.  This is one global pool shared by every rule
+   lane; descriptors retain no raw Topforms.  Heap keys are advisory preview
+   results, while ownership of every clause ends only in the authoritative
+   cl_process() path. */
+struct collective_pool_entry {
+  Topform clause;
+  enum inference_source source;
+  unsigned kind;
+  unsigned selector_priority;
+  unsigned long long selector_mask;
+  unsigned long long given_id;
+  unsigned long long raw_ordinal;
+  unsigned long long insertion_ordinal;
+  unsigned long long hint_id;
+  unsigned long long fingerprint;
+  unsigned long long hint_epoch;
+  unsigned simplifier_epoch;
+  double adjusted_weight;
+  unsigned long long bytes;
+};
+
+static struct collective_pool_entry **Collective_candidate_heap = NULL;
+static size_t Collective_candidate_heap_count = 0;
+static size_t Collective_candidate_heap_capacity = 0;
+static unsigned long long Collective_candidate_pool_bytes = 0;
+static unsigned long long Collective_candidate_insertion_ordinal = 0;
+static unsigned Collective_pool_expansions_since_commit = 0;
+static unsigned Collective_pool_commits_since_fair = 0;
+static struct collective_batch *Current_collective_pool_batch = NULL;
+static struct collective_pool_entry *Current_collective_commit_entry = NULL;
+
+static void collective_candidate_pool_clear(void);
+static unsigned long long collective_candidate_pool_allocated_bytes(void);
 
 /* Periodic automatic checkpoint state */
 static time_t Last_auto_ckpt_time = 0;       // wall-clock of last auto checkpoint
@@ -376,7 +411,7 @@ unsigned long long collective_candidate_occupancy(void)
      records here would couple descriptor draining to passive cardinality and
      can deadlock at the descriptor and passive limits simultaneously. */
   if (collective_balanced_mode() && dense_passive_mode())
-    return limbo;
+    return (unsigned long long) Collective_candidate_heap_count + limbo;
   passives = dense_passive_mode() ?
     (unsigned long long) dense_passive_size() :
     (Glob.sos == NULL ? 0 : (unsigned long long) Glob.sos->length);
@@ -412,6 +447,8 @@ void collective_clear_state(void)
 {
   size_t i;
   struct collective_batch *b;
+
+  collective_candidate_pool_clear();
 
   if (Collective_historical_idx != NULL) {
     unsigned long long position;
@@ -471,6 +508,11 @@ void collective_clear_state(void)
   Collective_balanced_lane_credit = 0;
   Collective_balanced_turns_since_oldest = 0;
   Collective_drain_mode = FALSE;
+  Collective_candidate_insertion_ordinal = 0;
+  Collective_pool_expansions_since_commit = 0;
+  Collective_pool_commits_since_fair = 0;
+  Current_collective_pool_batch = NULL;
+  Current_collective_commit_entry = NULL;
 }
 
 static
@@ -558,6 +600,17 @@ void collective_reset_state(void)
   Stats.collective_hyper_iterator_candidates = 0;
   Stats.collective_hyper_iterator_completions = 0;
   Stats.collective_hyper_iterator_choice_bytes = 0;
+  Stats.collective_candidate_pool_bytes = 0;
+  Stats.collective_candidate_pool_peak_bytes = 0;
+  Stats.collective_preview_calls = 0;
+  Stats.collective_preview_hint_matches = 0;
+  Stats.collective_preview_authoritative_matches = 0;
+  Stats.collective_preview_false_positives = 0;
+  Stats.collective_preview_changed_hint_ids = 0;
+  Stats.collective_preview_stale_refreshes = 0;
+  Stats.collective_candidate_pool_commits = 0;
+  Stats.collective_candidate_priority_commits = 0;
+  Stats.collective_candidate_fair_commits = 0;
 }
 
 static
@@ -1593,6 +1646,12 @@ Prover_options init_prover_options(void)
     init_parm("collective_pos_hyper_share", 1, 0, 1000);
   p->collective_neg_hyper_share =
     init_parm("collective_neg_hyper_share", 1, 0, 1000);
+  p->collective_candidate_window =
+    init_parm("collective_candidate_window", 64, 1, INT_MAX);
+  p->collective_candidate_commit_interval =
+    init_parm("collective_candidate_commit_interval", 4, 1, 1000);
+  p->collective_candidate_fair_interval =
+    init_parm("collective_candidate_fair_interval", 8, 1, 1000);
 
   p->fold_denial_max =  init_parm("fold_denial_max",       0,     -1,INT_MAX);
 
@@ -1647,6 +1706,8 @@ Prover_options init_prover_options(void)
   p->candidate_hard_limit = init_parm("candidate_hard_limit", -1,   -1,INT_MAX);
   p->checkpoint_minutes = init_parm("checkpoint_minutes",    -1,     -1,INT_MAX);
   p->checkpoint_given =   init_parm("checkpoint_given",      -1,     -1,INT_MAX);
+  p->checkpoint_candidate_pool =
+    init_parm("checkpoint_candidate_pool", -1, -1, INT_MAX);
   p->checkpoint_keep =    init_parm("checkpoint_keep",        3,      1,INT_MAX);
   p->sine =               init_parm("sine",                  -1,     -1,INT_MAX);
   p->sine_depth =         init_parm("sine_depth",             0,      0,INT_MAX);
@@ -2273,6 +2334,8 @@ void update_stats(void)
   Stats.collective_deactivation_entries = Collective_deactivation_count;
   Stats.collective_candidate_cache_current =
     collective_candidate_occupancy();
+  Stats.collective_candidate_pool_bytes =
+    collective_candidate_pool_allocated_bytes();
   Stats.collective_distinct_hints_matched = matched_hints(Glob.hints);
   Stats.collective_descriptor_bytes = Collective_batch_count *
                                       sizeof(struct collective_batch) +
@@ -2431,6 +2494,29 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             comma_num(s.collective_candidate_cache_current),
             comma_num(s.collective_candidate_cache_peak),
             comma_num(s.collective_candidate_cache_stalls));
+    fprintf(fp,
+            "Collective_candidate_pool: window=%d, commit_interval=%d, "
+            "fair_interval=%d, entries=%s, bytes=%s, peak_bytes=%s, "
+            "commits=%s, priority_commits=%s, fair_commits=%s.\n",
+            parm(Opt->collective_candidate_window),
+            parm(Opt->collective_candidate_commit_interval),
+            parm(Opt->collective_candidate_fair_interval),
+            comma_num(Collective_candidate_heap_count),
+            comma_num(s.collective_candidate_pool_bytes),
+            comma_num(s.collective_candidate_pool_peak_bytes),
+            comma_num(s.collective_candidate_pool_commits),
+            comma_num(s.collective_candidate_priority_commits),
+            comma_num(s.collective_candidate_fair_commits));
+    fprintf(fp,
+            "Collective_preview: calls=%s, predicted_hints=%s, "
+            "authoritative_hints=%s, false_positives=%s, "
+            "changed_hint_ids=%s, stale_refreshes=%s.\n",
+            comma_num(s.collective_preview_calls),
+            comma_num(s.collective_preview_hint_matches),
+            comma_num(s.collective_preview_authoritative_matches),
+            comma_num(s.collective_preview_false_positives),
+            comma_num(s.collective_preview_changed_hint_ids),
+            comma_num(s.collective_preview_stale_refreshes));
     fprintf(fp,
             "Collective_promising: enabled=%d, scans=%s, considered=%s, "
             "buffer_peak=%s.\n",
@@ -4554,7 +4640,9 @@ static
 BOOL inferences_to_make(void)
 {
   return givens_available() ||
-         (collective_frontier_mode() && Collective_batch_head != NULL);
+         (collective_frontier_mode() &&
+          (Collective_batch_head != NULL ||
+           Collective_candidate_heap_count != 0));
 }  // inferences_to_make
 
 /*************
@@ -5588,6 +5676,268 @@ unsigned long long hint_trace_label_hash(Topform c)
   return h;
 }
 
+/* Normalize a scratch copy enough to predict the authoritative selector and
+   exact hint key.  Every operation below is read-only with respect to search
+   state: demodulation accounting is suppressed, unit deletion only queries
+   its index, and CAC discovery is deliberately excluded (known CAC symbols
+   can still simplify the scratch clause). */
+static void collective_preview_normalize(Topform c)
+{
+  if (flag(Opt->eval_rewrite))
+    rewrite_with_eval(c);
+  else if (!clist_empty(Glob.demods)) {
+    if (flag(Opt->lex_order_vars)) {
+      renumber_variables(c, MAX_VARS);
+      c->normal_vars = FALSE;
+    }
+    demodulate_clause_preview(c,
+			     parm(Opt->demod_step_limit),
+			     parm(Opt->demod_increase_limit),
+			     flag(Opt->lex_order_vars));
+    if (flag(otter_style_demod_id())) {
+      int junk_sn = str_to_sn("junk", 0);
+      Literals lit;
+      for (lit = c->literals; lit != NULL; lit = lit->next) {
+        if (lit->sign && symbol_in_term(junk_sn, lit->atom)) {
+          zap_term(lit->atom);
+          lit->atom = get_rigid_term(true_sym(), 0);
+        }
+      }
+    }
+  }
+
+  orient_equalities(c, TRUE);
+  simplify_literals2(c);
+  merge_literals(c);
+  if (flag(Opt->unit_deletion))
+    unit_deletion(c);
+  if (flag(Opt->cac_redundancy) && cac_tautology(c->literals)) {
+    zap_literals(c->literals);
+    c->literals = get_literals();
+    c->literals->sign = TRUE;
+    c->literals->atom = get_rigid_term(true_sym(), 0);
+    upward_clause_links(c);
+  }
+}
+
+static void collective_preview_pool_entry(struct collective_pool_entry *e)
+{
+  Topform scratch = copy_clause_ija(e->clause);
+  Topform hint = NULL;
+  double weight;
+  BOOL flipped = FALSE;
+
+  collective_preview_normalize(scratch);
+  weight = clause_weight(scratch->literals);
+  if (!clist_empty(Glob.hints)) {
+    if (!scratch->normal_vars)
+      renumber_variables(scratch, MAX_VARS);
+    hint = preview_weight_with_hints(
+      scratch, weight, flag(Opt->degrade_hints),
+      flag(Opt->breadth_first_hints), &weight, &flipped);
+  }
+  scratch->weight = weight;
+  scratch->matching_hint = hint;
+  {
+    int sw = parm(Opt->sine_weight);
+    if (sw > 0) {
+      int sd = get_int_attribute(scratch->attributes, sine_depth_attr(), 1);
+      if (sd != INT_MAX && sd > 1)
+        scratch->weight += sw * (sd - 1);
+    }
+  }
+  if (scratch->weight > floatparm(Opt->default_weight) &&
+      scratch->weight <= floatparm(Opt->max_weight))
+    scratch->weight = floatparm(Opt->default_weight);
+
+  given_selection_preview(scratch, &e->selector_mask,
+                          &e->selector_priority);
+  e->adjusted_weight = scratch->weight;
+  e->hint_id = hint == NULL ? 0 : hint->id;
+  e->fingerprint = hint_trace_clause_hash(scratch);
+  e->hint_epoch = hint_state_epoch();
+  e->simplifier_epoch = Simplifier_epoch;
+  Stats.collective_preview_calls++;
+  if (hint != NULL)
+    Stats.collective_preview_hint_matches++;
+  (void) flipped;  /* Identity/weight already capture the flip result. */
+  scratch->matching_hint = NULL;
+  delete_clause(scratch);
+}
+
+static BOOL collective_pool_entry_less(const struct collective_pool_entry *a,
+				       const struct collective_pool_entry *b)
+{
+  unsigned long long ah = a->hint_id == 0 ? ULLONG_MAX : a->hint_id;
+  unsigned long long bh = b->hint_id == 0 ? ULLONG_MAX : b->hint_id;
+  if (a->selector_priority != b->selector_priority)
+    return a->selector_priority < b->selector_priority;
+  if (ah != bh)
+    return ah < bh;
+  if (a->adjusted_weight != b->adjusted_weight)
+    return a->adjusted_weight < b->adjusted_weight;
+  if (a->given_id != b->given_id)
+    return a->given_id < b->given_id;
+  if (a->raw_ordinal != b->raw_ordinal)
+    return a->raw_ordinal < b->raw_ordinal;
+  return a->insertion_ordinal < b->insertion_ordinal;
+}
+
+static void collective_candidate_heap_swap(size_t a, size_t b)
+{
+  struct collective_pool_entry *tmp = Collective_candidate_heap[a];
+  Collective_candidate_heap[a] = Collective_candidate_heap[b];
+  Collective_candidate_heap[b] = tmp;
+}
+
+static void collective_candidate_heap_sift_up(size_t at)
+{
+  while (at != 0) {
+    size_t parent = (at - 1) / 2;
+    if (!collective_pool_entry_less(Collective_candidate_heap[at],
+                                    Collective_candidate_heap[parent]))
+      break;
+    collective_candidate_heap_swap(at, parent);
+    at = parent;
+  }
+}
+
+static void collective_candidate_heap_sift_down(size_t at)
+{
+  while (TRUE) {
+    size_t left = at * 2 + 1;
+    size_t right = left + 1;
+    size_t smallest = at;
+    if (left < Collective_candidate_heap_count &&
+        collective_pool_entry_less(Collective_candidate_heap[left],
+                                   Collective_candidate_heap[smallest]))
+      smallest = left;
+    if (right < Collective_candidate_heap_count &&
+        collective_pool_entry_less(Collective_candidate_heap[right],
+                                   Collective_candidate_heap[smallest]))
+      smallest = right;
+    if (smallest == at)
+      break;
+    collective_candidate_heap_swap(at, smallest);
+    at = smallest;
+  }
+}
+
+static void collective_candidate_heap_grow(void)
+{
+  size_t old = Collective_candidate_heap_capacity;
+  size_t capacity = old == 0 ? 64 : old * 2;
+  if (capacity < old)
+    fatal_error("collective candidate heap capacity overflow");
+  Collective_candidate_heap = safe_realloc(
+    Collective_candidate_heap, capacity * sizeof(*Collective_candidate_heap));
+  Collective_candidate_heap_capacity = capacity;
+}
+
+static unsigned long long collective_candidate_pool_allocated_bytes(void)
+{
+  return Collective_candidate_pool_bytes +
+    (unsigned long long) Collective_candidate_heap_capacity *
+      sizeof(*Collective_candidate_heap);
+}
+
+static void collective_candidate_heap_insert(struct collective_pool_entry *e)
+{
+  size_t at;
+  if (Collective_candidate_heap_count == Collective_candidate_heap_capacity)
+    collective_candidate_heap_grow();
+  at = Collective_candidate_heap_count++;
+  Collective_candidate_heap[at] = e;
+  collective_candidate_heap_sift_up(at);
+}
+
+static struct collective_pool_entry *collective_candidate_heap_remove(size_t at)
+{
+  struct collective_pool_entry *e;
+  if (at >= Collective_candidate_heap_count)
+    return NULL;
+  e = Collective_candidate_heap[at];
+  Collective_candidate_heap_count--;
+  if (at != Collective_candidate_heap_count) {
+    size_t parent;
+    Collective_candidate_heap[at] =
+      Collective_candidate_heap[Collective_candidate_heap_count];
+    parent = at == 0 ? 0 : (at - 1) / 2;
+    if (at != 0 &&
+        collective_pool_entry_less(Collective_candidate_heap[at],
+                                   Collective_candidate_heap[parent]))
+      collective_candidate_heap_sift_up(at);
+    else
+      collective_candidate_heap_sift_down(at);
+  }
+  return e;
+}
+
+static void collective_candidate_pool_push(Topform c)
+{
+  struct collective_pool_entry *e;
+  unsigned long long occupied = collective_candidate_occupancy();
+  unsigned long long limit =
+    (unsigned long long) parm(Opt->collective_candidate_cache);
+  unsigned long long bytes;
+
+  if (!collective_balanced_mode() || Current_collective_pool_batch == NULL)
+    fatal_error("collective candidate callback has no balanced descriptor");
+  if (occupied >= limit)
+    fatal_error("collective candidate pool bound exceeded");
+  e = safe_calloc(1, sizeof(*e));
+  e->clause = c;
+  e->source = Current_inference_source;
+  e->kind = Current_collective_pool_batch->kind;
+  e->given_id = Current_collective_pool_batch->given_id;
+  e->raw_ordinal = Current_collective_pool_batch->candidate_ordinal++;
+  e->insertion_ordinal = Collective_candidate_insertion_ordinal++;
+  bytes = sizeof(*e) + sizeof(struct topform) +
+          clause_body_storage_bytes(c);
+  e->bytes = bytes;
+  collective_preview_pool_entry(e);
+  Collective_candidate_pool_bytes += bytes;
+  collective_candidate_heap_insert(e);
+  if (Collective_candidate_heap_count >
+        (size_t) parm(Opt->collective_candidate_cache))
+    fatal_error("collective candidate pool count exceeded hard limit");
+  if (collective_candidate_pool_allocated_bytes() >
+        Stats.collective_candidate_pool_peak_bytes)
+    Stats.collective_candidate_pool_peak_bytes =
+      collective_candidate_pool_allocated_bytes();
+}
+
+static void collective_candidate_pool_clear(void)
+{
+  size_t i;
+  for (i = 0; i < Collective_candidate_heap_count; i++) {
+    struct collective_pool_entry *e = Collective_candidate_heap[i];
+    delete_clause(e->clause);
+    safe_free(e);
+  }
+  safe_free(Collective_candidate_heap);
+  Collective_candidate_heap = NULL;
+  Collective_candidate_heap_count = 0;
+  Collective_candidate_heap_capacity = 0;
+  Collective_candidate_pool_bytes = 0;
+}
+
+static void collective_candidate_pool_refresh_top(void)
+{
+  struct collective_pool_entry *e;
+  if (Collective_candidate_heap_count == 0)
+    return;
+  e = Collective_candidate_heap[0];
+  if (e->hint_epoch != hint_state_epoch() ||
+      e->simplifier_epoch != Simplifier_epoch) {
+    collective_preview_pool_entry(e);
+    Stats.collective_preview_stale_refreshes++;
+    /* A refreshed top can move down.  A stale non-top is validated if and
+       when it reaches the top; this is the deterministic lazy-refresh rule. */
+    collective_candidate_heap_sift_down(0);
+  }
+}
+
 static
 void print_hint_trace(Topform c)
 {
@@ -5836,6 +6186,19 @@ void cl_process(Topform c)
 
     {
       BOOL deleted = cl_process_delete(c);
+      if (Current_collective_commit_entry != NULL) {
+        unsigned long long actual_hint = c->matching_hint == NULL ? 0 :
+                                         c->matching_hint->id;
+        unsigned long long predicted_hint =
+          Current_collective_commit_entry->hint_id;
+        if (actual_hint != 0)
+          Stats.collective_preview_authoritative_matches++;
+        if (predicted_hint != 0 && actual_hint == 0)
+          Stats.collective_preview_false_positives++;
+        if (predicted_hint != 0 && actual_hint != 0 &&
+            predicted_hint != actual_hint)
+          Stats.collective_preview_changed_hint_ids++;
+      }
       if (flag(Opt->hint_trace))
         {
           unsigned long long fingerprint = hint_trace_clause_hash(c);
@@ -5867,6 +6230,63 @@ void cl_process(Topform c)
   if (infer_clock_stopped)
     clock_start(Clocks.infer);
 }  // cl_process
+
+static BOOL collective_candidate_pool_commit(void)
+{
+  struct collective_pool_entry *e;
+  enum inference_source saved_source;
+  unsigned interval =
+    (unsigned) parm(Opt->collective_candidate_fair_interval);
+  BOOL fair = interval == 1 ||
+              Collective_pool_commits_since_fair >= interval - 1;
+  size_t at = 0;
+
+  if (fair && Collective_candidate_heap_count != 0) {
+    size_t i;
+    for (i = 1; i < Collective_candidate_heap_count; i++)
+      if (Collective_candidate_heap[i]->insertion_ordinal <
+            Collective_candidate_heap[at]->insertion_ordinal)
+        at = i;
+    e = Collective_candidate_heap[at];
+    if (e->hint_epoch != hint_state_epoch() ||
+        e->simplifier_epoch != Simplifier_epoch) {
+      collective_preview_pool_entry(e);
+      Stats.collective_preview_stale_refreshes++;
+    }
+  }
+  else {
+    while (Collective_candidate_heap_count != 0 &&
+           (Collective_candidate_heap[0]->hint_epoch != hint_state_epoch() ||
+            Collective_candidate_heap[0]->simplifier_epoch !=
+              Simplifier_epoch))
+      collective_candidate_pool_refresh_top();
+    at = 0;
+  }
+  e = collective_candidate_heap_remove(at);
+  if (e == NULL)
+    return FALSE;
+  if (Collective_candidate_pool_bytes < e->bytes)
+    fatal_error("collective candidate pool byte accounting underflow");
+  Collective_candidate_pool_bytes -= e->bytes;
+  saved_source = Current_inference_source;
+  Current_inference_source = e->source;
+  Current_collective_commit_entry = e;
+  cl_process(e->clause);
+  Current_collective_commit_entry = NULL;
+  Current_inference_source = saved_source;
+  safe_free(e);
+  Stats.collective_candidate_pool_commits++;
+  if (fair) {
+    Stats.collective_candidate_fair_commits++;
+    Collective_pool_commits_since_fair = 0;
+  }
+  else {
+    Stats.collective_candidate_priority_commits++;
+    Collective_pool_commits_since_fair++;
+  }
+  Collective_pool_expansions_since_commit = 0;
+  return TRUE;
+}
 
 /*************
  *
@@ -6803,10 +7223,12 @@ BOOL collective_expand_one_batch(void)
       source.data = &source_data;
       clock_start(Clocks.infer);
       Current_inference_source = INFER_SOURCE_HYPER;
+      Current_collective_pool_batch = b;
       complete = hyper_resolution_bounded(
         given, direction, &source, &b->hyper_iterator,
         (unsigned long long) parm(Opt->collective_raw_work_budget),
-        candidate_budget, cl_process, &raw, &emitted);
+        candidate_budget, collective_candidate_pool_push, &raw, &emitted);
+      Current_collective_pool_batch = NULL;
       Current_inference_source = INFER_SOURCE_OTHER;
       clock_stop(Clocks.infer);
       native = TRUE;
@@ -6930,10 +7352,13 @@ BOOL collective_expand_one_batch(void)
           fatal_error("bounded paramodulation has no candidate-pool space");
         clock_start(Clocks.infer);
         Current_inference_source = INFER_SOURCE_PARAMOD;
+        Current_collective_pool_batch = b;
         complete = para_from_into_bounded(
           from, into, check_top, &b->para_iterator,
           (unsigned long long) parm(Opt->collective_raw_work_budget),
-          candidate_budget, cl_process, &raw_steps, &yielded);
+          candidate_budget, collective_candidate_pool_push,
+          &raw_steps, &yielded);
+        Current_collective_pool_batch = NULL;
         Current_inference_source = INFER_SOURCE_OTHER;
         clock_stop(Clocks.infer);
         Stats.collective_iterator_raw_steps += raw_steps;
@@ -7242,6 +7667,27 @@ void make_inferences(void)
     collective_candidate_occupancy() <
       (unsigned long long) parm(Opt->collective_candidate_cache);
 
+  if (collective_balanced_mode() &&
+      Collective_candidate_heap_count != 0) {
+    unsigned long long target =
+      (unsigned long long) parm(Opt->collective_candidate_window);
+    unsigned long long cache =
+      (unsigned long long) parm(Opt->collective_candidate_cache);
+    BOOL commit_due;
+    if (target > cache)
+      target = cache;
+    commit_due =
+      Collective_candidate_heap_count >= target ||
+      Collective_batch_head == NULL ||
+      !collective_space ||
+      Collective_pool_expansions_since_commit >=
+        (unsigned) parm(Opt->collective_candidate_commit_interval);
+    if (commit_due) {
+      collective_candidate_pool_commit();
+      return;
+    }
+  }
+
   /* Spend one descriptor-expansion turn after the configured number of given
      activations.  If SOS is empty, drain the finite batch queue.  The
      round-robin queue is fair: every finite descriptor cursor is advanced
@@ -7250,6 +7696,8 @@ void make_inferences(void)
     if (balanced_drain && givens)
       Stats.collective_givens_withheld++;
     collective_expand_one_batch();
+    if (collective_balanced_mode())
+      Collective_pool_expansions_since_commit++;
     Collective_batch_turn = FALSE;
     Collective_givens_since_batch = 0;
     return;
@@ -9427,6 +9875,121 @@ void write_checkpoint_input(const char *dir)
   fclose(fp);
 }  /* write_checkpoint_input */
 
+static void write_collective_candidate_pool(const char *dir)
+{
+  char path[600];
+  FILE *fp;
+  size_t i;
+  snprintf(path, sizeof(path), "%s/collective_candidates.txt", dir);
+  fp = fopen(path, "w");
+  if (fp == NULL)
+    fatal_error("write_collective_candidate_pool: cannot create state file");
+  fprintf(fp, "P9CPOOL2 %llu %llu %u %u\n",
+          (unsigned long long) Collective_candidate_heap_count,
+          Collective_candidate_insertion_ordinal,
+          Collective_pool_expansions_since_commit,
+          Collective_pool_commits_since_fair);
+  for (i = 0; i < Collective_candidate_heap_count; i++) {
+    struct collective_pool_entry *e = Collective_candidate_heap[i];
+    Term t = topform_to_term(e->clause);
+    String_buf sb = get_string_buf();
+    fprintf(fp,
+            "%u %u %u %llu %llu %llu %llu %llu %llu %llu %u %a\n",
+            (unsigned) e->source, e->kind, e->selector_priority,
+            e->selector_mask, e->given_id, e->raw_ordinal,
+            e->insertion_ordinal, e->hint_id, e->fingerprint,
+            e->hint_epoch, e->simplifier_epoch, e->adjusted_weight);
+    fwrite_term(fp, t);
+    fprintf(fp, ".\n");
+    sb_write_just(sb, e->clause->justification, NULL);
+    fprint_sb(fp, sb);
+    fprintf(fp, "\n");
+    zap_string_buf(sb);
+    zap_term(t);
+  }
+  if (fclose(fp) != 0)
+    fatal_error("write_collective_candidate_pool: close failed");
+}
+
+static void read_collective_candidate_pool(const char *dir)
+{
+  char path[600], magic[16];
+  FILE *fp;
+  unsigned long long count, insertion, i;
+  unsigned expansions, commits_since_fair;
+
+  snprintf(path, sizeof(path), "%s/collective_candidates.txt", dir);
+  fp = fopen(path, "r");
+  if (fp == NULL)
+    fatal_error("resume: balanced candidate-pool state is missing");
+  if (fscanf(fp, " %15s %llu %llu %u %u", magic, &count, &insertion,
+             &expansions, &commits_since_fair) != 5 ||
+      strcmp(magic, "P9CPOOL2") != 0)
+    fatal_error("resume: corrupt collective candidate-pool header");
+  if (count > (unsigned long long) parm(Opt->collective_candidate_cache) ||
+      expansions >
+        (unsigned) parm(Opt->collective_candidate_commit_interval) ||
+      commits_since_fair >=
+        (unsigned) parm(Opt->collective_candidate_fair_interval))
+    fatal_error("resume: invalid collective candidate-pool bounds");
+  for (i = 0; i < count; i++) {
+    struct collective_pool_entry *e = safe_calloc(1, sizeof(*e));
+    unsigned source, kind, priority, simplifier_epoch;
+    unsigned long long selector_mask, given_id, raw_ordinal, entry_insertion;
+    unsigned long long hint_id, fingerprint, hint_epoch;
+    double adjusted_weight;
+    Term clause_term, just_term;
+    if (fscanf(fp,
+               " %u %u %u %llu %llu %llu %llu %llu %llu %llu %u %la",
+               &source, &kind, &priority, &selector_mask, &given_id,
+               &raw_ordinal, &entry_insertion, &hint_id, &fingerprint,
+               &hint_epoch, &simplifier_epoch, &adjusted_weight) != 12)
+      fatal_error("resume: truncated collective candidate metadata");
+    clause_term = read_term(fp, stderr);
+    just_term = read_term(fp, stderr);
+    if (clause_term == NULL || just_term == NULL)
+      fatal_error("resume: truncated collective candidate clause");
+    e->clause = term_to_topform(clause_term, FALSE);
+    zap_term(clause_term);
+    e->clause->justification = term_to_just(just_term);
+    zap_term(just_term);
+    if (source > INFER_SOURCE_PARAMOD ||
+        (kind != COLLECTIVE_PARAMOD_FROM &&
+         kind != COLLECTIVE_PARAMOD_INTO &&
+         kind != COLLECTIVE_POS_HYPER &&
+         kind != COLLECTIVE_NEG_HYPER) ||
+        priority > 2 || !isfinite(adjusted_weight) ||
+        entry_insertion >= insertion)
+      fatal_error("resume: invalid collective candidate metadata");
+    e->source = (enum inference_source) source;
+    e->kind = kind;
+    e->selector_priority = priority;
+    e->selector_mask = selector_mask;
+    e->given_id = given_id;
+    e->raw_ordinal = raw_ordinal;
+    e->insertion_ordinal = entry_insertion;
+    e->hint_id = hint_id;
+    e->fingerprint = fingerprint;
+    e->hint_epoch = hint_epoch;
+    e->simplifier_epoch = simplifier_epoch;
+    e->adjusted_weight = adjusted_weight;
+    e->bytes = sizeof(*e) + sizeof(struct topform) +
+               clause_body_storage_bytes(e->clause);
+    Collective_candidate_pool_bytes += e->bytes;
+    collective_candidate_heap_insert(e);
+  }
+  if (fscanf(fp, " %15s", magic) == 1)
+    fatal_error("resume: trailing collective candidate-pool data");
+  fclose(fp);
+  Collective_candidate_insertion_ordinal = insertion;
+  Collective_pool_expansions_since_commit = expansions;
+  Collective_pool_commits_since_fair = commits_since_fair;
+  if (collective_candidate_pool_allocated_bytes() >
+        Stats.collective_candidate_pool_peak_bytes)
+    Stats.collective_candidate_pool_peak_bytes =
+      collective_candidate_pool_allocated_bytes();
+}
+
 static
 void write_collective_checkpoint(const char *dir)
 {
@@ -9450,7 +10013,7 @@ void write_collective_checkpoint(const char *dir)
   if (!collective_frontier_mode())
     return;
   if (collective_balanced_mode())
-    magic[6] = 'D';
+    magic[6] = 'E';
   snprintf(path, sizeof(path), "%s/collective_frontier.bin", dir);
   fp = fopen(path, "wb");
   if (fp == NULL)
@@ -9501,6 +10064,9 @@ void write_collective_checkpoint(const char *dir)
                sizeof(b->conclusion_next_weight), 1, fp) != 1 ||
         fwrite(&b->conclusion_next_ordinal,
                sizeof(b->conclusion_next_ordinal), 1, fp) != 1 ||
+        (collective_balanced_mode() &&
+         fwrite(&b->candidate_ordinal,
+                sizeof(b->candidate_ordinal), 1, fp) != 1) ||
         fwrite(&epoch, sizeof(epoch), 1, fp) != 1 ||
         fwrite(&kind, sizeof(kind), 1, fp) != 1)
       fatal_error("write_collective_checkpoint: descriptor write failed");
@@ -9576,6 +10142,8 @@ void write_collective_checkpoint(const char *dir)
   }
   if (fclose(fp) != 0)
     fatal_error("write_collective_checkpoint: close failed");
+  if (collective_balanced_mode())
+    write_collective_candidate_pool(dir);
 }
 
 static
@@ -9589,7 +10157,7 @@ void read_collective_checkpoint(const char *dir)
   uint32_t balanced_lane = 0, balanced_lane_credit = 0;
   uint32_t balanced_turns_since_oldest = 0, drain_mode = 0;
   BOOL format6, format7, format8, format9, format_a, format_b, format_c,
-       format_d;
+       format_d, format_e;
 
   if (!collective_frontier_mode())
     return;
@@ -9599,6 +10167,7 @@ void read_collective_checkpoint(const char *dir)
     fatal_error("resume: collective frontier state is missing");
   if (fread(magic, sizeof(magic), 1, fp) != 1)
     fatal_error("resume: corrupt collective frontier header");
+  format_e = memcmp(magic, "P9COLLE", 7) == 0;
   format_d = memcmp(magic, "P9COLLD", 7) == 0;
   format_c = memcmp(magic, "P9COLLC", 7) == 0;
   format_b = memcmp(magic, "P9COLLB", 7) == 0;
@@ -9607,7 +10176,7 @@ void read_collective_checkpoint(const char *dir)
   format8 = memcmp(magic, "P9COLL8", 7) == 0;
   format7 = memcmp(magic, "P9COLL7", 7) == 0;
   format6 = memcmp(magic, "P9COLL6", 7) == 0;
-  if ((!format_d && !format_c && !format_b && !format_a && !format9 && !format8 &&
+  if ((!format_e && !format_d && !format_c && !format_b && !format_a && !format9 && !format8 &&
        !format7 && !format6 &&
        memcmp(magic, "P9COLL5", 7) != 0) ||
       fread(&activations, sizeof(activations), 1, fp) != 1 ||
@@ -9616,20 +10185,21 @@ void read_collective_checkpoint(const char *dir)
       fread(&givens_since_batch, sizeof(givens_since_batch), 1, fp) != 1)
     fatal_error("resume: corrupt collective frontier header");
   if (format6 || format7 || format8 || format9 || format_a || format_b ||
+      format_e ||
       format_c || format_d) {
     if (fread(&hint_probe_credit, sizeof(hint_probe_credit), 1, fp) != 1)
       fatal_error("resume: corrupt collective frontier probe state");
   }
   else
     hint_probe_credit = 1U;
-  if (format_a || format_b || format_c || format_d) {
+  if (format_a || format_b || format_c || format_d || format_e) {
     if (fread(&priority_turns_since_fair,
               sizeof(priority_turns_since_fair), 1, fp) != 1)
       fatal_error("resume: corrupt collective priority scheduler state");
   }
   else
     priority_turns_since_fair = 0;
-  if (format_b || format_c || format_d) {
+  if (format_b || format_c || format_d || format_e) {
     if (fread(&balanced_lane, sizeof(balanced_lane), 1, fp) != 1 ||
         fread(&balanced_lane_credit,
               sizeof(balanced_lane_credit), 1, fp) != 1 ||
@@ -9638,7 +10208,8 @@ void read_collective_checkpoint(const char *dir)
         fread(&drain_mode, sizeof(drain_mode), 1, fp) != 1)
       fatal_error("resume: corrupt balanced collective scheduler state");
   }
-  if ((format_b || format_c || format_d) != collective_balanced_mode())
+  if ((format_b || format_c || format_d || format_e) !=
+        collective_balanced_mode())
     fatal_error("resume: collective scheduler policy does not match checkpoint");
   if (turn > 1 || hint_probe_credit > 1)
     fatal_error("resume: invalid collective scheduler state");
@@ -9647,7 +10218,7 @@ void read_collective_checkpoint(const char *dir)
       (!flag(Opt->collective_promising_scheduler) &&
        priority_turns_since_fair != 0))
     fatal_error("resume: invalid collective priority scheduler state");
-  if ((format_b || format_c || format_d) &&
+  if ((format_b || format_c || format_d || format_e) &&
       (balanced_lane >= COLLECTIVE_LANE_COUNT ||
        balanced_lane_credit >
          collective_balanced_lane_share(balanced_lane) ||
@@ -9676,6 +10247,7 @@ void read_collective_checkpoint(const char *dir)
         fread(&b->activation_limit, sizeof(b->activation_limit), 1, fp) != 1)
       fatal_error("resume: truncated collective batch queue");
     if (format7 || format8 || format9 || format_a || format_b || format_c ||
+        format_e ||
         format_d) {
       if (fread(&b->conclusion_cursor,
                 sizeof(b->conclusion_cursor), 1, fp) != 1 ||
@@ -9687,7 +10259,7 @@ void read_collective_checkpoint(const char *dir)
       b->conclusion_cursor = 0;
       b->conclusion_prefix_hash = 0;
     }
-    if (format9 || format_a || format_b || format_c || format_d) {
+    if (format9 || format_a || format_b || format_c || format_d || format_e) {
       if (fread(&b->conclusion_order_weight,
                 sizeof(b->conclusion_order_weight), 1, fp) != 1 ||
           fread(&b->conclusion_order_ordinal,
@@ -9698,6 +10270,10 @@ void read_collective_checkpoint(const char *dir)
                 sizeof(b->conclusion_next_ordinal), 1, fp) != 1)
         fatal_error("resume: truncated collective promising cursor");
     }
+    if (format_e &&
+        fread(&b->candidate_ordinal,
+              sizeof(b->candidate_ordinal), 1, fp) != 1)
+      fatal_error("resume: truncated collective candidate ordinal");
     if (fread(&epoch, sizeof(epoch), 1, fp) != 1 ||
         fread(&kind, sizeof(kind), 1, fp) != 1)
       fatal_error("resume: truncated collective batch queue");
@@ -9707,11 +10283,11 @@ void read_collective_checkpoint(const char *dir)
     b->snapshot_epoch = epoch;
     if ((kind & COLLECTIVE_INFERENCE_MASK) == 0 ||
         (kind & ~COLLECTIVE_KIND_MASK) != 0 ||
-        (!format_d && !format_c && !format_b && !format_a && !format9 &&
+        (!format_e && !format_d && !format_c && !format_b && !format_a && !format9 &&
          !format8 &&
          !format7 && !format6 &&
          (kind & COLLECTIVE_HINT_PROBE) != 0) ||
-        (!format_d && !format_c && !format_b && !format_a && !format9 &&
+        (!format_e && !format_d && !format_c && !format_b && !format_a && !format9 &&
          (kind & COLLECTIVE_PROMISING_CURSOR) != 0) ||
         (format7 && b->conclusion_cursor != 0 &&
          (kind & (COLLECTIVE_POS_HYPER | COLLECTIVE_NEG_HYPER)) == 0) ||
@@ -9736,16 +10312,16 @@ void read_collective_checkpoint(const char *dir)
             b->conclusion_next_weight, b->conclusion_next_ordinal) >= 0)) ||
         ((kind & COLLECTIVE_HINT_PROBE) != 0 &&
          (i != 0 || hint_probe_credit != 0)) ||
-        ((format_b || format_c || format_d) &&
+        ((format_b || format_c || format_d || format_e) &&
          kind != COLLECTIVE_PARAMOD_FROM &&
          kind != COLLECTIVE_PARAMOD_INTO &&
          kind != COLLECTIVE_POS_HYPER &&
          kind != COLLECTIVE_NEG_HYPER) ||
-        (!format_b && !format_c && !format_d &&
+        (!format_b && !format_c && !format_d && !format_e &&
          (kind & (COLLECTIVE_PARAMOD_FROM | COLLECTIVE_PARAMOD_INTO)) != 0))
       fatal_error("resume: invalid collective batch kind");
     b->kind = kind;
-    if (format_c || format_d) {
+    if (format_c || format_d || format_e) {
       uint32_t from_literal, into_literal, from_side, into_argument;
       uint32_t path_depth, positioned, complete;
       if (fread(&from_literal, sizeof(from_literal), 1, fp) != 1 ||
@@ -9778,7 +10354,7 @@ void read_collective_checkpoint(const char *dir)
           fatal_error("resume: truncated paramodulation iterator path");
       }
     }
-    if (format_d) {
+    if (format_d || format_e) {
       Hyper_iterator *hi = &b->hyper_iterator;
       uint32_t initialized, satellite_mode, complete_hyper;
       uint32_t given_literal, given_phase, outer_literal;
@@ -9866,6 +10442,8 @@ void read_collective_checkpoint(const char *dir)
   if (fgetc(fp) != EOF)
     fatal_error("resume: trailing data in collective frontier state");
   fclose(fp);
+  if (format_e)
+    read_collective_candidate_pool(dir);
 }
 
 /*************
@@ -10070,6 +10648,26 @@ void write_checkpoint(void)
             Stats.collective_hyper_iterator_candidates);
     fprintf(fp, "collective_hyper_iterator_completions %llu\n",
             Stats.collective_hyper_iterator_completions);
+    fprintf(fp, "collective_candidate_pool_peak_bytes %llu\n",
+            Stats.collective_candidate_pool_peak_bytes);
+    fprintf(fp, "collective_preview_calls %llu\n",
+            Stats.collective_preview_calls);
+    fprintf(fp, "collective_preview_hint_matches %llu\n",
+            Stats.collective_preview_hint_matches);
+    fprintf(fp, "collective_preview_authoritative_matches %llu\n",
+            Stats.collective_preview_authoritative_matches);
+    fprintf(fp, "collective_preview_false_positives %llu\n",
+            Stats.collective_preview_false_positives);
+    fprintf(fp, "collective_preview_changed_hint_ids %llu\n",
+            Stats.collective_preview_changed_hint_ids);
+    fprintf(fp, "collective_preview_stale_refreshes %llu\n",
+            Stats.collective_preview_stale_refreshes);
+    fprintf(fp, "collective_candidate_pool_commits %llu\n",
+            Stats.collective_candidate_pool_commits);
+    fprintf(fp, "collective_candidate_priority_commits %llu\n",
+            Stats.collective_candidate_priority_commits);
+    fprintf(fp, "collective_candidate_fair_commits %llu\n",
+            Stats.collective_candidate_fair_commits);
     fprintf(fp, "simplifier_epoch %u\n", Simplifier_epoch);
     fprintf(fp, "hint_state_epoch %llu\n", hint_state_epoch());
     fprintf(fp, "user_seconds %.2f\n", user_seconds());
@@ -10974,6 +11572,45 @@ void resume_load_clauses(const char *dir)
     rewind(fp); (void) read_metadata_ull_if_present(
       fp, "collective_hyper_iterator_completions",
       &Stats.collective_hyper_iterator_completions);
+    Stats.collective_candidate_pool_peak_bytes = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_candidate_pool_peak_bytes",
+      &Stats.collective_candidate_pool_peak_bytes);
+    Stats.collective_preview_calls = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_preview_calls", &Stats.collective_preview_calls);
+    Stats.collective_preview_hint_matches = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_preview_hint_matches",
+      &Stats.collective_preview_hint_matches);
+    Stats.collective_preview_authoritative_matches = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_preview_authoritative_matches",
+      &Stats.collective_preview_authoritative_matches);
+    Stats.collective_preview_false_positives = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_preview_false_positives",
+      &Stats.collective_preview_false_positives);
+    Stats.collective_preview_changed_hint_ids = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_preview_changed_hint_ids",
+      &Stats.collective_preview_changed_hint_ids);
+    Stats.collective_preview_stale_refreshes = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_preview_stale_refreshes",
+      &Stats.collective_preview_stale_refreshes);
+    Stats.collective_candidate_pool_commits = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_candidate_pool_commits",
+      &Stats.collective_candidate_pool_commits);
+    Stats.collective_candidate_priority_commits = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_candidate_priority_commits",
+      &Stats.collective_candidate_priority_commits);
+    Stats.collective_candidate_fair_commits = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_candidate_fair_commits",
+      &Stats.collective_candidate_fair_commits);
   }
   rewind(fp); Simplifier_epoch =
     (unsigned) read_metadata_ull(fp, "simplifier_epoch");
@@ -11954,6 +12591,9 @@ Prover_results search(Prover_input p)
           fatal_error("collective_scheduler=balanced_hint requires passive_store=dense");
         if (low >= high)
           fatal_error("collective_descriptor_low_water must be below high_water");
+        if (parm(Opt->collective_candidate_window) >
+              parm(Opt->collective_candidate_cache))
+          fatal_error("collective_candidate_window must not exceed candidate_cache");
         if (reserve > (unsigned) high)
           fatal_error("collective descriptor high-water cannot admit one activation");
         if (flag(Opt->collective_hint_probes) ||
@@ -12193,6 +12833,27 @@ Prover_results search(Prover_input p)
           write_checkpoint();
           fprintf(stderr, "\nCheckpoint saved at given #%llu.\n",
                   Stats.given);
+          fflush(stderr);
+          if (flag(Opt->checkpoint_exit))
+            done_with_search(CHECKPOINT_EXIT);
+        }
+
+        /* Deterministically exercise serialization of live raw candidate
+           windows.  This is also useful for bounded operational handoffs
+           that want a checkpoint only after discovery work is resident. */
+        if (parm(Opt->checkpoint_candidate_pool) >= 0 &&
+            Collective_candidate_heap_count != 0 &&
+            Collective_candidate_heap_count >=
+              (size_t) parm(Opt->checkpoint_candidate_pool)) {
+          fprintf(stderr,
+                  "\nScheduled checkpoint at candidate-pool occupancy %llu...\n",
+                  (unsigned long long) Collective_candidate_heap_count);
+          fflush(stderr);
+          assign_parm(Opt->checkpoint_candidate_pool, -1, TRUE);
+          write_checkpoint();
+          fprintf(stderr,
+                  "\nCheckpoint saved with %llu candidate-pool entries.\n",
+                  (unsigned long long) Collective_candidate_heap_count);
           fflush(stderr);
           if (flag(Opt->checkpoint_exit))
             done_with_search(CHECKPOINT_EXIT);

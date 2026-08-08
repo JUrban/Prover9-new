@@ -22,6 +22,7 @@
 
 static unsigned long long Fdemod_attempts = 0;
 static unsigned long long Fdemod_rewrites = 0;
+static BOOL Fdemod_stat_counting = TRUE;
 
 /*************
  *
@@ -322,7 +323,8 @@ Flatterm fdemod(Flatterm f, Discrim root, Context subst,
       Term candidate = discrim_flat_retrieve_first(f, root, subst, &dpos);
       BOOL rewrite = FALSE;
 
-      Fdemod_attempts++;
+      if (Fdemod_stat_counting)
+        Fdemod_attempts++;
       (*sequence)++;
 
       while (candidate && !rewrite) {
@@ -352,7 +354,8 @@ Flatterm fdemod(Flatterm f, Discrim root, Context subst,
 	  (*current_size) += increase_in_size;  /* likely to be negative */
 	  (*step_limit)--;
 
-	  Fdemod_rewrites++;
+	  if (Fdemod_stat_counting)
+	    Fdemod_rewrites++;
 	  discrim_flat_cancel(dpos);
 	  zap_flatterm(f);
 	  *just_head = i3list_prepend(*just_head,
@@ -490,6 +493,13 @@ void fdemod_clause(Topform c, Mindex idx,
     if (steps != NULL) {
       steps = reverse_i3list(steps);
       c->justification = append_just(c->justification, demod_just(steps));
-    }
+}
+
   }
 }  /* fdemod_clause */
+
+/* PUBLIC */
+void set_fdemod_stat_counting(BOOL enabled)
+{
+  Fdemod_stat_counting = enabled;
+}

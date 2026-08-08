@@ -96,4 +96,46 @@ grep -E '^(Given=|Collective_(frontier|rule_descriptors|work|balanced|chunks):)'
   "$test_tmp/resumed.out" | tail -6 > "$test_tmp/resumed.stats"
 diff -u "$test_tmp/control.stats" "$test_tmp/resumed.stats"
 
+# Checkpoint with live raw candidates in the global bounded pool.  The pool
+# body/metadata file and per-descriptor raw ordinal must reproduce the same
+# final advisory/authoritative accounting as the uninterrupted run.
+sed '1i assign(checkpoint_candidate_pool,1).\nset(checkpoint_exit).\nset(checkpoint_verify).' \
+  "$repo_dir/test.src/collective_balanced.in" > "$test_tmp/pool-checkpoint.in"
+pool_case="$test_tmp/pool-checkpoint-case"
+mkdir "$pool_case"
+(
+  cd "$pool_case"
+  "$repo_dir/bin/prover9" < "$test_tmp/pool-checkpoint.in" \
+    > before.out 2> before.err || true
+)
+pool_checkpoint_dir=$(find "$pool_case" -maxdepth 1 -type d \
+  -name 'prover9_*_ckpt_*' -print)
+test -n "$pool_checkpoint_dir"
+pool_count=$(awk 'NR == 1 { print $2 }' \
+  "$pool_checkpoint_dir/collective_candidates.txt")
+test "$pool_count" -ge 1
+"$repo_dir/bin/prover9" -r "$pool_checkpoint_dir" < /dev/null \
+  > "$test_tmp/pool-resumed.out" 2> "$test_tmp/pool-resumed.err" || true
+grep -Eq '^%   Verification: [0-9]+ passed, 0 failed\.$' \
+  "$test_tmp/pool-resumed.out"
+grep -E '^(Given=|Collective_(frontier|rule_descriptors|work|balanced|chunks|candidate_cache|preview):)' \
+  "$test_tmp/balanced.out" | tail -8 > "$test_tmp/pool-control.stats"
+grep -E '^(Given=|Collective_(frontier|rule_descriptors|work|balanced|chunks|candidate_cache|preview):)' \
+  "$test_tmp/pool-resumed.out" | tail -8 > "$test_tmp/pool-resumed.stats"
+diff -u "$test_tmp/pool-control.stats" "$test_tmp/pool-resumed.stats"
+
+# Exact hint preview is advisory but must agree with authoritative matching
+# on stable candidates, while the configured count and byte bounds remain
+# hard even when several rule lanes contribute to one shared window.
+"$repo_dir/bin/prover9" < "$repo_dir/test.src/collective_preview.in" \
+  > "$test_tmp/preview.out" 2> "$test_tmp/preview.err" || true
+grep -Eq 'Collective_preview: calls=[1-9][0-9]*, predicted_hints=[1-9][0-9]*, authoritative_hints=[1-9][0-9]*, false_positives=0, changed_hint_ids=0, stale_refreshes=[0-9]+\.' \
+  "$test_tmp/preview.out"
+grep -Eq 'Collective_candidate_pool: .*commits=[1-9][0-9]*, priority_commits=[1-9][0-9]*, fair_commits=[1-9][0-9]*\.' \
+  "$test_tmp/preview.out"
+preview_peak=$(sed -n 's/.*Collective_candidate_cache:.* peak=\([0-9][0-9]*\),.*/\1/p' \
+  "$test_tmp/preview.out" | tail -1)
+test -n "$preview_peak"
+test "$preview_peak" -le 4
+
 echo 'collective_balanced_test: PASS'

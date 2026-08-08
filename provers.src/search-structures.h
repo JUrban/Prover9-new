@@ -177,6 +177,9 @@ struct prover_options {
     collective_paramod_share,         // weighted balanced lane share
     collective_pos_hyper_share,       // weighted balanced lane share
     collective_neg_hyper_share,       // weighted balanced lane share
+    collective_candidate_window,      // target shared raw-candidate window
+    collective_candidate_commit_interval, // max expansion turns before commit
+    collective_candidate_fair_interval, // one oldest pool commit per N
 
     fold_denial_max,
 
@@ -232,6 +235,7 @@ struct prover_options {
     candidate_hard_limit,  // skip inference when candidates exceed this
     checkpoint_minutes,    // periodic checkpoint interval in minutes (-1 = off)
     checkpoint_given,      // one-shot deterministic checkpoint at given count
+    checkpoint_candidate_pool, // one-shot at collective pool occupancy
     checkpoint_keep,       // max auto-checkpoint dirs to retain (default 3)
     sine,                  // SInE premise selection (-1=auto, 0=off, >0=tolerancex100)
     sine_depth,            // SInE BFS depth limit (0=unlimited/fixpoint)
@@ -412,6 +416,17 @@ struct prover_stats {
     collective_hyper_iterator_candidates,
     collective_hyper_iterator_completions,
     collective_hyper_iterator_choice_bytes,
+    collective_candidate_pool_bytes,
+    collective_candidate_pool_peak_bytes,
+    collective_preview_calls,
+    collective_preview_hint_matches,
+    collective_preview_authoritative_matches,
+    collective_preview_false_positives,
+    collective_preview_changed_hint_ids,
+    collective_preview_stale_refreshes,
+    collective_candidate_pool_commits,
+    collective_candidate_priority_commits,
+    collective_candidate_fair_commits,
     compression_attempted,
     compression_successful,
     compression_skipped,

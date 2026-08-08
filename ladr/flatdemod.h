@@ -51,6 +51,10 @@ unsigned long long fdemod_attempts();
 
 unsigned long long fdemod_rewrites();
 
+/* Suppress global attempt/rewrite accounting around read-only scratch
+   normalization.  This does not alter rewriting semantics. */
+void set_fdemod_stat_counting(BOOL enabled);
+
 void fdemod_clause(Topform c, Mindex idx,
 		   int *step_limit, int *increase_limit, BOOL lex_order_vars);
 

@@ -318,6 +318,17 @@ void demodulate_clause(Topform c, int step_limit, int increase_limit,
   }
 }  /* demodulate_clause */
 
+/* PUBLIC */
+void demodulate_clause_preview(Topform c, int step_limit, int increase_limit,
+			       BOOL lex_order_vars)
+{
+  step_limit = step_limit == -1 ? INT_MAX : step_limit;
+  increase_limit = increase_limit == -1 ? INT_MAX : increase_limit;
+  set_fdemod_stat_counting(FALSE);
+  fdemod_clause(c, Demod_idx, &step_limit, &increase_limit, lex_order_vars);
+  set_fdemod_stat_counting(TRUE);
+}  /* demodulate_clause_preview */
+
 /*************
  *
  *   back_demodulatable()

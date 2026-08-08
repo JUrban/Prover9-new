@@ -49,6 +49,11 @@ void destroy_back_demod_index(void);
 void demodulate_clause(Topform c, int step_limit, int increase_limit,
 		       BOOL print, BOOL lex_order_vars);
 
+/* Same rewrite result as demodulate_clause(), without diagnostics or global
+   forward-demodulation attempt/rewrite accounting. */
+void demodulate_clause_preview(Topform c, int step_limit, int increase_limit,
+			       BOOL lex_order_vars);
+
 Plist back_demodulatable(Topform demod, int type, BOOL lex_order_vars);
 
 void back_demod_idx_report(void);

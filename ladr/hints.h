@@ -58,6 +58,18 @@ void adjust_weight_with_hints(Topform c,
 			      BOOL degrade,
 			      BOOL breadth_first_hints);
 
+/* Read-only counterpart of adjust_weight_with_hints().  The candidate is
+   queried against the currently selected exact hint index, including the
+   unoriented-unit flip fallback, but neither the candidate nor persistent
+   hint state is changed.  raw_weight is the candidate's already-computed
+   clause weight. */
+Topform preview_weight_with_hints(Topform c,
+				  double raw_weight,
+				  BOOL degrade,
+				  BOOL breadth_first_hints,
+				  double *adjusted_weight,
+				  BOOL *flipped);
+
 void keep_hint_matcher(Topform c);
 
 void back_demod_hints(Topform demod, int type, BOOL lex_order_vars);

@@ -11,7 +11,7 @@ CFLAGS = $(XFLAGS) -g  -O0 -Wall
 # CFLAGS = $(XFLAGS) -pg -O -Wall
 # CFLAGS = $(XFLAGS)  -Wall -pedantic
 
-PROGRAMS = avltest memory_lifecycle_test allocator_churn_test bookkeeping_lifecycle_test ancestor_store_test ancestor_store_scale_test checkpoint_selector_test dense_selector_compaction_test hint_postings_test paramod_iterator_test hyper_iterator_test
+PROGRAMS = avltest memory_lifecycle_test allocator_churn_test bookkeeping_lifecycle_test ancestor_store_test ancestor_store_scale_test checkpoint_selector_test dense_selector_compaction_test hint_postings_test hint_preview_test paramod_iterator_test hyper_iterator_test
 
 all: ladr apps
 
@@ -57,6 +57,9 @@ dense_selector_compaction_test: dense_selector_compaction_test.o ../provers.src/
 hint_postings_test: hint_postings_test.o ../ladr/libladr.a
 	$(CC) $(CFLAGS) -o hint_postings_test hint_postings_test.o ../ladr/libladr.a -lm
 
+hint_preview_test: hint_preview_test.o ../ladr/libladr.a
+	$(CC) $(CFLAGS) -o hint_preview_test hint_preview_test.o ../ladr/libladr.a -lm
+
 paramod_iterator_test: paramod_iterator_test.o ../ladr/libladr.a
 	$(CC) $(CFLAGS) -o paramod_iterator_test paramod_iterator_test.o ../ladr/libladr.a -lm
 
@@ -89,8 +92,9 @@ checkpoint-tests: checkpoint_selector_test dense_selector_compaction_test
 bookkeeping-tests: bookkeeping_lifecycle_test
 	./bookkeeping_lifecycle_test
 
-hint-postings-test: hint_postings_test
+hint-postings-test: hint_postings_test hint_preview_test
 	./hint_postings_test
+	./hint_preview_test
 
 iterator-tests: paramod_iterator_test hyper_iterator_test
 	./paramod_iterator_test

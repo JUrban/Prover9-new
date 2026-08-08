@@ -101,6 +101,39 @@ claim a bounded raw-work turn; native continuation is the next phase.
 - Paramod/hyper iterator tests, balanced checkpoint/fairness/backpressure,
   all focused legacy suites, and `make test1` pass together.
 
+### 2026-08-08: Phase 4 bounded windows and read-only preview
+
+- Balanced iterators now transfer every yielded raw conclusion into one
+  global heap-owned candidate pool.  `collective_candidate_cache` remains the
+  hard count bound across the pool and current limbo body, while
+  `collective_candidate_window` and
+  `collective_candidate_commit_interval` bound cross-descriptor lookahead and
+  force regular authoritative commits.  One oldest-insertion commit per
+  `collective_candidate_fair_interval` makes every resident window member
+  finite-delay work even under an unbounded stream of better advisory keys.
+- Preview normalization runs on an owned scratch copy, queries the selected
+  exact hint index with the same flipped-unit and degradation rules, and
+  evaluates the actual high/low given-selection properties.  CAC discovery is
+  excluded from preview and forward-demodulation/packed-hint accounting is
+  suppressed, so the query cannot change active simplifiers, hint epochs,
+  match counters, labels, IDs, or authoritative operation statistics.
+- Heap keys use high/low selector priority, exact hint ID, adjusted weight,
+  given activation age, raw ordinal, and insertion ordinal.  They are advisory
+  only: every entry is sent through the unchanged `cl_process`, and predicted
+  versus authoritative matcher outcomes are counted there.
+- Entries carry hint and simplifier epochs.  A stale heap top is normalized,
+  rematched, and reheapified before it can be committed; lazy refresh work and
+  false positives/changed IDs are reported explicitly.
+- `P9COLLE` adds each descriptor's monotonically increasing candidate ordinal
+  and a bounded `collective_candidates.txt` containing live pool bodies and
+  deterministic preview metadata.  `checkpoint_candidate_pool` provides a
+  one-shot bounded test/operations trigger; old balanced `P9COLLB`--`P9COLLD`
+  checkpoints remain accepted with an initially empty pool.
+- `hint_preview_test` audits FPA, packed-legacy, and packed preview purity and
+  exact matcher/weight agreement.  The balanced integration test forces hint
+  matches, count/byte accounting, stale refresh, and checkpoint/resume with a
+  nonempty candidate pool.
+
 ## Objective
 
 Make the collective DISCOUNT frontier discover and propagate useful hint

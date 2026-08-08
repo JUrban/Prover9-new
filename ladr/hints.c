@@ -54,6 +54,15 @@ static unsigned *Packed_candidates = NULL;
 static unsigned Packed_candidates_count = 0, Packed_candidates_capacity = 0;
 static unsigned long long Packed_candidate_checks = 0;
 
+/* Dedicated read-only-preview query workspace.  It is allocated alongside
+   the packed bank, never aliases authoritative matcher scratch, and is not
+   part of persistent hint semantics or authoritative operation accounting. */
+static unsigned *Preview_candidate_mark = NULL;
+static unsigned Preview_candidate_serial = 1;
+static unsigned *Preview_candidates = NULL;
+static unsigned Preview_candidates_count = 0;
+static unsigned Preview_candidates_capacity = 0;
+
 /* Experimental stable-ID structural index.  Rewrites leave conservative
    stale IDs; a bounded rebuild materializes one active body at a time. */
 
@@ -86,6 +95,16 @@ static unsigned long long Better_posting_rebuild_materializations = 0;
 static unsigned long long *Better_key_scratch = NULL;
 static unsigned Better_key_scratch_count = 0;
 static unsigned Better_key_scratch_capacity = 0;
+static unsigned *Preview_intersection_member = NULL;
+static unsigned *Preview_intersection_match = NULL;
+static unsigned Preview_intersection_serial = 1;
+static unsigned Preview_match_serial = 1;
+static unsigned *Preview_intersection_ids = NULL;
+static unsigned Preview_intersection_count = 0;
+static unsigned Preview_intersection_capacity = 0;
+static unsigned long long *Preview_key_scratch = NULL;
+static unsigned Preview_key_scratch_count = 0;
+static unsigned Preview_key_scratch_capacity = 0;
 
 #define BETTER_FEATURE_BACK 1U
 #define BETTER_FEATURE_MATCH_POS 2U
@@ -127,6 +146,12 @@ struct packed_hint_operation_stats {
 static struct packed_hint_operation_stats
   Packed_operation_stats[PACKED_HINT_OPERATIONS];
 
+/* Preview queries use the same exact matcher and tie breaking as the
+   authoritative path, but operation counters and clocks must describe only
+   authoritative search work.  Candidate arrays and serial marks are scratch
+   index state and may be reused by a preview. */
+static BOOL Hint_preview_active = FALSE;
+
 static const char *Packed_operation_names[PACKED_HINT_OPERATIONS] = {
   "equivalence", "match", "flipped_match", "back_demod"
 };
@@ -145,8 +170,10 @@ static unsigned packed_candidate_bucket(unsigned n)
 
 static void packed_operation_begin(enum packed_hint_operation op)
 {
-  Packed_operation_stats[op].queries++;
-  clock_start(Packed_operation_stats[op].clock);
+  if (!Hint_preview_active) {
+    Packed_operation_stats[op].queries++;
+    clock_start(Packed_operation_stats[op].clock);
+  }
 }
 
 static void packed_operation_candidates(enum packed_hint_operation op)
@@ -161,7 +188,8 @@ static void packed_operation_candidates(enum packed_hint_operation op)
 
 static void packed_operation_end(enum packed_hint_operation op)
 {
-  clock_stop(Packed_operation_stats[op].clock);
+  if (!Hint_preview_active)
+    clock_stop(Packed_operation_stats[op].clock);
 }
 
 static void packed_reserve_hints(unsigned id)
@@ -201,6 +229,11 @@ static void packed_reserve_hints(unsigned id)
       Packed_hint_neg_features, (size_t) cap * sizeof(unsigned long long));
     Packed_candidate_mark = safe_realloc(Packed_candidate_mark,
                                          (size_t) cap * sizeof(unsigned));
+    Preview_candidate_mark = safe_realloc(
+      Preview_candidate_mark, (size_t) cap * sizeof(unsigned));
+    Preview_candidates = safe_realloc(
+      Preview_candidates, (size_t) cap * sizeof(unsigned));
+    Preview_candidates_capacity = cap;
     if (Better_packed_index) {
       Better_hint_feature_count = safe_realloc(
         Better_hint_feature_count, (size_t) cap * sizeof(unsigned));
@@ -214,6 +247,18 @@ static void packed_reserve_hints(unsigned id)
         Better_intersection_member, (size_t) cap * sizeof(unsigned));
       Better_intersection_match = safe_realloc(
         Better_intersection_match, (size_t) cap * sizeof(unsigned));
+      Preview_intersection_member = safe_realloc(
+        Preview_intersection_member, (size_t) cap * sizeof(unsigned));
+      Preview_intersection_match = safe_realloc(
+        Preview_intersection_match, (size_t) cap * sizeof(unsigned));
+      Preview_intersection_ids = safe_realloc(
+        Preview_intersection_ids, (size_t) cap * sizeof(unsigned));
+      Preview_intersection_capacity = cap;
+      if (Preview_key_scratch_capacity == 0) {
+        Preview_key_scratch_capacity = 32;
+        Preview_key_scratch = safe_calloc(
+          Preview_key_scratch_capacity, sizeof(*Preview_key_scratch));
+      }
     }
     memset(Packed_hint_by_id + old, 0,
            (size_t) (cap - old) * sizeof(Topform));
@@ -227,6 +272,8 @@ static void packed_reserve_hints(unsigned id)
            (size_t) (cap - old) * sizeof(unsigned long long));
     memset(Packed_candidate_mark + old, 0,
            (size_t) (cap - old) * sizeof(unsigned));
+    memset(Preview_candidate_mark + old, 0,
+           (size_t) (cap - old) * sizeof(unsigned));
     if (Better_packed_index) {
       memset(Better_hint_feature_count + old, 0,
              (size_t) (cap - old) * sizeof(unsigned));
@@ -237,6 +284,10 @@ static void packed_reserve_hints(unsigned id)
       memset(Better_intersection_member + old, 0,
              (size_t) (cap - old) * sizeof(unsigned));
       memset(Better_intersection_match + old, 0,
+             (size_t) (cap - old) * sizeof(unsigned));
+      memset(Preview_intersection_member + old, 0,
+             (size_t) (cap - old) * sizeof(unsigned));
+      memset(Preview_intersection_match + old, 0,
              (size_t) (cap - old) * sizeof(unsigned));
     }
     Packed_hint_capacity = cap;
@@ -1030,6 +1081,8 @@ void done_with_hints(void)
   if (Packed_feature_bitsets) safe_free(Packed_feature_bitsets);
   if (Packed_candidate_mark) safe_free(Packed_candidate_mark);
   if (Packed_candidates) safe_free(Packed_candidates);
+  if (Preview_candidate_mark) safe_free(Preview_candidate_mark);
+  if (Preview_candidates) safe_free(Preview_candidates);
   if (Better_hint_feature_count) safe_free(Better_hint_feature_count);
   if (Better_hint_positive_count) safe_free(Better_hint_positive_count);
   if (Better_hint_negative_count) safe_free(Better_hint_negative_count);
@@ -1037,6 +1090,10 @@ void done_with_hints(void)
   if (Better_intersection_match) safe_free(Better_intersection_match);
   if (Better_intersection_ids) safe_free(Better_intersection_ids);
   if (Better_key_scratch) safe_free(Better_key_scratch);
+  if (Preview_intersection_member) safe_free(Preview_intersection_member);
+  if (Preview_intersection_match) safe_free(Preview_intersection_match);
+  if (Preview_intersection_ids) safe_free(Preview_intersection_ids);
+  if (Preview_key_scratch) safe_free(Preview_key_scratch);
   hint_postings_destroy(Better_postings);
   if (Better_equivalence_buckets) safe_free(Better_equivalence_buckets);
   if (Better_equivalence_references) safe_free(Better_equivalence_references);
@@ -1047,6 +1104,8 @@ void done_with_hints(void)
   Packed_feature_bitsets = NULL;
   Packed_feature_words = 0;
   Packed_candidates = NULL;
+  Preview_candidate_mark = NULL;
+  Preview_candidates = NULL;
   Better_postings = NULL;
   Better_equivalence_buckets = NULL;
   Better_equivalence_references = NULL;
@@ -1058,15 +1117,23 @@ void done_with_hints(void)
   Better_intersection_member = Better_intersection_match = NULL;
   Better_intersection_ids = NULL;
   Better_key_scratch = NULL;
+  Preview_intersection_member = Preview_intersection_match = NULL;
+  Preview_intersection_ids = NULL;
+  Preview_key_scratch = NULL;
   Better_feature_live_count = 0;
   Better_equivalence_live_count = 0;
   Better_intersection_serial = Better_match_serial = 1;
   Better_intersection_count = Better_intersection_capacity = 0;
   Better_key_scratch_count = Better_key_scratch_capacity = 0;
+  Preview_intersection_serial = Preview_match_serial = 1;
+  Preview_intersection_count = Preview_intersection_capacity = 0;
+  Preview_key_scratch_count = Preview_key_scratch_capacity = 0;
   Better_posting_rebuilds = Better_posting_rebuild_refs = 0;
   Better_posting_rebuild_materializations = 0;
   Packed_hint_capacity = 0;
   Packed_candidates_count = Packed_candidates_capacity = 0;
+  Preview_candidate_serial = 1;
+  Preview_candidates_count = Preview_candidates_capacity = 0;
   memset(Packed_feature_counts, 0, sizeof(Packed_feature_counts));
   Packed_candidate_checks = 0;
   {
@@ -1574,6 +1641,155 @@ void adjust_weight_with_hints(Topform c,
 
 /*************
  *
+ *   preview_weight_with_hints()
+ *
+ *   Exact, side-effect-free hint/weight query for scheduler ranking.  Keep
+ *   all policy in lockstep with adjust_weight_with_hints(), but deliberately
+ *   omit labels, matching_hint assignment, and flip labels.  Packed-index
+ *   accounting is restored after the query; its reusable candidate scratch
+ *   storage is not persistent hint state.
+ *
+ *************/
+
+/* PUBLIC */
+Topform preview_weight_with_hints(Topform c,
+				  double raw_weight,
+				  BOOL degrade,
+				  BOOL breadth_first_hints,
+				  double *adjusted_weight,
+				  BOOL *flipped)
+{
+  struct packed_hint_operation_stats saved_stats[PACKED_HINT_OPERATIONS];
+  unsigned long long saved_checks = Packed_candidate_checks;
+  unsigned *saved_candidate_mark = NULL, *saved_candidates = NULL;
+  unsigned saved_candidate_serial = 0, saved_candidates_count = 0;
+  unsigned saved_candidates_capacity = 0;
+  unsigned *saved_intersection_member = NULL;
+  unsigned *saved_intersection_match = NULL;
+  unsigned *saved_intersection_ids = NULL;
+  unsigned saved_intersection_serial = 0, saved_match_serial = 0;
+  unsigned saved_intersection_count = 0, saved_intersection_capacity = 0;
+  unsigned long long *saved_key_scratch = NULL;
+  unsigned saved_key_scratch_count = 0, saved_key_scratch_capacity = 0;
+  Topform hint;
+  BOOL flip_match = FALSE;
+  double weight = raw_weight;
+
+  if (Hint_preview_active)
+    fatal_error("preview_weight_with_hints: nested preview");
+  memcpy(saved_stats, Packed_operation_stats, sizeof(saved_stats));
+  Hint_preview_active = TRUE;
+
+  /* Packed retrieval uses global arrays only as reusable query workspace.
+     Temporarily swap in preview-owned workspace so even serial marks,
+     capacities, and allocator-owned persistent scratch objects are exactly
+     unchanged when this function returns. */
+  if (Packed_index) {
+    saved_candidate_mark = Packed_candidate_mark;
+    saved_candidates = Packed_candidates;
+    saved_candidate_serial = Packed_candidate_serial;
+    saved_candidates_count = Packed_candidates_count;
+    saved_candidates_capacity = Packed_candidates_capacity;
+    Packed_candidate_mark = Preview_candidate_mark;
+    Packed_candidates = Preview_candidates;
+    Packed_candidate_serial = Preview_candidate_serial;
+    Packed_candidates_count = Preview_candidates_count;
+    Packed_candidates_capacity = Preview_candidates_capacity;
+    if (Better_packed_index) {
+      saved_intersection_member = Better_intersection_member;
+      saved_intersection_match = Better_intersection_match;
+      saved_intersection_ids = Better_intersection_ids;
+      saved_intersection_serial = Better_intersection_serial;
+      saved_match_serial = Better_match_serial;
+      saved_intersection_count = Better_intersection_count;
+      saved_intersection_capacity = Better_intersection_capacity;
+      saved_key_scratch = Better_key_scratch;
+      saved_key_scratch_count = Better_key_scratch_count;
+      saved_key_scratch_capacity = Better_key_scratch_capacity;
+      Better_intersection_member = Preview_intersection_member;
+      Better_intersection_match = Preview_intersection_match;
+      Better_intersection_ids = Preview_intersection_ids;
+      Better_intersection_serial = Preview_intersection_serial;
+      Better_match_serial = Preview_match_serial;
+      Better_intersection_count = Preview_intersection_count;
+      Better_intersection_capacity = Preview_intersection_capacity;
+      Better_key_scratch = Preview_key_scratch;
+      Better_key_scratch_count = Preview_key_scratch_count;
+      Better_key_scratch_capacity = Preview_key_scratch_capacity;
+    }
+  }
+
+  hint = Packed_index ? packed_find_matching_hint(c, FALSE) :
+                        find_matching_hint(c, Hints_idx);
+  if (hint == NULL &&
+      unit_clause(c->literals) &&
+      eq_term(c->literals->atom) &&
+      !oriented_eq(c->literals->atom)) {
+    Term save_atom = c->literals->atom;
+    c->literals->atom = top_flip(save_atom);
+    hint = Packed_index ? packed_find_matching_hint(c, TRUE) :
+                          find_matching_hint(c, Hints_idx);
+    zap_top_flip(c->literals->atom);
+    c->literals->atom = save_atom;
+    flip_match = hint != NULL;
+  }
+
+  if (Packed_index) {
+    Preview_candidate_mark = Packed_candidate_mark;
+    Preview_candidates = Packed_candidates;
+    Preview_candidate_serial = Packed_candidate_serial;
+    Preview_candidates_count = Packed_candidates_count;
+    Preview_candidates_capacity = Packed_candidates_capacity;
+    Packed_candidate_mark = saved_candidate_mark;
+    Packed_candidates = saved_candidates;
+    Packed_candidate_serial = saved_candidate_serial;
+    Packed_candidates_count = saved_candidates_count;
+    Packed_candidates_capacity = saved_candidates_capacity;
+    if (Better_packed_index) {
+      Preview_intersection_member = Better_intersection_member;
+      Preview_intersection_match = Better_intersection_match;
+      Preview_intersection_ids = Better_intersection_ids;
+      Preview_intersection_serial = Better_intersection_serial;
+      Preview_match_serial = Better_match_serial;
+      Preview_intersection_count = Better_intersection_count;
+      Preview_intersection_capacity = Better_intersection_capacity;
+      Preview_key_scratch = Better_key_scratch;
+      Preview_key_scratch_count = Better_key_scratch_count;
+      Preview_key_scratch_capacity = Better_key_scratch_capacity;
+      Better_intersection_member = saved_intersection_member;
+      Better_intersection_match = saved_intersection_match;
+      Better_intersection_ids = saved_intersection_ids;
+      Better_intersection_serial = saved_intersection_serial;
+      Better_match_serial = saved_match_serial;
+      Better_intersection_count = saved_intersection_count;
+      Better_intersection_capacity = saved_intersection_capacity;
+      Better_key_scratch = saved_key_scratch;
+      Better_key_scratch_count = saved_key_scratch_count;
+      Better_key_scratch_capacity = saved_key_scratch_capacity;
+    }
+  }
+  Hint_preview_active = FALSE;
+  memcpy(Packed_operation_stats, saved_stats, sizeof(saved_stats));
+  Packed_candidate_checks = saved_checks;
+
+  if (hint != NULL) {
+    int bsub_wt = get_int_attribute(hint->attributes, Bsub_wt_attr, 1);
+    if (bsub_wt != INT_MAX)
+      weight = bsub_wt;
+    else if (breadth_first_hints)
+      weight = 0;
+    if (degrade)
+      weight += hint->weight * 1000;
+  }
+  if (adjusted_weight != NULL)
+    *adjusted_weight = weight;
+  if (flipped != NULL)
+    *flipped = flip_match;
+  return hint;
+}  /* preview_weight_with_hints */
+
+/*************
+ *
  *   keep_hint_matcher()
  *
  *************/
@@ -1895,7 +2111,9 @@ void packed_hint_index_stats(unsigned long long *node_bytes,
     (unsigned long long) Packed_hint_capacity *
       (sizeof(Topform) + 2 * sizeof(unsigned char) + sizeof(unsigned) +
        3 * sizeof(unsigned long long)) +
-    (unsigned long long) Packed_candidates_capacity * sizeof(unsigned) : 0;
+    (unsigned long long) Packed_candidates_capacity * sizeof(unsigned) +
+    (unsigned long long) Packed_hint_capacity * sizeof(unsigned) +
+    (unsigned long long) Preview_candidates_capacity * sizeof(unsigned) : 0;
   *candidate_checks = Packed_candidate_checks;
   if (Better_packed_index) {
     hint_postings_get_stats(Better_postings, &posting_stats);
@@ -1908,6 +2126,10 @@ void packed_hint_index_stats(unsigned long long *node_bytes,
       (unsigned long long) Better_key_scratch_capacity *
         sizeof(unsigned long long) +
       (unsigned long long) Better_intersection_capacity * sizeof(unsigned) +
+      (unsigned long long) Packed_hint_capacity * 2 * sizeof(unsigned) +
+      (unsigned long long) Preview_intersection_capacity * sizeof(unsigned) +
+      (unsigned long long) Preview_key_scratch_capacity *
+        sizeof(unsigned long long) +
       (unsigned long long) Better_equivalence_bucket_capacity *
         sizeof(unsigned);
   }

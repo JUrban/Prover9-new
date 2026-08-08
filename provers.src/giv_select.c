@@ -653,6 +653,43 @@ static unsigned long long dense_selector_mask(Topform c)
   return mask;
 }
 
+/* PUBLIC */
+void given_selection_preview(Topform c,
+			     unsigned long long *selector_mask,
+			     unsigned *priority)
+{
+  unsigned long long mask = 0;
+  BOOL matched = FALSE;
+  Plist p;
+
+  if (Rule_needs_semantics)
+    set_semantics(c);
+  for (p = High.selectors; p != NULL; p = p->next) {
+    Giv_select gs = p->v;
+    if (eval_clause_in_rule(c, gs->property)) {
+      matched = TRUE;
+      mask |= 1ULL << gs->dense_bit;
+    }
+  }
+  if (matched) {
+    if (priority != NULL)
+      *priority = 0;
+  }
+  else {
+    for (p = Low.selectors; p != NULL; p = p->next) {
+      Giv_select gs = p->v;
+      if (eval_clause_in_rule(c, gs->property)) {
+        matched = TRUE;
+        mask |= 1ULL << gs->dense_bit;
+      }
+    }
+    if (priority != NULL)
+      *priority = matched ? 1 : 2;
+  }
+  if (selector_mask != NULL)
+    *selector_mask = mask;
+}  /* given_selection_preview */
+
 static void dense_insert_passive(Topform c)
 {
   struct dense_passive_record r;

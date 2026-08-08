@@ -1,0 +1,42 @@
+clear(auto).
+clear(print_initial_clauses).
+clear(print_given).
+assign(search_loop,discount).
+assign(passive_store,dense).
+assign(sos_limit,-1).
+assign(inference_frontier,collective).
+assign(collective_scheduler,balanced_hint).
+assign(ancestor_store,memory).
+assign(hint_index,packed).
+assign(collective_candidate_chunk,2).
+assign(collective_candidate_window,4).
+assign(collective_candidate_cache,4).
+assign(collective_candidate_commit_interval,2).
+assign(collective_candidate_fair_interval,2).
+assign(collective_descriptor_high_water,8).
+assign(collective_descriptor_low_water,3).
+assign(collective_oldest_lag_limit,3).
+assign(collective_balanced_fair_interval,4).
+assign(collective_paramod_share,2).
+assign(collective_pos_hyper_share,1).
+assign(collective_neg_hyper_share,1).
+assign(max_given,20).
+assign(max_proofs,-1).
+assign(max_seconds,20).
+assign(stats,all).
+set(paramodulation).
+set(pos_hyper_resolution).
+set(neg_hyper_resolution).
+
+formulas(sos).
+  a = b.
+  f(a) = c.
+  P(a).
+  -P(x) | Q(x).
+  -Q(b).
+end_of_list.
+
+formulas(hints).
+  Q(a).
+  -P(a).
+end_of_list.

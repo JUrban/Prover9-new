@@ -108,6 +108,14 @@ void get_high_selector_state(const char **name, int *count);
 
 void set_high_selector_state(const char *name, int count);
 
+/* Read-only selector classification for a scratch, normalized candidate.
+   The bit layout is identical to dense passive selector masks.  Priority is
+   0 for a high-priority match, 1 for a low-priority match, and 2 when no
+   selector matches. */
+void given_selection_preview(Topform c,
+			     unsigned long long *selector_mask,
+			     unsigned *priority);
+
 Term selector_rule_term(char *name, char *priority,
 			char *order, char *rule, int part);
 
