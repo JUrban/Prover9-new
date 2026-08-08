@@ -454,8 +454,8 @@ static unsigned long long better_equivalence_key(
 {
   unsigned long long x = positive_mask ^
     ((negative_mask << 29) | (negative_mask >> 35)) ^
-    ((unsigned long long) positive << 48) ^
-    ((unsigned long long) negative << 32);
+    ((unsigned long long) (positive != 0) << 48) ^
+    ((unsigned long long) (negative != 0) << 32);
   x ^= x >> 30;
   x *= 0xbf58476d1ce4e5b9ULL;
   x ^= x >> 27;
@@ -1190,8 +1190,8 @@ static void better_collect_clause_candidates(
     unsigned long long stored = first != NULL && first->sign ?
       Packed_hint_pos_features[id] : Packed_hint_neg_features[id];
     BOOL profile_ok = equivalence ?
-      Better_hint_positive_count[id] == positive &&
-        Better_hint_negative_count[id] == negative :
+      (Better_hint_positive_count[id] != 0) == (positive != 0) &&
+        (Better_hint_negative_count[id] != 0) == (negative != 0) :
       Better_hint_positive_count[id] >= positive &&
         Better_hint_negative_count[id] >= negative;
     BOOL feature_ok = equivalence ?

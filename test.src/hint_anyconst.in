@@ -14,6 +14,10 @@ formulas(hints).
   g(_AnyConst_1,_AnyConst_2) = e # label(distinct_anyconsts).
   -p(x) | q(f(x)) # label(multiliteral_variant_a).
   q(f(y)) | -p(y) # label(multiliteral_variant_b).
+  r(x) # label(theta_equivalent_single).
+  r(x) | r(y) # label(theta_equivalent_repeated).
+  -s(x) | t(x) # label(theta_equivalent_mixed_single).
+  -s(x) | -s(y) | t(x) | t(y) # label(theta_equivalent_mixed_repeated).
 end_of_list.
 
 formulas(sos).
