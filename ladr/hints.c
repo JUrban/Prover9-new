@@ -90,6 +90,7 @@ static unsigned Better_key_scratch_capacity = 0;
 #define BETTER_FEATURE_BACK 1U
 #define BETTER_FEATURE_MATCH_POS 2U
 #define BETTER_FEATURE_MATCH_NEG 3U
+#define BETTER_FEATURE_BACK_CORRELATED 4U
 #define BETTER_BACK_FEATURE_DEPTH 2U
 #define BETTER_MATCH_FEATURE_DEPTH 2U
 #define BETTER_REBUILD_STALE_MIN 65536ULL
@@ -448,6 +449,24 @@ static unsigned long long better_feature_key(unsigned kind, unsigned path,
          (unsigned) symbol;
 }
 
+/* Correlate a descendant with the root of the same possible rewrite
+   occurrence.  The low 56 bits are a hash, so collisions admit extra
+   candidates only; rewritable_clause_type remains the exact authority. */
+static unsigned long long better_back_correlated_key(
+  int root_symbol, unsigned path, int symbol)
+{
+  unsigned long long x = ((unsigned long long) (unsigned) root_symbol << 32) |
+                         (unsigned) symbol;
+  x ^= (unsigned long long) path * 0x9e3779b97f4a7c15ULL;
+  x ^= x >> 30;
+  x *= 0xbf58476d1ce4e5b9ULL;
+  x ^= x >> 27;
+  x *= 0x94d049bb133111ebULL;
+  x ^= x >> 31;
+  return ((unsigned long long) BETTER_FEATURE_BACK_CORRELATED << 56) |
+         (x & 0x00ffffffffffffffULL);
+}
+
 static unsigned long long better_equivalence_key(
   unsigned long long positive_mask, unsigned long long negative_mask,
   unsigned positive, unsigned negative, unsigned query_literals)
@@ -615,13 +634,39 @@ static void better_collect_relative_features(Term t, unsigned kind,
   }
 }
 
+static void better_collect_back_correlated_features(
+  Term t, int root_symbol, unsigned path, unsigned depth)
+{
+  unsigned i;
+  if (VARIABLE(t) || depth >= BETTER_BACK_FEATURE_DEPTH)
+    return;
+  for (i = 0; i < (unsigned) ARITY(t); i++) {
+    Term child = ARG(t,i);
+    unsigned child_path = better_child_path(path, depth, i);
+    if (child_path != UINT_MAX && !VARIABLE(child)) {
+      better_scratch_add(better_back_correlated_key(
+        root_symbol, child_path, SYMNUM(child)));
+      better_collect_back_correlated_features(
+        child, root_symbol, child_path, depth + 1);
+    }
+  }
+}
+
+static void better_collect_back_features(Term t)
+{
+  if (VARIABLE(t))
+    return;
+  better_collect_relative_features(t, BETTER_FEATURE_BACK, 0, 0,
+                                   BETTER_BACK_FEATURE_DEPTH);
+  better_collect_back_correlated_features(t, SYMNUM(t), 0, 0);
+}
+
 static void better_collect_back_occurrences(Term t)
 {
   int i;
   if (VARIABLE(t))
     return;
-  better_collect_relative_features(t, BETTER_FEATURE_BACK, 0, 0,
-                                   BETTER_BACK_FEATURE_DEPTH);
+  better_collect_back_features(t);
   for (i = 0; i < ARITY(t); i++)
     better_collect_back_occurrences(ARG(t,i));
 }
@@ -854,8 +899,7 @@ static void better_collect_back_pattern_candidates(
     return;
   }
   better_scratch_clear();
-  better_collect_relative_features(pattern, BETTER_FEATURE_BACK, 0, 0,
-                                   BETTER_BACK_FEATURE_DEPTH);
+  better_collect_back_features(pattern);
   better_intersect_scratch_candidates(op, TRUE, TRUE);
 }
 
