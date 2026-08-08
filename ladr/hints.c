@@ -899,7 +899,10 @@ static void better_collect_back_pattern_candidates(
     return;
   }
   better_scratch_clear();
-  better_collect_back_features(pattern);
+  better_collect_back_correlated_features(pattern, SYMNUM(pattern), 0, 0);
+  if (Better_key_scratch_count == 0)
+    better_scratch_add(better_feature_key(
+      BETTER_FEATURE_BACK, 0, SYMNUM(pattern)));
   better_intersect_scratch_candidates(op, TRUE, TRUE);
 }
 
