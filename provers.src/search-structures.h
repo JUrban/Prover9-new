@@ -267,6 +267,7 @@ struct prover_options {
     multiple_interps,    // false_in_all, false_in_some
     search_loop,         // otter, discount
     passive_store,       // full, compressed
+    discount_demodulation, // selected, eager_legacy, eager_interreduced
     hint_index,          // fpa, compact, shallow, packed/hybrid, packed_legacy
     inference_frontier,  // clauses, collective
     collective_scheduler, // legacy, balanced_hint
@@ -339,6 +340,16 @@ struct prover_stats {
     active_indexed_clauses,
     passive_indexed_clauses,
     delayed_demodulators,
+    passive_demodulator_candidates,
+    passive_oriented_demodulator_candidates,
+    passive_lex_demodulator_candidates,
+    rewrite_only_demodulators_admitted,
+    rewrite_only_demodulators_retired,
+    rewrite_only_demodulators_selected,
+    rewrite_only_demodulators_current,
+    rewrite_only_demodulators_peak,
+    rewrite_bank_bytes,
+    rewrite_bank_peak_bytes,
     passive_refresh_checks,
     passive_refresh_requeued,
     passive_refresh_subsumed,

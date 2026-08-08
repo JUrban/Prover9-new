@@ -87,6 +87,19 @@ static BOOL dense_passive_mode(void)
          str_ident(stringparm1(Opt->passive_store), "dense");
 }
 
+static BOOL eager_legacy_demod_mode(void)
+{
+  return discount_mode() && Opt != NULL &&
+    str_ident(stringparm1(Opt->discount_demodulation), "eager_legacy");
+}
+
+static BOOL eager_interreduced_demod_mode(void)
+{
+  return discount_mode() && Opt != NULL &&
+    str_ident(stringparm1(Opt->discount_demodulation),
+              "eager_interreduced");
+}
+
 static BOOL collective_frontier_mode(void)
 {
   return discount_mode() && Opt != NULL &&
@@ -1948,6 +1961,12 @@ Prover_options init_prover_options(void)
 				     "compressed",
 				     "dense");
 
+  p->discount_demodulation =
+    init_stringparm("discount_demodulation", 3,
+			"selected",
+			"eager_legacy",
+			"eager_interreduced");
+
   p->hint_index = init_stringparm("hint_index", 6,
 				  "fpa",
 				  "compact",
@@ -2575,7 +2594,22 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
           comma_num(s.active_indexed_clauses),
           comma_num(s.passive_indexed_clauses),
           comma_num(s.delayed_demodulators));
-  if (discount_mode())
+  if (discount_mode()) {
+    fprintf(fp,
+            "Discount_demodulation: policy=%s, candidates=%s, oriented=%s, "
+            "lex=%s, rewrite_only_admitted=%s, retired=%s, selected=%s, "
+            "current=%s, peak=%s, bytes=%s, peak_bytes=%s.\n",
+            stringparm1(Opt->discount_demodulation),
+            comma_num(s.passive_demodulator_candidates),
+            comma_num(s.passive_oriented_demodulator_candidates),
+            comma_num(s.passive_lex_demodulator_candidates),
+            comma_num(s.rewrite_only_demodulators_admitted),
+            comma_num(s.rewrite_only_demodulators_retired),
+            comma_num(s.rewrite_only_demodulators_selected),
+            comma_num(s.rewrite_only_demodulators_current),
+            comma_num(s.rewrite_only_demodulators_peak),
+            comma_num(s.rewrite_bank_bytes),
+            comma_num(s.rewrite_bank_peak_bytes));
     fprintf(fp,
             "Passive_refresh: epoch=%u, checks=%s, requeued=%s, "
             "subsumed=%s.\n",
@@ -2583,6 +2617,7 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             comma_num(s.passive_refresh_checks),
             comma_num(s.passive_refresh_requeued),
             comma_num(s.passive_refresh_subsumed));
+  }
   if (collective_frontier_mode()) {
     fprintf(fp,
             "Collective_scheduler: policy=%s, drain=%d, high=%d, low=%d, "
@@ -6338,13 +6373,26 @@ void cl_process_new_demod(Topform c)
 static
 void prepare_discount_passive(Topform c, BOOL stamp_epoch)
 {
+  int type = NOT_DEMODULATOR;
+
   if (stamp_epoch)
     c->simplifier_epoch = Simplifier_epoch;
-  c->delayed_demodulator =
-    flag(Opt->back_demod) &&
-    demodulator_type(c,
-		     parm(Opt->lex_dep_demod_lim),
-		     flag(Opt->lex_dep_demod_sane)) != NOT_DEMODULATOR;
+  if (flag(Opt->back_demod))
+    type = demodulator_type(c,
+			    parm(Opt->lex_dep_demod_lim),
+			    flag(Opt->lex_dep_demod_sane));
+  c->delayed_demodulator = type != NOT_DEMODULATOR;
+
+  /* stamp_epoch is TRUE only for a newly admitted passive.  Checkpoint
+     reconstruction deliberately passes FALSE, so these are cumulative
+     admissions rather than repeated observations of restored bodies. */
+  if (stamp_epoch && type != NOT_DEMODULATOR) {
+    Stats.passive_demodulator_candidates++;
+    if (type == ORIENTED)
+      Stats.passive_oriented_demodulator_candidates++;
+    else
+      Stats.passive_lex_demodulator_candidates++;
+  }
 
   if (compressed_passive_mode()) {
     Clause_compress_result result = compress_clause_with_justification(c);
@@ -11298,6 +11346,25 @@ void write_checkpoint(void)
     fprintf(fp, "deleted_by_rule %llu\n", Stats.deleted_by_rule);
     fprintf(fp, "sos_displaced %llu\n", Stats.sos_displaced);
     fprintf(fp, "sos_removed %llu\n", Stats.sos_removed);
+    fprintf(fp, "passive_demodulator_candidates %llu\n",
+            Stats.passive_demodulator_candidates);
+    fprintf(fp, "passive_oriented_demodulator_candidates %llu\n",
+            Stats.passive_oriented_demodulator_candidates);
+    fprintf(fp, "passive_lex_demodulator_candidates %llu\n",
+            Stats.passive_lex_demodulator_candidates);
+    fprintf(fp, "rewrite_only_demodulators_admitted %llu\n",
+            Stats.rewrite_only_demodulators_admitted);
+    fprintf(fp, "rewrite_only_demodulators_retired %llu\n",
+            Stats.rewrite_only_demodulators_retired);
+    fprintf(fp, "rewrite_only_demodulators_selected %llu\n",
+            Stats.rewrite_only_demodulators_selected);
+    fprintf(fp, "rewrite_only_demodulators_current %llu\n",
+            Stats.rewrite_only_demodulators_current);
+    fprintf(fp, "rewrite_only_demodulators_peak %llu\n",
+            Stats.rewrite_only_demodulators_peak);
+    fprintf(fp, "rewrite_bank_bytes %llu\n", Stats.rewrite_bank_bytes);
+    fprintf(fp, "rewrite_bank_peak_bytes %llu\n",
+            Stats.rewrite_bank_peak_bytes);
     fprintf(fp, "passive_refresh_checks %llu\n",
             Stats.passive_refresh_checks);
     fprintf(fp, "passive_refresh_requeued %llu\n",
@@ -12156,6 +12223,34 @@ void resume_load_clauses(const char *dir)
   rewind(fp); Stats.deleted_by_rule = read_metadata_ull(fp, "deleted_by_rule");
   rewind(fp); Stats.sos_displaced = read_metadata_ull(fp, "sos_displaced");
   rewind(fp); Stats.sos_removed = read_metadata_ull(fp, "sos_removed");
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "passive_demodulator_candidates",
+    &Stats.passive_demodulator_candidates);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "passive_oriented_demodulator_candidates",
+    &Stats.passive_oriented_demodulator_candidates);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "passive_lex_demodulator_candidates",
+    &Stats.passive_lex_demodulator_candidates);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "rewrite_only_demodulators_admitted",
+    &Stats.rewrite_only_demodulators_admitted);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "rewrite_only_demodulators_retired",
+    &Stats.rewrite_only_demodulators_retired);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "rewrite_only_demodulators_selected",
+    &Stats.rewrite_only_demodulators_selected);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "rewrite_only_demodulators_current",
+    &Stats.rewrite_only_demodulators_current);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "rewrite_only_demodulators_peak",
+    &Stats.rewrite_only_demodulators_peak);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "rewrite_bank_bytes", &Stats.rewrite_bank_bytes);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "rewrite_bank_peak_bytes", &Stats.rewrite_bank_peak_bytes);
   rewind(fp); Stats.passive_refresh_checks =
     read_metadata_ull(fp, "passive_refresh_checks");
   rewind(fp); Stats.passive_refresh_requeued =
@@ -13428,6 +13523,13 @@ Prover_results search(Prover_input p)
     if (str_ident(stringparm1(Opt->collective_scheduler), "balanced_hint") &&
         !str_ident(stringparm1(Opt->inference_frontier), "collective"))
       fatal_error("collective_scheduler=balanced_hint requires inference_frontier=collective");
+    if (!str_ident(stringparm1(Opt->discount_demodulation), "selected") &&
+        !discount_mode())
+      fatal_error("eager DISCOUNT demodulation requires search_loop=discount");
+    if (eager_legacy_demod_mode())
+      fatal_error("discount_demodulation=eager_legacy is reserved until the separately owned rewrite store is initialized");
+    if (eager_interreduced_demod_mode())
+      fatal_error("discount_demodulation=eager_interreduced is reserved for the compact rewrite bank");
     if (str_ident(stringparm1(Opt->inference_frontier), "collective")) {
       if (!discount_mode())
 	fatal_error("inference_frontier=collective requires search_loop=discount");
