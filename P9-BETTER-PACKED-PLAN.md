@@ -18,6 +18,51 @@ code will initially be exposed under a separate experimental hint-index mode;
 the meanings of `packed` and `compact` will not change until all differential
 gates pass.
 
+## Implementation outcome (2026-08-08)
+
+The bounded development gates passed and the improved implementation is now
+the meaning of `assign(hint_index,packed)`.  `hybrid` remains an exact alias
+for command files made during development.  The former broad hashed candidate
+bank is available only as `assign(hint_index,packed_legacy)` for diagnostic
+reproduction; `compact` and ordinary FPA modes are unchanged.
+
+The delivered index has:
+
+- compressed hint bodies and dense mutable sidecars;
+- stable 32-bit hint-ID postings with exact symbol/path keys;
+- occurrence-correlated back-demodulation keys;
+- selective ordinary, flipped, and equivalence candidate retrieval;
+- conservative stale references with a 65,536-reference/25%-of-live rebuild
+  threshold;
+- compact equivalence buckets indexed by safe literal-count ranges;
+- exact final `subsumes`/`rewritable_clause_type` decisions and decreasing-ID
+  candidate order;
+- generic and numbered `AnyConst` handling;
+- deterministic derived-index reconstruction after checkpoints; and
+- operation-specific candidate, materialization, rewrite, stale, and byte
+  statistics.
+
+Measured bounded evidence is:
+
+| Workload | Mode/result | User CPU | Peak RSS |
+| --- | --- | ---: | ---: |
+| 31,014 hints, 100 givens | compact reference | 6.13 s | about 43.0 MiB |
+| 31,014 hints, 100 givens | old packed | 10.88 s | about 32.2 MiB |
+| 31,014 hints, 100 givens | improved packed | 3.98 s | 35,600 KiB |
+| 310,153 hints, 100 givens | improved packed | 71.90--81.03 s | 295,808--296,064 KiB |
+
+The full-hint improved run produced the exact first-100 compact given trace
+(`620c7df29deac1f5cff1f5855570ca27c9a3a5594984f4bd742da18923e57ea2`),
+`Generated=499`, and `Kept=436`.  It performed 912,856 total exact hint-body
+materializations, including 548,856 back-demodulation candidates and 51,182
+actual rewrites.  The full-hint peak is essentially the old packed peak
+(295,680 KiB) and is 41.6% below the old-P9 507,108 KiB artifact.
+
+The full 1,000-given improved run was deliberately not launched on this
+low-memory/busy host.  The user-run 4,000-given campaign and a suitable-host
+1,000-given run remain the final performance acceptance gates; therefore the
+79-second 1,000-given CPU target is not yet claimed as measured.
+
 ## Evidence from the 1,000-given Osborn runs
 
 The full input contains 310,153 hints.  The four relevant results under

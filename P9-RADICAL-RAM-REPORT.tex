@@ -34,7 +34,7 @@
 \title{Radical RAM Reduction in Prover9\\
 \large A DISCOUNT Loop, Compact State, and Waldmeister-Style Collective Inference}
 \author{Engineering report}
-\date{7 August 2026}
+\date{Updated 8 August 2026}
 
 \begin{document}
 \maketitle
@@ -158,12 +158,21 @@ payloads, or checksums fail closed.
 \subsection{Packed exact hints}
 
 \setting{assign(hint\_index,packed)} removes live hint term trees and their
-ordinary FPA index.  It stores compressed bodies, dense mutable side tables,
-compact path/symbol feature bits, and a rewrite-symbol filter.  The filter is
-conservative; the original exact subsumption, equivalence, or rewrite test
-makes the decision.  Candidate hint IDs remain ordered so the existing first
-equivalent/last subsumed result is stable.  Differential tests cover matcher
-ID, raw and adjusted weight, labels, degradation, hint epoch, and proof result.
+ordinary FPA index.  The promoted implementation stores compressed bodies,
+dense mutable side tables, and compact postings containing stable 32-bit hint
+IDs rather than pointers into evictable term trees.  Exact symbol/path and
+root-plus-descendant occurrence keys retrieve candidates for equivalence,
+ordinary/flipped matching, and hint back-demodulation.  Compact equivalence
+buckets use safe literal-count ranges, preserving theta-equivalent repeated
+literals.
+
+The filters are conservative; the original exact subsumption, equivalence, or
+\setting{rewritable\_clause\_type} test makes every final decision.  Counted
+stale references trigger a bounded rebuild which materializes at most one
+compressed hint at a time.  Candidate IDs retain the established semantic
+order.  \setting{hint\_index=hybrid} is a compatibility alias, and
+\setting{hint\_index=packed\_legacy} selects the former broad algorithm only
+for diagnostics.
 
 \subsection{Collective inference frontier}
 
@@ -249,6 +258,8 @@ make all -j2
 make test1
 ./test.src/discount_loop_test.sh
 ./test.src/collective_frontier_test.sh
+./test.src/hint_index_trace_test.sh
+./test.src/hint_checkpoint_test.sh
 \end{lstlisting}
 
 \setting{make memory-tests} runs focused storage and allocator lifecycle tests.
@@ -283,13 +294,26 @@ set(clocks).
 assign(stats,all).
 \end{lstlisting}
 
-This is the conservative measured setup: exact packed hints, dense passives,
+This is the conservative measured setup: stable-ID packed hints, dense passives,
 collective paramodulation/hyperresolution, a 4096-candidate cache, and FIFO
 descriptor scheduling.  Dense passive storage requires
 \setting{sos\_limit=-1}; collective mode requires DISCOUNT and a memory or mmap
 ancestor store.  A given ratio of 4 schedules one descriptor-expansion turn
 after four activations.  If SOS empties, the finite descriptor queue is still
 drained.
+
+For an isolated hint-index comparison, keep every other option fixed and vary
+only:
+
+\begin{lstlisting}
+assign(hint_index,compact).       % depth-2 FPA reference
+assign(hint_index,packed).        % improved stable-ID implementation
+assign(hint_index,packed_legacy). % former broad packed diagnostic
+\end{lstlisting}
+
+\setting{hybrid} is an alias for improved \setting{packed}.  Changing
+\setting{back\_demod\_hints}, given selection, or frontier options at the same
+time would independently change semantics or the search trajectory.
 
 The mmap stores use immediately unlinked temporary backing files.  This lets
 the operating system page cold records and lowers resident pressure, but still
@@ -329,6 +353,8 @@ external RSS.  The cache peak includes initial preprocessing SOS occupancy.
 \begin{lstlisting}
 set(checkpoint_verify).
 assign(checkpoint_minutes,30).
+assign(checkpoint_given,4000).  % optional deterministic one-shot boundary
+set(checkpoint_exit).
 \end{lstlisting}
 
 After initialization, request an immediate checkpoint with
@@ -342,9 +368,11 @@ bin/directproof < run.out > direct-proof.out
 
 \section{Measured bounded results}
 
-All AIM/Osborn experiments were intentionally restricted to hundreds of
-givens, 30 seconds, 256\,MiB, and a deterministic 10\% sample (31,014 hints).
-No week-long high-memory run was performed on the development host.
+Development began with hundreds of givens, 30 seconds, 256\,MiB, and a
+deterministic 10\% sample (31,014 hints).  After those gates passed, the full
+310,153-hint input was run only to 100 givens under 90-CPU-second and
+512\,MiB limits.  No week-long or 1,000/4,000-given improved run was performed
+on the development host.
 
 \subsection{Component measurements}
 
@@ -356,8 +384,9 @@ Change & Result \\
 \endhead
 Compressed passive bodies, 500 givens & 38.84 to 3.57 MB body storage
 (90.8\%); total RSS about 145 to 114.7\,MiB (21\%). \\
-Packed hints, 31,014 hints/100 givens & 43.0\,MiB compact-FPA RSS to
-32.2\,MiB packed RSS with exact matcher trace. \\
+Improved packed hints, 31,014 hints/100 givens & 3.98 seconds user CPU and
+35,600\,KiB RSS versus compact's 6.13 seconds/about 43.0\,MiB, with exact
+trace. \\
 Shared collective history & 88,976 estimated cloned-body bytes to 17,304
 retained bytes (80.6\%). \\
 Sparse deactivation/history & 34,048 to 19,584 structural bytes (42.5\%). \\
@@ -410,6 +439,41 @@ captured nonzero fairness and six heap entries, then reproduced 13,611
 generated clauses, 11,854 priority turns, 1835 fair turns, heap peak 68, and
 18/18 hashes.  The current reader also reproduces older
 \setting{P9COLL5--P9COLL9} boundaries.
+
+Stable-ID packed hints checkpointed at givens 0, 2, and 6 reproduce the
+uninterrupted post-checkpoint hint trace byte-for-byte, including a boundary
+after hint rewrite/reindex activity.
+
+\subsection{Better packed hint-index results}
+
+The archived full-hint target and the bounded improved result are:
+
+\begin{center}
+\begin{tabular}{lrrr}
+\toprule
+Mode & Given & User CPU & Peak RSS \\
+\midrule
+Old P9 legacy & 1,001 & 113.44 s & 507,108 KiB \\
+Radical compact FPA & 1,001 & 68.33 s & 371,904 KiB \\
+Former packed & 1,001 & 441.39 s & 295,680 KiB \\
+Improved packed, bounded & 101 & 71.90--81.03 s & 295,808--296,064 KiB \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The improved runs produced \setting{Generated=499} and
+\setting{Kept=436}.  The first 100 given clauses exactly match compact, with
+SHA-256
+\setting{620c7df29deac1f5cff1f5855570ca27c9a3a5594984f4bd742da18923e57ea2}.
+The CPU range reflects a busy host and is not a 1,000-given measurement.
+
+The bounded final state materialized 912,856 hint bodies: 221,157 for
+equivalence, 141,588 for ordinary matching, 1,255 for flipped matching, and
+548,856 for back-demodulation, which found 51,182 exact rewrites.  The peak is
+essentially unchanged from former packed, 20.4\% below compact FPA, and 41.6\%
+below old P9.  This is the fixed hint-bank saving; the 80--95\% whole-process
+forecast additionally depends on dense passives and collective inference in
+long passive-dominated runs.
 
 \section{Expected RAM reduction}
 
@@ -468,8 +532,8 @@ The engineering forecast is:
         99\%+ resident-passive count reduction.
 \end{itemize}
 
-Uncertainty comes from changed search trajectories, full-size hint
-preprocessing, active/history term complexity, proof-archive growth, eager
+Uncertainty comes from changed search trajectories, full-size hint CPU beyond
+100 givens, active/history term complexity, proof-archive growth, eager
 rules outside the collective frontier, and allocator high-water effects.
 
 \subsection{Acceptance experiment}
@@ -495,8 +559,8 @@ that explains at least 95\% of the delta.
         retained history could shrink the active tail further.
   \item The mode is fair and proof-tested but does not reproduce OTTER search
         order; solved-problem coverage must determine default strategies.
-  \item Full 310,153-hint and week-long acceptance runs were intentionally not
-        performed on the low-RAM development host.
+  \item Full 310,153-hint startup and 100-given gates passed; the 1,000-given,
+        user-run 4,000-given, and week-long gates remain for the suitable host.
 \end{enumerate}
 
 \section{Implementation history and source map}
@@ -518,6 +582,12 @@ Commit & Main change \\
 \setting{01b51c2} & Per-set promising candidate buffer \\
 \setting{c5f92f0} & Global priority with FIFO fairness \\
 \setting{171e6be} & Tight-cache Osborn scheduler measurements \\
+\setting{94a4a4d} & Compact stable-ID posting primitive \\
+\setting{852d926} & Selective stable-ID hint back-demodulation \\
+\setting{7b46feb} & Selective equivalence and ordinary matching \\
+\setting{24413df} & Occurrence-correlated rewrite features \\
+\setting{a6b36f6} & Deterministic packed-hint checkpoint regression \\
+\setting{7611da4} & Promote improved \setting{hint\_index=packed} \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -527,10 +597,15 @@ Primary implementation and verification files are
 \setting{provers.src/search-structures.h},
 \setting{provers.src/cold\_passive\_store.c},
 \setting{provers.src/cold\_passive\_store.h},
-\setting{test.src/collective\_frontier\_test.sh}, and
-\setting{test.src/discount\_loop\_test.sh}.  The detailed design and prior
-measurements are in \setting{P9-DISCOUNT-WALDMEISTER-PLAN.md},
-\setting{P9-MEMORY-RESULTS.md}, and \setting{Checkpoint-Format-Spec.txt}.
+\setting{test.src/collective\_frontier\_test.sh},
+\setting{test.src/discount\_loop\_test.sh},
+\setting{test.src/hint\_index\_trace\_test.sh},
+\setting{test.src/hint\_checkpoint\_test.sh},
+\setting{ladr/hint\_postings.c}, and \setting{ladr/hints.c}.  The detailed
+design and prior measurements are in
+\setting{P9-DISCOUNT-WALDMEISTER-PLAN.md},
+\setting{P9-BETTER-PACKED-PLAN.md}, \setting{P9-MEMORY-RESULTS.md}, and
+\setting{Checkpoint-Format-Spec.txt}.
 
 \section{Conclusion}
 

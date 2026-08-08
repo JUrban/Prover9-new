@@ -2,7 +2,7 @@
 
 ## A DISCOUNT loop, compact state, and Waldmeister-style collective inference
 
-**Engineering report, 7 August 2026**
+**Engineering report, updated 8 August 2026**
 
 ## Executive summary
 
@@ -124,14 +124,25 @@ closed.
 ### 2.4 Packed exact hints
 
 `assign(hint_index,packed)` removes live hint term trees and their ordinary FPA
-index.  It stores compressed hint bodies, dense mutable side tables, compact
-path/symbol feature bits, and a rewrite-symbol filter.  A conservative filter
-produces candidates; the original exact subsumption/equivalence or rewrite
-test makes the final decision.
+index.  The promoted implementation stores compressed hint bodies, dense
+mutable side tables, and compact postings containing stable 32-bit hint IDs,
+never pointers into evictable term trees.  Exact symbol/path features and
+root-plus-descendant occurrence keys select candidates for equivalence,
+ordinary/flipped matching, and hint back-demodulation.  Compact hash buckets
+handle equivalence; safe literal-count ranges preserve theta-equivalent
+clauses with repeated literals.
+
+Filters are conservative.  The original exact subsumption/equivalence or
+`rewritable_clause_type` test makes every final decision.  Rewritten hints
+leave counted stale references, and a bounded threshold rebuilds the derived
+postings while materializing at most one compressed hint at a time.
 
 Candidate hint IDs are ordered so the existing “first equivalent / last
 subsumed” result remains stable.  Differential tests cover matcher ID,
 raw/adjusted weight, labels, degradation, hint epoch, and proof result.
+`assign(hint_index,hybrid)` is a compatibility alias for the improved mode;
+`assign(hint_index,packed_legacy)` selects the former broad packed algorithm
+only for diagnostics.
 
 ### 2.5 Collective inference frontier
 
@@ -240,6 +251,8 @@ make all -j2
 make test1
 ./test.src/discount_loop_test.sh
 ./test.src/collective_frontier_test.sh
+./test.src/hint_index_trace_test.sh
+./test.src/hint_checkpoint_test.sh
 ```
 
 `make memory-tests` runs the focused storage/allocator lifecycle tests.  For a
@@ -274,11 +287,24 @@ set(clocks).
 assign(stats,all).
 ```
 
-This is the conservative measured configuration: exact packed hints, dense
+This is the conservative measured configuration: stable-ID packed hints, dense
 passives, collective paramodulation/hyperresolution, a 4,096-candidate cache,
 and FIFO descriptor scheduling.  `passive_store=dense` currently requires
 `sos_limit=-1`; collective mode requires DISCOUNT and a memory or mmap ancestor
 store.
+
+For an isolated hint-index comparison that preserves the current radical
+search trajectory, keep every other option identical and vary only:
+
+```text
+assign(hint_index,compact).       % depth-2 FPA reference
+assign(hint_index,packed).        % improved stable-ID implementation
+assign(hint_index,packed_legacy). % former broad packed diagnostic
+```
+
+`hybrid` is an alias for improved `packed`.  Do not compare `packed` with a
+run that also changed `back_demod_hints`, given selection, or inference-frontier
+options; those change semantics or the search trajectory independently.
 
 The `mmap` stores use immediately unlinked temporary backing files: they lower
 resident pressure by letting the operating system page cold records, but they
@@ -326,7 +352,8 @@ With `assign(stats,all)`, the important lines are:
 - `Collective_promising` and `Collective_promising_scheduler`;
 - `Collective_memory` and `Collective_history_index`;
 - `Clause_body_bytes`, `Dense_passive`, `Hint_store`, and
-  `Packed_hint_index`;
+  `Packed_hint_index`, including per-operation `Packed_hint_operation` and
+  `Better_packed_postings` lines;
 - allocator live/reserved/fragmentation and external RSS.
 
 The cache peak includes initial/preprocessing SOS occupancy.  If the initial
@@ -341,6 +368,16 @@ Enable integrity hashes with:
 set(checkpoint_verify).
 assign(checkpoint_minutes,30).
 ```
+
+For a deterministic one-shot checkpoint after a completed given count:
+
+```text
+assign(checkpoint_given,4000).
+set(checkpoint_exit).
+```
+
+`checkpoint_given` disables itself before writing the checkpoint, so resume
+cannot retrigger the same boundary.
 
 A checkpoint can also be requested after search initialization:
 
@@ -363,16 +400,18 @@ bin/directproof < run.out > direct-proof.out
 
 ## 5. Measured results
 
-All new AIM/Osborn experiments were deliberately bounded to at most hundreds
-of givens, 30 seconds, 256 MiB, and a deterministic 10% (31,014) hint sample.
-No week-long or full-high-RAM run was made on the current host.
+Development began with at most hundreds of givens, 30 seconds, 256 MiB, and a
+deterministic 10% (31,014) hint sample.  After those gates passed, the complete
+310,153-hint input was run only to 100 givens with 90 CPU seconds and 512 MiB
+as hard limits.  No week-long or 1,000/4,000-given improved run was launched
+on the current host.
 
 ### 5.1 Component results
 
 | Change | Measured result |
 | --- | --- |
 | Compressed passive bodies, 500 givens | 38.84 MB to 3.57 MB body storage (90.8%); total RSS about 145 to 114.7 MiB (21%) |
-| Packed hints, 31,014 hints/100 givens | 43.0 MiB compact-FPA RSS to 32.2 MiB packed RSS; exact matcher trace |
+| Improved packed hints, 31,014 hints/100 givens | 3.98 s user CPU and 35,600 KiB RSS versus compact's 6.13 s/about 43.0 MiB; exact trace |
 | Shared collective history | 88,976 estimated cloned-body bytes to 17,304 retained bytes (80.6%) |
 | Sparse deactivation/history structures | 34,048 to 19,584 structural bytes (42.5%) |
 | Original persistent collective scaffold | descriptor/history/retained state 132,944 to 46,808 bytes (64.8%) at that revision |
@@ -412,6 +451,39 @@ frontier, but broader proof coverage is needed.
   resume exactly matched 13,611 generated, 11,854 priority turns, 1,835 fair
   turns, and a heap peak of 68, again with 18/18 hashes.
 - The current reader reproduced older `P9COLL5`–`P9COLL9` boundaries.
+- Stable-ID packed hints checkpointed at givens 0, 2, and 6 reproduce the
+  uninterrupted post-checkpoint `HINT_TRACE` byte-for-byte, including a
+  boundary after hint rewrite/reindex activity.
+
+### 5.4 Better packed hint-index results
+
+The archived 1,000-given full-hint results established the target:
+
+| Mode | Given | CPU seconds | Peak RSS |
+| --- | ---: | ---: | ---: |
+| Old P9 legacy | 1,001 | 113.44 | 507,108 KiB |
+| Radical compact depth-2 FPA | 1,001 | 68.33 | 371,904 KiB |
+| Former packed algorithm | 1,001 | 441.39 | 295,680 KiB |
+
+The improved stable-ID mode was bounded to 100 givens on this host.  Two
+full-hint repetitions used 71.90 and 81.03 user seconds and peaked at 296,064
+and 295,808 KiB respectively.  Both produced `Generated=499`, `Kept=436`; the
+recorded first-100 given trace exactly matches compact, with SHA-256
+`620c7df29deac1f5cff1f5855570ca27c9a3a5594984f4bd742da18923e57ea2`.
+The CPU range reflects a busy host and is not a 1,000-given result.
+
+At the final bounded state, packed operations materialized 912,856 hint bodies
+in total: 221,157 for equivalence, 141,588 for ordinary matching, 1,255 for
+flipped matching, and 548,856 for back-demodulation.  Back-demodulation found
+51,182 exact rewrites.  The posting rebuild kept stale storage bounded and
+finished with 86,239 stale structural references and 3,087 stale equivalence
+references versus more than 6.6 million live references.
+
+The measured full-hint peak is essentially unchanged from the former packed
+algorithm, 20.4% below compact FPA, and 41.6% below old P9.  This is the
+fixed-hint-bank saving; it must not be mislabeled as the expected 80--95%
+whole-process saving from combining packed hints with dense passives and the
+collective inference frontier in week-long passive-dominated runs.
 
 ## 6. How much RAM is likely to be saved
 
@@ -463,7 +535,7 @@ The engineering forecast is:
   99%+ resident-passive count reduction.
 
 The uncertainty is dominated by changed search trajectories, full-size packed
-hint preprocessing, active/history term complexity, proof-archive growth,
+hint CPU beyond 100 givens, active/history term complexity, proof-archive growth,
 eager rules outside the collective frontier, and allocator high-water effects.
 
 ### 6.3 How to establish the real number
@@ -496,8 +568,9 @@ component accounting to explain 95% of the delta.
    immutable retained-history representation could reduce the active tail.
 6. The new mode is fair and proof-tested but does not reproduce OTTER search
    order.  Solved-problem coverage must decide default strategies.
-7. The full 310,153-hint and week-long acceptance runs have intentionally not
-   been executed on the low-RAM development host.
+7. Full 310,153-hint startup and 100-given gates passed; the 1,000-given,
+   user-run 4,000-given, and week-long acceptance gates still belong on the
+   suitable host.
 
 ## 8. Main commits and files
 
@@ -517,6 +590,12 @@ The implementation was split into reviewable commits, including:
 | `01b51c2` | Per-set promising candidate buffer |
 | `c5f92f0` | Global raw-weight priority with FIFO fairness |
 | `171e6be` | Bounded tight-cache Osborn scheduler measurements |
+| `94a4a4d` | Compact stable-ID posting primitive |
+| `852d926` | Selective stable-ID hint back-demodulation |
+| `7b46feb` | Selective equivalence and ordinary hint matching |
+| `24413df` | Occurrence-correlated rewrite features |
+| `a6b36f6` | Deterministic packed-hint checkpoint regression |
+| `7611da4` | Promote the improved index to `hint_index=packed` |
 
 Important implementation and documentation files are:
 
@@ -526,6 +605,11 @@ Important implementation and documentation files are:
 - [`provers.src/cold_passive_store.h`](provers.src/cold_passive_store.h)
 - [`test.src/collective_frontier_test.sh`](test.src/collective_frontier_test.sh)
 - [`test.src/discount_loop_test.sh`](test.src/discount_loop_test.sh)
+- [`test.src/hint_index_trace_test.sh`](test.src/hint_index_trace_test.sh)
+- [`test.src/hint_checkpoint_test.sh`](test.src/hint_checkpoint_test.sh)
+- [`ladr/hint_postings.c`](ladr/hint_postings.c)
+- [`ladr/hints.c`](ladr/hints.c)
+- [`P9-BETTER-PACKED-PLAN.md`](P9-BETTER-PACKED-PLAN.md)
 - [`P9-DISCOUNT-WALDMEISTER-PLAN.md`](P9-DISCOUNT-WALDMEISTER-PLAN.md)
 - [`P9-MEMORY-RESULTS.md`](P9-MEMORY-RESULTS.md)
 - [`Checkpoint-Format-Spec.txt`](Checkpoint-Format-Spec.txt)
