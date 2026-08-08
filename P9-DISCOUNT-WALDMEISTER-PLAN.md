@@ -638,3 +638,7 @@ per-passive 80% result still needs a bounded synthetic/million-record
 measurement.  Phase 5 still requires hint-aware discovery/lower-bound
 scheduling, compact history storage, and long-run completeness/performance
 gates.
+
+The measured six-hour Osborn backlog and the follow-up architecture for
+bounded inference debt, rule fairness, resumable generators, and read-only
+hint discovery are specified in `P9-COLLECTIVE-SCHEDULER-PLAN.md`.
