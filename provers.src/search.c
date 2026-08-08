@@ -1236,6 +1236,7 @@ Prover_options init_prover_options(void)
   p->candidate_warn_limit = init_parm("candidate_warn_limit", -1,   -1,INT_MAX);
   p->candidate_hard_limit = init_parm("candidate_hard_limit", -1,   -1,INT_MAX);
   p->checkpoint_minutes = init_parm("checkpoint_minutes",    -1,     -1,INT_MAX);
+  p->checkpoint_given =   init_parm("checkpoint_given",      -1,     -1,INT_MAX);
   p->checkpoint_keep =    init_parm("checkpoint_keep",        3,      1,INT_MAX);
   p->sine =               init_parm("sine",                  -1,     -1,INT_MAX);
   p->sine_depth =         init_parm("sine_depth",             0,      0,INT_MAX);
@@ -11035,6 +11036,24 @@ Prover_results search(Prover_input p)
       // Checkpoint save triggers (periodic / SIGUSR2).
       // Skip on the first iteration if we are loading a checkpoint.
       if (!Load_checkpoint) {
+
+        /* Deterministic one-shot checkpointing is useful for regression
+           tests and reproducible handoffs.  Disable the option before
+           writing so saved_input.txt cannot retrigger it on resume. */
+        if (parm(Opt->checkpoint_given) >= 0 &&
+            Stats.given >= (unsigned long long)
+              parm(Opt->checkpoint_given)) {
+          fprintf(stderr, "\nScheduled checkpoint at given #%llu...\n",
+                  Stats.given);
+          fflush(stderr);
+          assign_parm(Opt->checkpoint_given, -1, TRUE);
+          write_checkpoint();
+          fprintf(stderr, "\nCheckpoint saved at given #%llu.\n",
+                  Stats.given);
+          fflush(stderr);
+          if (flag(Opt->checkpoint_exit))
+            done_with_search(CHECKPOINT_EXIT);
+        }
 
         // Check for periodic automatic checkpoint
         if (parm(Opt->checkpoint_minutes) > 0) {

@@ -79,6 +79,7 @@ discount-tests: all
 	./test.src/discount_loop_test.sh
 	./test.src/collective_frontier_test.sh
 	./test.src/hint_index_trace_test.sh
+	./test.src/hint_checkpoint_test.sh
 	./test.src/dense_passive_test.sh
 	cd test.src && $(MAKE) checkpoint-tests
 

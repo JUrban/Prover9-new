@@ -223,6 +223,7 @@ struct prover_options {
     candidate_warn_limit,  // warn when candidates exceed this
     candidate_hard_limit,  // skip inference when candidates exceed this
     checkpoint_minutes,    // periodic checkpoint interval in minutes (-1 = off)
+    checkpoint_given,      // one-shot deterministic checkpoint at given count
     checkpoint_keep,       // max auto-checkpoint dirs to retain (default 3)
     sine,                  // SInE premise selection (-1=auto, 0=off, >0=tolerancex100)
     sine_depth,            // SInE BFS depth limit (0=unlimited/fixpoint)
