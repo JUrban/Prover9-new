@@ -18,17 +18,25 @@ sed '/assign(hint_index,compact)./a assign(hint_index,packed).\
 set(hint_trace).' "$repo_dir/test.src/discount_loop.in" |
   "$repo_dir/bin/prover9" > "$test_tmp/packed.out" 2> "$test_tmp/packed.err"
 
+sed '/assign(hint_index,compact)./a assign(hint_index,hybrid).\
+set(hint_trace).' "$repo_dir/test.src/discount_loop.in" |
+  "$repo_dir/bin/prover9" > "$test_tmp/hybrid.out" 2> "$test_tmp/hybrid.err"
+
 grep '^HINT_TRACE ' "$test_tmp/compact.out" > "$test_tmp/compact.trace"
 grep '^HINT_TRACE ' "$test_tmp/fpa.out" > "$test_tmp/fpa.trace"
 grep '^HINT_TRACE ' "$test_tmp/packed.out" > "$test_tmp/packed.trace"
+grep '^HINT_TRACE ' "$test_tmp/hybrid.out" > "$test_tmp/hybrid.trace"
 test -s "$test_tmp/compact.trace"
 diff -u "$test_tmp/fpa.trace" "$test_tmp/compact.trace"
 diff -u "$test_tmp/fpa.trace" "$test_tmp/packed.trace"
+diff -u "$test_tmp/fpa.trace" "$test_tmp/hybrid.trace"
 grep -q 'THEOREM PROVED' "$test_tmp/compact.out"
 grep -q 'THEOREM PROVED' "$test_tmp/fpa.out"
 grep -q 'THEOREM PROVED' "$test_tmp/packed.out"
+grep -q 'THEOREM PROVED' "$test_tmp/hybrid.out"
 for hint_op in equivalence match flipped_match back_demod; do
   grep -q "^Packed_hint_operation: op=$hint_op," "$test_tmp/packed.out"
 done
+grep -q '^Better_packed_postings:' "$test_tmp/hybrid.out"
 
 echo 'hint_index_trace_test: PASS'

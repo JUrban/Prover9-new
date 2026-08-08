@@ -39,6 +39,7 @@ void init_hints(Uniftype utype,
 		BOOL back_demod_hints,
 		int fpa_depth,
 		BOOL packed_index,
+		BOOL better_packed_index,
 		void (*demod_proc) (Topform, int, int, BOOL, BOOL));
 
 void done_with_hints(void);

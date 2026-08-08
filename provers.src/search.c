@@ -113,7 +113,8 @@ static BOOL live_clash_index_needed(void)
 
 static int configured_hint_fpa_depth(void)
 {
-  if (str_ident(stringparm1(Opt->hint_index), "packed"))
+  if (str_ident(stringparm1(Opt->hint_index), "packed") ||
+      str_ident(stringparm1(Opt->hint_index), "hybrid"))
     return 0;
   else if (str_ident(stringparm1(Opt->hint_index), "compact"))
     return 2;
@@ -1292,11 +1293,12 @@ Prover_options init_prover_options(void)
 				     "compressed",
 				     "dense");
 
-  p->hint_index = init_stringparm("hint_index", 4,
+  p->hint_index = init_stringparm("hint_index", 5,
 				  "fpa",
 				  "compact",
 				  "shallow",
-				  "packed");
+				  "packed",
+				  "hybrid");
 
   p->inference_frontier = init_stringparm("inference_frontier", 2,
 					  "clauses",
@@ -7207,7 +7209,9 @@ void index_and_process_initial_clauses(void)
 	     flag(Opt->collect_hint_labels),
 	     flag(Opt->back_demod_hints),
 	     configured_hint_fpa_depth(),
-	     str_ident(stringparm1(Opt->hint_index), "packed"),
+	     str_ident(stringparm1(Opt->hint_index), "packed") ||
+	       str_ident(stringparm1(Opt->hint_index), "hybrid"),
+	     str_ident(stringparm1(Opt->hint_index), "hybrid"),
 	     demodulate_clause);
   set_hint_match_stats(flag(Opt->hint_match_stats));
   set_hint_match_once(flag(Opt->hint_match_once));
@@ -10350,7 +10354,9 @@ void load_checkpoint_into_loop(void)
              flag(Opt->collect_hint_labels),
              flag(Opt->back_demod_hints),
              configured_hint_fpa_depth(),
-             str_ident(stringparm1(Opt->hint_index), "packed"),
+             str_ident(stringparm1(Opt->hint_index), "packed") ||
+               str_ident(stringparm1(Opt->hint_index), "hybrid"),
+             str_ident(stringparm1(Opt->hint_index), "hybrid"),
              demodulate_clause);
   set_hint_match_stats(flag(Opt->hint_match_stats));
   set_hint_match_once(flag(Opt->hint_match_once));
@@ -10870,7 +10876,8 @@ Prover_results search(Prover_input p)
        The indexing pass below materializes one hint at a time.  This is an
        important peak-memory property for large AIM hint files, not merely a
        steady-state optimization. */
-    if (str_ident(stringparm1(Opt->hint_index), "packed")) {
+    if (str_ident(stringparm1(Opt->hint_index), "packed") ||
+        str_ident(stringparm1(Opt->hint_index), "hybrid")) {
       Clist_pos hp;
       for (hp = Glob.hints->first; hp != NULL; hp = hp->next) {
         if (compress_clause(hp->c) == CLAUSE_COMPRESS_INVALID)

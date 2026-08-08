@@ -1,15 +1,14 @@
 /* Stable-ID posting lists used by compressed hint indexes.
 
-   The table owns no Term or Topform pointers.  A reference contains a
-   32-bit stable hint ID and a 32-bit membership version.  Callers use the
-   version to reject entries left behind by rewrite, retirement, or expiry,
-   and periodically rebuild the index from their current feature records. */
+   The table owns no Term or Topform pointers.  A reference is one 32-bit
+   stable hint ID.  Callers conservatively tolerate entries left behind by
+   rewrite, retirement, or expiry and periodically rebuild the index. */
 
 #include "hint_postings.h"
 
 struct hint_posting {
   unsigned long long key;
-  unsigned long long *references;
+  unsigned *references;
   unsigned count;
   unsigned capacity;
   unsigned char occupied;
@@ -84,12 +83,11 @@ void hint_postings_destroy(Hint_postings index)
 }
 
 void hint_postings_add(Hint_postings index, unsigned long long key,
-                       unsigned id, unsigned version)
+                       unsigned id)
 {
   struct hint_posting *posting;
-  unsigned long long reference;
-  if (index == NULL || id == 0 || version == 0)
-    fatal_error("hint_postings_add: invalid index, ID, or version");
+  if (index == NULL || id == 0)
+    fatal_error("hint_postings_add: invalid index or ID");
   if ((unsigned long long) index->keys * 10 >=
       (unsigned long long) index->capacity * 7)
     posting_rehash(index, index->capacity * 2);
@@ -101,23 +99,24 @@ void hint_postings_add(Hint_postings index, unsigned long long key,
   }
   if (posting->count == posting->capacity) {
     unsigned old = posting->capacity;
-    unsigned capacity = old == 0 ? 4 : old * 2;
+    unsigned capacity = old == 0 ? 4 : old + (old + 1) / 2;
+    if (capacity <= old)
+      fatal_error("hint_postings_add: posting capacity overflow");
     posting->references = safe_realloc(
       posting->references,
-      (size_t) capacity * sizeof(unsigned long long));
+      (size_t) capacity * sizeof(unsigned));
     posting->capacity = capacity;
     index->reference_capacity += capacity - old;
   }
-  reference = ((unsigned long long) version << 32) | id;
-  posting->references[posting->count++] = reference;
+  posting->references[posting->count++] = id;
   index->references++;
   if (posting->count > index->maximum_posting)
     index->maximum_posting = posting->count;
 }
 
-const unsigned long long *hint_postings_get(Hint_postings index,
-                                            unsigned long long key,
-                                            unsigned *count)
+const unsigned *hint_postings_get(Hint_postings index,
+                                  unsigned long long key,
+                                  unsigned *count)
 {
   struct hint_posting *posting;
   if (count == NULL)
@@ -135,16 +134,6 @@ const unsigned long long *hint_postings_get(Hint_postings index,
   return posting->references;
 }
 
-unsigned hint_posting_id(unsigned long long reference)
-{
-  return (unsigned) reference;
-}
-
-unsigned hint_posting_version(unsigned long long reference)
-{
-  return (unsigned) (reference >> 32);
-}
-
 void hint_postings_get_stats(Hint_postings index,
                              struct hint_postings_stats *stats)
 {
@@ -159,6 +148,6 @@ void hint_postings_get_stats(Hint_postings index,
     (unsigned long long) index->capacity * sizeof(struct hint_posting) +
     sizeof(struct hint_postings);
   stats->reference_bytes = index->reference_capacity *
-                           sizeof(unsigned long long);
+                           sizeof(unsigned);
   stats->maximum_posting = index->maximum_posting;
 }

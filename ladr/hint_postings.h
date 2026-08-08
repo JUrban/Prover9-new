@@ -20,15 +20,11 @@ Hint_postings hint_postings_init(void);
 void hint_postings_destroy(Hint_postings index);
 
 void hint_postings_add(Hint_postings index, unsigned long long key,
-                       unsigned id, unsigned version);
+                       unsigned id);
 
-const unsigned long long *hint_postings_get(Hint_postings index,
-                                            unsigned long long key,
-                                            unsigned *count);
-
-unsigned hint_posting_id(unsigned long long reference);
-
-unsigned hint_posting_version(unsigned long long reference);
+const unsigned *hint_postings_get(Hint_postings index,
+                                  unsigned long long key,
+                                  unsigned *count);
 
 void hint_postings_get_stats(Hint_postings index,
                              struct hint_postings_stats *stats);

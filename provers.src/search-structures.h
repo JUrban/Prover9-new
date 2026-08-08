@@ -247,7 +247,7 @@ struct prover_options {
     multiple_interps,    // false_in_all, false_in_some
     search_loop,         // otter, discount
     passive_store,       // full, compressed
-    hint_index,          // fpa, compact, shallow, packed
+    hint_index,          // fpa, compact, shallow, packed, hybrid
     inference_frontier,  // clauses, collective
     ancestor_store;      // off, memory, mmap
 };
