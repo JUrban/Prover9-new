@@ -450,12 +450,13 @@ static unsigned long long better_feature_key(unsigned kind, unsigned path,
 
 static unsigned long long better_equivalence_key(
   unsigned long long positive_mask, unsigned long long negative_mask,
-  unsigned positive, unsigned negative)
+  unsigned positive, unsigned negative, unsigned query_literals)
 {
   unsigned long long x = positive_mask ^
     ((negative_mask << 29) | (negative_mask >> 35)) ^
     ((unsigned long long) (positive != 0) << 48) ^
-    ((unsigned long long) (negative != 0) << 32);
+    ((unsigned long long) (negative != 0) << 32) ^
+    (unsigned long long) query_literals * 0x9e3779b97f4a7c15ULL;
   x ^= x >> 30;
   x *= 0xbf58476d1ce4e5b9ULL;
   x ^= x >> 27;
@@ -481,20 +482,37 @@ static void better_equivalence_reserve_references(unsigned needed)
   }
 }
 
+static unsigned better_equivalence_memberships(unsigned id)
+{
+  unsigned literals = (unsigned) Better_hint_positive_count[id] +
+                      Better_hint_negative_count[id];
+  return literals == 0 ? 1 : literals;
+}
+
 static void better_equivalence_append(unsigned id)
 {
-  unsigned long long key = better_equivalence_key(
-    Packed_hint_pos_features[id], Packed_hint_neg_features[id],
-    Better_hint_positive_count[id], Better_hint_negative_count[id]);
-  unsigned bucket = (unsigned) key &
-                    (Better_equivalence_bucket_capacity - 1);
-  unsigned position = Better_equivalence_reference_count;
-  better_equivalence_reserve_references(position + 1);
-  Better_equivalence_references[position].id = id;
-  Better_equivalence_references[position].next =
-    Better_equivalence_buckets[bucket];
-  Better_equivalence_buckets[bucket] = position;
-  Better_equivalence_reference_count++;
+  unsigned literals = (unsigned) Better_hint_positive_count[id] +
+                      Better_hint_negative_count[id];
+  unsigned first_query_literals = literals == 0 ? 0 : 1;
+  unsigned last_query_literals = literals;
+  unsigned query_literals;
+  for (query_literals = first_query_literals; ; query_literals++) {
+    unsigned long long key = better_equivalence_key(
+      Packed_hint_pos_features[id], Packed_hint_neg_features[id],
+      Better_hint_positive_count[id], Better_hint_negative_count[id],
+      query_literals);
+    unsigned bucket = (unsigned) key &
+                      (Better_equivalence_bucket_capacity - 1);
+    unsigned position = Better_equivalence_reference_count;
+    better_equivalence_reserve_references(position + 1);
+    Better_equivalence_references[position].id = id;
+    Better_equivalence_references[position].next =
+      Better_equivalence_buckets[bucket];
+    Better_equivalence_buckets[bucket] = position;
+    Better_equivalence_reference_count++;
+    if (query_literals == last_query_literals)
+      break;
+  }
 }
 
 static void better_equivalence_rebuild(unsigned requested_capacity)
@@ -524,8 +542,10 @@ static void better_equivalence_rebuild(unsigned requested_capacity)
 
 static void better_equivalence_add(unsigned id)
 {
+  unsigned memberships = better_equivalence_memberships(id);
   if (Better_equivalence_bucket_capacity == 0 ||
-      ((unsigned long long) Better_equivalence_reference_count + 1) * 10 >=
+      ((unsigned long long) Better_equivalence_reference_count +
+       memberships) * 10 >=
       (unsigned long long) Better_equivalence_bucket_capacity * 7) {
     unsigned capacity;
     if (Better_equivalence_bucket_capacity == 0)
@@ -656,7 +676,7 @@ static void better_rebuild_postings(void)
       live += Better_key_scratch_count;
       for (i = 0; i < Better_key_scratch_count; i++)
         hint_postings_add(postings, Better_key_scratch[i], id);
-      equivalence_live++;
+      equivalence_live += better_equivalence_memberships(id);
       if (was_compressed && !recompress_clause(h))
         fatal_error("better_rebuild_postings: cannot recompress hint");
       if (!Packed_hint_active[id]) {
@@ -701,9 +721,9 @@ static void better_deactivate_hint(unsigned id)
   if (count > Better_feature_live_count)
     fatal_error("better_deactivate_hint: live feature count underflow");
   Better_feature_live_count -= count;
-  if (Better_equivalence_live_count == 0)
+  if (better_equivalence_memberships(id) > Better_equivalence_live_count)
     fatal_error("better_deactivate_hint: equivalence count underflow");
-  Better_equivalence_live_count--;
+  Better_equivalence_live_count -= better_equivalence_memberships(id);
   Better_hint_feature_count[id] = 0;
   Better_hint_positive_count[id] = 0;
   Better_hint_negative_count[id] = 0;
@@ -725,7 +745,7 @@ static void better_index_hint_terms(Topform h, BOOL anyconst)
     hint_postings_add(Better_postings, key, id);
   }
   Better_feature_live_count += Better_key_scratch_count;
-  Better_equivalence_live_count++;
+  Better_equivalence_live_count += better_equivalence_memberships(id);
   better_equivalence_add(id);
   better_maybe_rebuild_postings();
 }
@@ -1149,7 +1169,8 @@ static void better_collect_clause_candidates(
   packed_begin_candidates();
   if (equivalence) {
     unsigned long long key = better_equivalence_key(
-      positive_mask, negative_mask, positive, negative);
+      positive_mask, negative_mask, positive, negative,
+      positive + negative);
     unsigned position = Better_equivalence_bucket_capacity == 0 ? UINT_MAX :
       Better_equivalence_buckets[(unsigned) key &
         (Better_equivalence_bucket_capacity - 1)];
