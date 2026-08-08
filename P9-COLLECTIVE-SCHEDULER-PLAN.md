@@ -25,6 +25,34 @@ Status: implementation in progress on the opt-in development branch.
   collective, DISCOUNT, hint-index, hint-checkpoint, and standard proof suites
   pass.
 
+### 2026-08-08: Phase 1 split work and bounded admission
+
+- `collective_scheduler=balanced_hint` is a separate opt-in policy; the
+  default remains `legacy` and old `P9COLL5`--`P9COLLA` checkpoints continue
+  to select only that policy.
+- Balanced activation creates independent descriptors for positive hyper,
+  negative hyper, paramodulation from the given, and paramodulation into the
+  given.  No rule is hidden behind another rule's descriptor.
+- Deterministic weighted lane service is supplemented by a mandatory oldest
+  queue turn.  Rule weights, the oldest-turn interval, descriptor high/low
+  watermarks, and activation-lag pressure are explicit options.
+- Admission reserves the maximum number of descriptors one activation can
+  create and asserts the hard high-water on every append.  Drain mode uses
+  hysteresis and records entries, exits, and withheld givens.
+- In dense mode the candidate bound measures transient exposed bodies rather
+  than already-compacted passive records.  This permits inference draining
+  without rebuilding the full passive-body frontier or deadlocking two
+  unrelated logical cardinality bounds.
+- `P9COLLB` records the policy, lane/credit position, mandatory-fairness
+  position, and drain state.  Policy mismatches fail closed.
+- `collective_balanced_test.sh` forces all rule lanes, both paramodulation
+  directions, high-water drain/recovery, a peak descriptor bound of eight,
+  and deterministic checkpoint/resume.  Existing legacy collective,
+  DISCOUNT, hint-index, and hint-checkpoint tests remain unchanged and pass.
+
+Phase 1 deliberately still uses the replay generators.  Its reports do not
+claim a bounded raw-work turn; native continuation is the next phase.
+
 ## Objective
 
 Make the collective DISCOUNT frontier discover and propagate useful hint

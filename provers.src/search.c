@@ -93,6 +93,12 @@ static BOOL collective_frontier_mode(void)
          str_ident(stringparm1(Opt->inference_frontier), "collective");
 }
 
+static BOOL collective_balanced_mode(void)
+{
+  return collective_frontier_mode() &&
+         str_ident(stringparm1(Opt->collective_scheduler), "balanced_hint");
+}
+
 static BOOL collective_hyper_enabled(void)
 {
   return collective_frontier_mode() &&
@@ -205,11 +211,16 @@ enum collective_batch_kind {
   COLLECTIVE_HINT_PROBE = 8U,
   /* This descriptor's current inference unit is being enumerated in
      deterministic raw-weight order rather than raw generator order. */
-  COLLECTIVE_PROMISING_CURSOR = 16U
+  COLLECTIVE_PROMISING_CURSOR = 16U,
+  /* Balanced mode splits the two historical paramodulation directions.
+     The legacy bit remains unchanged for old queues and checkpoints. */
+  COLLECTIVE_PARAMOD_FROM = 32U,
+  COLLECTIVE_PARAMOD_INTO = 64U
 };
 
 #define COLLECTIVE_INFERENCE_MASK \
-  (COLLECTIVE_PARAMOD | COLLECTIVE_POS_HYPER | COLLECTIVE_NEG_HYPER)
+  (COLLECTIVE_PARAMOD | COLLECTIVE_POS_HYPER | COLLECTIVE_NEG_HYPER | \
+   COLLECTIVE_PARAMOD_FROM | COLLECTIVE_PARAMOD_INTO)
 #define COLLECTIVE_KIND_MASK \
   (COLLECTIVE_INFERENCE_MASK | COLLECTIVE_HINT_PROBE | \
    COLLECTIVE_PROMISING_CURSOR)
@@ -251,6 +262,16 @@ static unsigned Collective_priority_turns_since_fair = 0;
 static BOOL Collective_batch_turn = FALSE;
 static unsigned Collective_givens_since_batch = 0;
 static BOOL Collective_hint_probe_credit = TRUE;
+enum collective_balanced_lane {
+  COLLECTIVE_LANE_PARAMOD = 0,
+  COLLECTIVE_LANE_POS_HYPER = 1,
+  COLLECTIVE_LANE_NEG_HYPER = 2,
+  COLLECTIVE_LANE_COUNT = 3
+};
+static unsigned Collective_balanced_lane = COLLECTIVE_LANE_PARAMOD;
+static unsigned Collective_balanced_lane_credit = 0;
+static unsigned Collective_balanced_turns_since_oldest = 0;
+static BOOL Collective_drain_mode = FALSE;
 
 /* Periodic automatic checkpoint state */
 static time_t Last_auto_ckpt_time = 0;       // wall-clock of last auto checkpoint
@@ -347,6 +368,13 @@ unsigned long long collective_candidate_occupancy(void)
   unsigned long long limbo = Glob.limbo == NULL ? 0 : Glob.limbo->length;
   if (!collective_frontier_mode())
     return 0;
+  /* Dense passives have already surrendered their transient Topform bodies
+     to the compact store.  In balanced mode the cache is the global bound
+     on exposed, not-yet-compacted candidate bodies; counting all dense SOS
+     records here would couple descriptor draining to passive cardinality and
+     can deadlock at the descriptor and passive limits simultaneously. */
+  if (collective_balanced_mode() && dense_passive_mode())
+    return limbo;
   passives = dense_passive_mode() ?
     (unsigned long long) dense_passive_size() :
     (Glob.sos == NULL ? 0 : (unsigned long long) Glob.sos->length);
@@ -435,6 +463,10 @@ void collective_clear_state(void)
   Collective_batch_turn = FALSE;
   Collective_givens_since_batch = 0;
   Collective_hint_probe_credit = TRUE;
+  Collective_balanced_lane = COLLECTIVE_LANE_PARAMOD;
+  Collective_balanced_lane_credit = 0;
+  Collective_balanced_turns_since_oldest = 0;
+  Collective_drain_mode = FALSE;
 }
 
 static
@@ -496,6 +528,22 @@ void collective_reset_state(void)
   Stats.collective_deactivation_entries = 0;
   Stats.collective_descriptor_bytes = 0;
   Stats.collective_history_bytes = 0;
+  Stats.collective_created_paramod = 0;
+  Stats.collective_created_pos_hyper = 0;
+  Stats.collective_created_neg_hyper = 0;
+  Stats.collective_completed_paramod = 0;
+  Stats.collective_completed_pos_hyper = 0;
+  Stats.collective_completed_neg_hyper = 0;
+  Stats.collective_balanced_paramod_turns = 0;
+  Stats.collective_balanced_pos_hyper_turns = 0;
+  Stats.collective_balanced_neg_hyper_turns = 0;
+  Stats.collective_balanced_oldest_turns = 0;
+  Stats.collective_balanced_lane_turns = 0;
+  Stats.collective_drain_entries = 0;
+  Stats.collective_drain_exits = 0;
+  Stats.collective_givens_withheld = 0;
+  Stats.collective_paramod_from_turns = 0;
+  Stats.collective_paramod_into_turns = 0;
 }
 
 static
@@ -844,6 +892,10 @@ void collective_append_batch(struct collective_batch *b)
     Collective_batch_tail->next = b;
   Collective_batch_tail = b;
   Collective_batch_count++;
+  if (collective_balanced_mode() &&
+      Collective_batch_count >
+        (unsigned long long) parm(Opt->collective_descriptor_high_water))
+    fatal_error("collective balanced descriptor high-water exceeded");
   if (Collective_batch_count > Stats.collective_batches_peak)
     Stats.collective_batches_peak = Collective_batch_count;
   collective_priority_heap_insert(b);
@@ -892,6 +944,25 @@ static
 void collective_enqueue_batch(Topform given)
 {
   struct collective_batch *b;
+  if (collective_balanced_mode()) {
+    unsigned directions[2] = {
+      COLLECTIVE_PARAMOD_FROM, COLLECTIVE_PARAMOD_INTO
+    };
+    int i;
+    for (i = 0; i < 2; i++) {
+      b = collective_new_batch();
+      b->given_id = given->id;
+      b->cursor = 0;
+      b->activation_limit = Collective_activation_count;
+      b->snapshot_epoch = Simplifier_epoch;
+      b->kind = directions[i];
+      collective_append_batch(b);
+      Stats.collective_batches_created++;
+      Stats.collective_created_paramod++;
+    }
+    return;
+  }
+  Stats.collective_created_paramod++;
   if (Collective_batch_tail != NULL &&
       Collective_batch_tail->given_id == given->id &&
       Collective_batch_tail->snapshot_epoch == Simplifier_epoch) {
@@ -913,7 +984,11 @@ static
 void collective_enqueue_hyper_batch(Topform given, unsigned kind)
 {
   struct collective_batch *b;
-  if (Collective_batch_tail != NULL &&
+  if (kind == COLLECTIVE_POS_HYPER)
+    Stats.collective_created_pos_hyper++;
+  else if (kind == COLLECTIVE_NEG_HYPER)
+    Stats.collective_created_neg_hyper++;
+  if (!collective_balanced_mode() && Collective_batch_tail != NULL &&
       Collective_batch_tail->given_id == given->id &&
       Collective_batch_tail->snapshot_epoch == Simplifier_epoch) {
     Collective_batch_tail->kind |= kind;
@@ -935,9 +1010,13 @@ void collective_rotate_or_complete_batch(struct collective_batch *b)
   BOOL hyper_pending =
     (b->kind & (COLLECTIVE_POS_HYPER | COLLECTIVE_NEG_HYPER)) != 0;
   BOOL paramod_pending =
-    (b->kind & COLLECTIVE_PARAMOD) != 0 &&
+    (b->kind & (COLLECTIVE_PARAMOD | COLLECTIVE_PARAMOD_FROM |
+                COLLECTIVE_PARAMOD_INTO)) != 0 &&
     b->cursor < b->activation_limit;
   if (!hyper_pending && !paramod_pending) {
+    if ((b->kind & (COLLECTIVE_PARAMOD | COLLECTIVE_PARAMOD_FROM |
+                    COLLECTIVE_PARAMOD_INTO)) != 0)
+      Stats.collective_completed_paramod++;
     safe_free(b);
     Stats.collective_batches_completed++;
   }
@@ -1013,6 +1092,107 @@ static BOOL collective_choose_batch_for_turn(void)
   return FALSE;
 }
 
+static BOOL collective_batch_in_balanced_lane(
+  struct collective_batch *b, unsigned lane)
+{
+  if (lane == COLLECTIVE_LANE_PARAMOD)
+    return (b->kind & (COLLECTIVE_PARAMOD_FROM |
+                       COLLECTIVE_PARAMOD_INTO)) != 0;
+  else if (lane == COLLECTIVE_LANE_POS_HYPER)
+    return (b->kind & COLLECTIVE_POS_HYPER) != 0;
+  else if (lane == COLLECTIVE_LANE_NEG_HYPER)
+    return (b->kind & COLLECTIVE_NEG_HYPER) != 0;
+  else
+    fatal_error("unknown collective balanced lane");
+  return FALSE;
+}
+
+static unsigned collective_balanced_lane_share(unsigned lane)
+{
+  if (lane == COLLECTIVE_LANE_PARAMOD)
+    return (unsigned) parm(Opt->collective_paramod_share);
+  else if (lane == COLLECTIVE_LANE_POS_HYPER)
+    return (unsigned) parm(Opt->collective_pos_hyper_share);
+  else if (lane == COLLECTIVE_LANE_NEG_HYPER)
+    return (unsigned) parm(Opt->collective_neg_hyper_share);
+  else
+    fatal_error("unknown collective balanced lane");
+  return 0;
+}
+
+static void collective_move_batch_to_head(struct collective_batch *b)
+{
+  if (b == Collective_batch_head)
+    return;
+  if (b == NULL || b->prev == NULL)
+    fatal_error("collective balanced queue link corrupted");
+  b->prev->next = b->next;
+  if (b->next == NULL)
+    Collective_batch_tail = b->prev;
+  else
+    b->next->prev = b->prev;
+  b->prev = NULL;
+  b->next = Collective_batch_head;
+  Collective_batch_head->prev = b;
+  Collective_batch_head = b;
+}
+
+/* Deterministic weighted round robin chooses the oldest queued descriptor
+   in each rule lane.  The mandatory FIFO turn is independent of lane
+   weights, so even a continuously replenished high-share lane cannot hide
+   an older finite descriptor.  Phase 1 charges one legacy generator call;
+   native iterator phases replace that opaque charge with raw work units. */
+static void collective_choose_balanced_batch_for_turn(void)
+{
+  unsigned interval =
+    (unsigned) parm(Opt->collective_balanced_fair_interval);
+  unsigned attempts;
+
+  if (Collective_batch_head == NULL)
+    return;
+
+  if (interval == 1 ||
+      Collective_balanced_turns_since_oldest >= interval - 1) {
+    Collective_balanced_turns_since_oldest = 0;
+    Stats.collective_balanced_oldest_turns++;
+    return;
+  }
+
+  for (attempts = 0; attempts < COLLECTIVE_LANE_COUNT; attempts++) {
+    struct collective_batch *b;
+    unsigned lane = Collective_balanced_lane;
+    if (Collective_balanced_lane_credit == 0)
+      Collective_balanced_lane_credit =
+        collective_balanced_lane_share(lane);
+    if (Collective_balanced_lane_credit != 0) {
+      for (b = Collective_batch_head; b != NULL; b = b->next)
+        if (collective_batch_in_balanced_lane(b, lane))
+          break;
+      if (b != NULL) {
+        collective_move_batch_to_head(b);
+        Collective_balanced_lane_credit--;
+        if (lane == COLLECTIVE_LANE_PARAMOD)
+          Stats.collective_balanced_paramod_turns++;
+        else if (lane == COLLECTIVE_LANE_POS_HYPER)
+          Stats.collective_balanced_pos_hyper_turns++;
+        else
+          Stats.collective_balanced_neg_hyper_turns++;
+        Stats.collective_balanced_lane_turns++;
+        Collective_balanced_turns_since_oldest++;
+        if (Collective_balanced_lane_credit == 0)
+          Collective_balanced_lane =
+            (Collective_balanced_lane + 1) % COLLECTIVE_LANE_COUNT;
+        return;
+      }
+    }
+    Collective_balanced_lane_credit = 0;
+    Collective_balanced_lane =
+      (Collective_balanced_lane + 1) % COLLECTIVE_LANE_COUNT;
+  }
+
+  fatal_error("collective balanced scheduler found no eligible lane");
+}
+
 static
 unsigned long long collective_history_bytes(void)
 {
@@ -1029,6 +1209,70 @@ unsigned long long collective_descriptor_lag(struct collective_batch *b)
 {
   return Collective_activation_count > b->activation_limit ?
     Collective_activation_count - b->activation_limit : 0;
+}
+
+static unsigned collective_balanced_max_activation_descriptors(void)
+{
+  unsigned n = 0;
+  if (flag(Opt->pos_hyper_resolution))
+    n++;
+  if (flag(Opt->neg_hyper_resolution))
+    n++;
+  if (flag(Opt->paramodulation))
+    n += 2;
+  return n;
+}
+
+static unsigned long long collective_oldest_pending_lag(void)
+{
+  struct collective_batch *b;
+  unsigned long long maximum = 0;
+  for (b = Collective_batch_head; b != NULL; b = b->next) {
+    unsigned long long lag = collective_descriptor_lag(b);
+    if (lag > maximum)
+      maximum = lag;
+  }
+  return maximum;
+}
+
+static BOOL collective_balanced_admission_allowed(void)
+{
+  unsigned long long reserve =
+    collective_balanced_max_activation_descriptors();
+  unsigned long long high =
+    (unsigned long long) parm(Opt->collective_descriptor_high_water);
+  return Collective_batch_count <= high && reserve <= high - Collective_batch_count;
+}
+
+static BOOL collective_update_drain_mode(void)
+{
+  unsigned long long lag;
+  BOOL pressure;
+  if (!collective_balanced_mode())
+    return FALSE;
+  if (Collective_batch_count == 0) {
+    if (Collective_drain_mode) {
+      Collective_drain_mode = FALSE;
+      Stats.collective_drain_exits++;
+    }
+    return FALSE;
+  }
+  lag = collective_oldest_pending_lag();
+  pressure = !collective_balanced_admission_allowed() ||
+    lag >= (unsigned long long) parm(Opt->collective_oldest_lag_limit);
+  if (!Collective_drain_mode && pressure) {
+    Collective_drain_mode = TRUE;
+    Stats.collective_drain_entries++;
+  }
+  else if (Collective_drain_mode &&
+           Collective_batch_count <=
+             (unsigned long long) parm(Opt->collective_descriptor_low_water) &&
+           lag < (unsigned long long) parm(Opt->collective_oldest_lag_limit) &&
+           collective_balanced_admission_allowed()) {
+    Collective_drain_mode = FALSE;
+    Stats.collective_drain_exits++;
+  }
+  return Collective_drain_mode;
 }
 
 /* Return the exact zero-based order statistic without allocating an array
@@ -1081,7 +1325,8 @@ void collective_descriptor_stats(
   for (b = Collective_batch_head; b != NULL; b = b->next) {
     unsigned long long lag = collective_descriptor_lag(b);
     count++;
-    if ((b->kind & COLLECTIVE_PARAMOD) != 0)
+    if ((b->kind & (COLLECTIVE_PARAMOD | COLLECTIVE_PARAMOD_FROM |
+                    COLLECTIVE_PARAMOD_INTO)) != 0)
       (*paramod)++;
     if ((b->kind & COLLECTIVE_POS_HYPER) != 0)
       (*pos_hyper)++;
@@ -1289,6 +1534,20 @@ Prover_options init_prover_options(void)
     init_parm("collective_candidate_cache", 4096, 1, INT_MAX);
   p->collective_promising_fair_interval =
     init_parm("collective_promising_fair_interval", 8, 1, 1000);
+  p->collective_descriptor_high_water =
+    init_parm("collective_descriptor_high_water", 4096, 4, INT_MAX);
+  p->collective_descriptor_low_water =
+    init_parm("collective_descriptor_low_water", 3072, 0, INT_MAX);
+  p->collective_oldest_lag_limit =
+    init_parm("collective_oldest_lag_limit", 4096, 1, INT_MAX);
+  p->collective_balanced_fair_interval =
+    init_parm("collective_balanced_fair_interval", 8, 1, 1000);
+  p->collective_paramod_share =
+    init_parm("collective_paramod_share", 2, 0, 1000);
+  p->collective_pos_hyper_share =
+    init_parm("collective_pos_hyper_share", 1, 0, 1000);
+  p->collective_neg_hyper_share =
+    init_parm("collective_neg_hyper_share", 1, 0, 1000);
 
   p->fold_denial_max =  init_parm("fold_denial_max",       0,     -1,INT_MAX);
 
@@ -1411,6 +1670,10 @@ Prover_options init_prover_options(void)
   p->inference_frontier = init_stringparm("inference_frontier", 2,
 					  "clauses",
 					  "collective");
+
+  p->collective_scheduler = init_stringparm("collective_scheduler", 2,
+					    "legacy",
+					    "balanced_hint");
 
   p->ancestor_store = init_stringparm("ancestor_store", 3,
 				      "off",
@@ -2021,6 +2284,13 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             comma_num(s.passive_refresh_subsumed));
   if (collective_frontier_mode()) {
     fprintf(fp,
+            "Collective_scheduler: policy=%s, drain=%d, high=%d, low=%d, "
+            "lag_limit=%d.\n",
+            stringparm1(Opt->collective_scheduler), Collective_drain_mode,
+            parm(Opt->collective_descriptor_high_water),
+            parm(Opt->collective_descriptor_low_water),
+            parm(Opt->collective_oldest_lag_limit));
+    fprintf(fp,
             "Collective_frontier: batches_created=%s, completed=%s, "
             "pending=%s, peak=%s, ratio=%d, skipped=%s, "
             "parent_materializations=%s, activations=%s.\n",
@@ -2045,12 +2315,38 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             comma_num(s.collective_descriptor_lag_p95),
             comma_num(s.collective_descriptor_lag_max));
     fprintf(fp,
+            "Collective_rule_descriptors: created_paramod=%s, "
+            "created_pos_hyper=%s, created_neg_hyper=%s, "
+            "completed_paramod=%s, completed_pos_hyper=%s, "
+            "completed_neg_hyper=%s.\n",
+            comma_num(s.collective_created_paramod),
+            comma_num(s.collective_created_pos_hyper),
+            comma_num(s.collective_created_neg_hyper),
+            comma_num(s.collective_completed_paramod),
+            comma_num(s.collective_completed_pos_hyper),
+            comma_num(s.collective_completed_neg_hyper));
+    fprintf(fp,
             "Collective_work: paramod_turns=%s, paramod_pairs_completed=%s, "
             "hyper_turns=%s, hyper_sets_completed=%s.\n",
             comma_num(s.collective_pair_turns),
             comma_num(s.collective_pair_expansions),
             comma_num(s.collective_hyper_expansions),
             comma_num(s.collective_hyper_sets_completed));
+    fprintf(fp,
+            "Collective_balanced: lane_paramod=%s, lane_pos_hyper=%s, "
+            "lane_neg_hyper=%s, lane_turns=%s, oldest_turns=%s, "
+            "drain_entries=%s, drain_exits=%s, givens_withheld=%s, "
+            "paramod_from_turns=%s, paramod_into_turns=%s.\n",
+            comma_num(s.collective_balanced_paramod_turns),
+            comma_num(s.collective_balanced_pos_hyper_turns),
+            comma_num(s.collective_balanced_neg_hyper_turns),
+            comma_num(s.collective_balanced_lane_turns),
+            comma_num(s.collective_balanced_oldest_turns),
+            comma_num(s.collective_drain_entries),
+            comma_num(s.collective_drain_exits),
+            comma_num(s.collective_givens_withheld),
+            comma_num(s.collective_paramod_from_turns),
+            comma_num(s.collective_paramod_into_turns));
     fprintf(fp,
             "Collective_chunks: limit=%d, emitted=%s, replayed=%s, "
             "raw_seen=%s, deferred_turns=%s, raw_peak=%s.\n",
@@ -6353,13 +6649,22 @@ BOOL collective_expand_one_batch(void)
   if (Collective_batch_head == NULL)
     return FALSE;
 
-  collective_choose_batch_for_turn();
+  if (collective_balanced_mode())
+    collective_choose_balanced_batch_for_turn();
+  else
+    collective_choose_batch_for_turn();
   b = Collective_batch_head;
   hint_probe = (b->kind & COLLECTIVE_HINT_PROBE) != 0;
 
   if ((b->kind & COLLECTIVE_INFERENCE_MASK) == 0 ||
       (b->kind & ~COLLECTIVE_KIND_MASK) != 0)
     fatal_error("unknown collective batch kind");
+  if (collective_balanced_mode() &&
+      b->kind != COLLECTIVE_PARAMOD_FROM &&
+      b->kind != COLLECTIVE_PARAMOD_INTO &&
+      b->kind != COLLECTIVE_POS_HYPER &&
+      b->kind != COLLECTIVE_NEG_HYPER)
+    fatal_error("balanced collective descriptor is not split by rule");
 
   /* A hint probe advances one paramodulation pair before any hyper work.
      Hyper now commits only a bounded conclusion chunk, but regenerating and
@@ -6398,6 +6703,10 @@ BOOL collective_expand_one_batch(void)
           &chunk, b, "collective hyper replay order changed")) {
       b->kind &= ~hyper_kind;
       Stats.collective_hyper_sets_completed++;
+      if (hyper_kind == COLLECTIVE_POS_HYPER)
+        Stats.collective_completed_pos_hyper++;
+      else
+        Stats.collective_completed_neg_hyper++;
     }
     Current_collective_chunk = NULL;
     Current_inference_source = INFER_SOURCE_OTHER;
@@ -6424,7 +6733,8 @@ BOOL collective_expand_one_batch(void)
     return TRUE;
   }
 
-  if ((b->kind & COLLECTIVE_PARAMOD) == 0)
+  if ((b->kind & (COLLECTIVE_PARAMOD | COLLECTIVE_PARAMOD_FROM |
+                  COLLECTIVE_PARAMOD_INTO)) == 0)
     fatal_error("unknown collective batch kind");
 
   while (b->cursor < b->activation_limit) {
@@ -6470,10 +6780,18 @@ BOOL collective_expand_one_batch(void)
       clock_start(Clocks.infer);
       Current_inference_source = INFER_SOURCE_PARAMOD;
       Current_collective_chunk = &chunk;
-      para_from_into(given, cf, partner, ci, FALSE,
-                     collective_chunk_cl_process);
-      para_from_into(partner, cf, given, ci, TRUE,
-                     collective_chunk_cl_process);
+      if ((b->kind &
+           (COLLECTIVE_PARAMOD | COLLECTIVE_PARAMOD_FROM)) != 0) {
+        para_from_into(given, cf, partner, ci, FALSE,
+                       collective_chunk_cl_process);
+        Stats.collective_paramod_from_turns++;
+      }
+      if ((b->kind &
+           (COLLECTIVE_PARAMOD | COLLECTIVE_PARAMOD_INTO)) != 0) {
+        para_from_into(partner, cf, given, ci, TRUE,
+                       collective_chunk_cl_process);
+        Stats.collective_paramod_into_turns++;
+      }
       complete = collective_chunk_finish(
         &chunk, b, "collective paramodulation replay order changed");
       Current_collective_chunk = NULL;
@@ -6487,11 +6805,15 @@ BOOL collective_expand_one_batch(void)
       }
       Stats.collective_pair_turns++;
       if (flag(Opt->collective_trace))
-        printf("%sCOLLECTIVE_TRACE kind=paramod given=%llu partner=%llu "
+        printf("%sCOLLECTIVE_TRACE kind=%s given=%llu partner=%llu "
                "epoch=%u generated=%llu kept=%llu historical=1 "
                "hint_probe=%d raw=%llu emitted=%llu cursor=%llu "
                "complete=%d.\n",
-               TPTP_PFX, b->given_id, partner_id, b->snapshot_epoch,
+               TPTP_PFX,
+               b->kind == COLLECTIVE_PARAMOD_FROM ? "paramod_from" :
+               b->kind == COLLECTIVE_PARAMOD_INTO ? "paramod_into" :
+                                                    "paramod",
+               b->given_id, partner_id, b->snapshot_epoch,
                Stats.generated - generated_before, Stats.kept - kept_before,
                hint_probe, chunk.seen, chunk.emitted,
                b->conclusion_cursor, complete);
@@ -6712,9 +7034,10 @@ void make_inferences(void)
   Topform given_clause;
   char *selection_type;
   BOOL givens = givens_available();
+  BOOL balanced_drain = collective_update_drain_mode();
   BOOL collective_due = collective_frontier_mode() &&
     Collective_batch_head != NULL &&
-    (Collective_batch_turn || !givens);
+    (Collective_batch_turn || !givens || balanced_drain);
   BOOL collective_space = !collective_frontier_mode() ||
     collective_candidate_occupancy() <
       (unsigned long long) parm(Opt->collective_candidate_cache);
@@ -6724,6 +7047,8 @@ void make_inferences(void)
      round-robin queue is fair: every finite descriptor cursor is advanced
      repeatedly. */
   if (collective_due && (collective_space || !givens)) {
+    if (balanced_drain && givens)
+      Stats.collective_givens_withheld++;
     collective_expand_one_batch();
     Collective_batch_turn = FALSE;
     Collective_givens_since_batch = 0;
@@ -6732,6 +7057,16 @@ void make_inferences(void)
 
   if (collective_due && !collective_space)
     Stats.collective_candidate_cache_stalls++;
+
+  /* The normal end-of-iteration limbo pass frees transient candidate-body
+     capacity.  Never violate the descriptor bound merely because that pass
+     has not happened yet. */
+  if (collective_balanced_mode() &&
+      !collective_balanced_admission_allowed()) {
+    if (givens)
+      Stats.collective_givens_withheld++;
+    return;
+  }
 
   if (!givens)
     return;
@@ -8899,16 +9234,23 @@ void write_collective_checkpoint(const char *dir)
   FILE *fp;
   unsigned long long i;
   struct collective_batch *b;
-  const char magic[8] = {'P','9','C','O','L','L','A','\0'};
+  char magic[8] = {'P','9','C','O','L','L','A','\0'};
   uint32_t turn = Collective_batch_turn ? 1U : 0U;
   uint32_t givens_since_batch = Collective_givens_since_batch;
   uint32_t hint_probe_credit = Collective_hint_probe_credit ? 1U : 0U;
   uint32_t priority_turns_since_fair =
     flag(Opt->collective_promising_scheduler) ?
       Collective_priority_turns_since_fair : 0U;
+  uint32_t balanced_lane = Collective_balanced_lane;
+  uint32_t balanced_lane_credit = Collective_balanced_lane_credit;
+  uint32_t balanced_turns_since_oldest =
+    Collective_balanced_turns_since_oldest;
+  uint32_t drain_mode = Collective_drain_mode ? 1U : 0U;
 
   if (!collective_frontier_mode())
     return;
+  if (collective_balanced_mode())
+    magic[6] = 'B';
   snprintf(path, sizeof(path), "%s/collective_frontier.bin", dir);
   fp = fopen(path, "wb");
   if (fp == NULL)
@@ -8923,6 +9265,14 @@ void write_collective_checkpoint(const char *dir)
       fwrite(&priority_turns_since_fair,
              sizeof(priority_turns_since_fair), 1, fp) != 1)
     fatal_error("write_collective_checkpoint: header write failed");
+  if (collective_balanced_mode() &&
+      (fwrite(&balanced_lane, sizeof(balanced_lane), 1, fp) != 1 ||
+       fwrite(&balanced_lane_credit,
+              sizeof(balanced_lane_credit), 1, fp) != 1 ||
+       fwrite(&balanced_turns_since_oldest,
+              sizeof(balanced_turns_since_oldest), 1, fp) != 1 ||
+       fwrite(&drain_mode, sizeof(drain_mode), 1, fp) != 1))
+    fatal_error("write_collective_checkpoint: balanced state write failed");
 
   for (i = 0; i < Collective_activation_count; i++) {
     unsigned long long id = collective_activation_id(i);
@@ -8967,7 +9317,9 @@ void read_collective_checkpoint(const char *dir)
   unsigned long long activations, batches, i;
   uint32_t turn, givens_since_batch, hint_probe_credit;
   uint32_t priority_turns_since_fair;
-  BOOL format6, format7, format8, format9, format_a;
+  uint32_t balanced_lane = 0, balanced_lane_credit = 0;
+  uint32_t balanced_turns_since_oldest = 0, drain_mode = 0;
+  BOOL format6, format7, format8, format9, format_a, format_b;
 
   if (!collective_frontier_mode())
     return;
@@ -8977,31 +9329,43 @@ void read_collective_checkpoint(const char *dir)
     fatal_error("resume: collective frontier state is missing");
   if (fread(magic, sizeof(magic), 1, fp) != 1)
     fatal_error("resume: corrupt collective frontier header");
+  format_b = memcmp(magic, "P9COLLB", 7) == 0;
   format_a = memcmp(magic, "P9COLLA", 7) == 0;
   format9 = memcmp(magic, "P9COLL9", 7) == 0;
   format8 = memcmp(magic, "P9COLL8", 7) == 0;
   format7 = memcmp(magic, "P9COLL7", 7) == 0;
   format6 = memcmp(magic, "P9COLL6", 7) == 0;
-  if ((!format_a && !format9 && !format8 && !format7 && !format6 &&
+  if ((!format_b && !format_a && !format9 && !format8 && !format7 && !format6 &&
        memcmp(magic, "P9COLL5", 7) != 0) ||
       fread(&activations, sizeof(activations), 1, fp) != 1 ||
       fread(&batches, sizeof(batches), 1, fp) != 1 ||
       fread(&turn, sizeof(turn), 1, fp) != 1 ||
       fread(&givens_since_batch, sizeof(givens_since_batch), 1, fp) != 1)
     fatal_error("resume: corrupt collective frontier header");
-  if (format6 || format7 || format8 || format9 || format_a) {
+  if (format6 || format7 || format8 || format9 || format_a || format_b) {
     if (fread(&hint_probe_credit, sizeof(hint_probe_credit), 1, fp) != 1)
       fatal_error("resume: corrupt collective frontier probe state");
   }
   else
     hint_probe_credit = 1U;
-  if (format_a) {
+  if (format_a || format_b) {
     if (fread(&priority_turns_since_fair,
               sizeof(priority_turns_since_fair), 1, fp) != 1)
       fatal_error("resume: corrupt collective priority scheduler state");
   }
   else
     priority_turns_since_fair = 0;
+  if (format_b) {
+    if (fread(&balanced_lane, sizeof(balanced_lane), 1, fp) != 1 ||
+        fread(&balanced_lane_credit,
+              sizeof(balanced_lane_credit), 1, fp) != 1 ||
+        fread(&balanced_turns_since_oldest,
+              sizeof(balanced_turns_since_oldest), 1, fp) != 1 ||
+        fread(&drain_mode, sizeof(drain_mode), 1, fp) != 1)
+      fatal_error("resume: corrupt balanced collective scheduler state");
+  }
+  if (format_b != collective_balanced_mode())
+    fatal_error("resume: collective scheduler policy does not match checkpoint");
   if (turn > 1 || hint_probe_credit > 1)
     fatal_error("resume: invalid collective scheduler state");
   if (priority_turns_since_fair >=
@@ -9009,6 +9373,14 @@ void read_collective_checkpoint(const char *dir)
       (!flag(Opt->collective_promising_scheduler) &&
        priority_turns_since_fair != 0))
     fatal_error("resume: invalid collective priority scheduler state");
+  if (format_b &&
+      (balanced_lane >= COLLECTIVE_LANE_COUNT ||
+       balanced_lane_credit >
+         collective_balanced_lane_share(balanced_lane) ||
+       balanced_turns_since_oldest >=
+         (unsigned) parm(Opt->collective_balanced_fair_interval) ||
+       drain_mode > 1))
+    fatal_error("resume: invalid balanced collective scheduler state");
 
   for (i = 0; i < activations; i++) {
     unsigned long long id;
@@ -9029,7 +9401,7 @@ void read_collective_checkpoint(const char *dir)
         fread(&b->cursor, sizeof(b->cursor), 1, fp) != 1 ||
         fread(&b->activation_limit, sizeof(b->activation_limit), 1, fp) != 1)
       fatal_error("resume: truncated collective batch queue");
-    if (format7 || format8 || format9 || format_a) {
+    if (format7 || format8 || format9 || format_a || format_b) {
       if (fread(&b->conclusion_cursor,
                 sizeof(b->conclusion_cursor), 1, fp) != 1 ||
           fread(&b->conclusion_prefix_hash,
@@ -9040,7 +9412,7 @@ void read_collective_checkpoint(const char *dir)
       b->conclusion_cursor = 0;
       b->conclusion_prefix_hash = 0;
     }
-    if (format9 || format_a) {
+    if (format9 || format_a || format_b) {
       if (fread(&b->conclusion_order_weight,
                 sizeof(b->conclusion_order_weight), 1, fp) != 1 ||
           fread(&b->conclusion_order_ordinal,
@@ -9060,9 +9432,9 @@ void read_collective_checkpoint(const char *dir)
     b->snapshot_epoch = epoch;
     if ((kind & COLLECTIVE_INFERENCE_MASK) == 0 ||
         (kind & ~COLLECTIVE_KIND_MASK) != 0 ||
-        (!format_a && !format9 && !format8 && !format7 && !format6 &&
+        (!format_b && !format_a && !format9 && !format8 && !format7 && !format6 &&
          (kind & COLLECTIVE_HINT_PROBE) != 0) ||
-        (!format_a && !format9 &&
+        (!format_b && !format_a && !format9 &&
          (kind & COLLECTIVE_PROMISING_CURSOR) != 0) ||
         (format7 && b->conclusion_cursor != 0 &&
          (kind & (COLLECTIVE_POS_HYPER | COLLECTIVE_NEG_HYPER)) == 0) ||
@@ -9086,7 +9458,13 @@ void read_collective_checkpoint(const char *dir)
             b->conclusion_order_weight, b->conclusion_order_ordinal,
             b->conclusion_next_weight, b->conclusion_next_ordinal) >= 0)) ||
         ((kind & COLLECTIVE_HINT_PROBE) != 0 &&
-         (i != 0 || hint_probe_credit != 0)))
+         (i != 0 || hint_probe_credit != 0)) ||
+        (format_b && kind != COLLECTIVE_PARAMOD_FROM &&
+         kind != COLLECTIVE_PARAMOD_INTO &&
+         kind != COLLECTIVE_POS_HYPER &&
+         kind != COLLECTIVE_NEG_HYPER) ||
+        (!format_b &&
+         (kind & (COLLECTIVE_PARAMOD_FROM | COLLECTIVE_PARAMOD_INTO)) != 0))
       fatal_error("resume: invalid collective batch kind");
     b->kind = kind;
     collective_append_batch(b);
@@ -9095,6 +9473,10 @@ void read_collective_checkpoint(const char *dir)
   Collective_givens_since_batch = givens_since_batch;
   Collective_hint_probe_credit = hint_probe_credit != 0;
   Collective_priority_turns_since_fair = priority_turns_since_fair;
+  Collective_balanced_lane = balanced_lane;
+  Collective_balanced_lane_credit = balanced_lane_credit;
+  Collective_balanced_turns_since_oldest = balanced_turns_since_oldest;
+  Collective_drain_mode = drain_mode != 0;
   if (fgetc(fp) != EOF)
     fatal_error("resume: trailing data in collective frontier state");
   fclose(fp);
@@ -9254,6 +9636,38 @@ void write_checkpoint(void)
             Stats.collective_hint_selected_other);
     fprintf(fp, "collective_batches_peak %llu\n",
             Stats.collective_batches_peak);
+    fprintf(fp, "collective_created_paramod %llu\n",
+            Stats.collective_created_paramod);
+    fprintf(fp, "collective_created_pos_hyper %llu\n",
+            Stats.collective_created_pos_hyper);
+    fprintf(fp, "collective_created_neg_hyper %llu\n",
+            Stats.collective_created_neg_hyper);
+    fprintf(fp, "collective_completed_paramod %llu\n",
+            Stats.collective_completed_paramod);
+    fprintf(fp, "collective_completed_pos_hyper %llu\n",
+            Stats.collective_completed_pos_hyper);
+    fprintf(fp, "collective_completed_neg_hyper %llu\n",
+            Stats.collective_completed_neg_hyper);
+    fprintf(fp, "collective_balanced_paramod_turns %llu\n",
+            Stats.collective_balanced_paramod_turns);
+    fprintf(fp, "collective_balanced_pos_hyper_turns %llu\n",
+            Stats.collective_balanced_pos_hyper_turns);
+    fprintf(fp, "collective_balanced_neg_hyper_turns %llu\n",
+            Stats.collective_balanced_neg_hyper_turns);
+    fprintf(fp, "collective_balanced_oldest_turns %llu\n",
+            Stats.collective_balanced_oldest_turns);
+    fprintf(fp, "collective_balanced_lane_turns %llu\n",
+            Stats.collective_balanced_lane_turns);
+    fprintf(fp, "collective_drain_entries %llu\n",
+            Stats.collective_drain_entries);
+    fprintf(fp, "collective_drain_exits %llu\n",
+            Stats.collective_drain_exits);
+    fprintf(fp, "collective_givens_withheld %llu\n",
+            Stats.collective_givens_withheld);
+    fprintf(fp, "collective_paramod_from_turns %llu\n",
+            Stats.collective_paramod_from_turns);
+    fprintf(fp, "collective_paramod_into_turns %llu\n",
+            Stats.collective_paramod_into_turns);
     fprintf(fp, "simplifier_epoch %u\n", Simplifier_epoch);
     fprintf(fp, "hint_state_epoch %llu\n", hint_state_epoch());
     fprintf(fp, "user_seconds %.2f\n", user_seconds());
@@ -10066,6 +10480,66 @@ void resume_load_clauses(const char *dir)
       &Stats.collective_hint_selected_other);
     rewind(fp); Stats.collective_batches_peak =
       read_metadata_ull(fp, "collective_batches_peak");
+    Stats.collective_created_paramod = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_created_paramod", &Stats.collective_created_paramod);
+    Stats.collective_created_pos_hyper = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_created_pos_hyper",
+      &Stats.collective_created_pos_hyper);
+    Stats.collective_created_neg_hyper = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_created_neg_hyper",
+      &Stats.collective_created_neg_hyper);
+    Stats.collective_completed_paramod = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_completed_paramod",
+      &Stats.collective_completed_paramod);
+    Stats.collective_completed_pos_hyper = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_completed_pos_hyper",
+      &Stats.collective_completed_pos_hyper);
+    Stats.collective_completed_neg_hyper = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_completed_neg_hyper",
+      &Stats.collective_completed_neg_hyper);
+    Stats.collective_balanced_paramod_turns = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_balanced_paramod_turns",
+      &Stats.collective_balanced_paramod_turns);
+    Stats.collective_balanced_pos_hyper_turns = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_balanced_pos_hyper_turns",
+      &Stats.collective_balanced_pos_hyper_turns);
+    Stats.collective_balanced_neg_hyper_turns = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_balanced_neg_hyper_turns",
+      &Stats.collective_balanced_neg_hyper_turns);
+    Stats.collective_balanced_oldest_turns = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_balanced_oldest_turns",
+      &Stats.collective_balanced_oldest_turns);
+    Stats.collective_balanced_lane_turns = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_balanced_lane_turns",
+      &Stats.collective_balanced_lane_turns);
+    Stats.collective_drain_entries = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_drain_entries", &Stats.collective_drain_entries);
+    Stats.collective_drain_exits = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_drain_exits", &Stats.collective_drain_exits);
+    Stats.collective_givens_withheld = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_givens_withheld", &Stats.collective_givens_withheld);
+    Stats.collective_paramod_from_turns = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_paramod_from_turns",
+      &Stats.collective_paramod_from_turns);
+    Stats.collective_paramod_into_turns = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_paramod_into_turns",
+      &Stats.collective_paramod_into_turns);
   }
   rewind(fp); Simplifier_epoch =
     (unsigned) read_metadata_ull(fp, "simplifier_epoch");
@@ -11027,6 +11501,9 @@ Prover_results search(Prover_input p)
     if (flag(Opt->collective_promising_scheduler) &&
         !str_ident(stringparm1(Opt->inference_frontier), "collective"))
       fatal_error("collective_promising_scheduler requires inference_frontier=collective");
+    if (str_ident(stringparm1(Opt->collective_scheduler), "balanced_hint") &&
+        !str_ident(stringparm1(Opt->inference_frontier), "collective"))
+      fatal_error("collective_scheduler=balanced_hint requires inference_frontier=collective");
     if (str_ident(stringparm1(Opt->inference_frontier), "collective")) {
       if (!discount_mode())
 	fatal_error("inference_frontier=collective requires search_loop=discount");
@@ -11035,6 +11512,28 @@ Prover_results search(Prover_input p)
       if (flag(Opt->collective_promising_scheduler) &&
           !flag(Opt->collective_promising_candidates))
         fatal_error("collective_promising_scheduler requires collective_promising_candidates");
+      if (str_ident(stringparm1(Opt->collective_scheduler), "balanced_hint")) {
+        unsigned reserve = collective_balanced_max_activation_descriptors();
+        int high = parm(Opt->collective_descriptor_high_water);
+        int low = parm(Opt->collective_descriptor_low_water);
+        if (!dense_passive_mode())
+          fatal_error("collective_scheduler=balanced_hint requires passive_store=dense");
+        if (low >= high)
+          fatal_error("collective_descriptor_low_water must be below high_water");
+        if (reserve > (unsigned) high)
+          fatal_error("collective descriptor high-water cannot admit one activation");
+        if (flag(Opt->collective_hint_probes) ||
+            flag(Opt->collective_promising_candidates) ||
+            flag(Opt->collective_promising_scheduler))
+          fatal_error("balanced_hint replaces the legacy collective discovery aids");
+        if ((flag(Opt->paramodulation) &&
+             parm(Opt->collective_paramod_share) == 0) ||
+            (flag(Opt->pos_hyper_resolution) &&
+             parm(Opt->collective_pos_hyper_share) == 0) ||
+            (flag(Opt->neg_hyper_resolution) &&
+             parm(Opt->collective_neg_hyper_share) == 0))
+          fatal_error("each enabled balanced collective rule needs a nonzero lane share");
+      }
       /* A delayed parent may already be disabled when a checkpoint is
 	 resumed, so collective checkpoints necessarily include ancestors. */
       if (!flag(Opt->checkpoint_ancestors))

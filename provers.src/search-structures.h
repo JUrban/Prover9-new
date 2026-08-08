@@ -169,6 +169,13 @@ struct prover_options {
     collective_candidate_chunk, // max collective conclusions per turn
     collective_candidate_cache, // max passives exposed by collective turns
     collective_promising_fair_interval, // one FIFO turn per N expansions
+    collective_descriptor_high_water, // hard balanced descriptor bound
+    collective_descriptor_low_water,  // balanced drain exit threshold
+    collective_oldest_lag_limit,      // activation lag forcing drain mode
+    collective_balanced_fair_interval, // one oldest turn per N lane turns
+    collective_paramod_share,         // weighted balanced lane share
+    collective_pos_hyper_share,       // weighted balanced lane share
+    collective_neg_hyper_share,       // weighted balanced lane share
 
     fold_denial_max,
 
@@ -250,6 +257,7 @@ struct prover_options {
     passive_store,       // full, compressed
     hint_index,          // fpa, compact, shallow, packed/hybrid, packed_legacy
     inference_frontier,  // clauses, collective
+    collective_scheduler, // legacy, balanced_hint
     ancestor_store;      // off, memory, mmap
 };
 
@@ -377,6 +385,22 @@ struct prover_stats {
     collective_deactivation_entries,
     collective_descriptor_bytes,
     collective_history_bytes,
+    collective_created_paramod,
+    collective_created_pos_hyper,
+    collective_created_neg_hyper,
+    collective_completed_paramod,
+    collective_completed_pos_hyper,
+    collective_completed_neg_hyper,
+    collective_balanced_paramod_turns,
+    collective_balanced_pos_hyper_turns,
+    collective_balanced_neg_hyper_turns,
+    collective_balanced_oldest_turns,
+    collective_balanced_lane_turns,
+    collective_drain_entries,
+    collective_drain_exits,
+    collective_givens_withheld,
+    collective_paramod_from_turns,
+    collective_paramod_into_turns,
     compression_attempted,
     compression_successful,
     compression_skipped,
