@@ -218,6 +218,11 @@ enum collective_batch_kind {
   COLLECTIVE_PARAMOD_INTO = 64U
 };
 
+struct collective_consumed_ordinal {
+  unsigned long long ordinal;
+  unsigned long long raw_fingerprint;
+};
+
 #define COLLECTIVE_INFERENCE_MASK \
   (COLLECTIVE_PARAMOD | COLLECTIVE_POS_HYPER | COLLECTIVE_NEG_HYPER | \
    COLLECTIVE_PARAMOD_FROM | COLLECTIVE_PARAMOD_INTO)
@@ -240,6 +245,16 @@ struct collective_batch {
   unsigned long long candidate_ordinal;
   Para_iterator para_iterator;
   Hyper_iterator hyper_iterator;
+  unsigned long long discovery_cursor;
+  unsigned long long discovery_ordinal;
+  Para_iterator discovery_para_iterator;
+  Hyper_iterator discovery_hyper_iterator;
+  struct collective_consumed_ordinal *consumed;
+  unsigned consumed_count;
+  unsigned consumed_capacity;
+  BOOL discovery_initialized;
+  BOOL discovery_complete;
+  BOOL discovery_hot;
   size_t priority_heap_index;
   struct collective_batch *prev;
   struct collective_batch *next;
@@ -293,6 +308,7 @@ struct collective_pool_entry {
   unsigned long long fingerprint;
   unsigned long long hint_epoch;
   unsigned simplifier_epoch;
+  BOOL discovery_promotion;
   double adjusted_weight;
   unsigned long long bytes;
 };
@@ -306,9 +322,13 @@ static unsigned Collective_pool_expansions_since_commit = 0;
 static unsigned Collective_pool_commits_since_fair = 0;
 static struct collective_batch *Current_collective_pool_batch = NULL;
 static struct collective_pool_entry *Current_collective_commit_entry = NULL;
+static BOOL Current_collective_discovery = FALSE;
+static unsigned Collective_discovery_turns_since_fair = 0;
+static unsigned Collective_discovery_turns_since_general = 0;
 
 static void collective_candidate_pool_clear(void);
 static unsigned long long collective_candidate_pool_allocated_bytes(void);
+static unsigned long long hint_trace_clause_hash(Topform c);
 
 /* Periodic automatic checkpoint state */
 static time_t Last_auto_ckpt_time = 0;       // wall-clock of last auto checkpoint
@@ -492,6 +512,9 @@ void collective_clear_state(void)
     Collective_batch_head = b->next;
     para_iterator_zap(&b->para_iterator);
     hyper_iterator_zap(&b->hyper_iterator);
+    para_iterator_zap(&b->discovery_para_iterator);
+    hyper_iterator_zap(&b->discovery_hyper_iterator);
+    safe_free(b->consumed);
     safe_free(b);
   }
   Collective_batch_tail = NULL;
@@ -513,6 +536,9 @@ void collective_clear_state(void)
   Collective_pool_commits_since_fair = 0;
   Current_collective_pool_batch = NULL;
   Current_collective_commit_entry = NULL;
+  Current_collective_discovery = FALSE;
+  Collective_discovery_turns_since_fair = 0;
+  Collective_discovery_turns_since_general = 0;
 }
 
 static
@@ -611,6 +637,21 @@ void collective_reset_state(void)
   Stats.collective_candidate_pool_commits = 0;
   Stats.collective_candidate_priority_commits = 0;
   Stats.collective_candidate_fair_commits = 0;
+  Stats.collective_discovery_turns = 0;
+  Stats.collective_discovery_hot_turns = 0;
+  Stats.collective_discovery_general_turns = 0;
+  Stats.collective_discovery_forced_fair_turns = 0;
+  Stats.collective_discovery_raw_steps = 0;
+  Stats.collective_discovery_candidates = 0;
+  Stats.collective_discovery_promotions = 0;
+  Stats.collective_discovery_confirmed = 0;
+  Stats.collective_discovery_false_positives = 0;
+  Stats.collective_discovery_duplicate_skips = 0;
+  Stats.collective_discovery_catchups = 0;
+  Stats.collective_discovery_distance_max = 0;
+  Stats.collective_discovery_cap_stalls = 0;
+  Stats.collective_discovery_consumed_records = 0;
+  Stats.collective_discovery_consumed_bytes = 0;
 }
 
 static
@@ -825,6 +866,8 @@ static struct collective_batch *collective_new_batch(void)
   struct collective_batch *b = safe_calloc(1, sizeof(*b));
   para_iterator_init(&b->para_iterator);
   hyper_iterator_init(&b->hyper_iterator);
+  para_iterator_init(&b->discovery_para_iterator);
+  hyper_iterator_init(&b->discovery_hyper_iterator);
   b->priority_heap_index = COLLECTIVE_NO_HEAP_INDEX;
   return b;
 }
@@ -833,6 +876,9 @@ static void collective_free_batch(struct collective_batch *b)
 {
   para_iterator_zap(&b->para_iterator);
   hyper_iterator_zap(&b->hyper_iterator);
+  para_iterator_zap(&b->discovery_para_iterator);
+  hyper_iterator_zap(&b->discovery_hyper_iterator);
+  safe_free(b->consumed);
   safe_free(b);
 }
 
@@ -1032,6 +1078,7 @@ void collective_enqueue_batch(Topform given)
       b->activation_limit = Collective_activation_count;
       b->snapshot_epoch = Simplifier_epoch;
       b->kind = directions[i];
+      b->discovery_hot = given->matching_hint != NULL;
       collective_append_batch(b);
       Stats.collective_batches_created++;
       Stats.collective_created_paramod++;
@@ -1052,6 +1099,7 @@ void collective_enqueue_batch(Topform given)
   b->activation_limit = Collective_activation_count;
   b->snapshot_epoch = Simplifier_epoch;
   b->kind = COLLECTIVE_PARAMOD;
+  b->discovery_hot = given->matching_hint != NULL;
   collective_append_batch(b);
   Stats.collective_batches_created++;
 }
@@ -1076,6 +1124,7 @@ void collective_enqueue_hyper_batch(Topform given, unsigned kind)
   b->activation_limit = Collective_activation_count;
   b->snapshot_epoch = Simplifier_epoch;
   b->kind = kind;
+  b->discovery_hot = given->matching_hint != NULL;
   collective_append_batch(b);
   Stats.collective_batches_created++;
 }
@@ -1090,6 +1139,8 @@ void collective_rotate_or_complete_batch(struct collective_batch *b)
                 COLLECTIVE_PARAMOD_INTO)) != 0 &&
     b->cursor < b->activation_limit;
   if (!hyper_pending && !paramod_pending) {
+    if (b->consumed_count != 0)
+      fatal_error("collective descriptor completed with promoted ordinals ahead");
     if ((b->kind & (COLLECTIVE_PARAMOD | COLLECTIVE_PARAMOD_FROM |
                     COLLECTIVE_PARAMOD_INTO)) != 0)
       Stats.collective_completed_paramod++;
@@ -1287,6 +1338,9 @@ static unsigned long long collective_iterator_path_bytes(void)
   for (b = Collective_batch_head; b != NULL; b = b->next)
     bytes += (unsigned long long) b->para_iterator.path_capacity *
              sizeof(*b->para_iterator.path);
+  for (b = Collective_batch_head; b != NULL; b = b->next)
+    bytes += (unsigned long long) b->discovery_para_iterator.path_capacity *
+             sizeof(*b->discovery_para_iterator.path);
   return bytes;
 }
 
@@ -1297,7 +1351,122 @@ static unsigned long long collective_hyper_iterator_choice_bytes(void)
   for (b = Collective_batch_head; b != NULL; b = b->next)
     bytes += (unsigned long long) b->hyper_iterator.choice_capacity *
              sizeof(*b->hyper_iterator.choices);
+  for (b = Collective_batch_head; b != NULL; b = b->next)
+    bytes +=
+      (unsigned long long) b->discovery_hyper_iterator.choice_capacity *
+      sizeof(*b->discovery_hyper_iterator.choices);
   return bytes;
+}
+
+static unsigned long long collective_consumed_bytes(void)
+{
+  struct collective_batch *b;
+  unsigned long long bytes = 0;
+  for (b = Collective_batch_head; b != NULL; b = b->next)
+    bytes += (unsigned long long) b->consumed_capacity * sizeof(*b->consumed);
+  return bytes;
+}
+
+static unsigned long long collective_consumed_records(void)
+{
+  struct collective_batch *b;
+  unsigned long long records = 0;
+  for (b = Collective_batch_head; b != NULL; b = b->next)
+    records += b->consumed_count;
+  return records;
+}
+
+static void collective_clone_para_iterator(Para_iterator *to,
+					   const Para_iterator *from)
+{
+  unsigned *path = NULL;
+  unsigned depth = from->path_depth;
+  para_iterator_zap(to);
+  *to = *from;
+  if (depth != 0) {
+    path = safe_calloc(depth, sizeof(*path));
+    memcpy(path, from->path, depth * sizeof(*path));
+  }
+  to->path = path;
+  to->path_capacity = depth;
+}
+
+static void collective_clone_hyper_iterator(Hyper_iterator *to,
+					    const Hyper_iterator *from)
+{
+  Hyper_iterator_choice *choices = NULL;
+  unsigned depth = from->depth;
+  hyper_iterator_zap(to);
+  *to = *from;
+  if (depth != 0) {
+    choices = safe_calloc(depth, sizeof(*choices));
+    memcpy(choices, from->choices, depth * sizeof(*choices));
+  }
+  to->choices = choices;
+  to->choice_capacity = depth;
+}
+
+static void collective_discovery_sync(struct collective_batch *b)
+{
+  if (!b->discovery_initialized ||
+      b->candidate_ordinal > b->discovery_ordinal) {
+    if (b->candidate_ordinal > b->discovery_ordinal &&
+        b->consumed_count != 0)
+      fatal_error("collective discovery cursor passed unconsumed promotion");
+    b->discovery_cursor = b->cursor;
+    b->discovery_ordinal = b->candidate_ordinal;
+    collective_clone_para_iterator(&b->discovery_para_iterator,
+                                   &b->para_iterator);
+    collective_clone_hyper_iterator(&b->discovery_hyper_iterator,
+                                    &b->hyper_iterator);
+    b->discovery_initialized = TRUE;
+    b->discovery_complete = FALSE;
+    Stats.collective_discovery_catchups++;
+  }
+}
+
+static void collective_add_consumed(struct collective_batch *b,
+				    unsigned long long ordinal,
+				    unsigned long long raw_fingerprint)
+{
+  if (b->consumed_count != 0 &&
+      b->consumed[b->consumed_count-1].ordinal >= ordinal)
+    fatal_error("collective discovery ordinals are not increasing");
+  if (b->consumed_count == b->consumed_capacity) {
+    unsigned capacity = b->consumed_capacity == 0 ? 8 :
+                        b->consumed_capacity * 2;
+    unsigned cap_limit =
+      (unsigned) parm(Opt->collective_discovery_promotion_cap);
+    if (capacity > cap_limit)
+      capacity = cap_limit;
+    if (capacity <= b->consumed_capacity)
+      fatal_error("collective discovery promotion cap exceeded");
+    b->consumed = safe_realloc(
+      b->consumed, (size_t) capacity * sizeof(*b->consumed));
+    b->consumed_capacity = capacity;
+  }
+  b->consumed[b->consumed_count].ordinal = ordinal;
+  b->consumed[b->consumed_count].raw_fingerprint = raw_fingerprint;
+  b->consumed_count++;
+}
+
+static BOOL collective_consume_if_promoted(struct collective_batch *b,
+					   unsigned long long ordinal,
+					   Topform c)
+{
+  if (b->consumed_count == 0 || b->consumed[0].ordinal != ordinal)
+    return FALSE;
+  if (b->consumed[0].raw_fingerprint !=
+        hint_trace_clause_hash(c))
+    fatal_error("collective discovery raw conclusion changed at fair cursor");
+  if (b->consumed_count > 1)
+    memmove(b->consumed, b->consumed + 1,
+            (size_t) (b->consumed_count - 1) * sizeof(*b->consumed));
+  b->consumed_count--;
+  Stats.collective_discovery_duplicate_skips++;
+  Stats.collective_discovery_catchups++;
+  delete_clause(c);
+  return TRUE;
 }
 
 static
@@ -1545,6 +1714,8 @@ Prover_options init_prover_options(void)
     init_flag("collective_promising_candidates", FALSE);
   p->collective_promising_scheduler =
     init_flag("collective_promising_scheduler", FALSE);
+  p->collective_hint_discovery =
+    init_flag("collective_hint_discovery", TRUE);
   p->print_matched_hints    = init_flag("print_matched_hints",    FALSE);
   p->print_derivations      = init_flag("print_derivations",      FALSE);
   p->derivations_only       = init_flag("derivations_only",        TRUE);
@@ -1652,6 +1823,16 @@ Prover_options init_prover_options(void)
     init_parm("collective_candidate_commit_interval", 4, 1, 1000);
   p->collective_candidate_fair_interval =
     init_parm("collective_candidate_fair_interval", 8, 1, 1000);
+  p->collective_discovery_raw_budget =
+    init_parm("collective_discovery_raw_budget", 32, 1, INT_MAX);
+  p->collective_discovery_distance =
+    init_parm("collective_discovery_distance", 256, 1, INT_MAX);
+  p->collective_discovery_promotion_cap =
+    init_parm("collective_discovery_promotion_cap", 32, 1, INT_MAX);
+  p->collective_discovery_general_interval =
+    init_parm("collective_discovery_general_interval", 8, 1, 1000);
+  p->collective_discovery_turn_interval =
+    init_parm("collective_discovery_turn_interval", 2, 1, 1000);
 
   p->fold_denial_max =  init_parm("fold_denial_max",       0,     -1,INT_MAX);
 
@@ -1708,6 +1889,8 @@ Prover_options init_prover_options(void)
   p->checkpoint_given =   init_parm("checkpoint_given",      -1,     -1,INT_MAX);
   p->checkpoint_candidate_pool =
     init_parm("checkpoint_candidate_pool", -1, -1, INT_MAX);
+  p->checkpoint_discovery_promotions =
+    init_parm("checkpoint_discovery_promotions", -1, -1, INT_MAX);
   p->checkpoint_keep =    init_parm("checkpoint_keep",        3,      1,INT_MAX);
   p->sine =               init_parm("sine",                  -1,     -1,INT_MAX);
   p->sine_depth =         init_parm("sine_depth",             0,      0,INT_MAX);
@@ -2346,6 +2529,10 @@ void update_stats(void)
     collective_hyper_iterator_choice_bytes();
   Stats.collective_descriptor_bytes +=
     Stats.collective_hyper_iterator_choice_bytes;
+  Stats.collective_discovery_consumed_records =
+    collective_consumed_records();
+  Stats.collective_discovery_consumed_bytes = collective_consumed_bytes();
+  Stats.collective_descriptor_bytes += Stats.collective_discovery_consumed_bytes;
   Stats.collective_history_bytes = collective_history_bytes();
   collective_history_clause_stats(&Stats.collective_history_clauses,
                                    &Stats.collective_history_indexed_clauses,
@@ -2517,6 +2704,32 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             comma_num(s.collective_preview_false_positives),
             comma_num(s.collective_preview_changed_hint_ids),
             comma_num(s.collective_preview_stale_refreshes));
+    fprintf(fp,
+            "Collective_discovery: enabled=%d, raw_budget=%d, distance_limit=%d, "
+            "promotion_cap=%d, turns=%s, hot_turns=%s, general_turns=%s, "
+            "forced_fair=%s, raw_steps=%s, inspected=%s, promotions=%s, "
+            "confirmed=%s, false_positives=%s, duplicate_skips=%s, "
+            "catchups=%s, distance_max=%s, cap_stalls=%s, "
+            "consumed_records=%s, consumed_bytes=%s.\n",
+            flag(Opt->collective_hint_discovery),
+            parm(Opt->collective_discovery_raw_budget),
+            parm(Opt->collective_discovery_distance),
+            parm(Opt->collective_discovery_promotion_cap),
+            comma_num(s.collective_discovery_turns),
+            comma_num(s.collective_discovery_hot_turns),
+            comma_num(s.collective_discovery_general_turns),
+            comma_num(s.collective_discovery_forced_fair_turns),
+            comma_num(s.collective_discovery_raw_steps),
+            comma_num(s.collective_discovery_candidates),
+            comma_num(s.collective_discovery_promotions),
+            comma_num(s.collective_discovery_confirmed),
+            comma_num(s.collective_discovery_false_positives),
+            comma_num(s.collective_discovery_duplicate_skips),
+            comma_num(s.collective_discovery_catchups),
+            comma_num(s.collective_discovery_distance_max),
+            comma_num(s.collective_discovery_cap_stalls),
+            comma_num(s.collective_discovery_consumed_records),
+            comma_num(s.collective_discovery_consumed_bytes));
     fprintf(fp,
             "Collective_promising: enabled=%d, scans=%s, considered=%s, "
             "buffer_peak=%s.\n",
@@ -5873,7 +6086,8 @@ static struct collective_pool_entry *collective_candidate_heap_remove(size_t at)
   return e;
 }
 
-static void collective_candidate_pool_push(Topform c)
+static void collective_candidate_pool_push_at(
+  Topform c, struct collective_batch *b, unsigned long long raw_ordinal)
 {
   struct collective_pool_entry *e;
   unsigned long long occupied = collective_candidate_occupancy();
@@ -5881,21 +6095,23 @@ static void collective_candidate_pool_push(Topform c)
     (unsigned long long) parm(Opt->collective_candidate_cache);
   unsigned long long bytes;
 
-  if (!collective_balanced_mode() || Current_collective_pool_batch == NULL)
+  if (!collective_balanced_mode() || b == NULL)
     fatal_error("collective candidate callback has no balanced descriptor");
   if (occupied >= limit)
     fatal_error("collective candidate pool bound exceeded");
   e = safe_calloc(1, sizeof(*e));
   e->clause = c;
   e->source = Current_inference_source;
-  e->kind = Current_collective_pool_batch->kind;
-  e->given_id = Current_collective_pool_batch->given_id;
-  e->raw_ordinal = Current_collective_pool_batch->candidate_ordinal++;
+  e->kind = b->kind;
+  e->given_id = b->given_id;
+  e->raw_ordinal = raw_ordinal;
   e->insertion_ordinal = Collective_candidate_insertion_ordinal++;
   bytes = sizeof(*e) + sizeof(struct topform) +
           clause_body_storage_bytes(c);
   e->bytes = bytes;
   collective_preview_pool_entry(e);
+  if (e->hint_id != 0)
+    b->discovery_hot = TRUE;
   Collective_candidate_pool_bytes += bytes;
   collective_candidate_heap_insert(e);
   if (Collective_candidate_heap_count >
@@ -5905,6 +6121,70 @@ static void collective_candidate_pool_push(Topform c)
         Stats.collective_candidate_pool_peak_bytes)
     Stats.collective_candidate_pool_peak_bytes =
       collective_candidate_pool_allocated_bytes();
+}
+
+static void collective_candidate_pool_push(Topform c)
+{
+  struct collective_batch *b = Current_collective_pool_batch;
+  unsigned long long ordinal;
+  if (b == NULL || Current_collective_discovery)
+    fatal_error("collective fair candidate callback has invalid context");
+  ordinal = b->candidate_ordinal++;
+  if (!collective_consume_if_promoted(b, ordinal, c))
+    collective_candidate_pool_push_at(c, b, ordinal);
+}
+
+static void collective_discovery_candidate(Topform c)
+{
+  struct collective_batch *b = Current_collective_pool_batch;
+  struct collective_pool_entry *e;
+  unsigned long long ordinal, raw_fingerprint, distance;
+  unsigned long long limit =
+    (unsigned long long) parm(Opt->collective_candidate_cache);
+  unsigned promotion_cap =
+    (unsigned) parm(Opt->collective_discovery_promotion_cap);
+
+  if (b == NULL || !Current_collective_discovery)
+    fatal_error("collective discovery callback has invalid context");
+  ordinal = b->discovery_ordinal++;
+  raw_fingerprint = hint_trace_clause_hash(c);
+  e = safe_calloc(1, sizeof(*e));
+  e->clause = c;
+  e->source = Current_inference_source;
+  e->kind = b->kind;
+  e->given_id = b->given_id;
+  e->raw_ordinal = ordinal;
+  e->discovery_promotion = TRUE;
+  collective_preview_pool_entry(e);
+  Stats.collective_discovery_candidates++;
+
+  if (e->hint_id != 0)
+    b->discovery_hot = TRUE;
+  if (e->hint_id != 0 &&
+      b->consumed_count < promotion_cap &&
+      collective_candidate_occupancy() < limit) {
+    e->insertion_ordinal = Collective_candidate_insertion_ordinal++;
+    e->bytes = sizeof(*e) + sizeof(struct topform) +
+               clause_body_storage_bytes(c);
+    collective_add_consumed(b, ordinal, raw_fingerprint);
+    Collective_candidate_pool_bytes += e->bytes;
+    collective_candidate_heap_insert(e);
+    Stats.collective_discovery_promotions++;
+    distance = ordinal + 1 > b->candidate_ordinal ?
+      ordinal + 1 - b->candidate_ordinal : 0;
+    if (distance > Stats.collective_discovery_distance_max)
+      Stats.collective_discovery_distance_max = distance;
+    if (collective_candidate_pool_allocated_bytes() >
+          Stats.collective_candidate_pool_peak_bytes)
+      Stats.collective_candidate_pool_peak_bytes =
+        collective_candidate_pool_allocated_bytes();
+  }
+  else {
+    if (e->hint_id != 0 && b->consumed_count >= promotion_cap)
+      Stats.collective_discovery_cap_stalls++;
+    delete_clause(c);
+    safe_free(e);
+  }
 }
 
 static void collective_candidate_pool_clear(void)
@@ -6198,6 +6478,12 @@ void cl_process(Topform c)
         if (predicted_hint != 0 && actual_hint != 0 &&
             predicted_hint != actual_hint)
           Stats.collective_preview_changed_hint_ids++;
+        if (Current_collective_commit_entry->discovery_promotion) {
+          if (actual_hint != 0)
+            Stats.collective_discovery_confirmed++;
+          else
+            Stats.collective_discovery_false_positives++;
+        }
       }
       if (flag(Opt->hint_trace))
         {
@@ -7152,6 +7438,187 @@ static BOOL collective_hyper_source_test(Topform c, void *data)
   return collective_history_clause_test(c, source->filter);
 }
 
+static BOOL collective_discovery_eligible(struct collective_batch *b)
+{
+  unsigned long long distance;
+  if (!collective_balanced_mode() ||
+      !flag(Opt->collective_hint_discovery) ||
+      clist_empty(Glob.hints) || b->discovery_complete)
+    return FALSE;
+  if (b->consumed_count >=
+        (unsigned) parm(Opt->collective_discovery_promotion_cap))
+    return FALSE;
+  if (!b->discovery_initialized ||
+      b->candidate_ordinal > b->discovery_ordinal)
+    return TRUE;
+  distance = b->discovery_ordinal - b->candidate_ordinal;
+  return distance <
+    (unsigned long long) parm(Opt->collective_discovery_distance);
+}
+
+static struct collective_batch *collective_choose_discovery_batch(
+  BOOL *general_turn)
+{
+  struct collective_batch *b, *first = NULL, *ordinary = NULL, *hot = NULL;
+  unsigned interval =
+    (unsigned) parm(Opt->collective_discovery_general_interval);
+  BOOL force_general = interval == 1 ||
+    Collective_discovery_turns_since_general >= interval - 1;
+
+  for (b = Collective_batch_head; b != NULL; b = b->next) {
+    if (!collective_discovery_eligible(b))
+      continue;
+    if (first == NULL)
+      first = b;
+    if (b->discovery_hot && hot == NULL)
+      hot = b;
+    if (!b->discovery_hot && ordinary == NULL)
+      ordinary = b;
+  }
+  if (first == NULL)
+    return NULL;
+  if (force_general) {
+    *general_turn = TRUE;
+    return ordinary == NULL ? first : ordinary;
+  }
+  if (hot != NULL) {
+    *general_turn = FALSE;
+    return hot;
+  }
+  *general_turn = TRUE;
+  return ordinary == NULL ? first : ordinary;
+}
+
+static BOOL collective_expand_discovery_one(void)
+{
+  struct collective_batch *b;
+  BOOL general_turn = FALSE;
+  unsigned turn_interval =
+    (unsigned) parm(Opt->collective_discovery_turn_interval);
+  unsigned long long raw_budget =
+    (unsigned long long) parm(Opt->collective_discovery_raw_budget);
+  unsigned long long distance_limit =
+    (unsigned long long) parm(Opt->collective_discovery_distance);
+  unsigned long long distance, candidate_budget;
+
+  if (!flag(Opt->collective_hint_discovery) || clist_empty(Glob.hints))
+    return FALSE;
+  if (turn_interval == 1 ||
+      Collective_discovery_turns_since_fair >= turn_interval - 1) {
+    Stats.collective_discovery_forced_fair_turns++;
+    return FALSE;
+  }
+  b = collective_choose_discovery_batch(&general_turn);
+  if (b == NULL)
+    return FALSE;
+  collective_discovery_sync(b);
+  distance = b->discovery_ordinal >= b->candidate_ordinal ?
+    b->discovery_ordinal - b->candidate_ordinal : 0;
+  if (distance >= distance_limit)
+    return FALSE;
+  candidate_budget = distance_limit - distance;
+  if (candidate_budget > raw_budget)
+    candidate_budget = raw_budget;
+
+  Current_collective_pool_batch = b;
+  Current_collective_discovery = TRUE;
+  if (b->kind == COLLECTIVE_POS_HYPER ||
+      b->kind == COLLECTIVE_NEG_HYPER) {
+    struct collective_history_filter filter;
+    struct collective_hyper_source_data source_data;
+    Hyper_parent_source source;
+    unsigned long long raw = 0, yielded = 0;
+    Topform given = collective_activation_clause(b->activation_limit - 1);
+    int direction = b->kind == COLLECTIVE_POS_HYPER ? POS_RES : NEG_RES;
+    BOOL complete;
+    memset(&filter, 0, sizeof(filter));
+    filter.snapshot_epoch = b->snapshot_epoch;
+    source_data.filter = &filter;
+    source_data.activation_limit = b->activation_limit;
+    source.count = collective_hyper_source_count;
+    source.clause = collective_hyper_source_clause;
+    source.test = collective_hyper_source_test;
+    source.data = &source_data;
+    clock_start(Clocks.infer);
+    Current_inference_source = INFER_SOURCE_HYPER;
+    complete = hyper_resolution_bounded(
+      given, direction, &source, &b->discovery_hyper_iterator,
+      raw_budget, candidate_budget, collective_discovery_candidate,
+      &raw, &yielded);
+    Current_inference_source = INFER_SOURCE_OTHER;
+    clock_stop(Clocks.infer);
+    Stats.collective_discovery_raw_steps += raw;
+    if (complete) {
+      hyper_iterator_reset(&b->discovery_hyper_iterator);
+      b->discovery_complete = TRUE;
+    }
+  }
+  else {
+    unsigned long long raw = 0, yielded = 0;
+    BOOL complete = FALSE;
+    if (b->discovery_cursor >= b->activation_limit)
+      b->discovery_complete = TRUE;
+    else {
+      unsigned long long position = b->discovery_cursor;
+      unsigned long long partner_id = collective_activation_id(position);
+      unsigned deactivated = collective_deactivation_epoch(partner_id);
+      Topform given = collective_activation_clause(b->activation_limit - 1);
+      Topform partner = collective_activation_clause(position);
+      BOOL good_given =
+        b->given_id < (unsigned long long) parm(Opt->para_restr_beg) ||
+        b->given_id > (unsigned long long) parm(Opt->para_restr_end);
+      BOOL good_pair = good_given ||
+        partner_id < (unsigned long long) parm(Opt->para_restr_beg) ||
+        partner_id > (unsigned long long) parm(Opt->para_restr_end);
+      if (deactivated != 0 && deactivated <= b->snapshot_epoch) {
+        para_iterator_reset(&b->discovery_para_iterator);
+        b->discovery_cursor++;
+        raw = 1;
+      }
+      else if (restricted_denial(partner) || !good_pair ||
+               over_parm_limit(number_of_literals(partner->literals),
+                               Opt->para_lit_limit)) {
+        para_iterator_reset(&b->discovery_para_iterator);
+        b->discovery_cursor++;
+        raw = 1;
+      }
+      else {
+        Topform from = b->kind == COLLECTIVE_PARAMOD_FROM ? given : partner;
+        Topform into = b->kind == COLLECTIVE_PARAMOD_FROM ? partner : given;
+        BOOL check_top = b->kind == COLLECTIVE_PARAMOD_INTO;
+        clock_start(Clocks.infer);
+        Current_inference_source = INFER_SOURCE_PARAMOD;
+        complete = para_from_into_bounded(
+          from, into, check_top, &b->discovery_para_iterator,
+          raw_budget, candidate_budget, collective_discovery_candidate,
+          &raw, &yielded);
+        Current_inference_source = INFER_SOURCE_OTHER;
+        clock_stop(Clocks.infer);
+        if (complete) {
+          para_iterator_reset(&b->discovery_para_iterator);
+          b->discovery_cursor++;
+        }
+      }
+      if (b->discovery_cursor >= b->activation_limit)
+        b->discovery_complete = TRUE;
+    }
+    Stats.collective_discovery_raw_steps += raw;
+  }
+  Current_collective_discovery = FALSE;
+  Current_collective_pool_batch = NULL;
+  Stats.collective_discovery_turns++;
+  if (general_turn) {
+    Stats.collective_discovery_general_turns++;
+    Collective_discovery_turns_since_general = 0;
+  }
+  else {
+    Stats.collective_discovery_hot_turns++;
+    Collective_discovery_turns_since_general++;
+  }
+  Collective_discovery_turns_since_fair++;
+  return TRUE;
+}
+
 /* Expand at most one historical active partner from the oldest round-robin
    batch.  Both paramodulation directions for that pair are performed before
    yielding.  Conclusions still go through cl_process(), including exact
@@ -7695,9 +8162,18 @@ void make_inferences(void)
   if (collective_due && (collective_space || !givens)) {
     if (balanced_drain && givens)
       Stats.collective_givens_withheld++;
-    collective_expand_one_batch();
-    if (collective_balanced_mode())
+    if (collective_balanced_mode() && collective_space &&
+        collective_expand_discovery_one()) {
       Collective_pool_expansions_since_commit++;
+      Collective_batch_turn = FALSE;
+      Collective_givens_since_batch = 0;
+      return;
+    }
+    collective_expand_one_batch();
+    if (collective_balanced_mode()) {
+      Collective_pool_expansions_since_commit++;
+      Collective_discovery_turns_since_fair = 0;
+    }
     Collective_batch_turn = FALSE;
     Collective_givens_since_batch = 0;
     return;
@@ -9884,7 +10360,7 @@ static void write_collective_candidate_pool(const char *dir)
   fp = fopen(path, "w");
   if (fp == NULL)
     fatal_error("write_collective_candidate_pool: cannot create state file");
-  fprintf(fp, "P9CPOOL2 %llu %llu %u %u\n",
+  fprintf(fp, "P9CPOOL3 %llu %llu %u %u\n",
           (unsigned long long) Collective_candidate_heap_count,
           Collective_candidate_insertion_ordinal,
           Collective_pool_expansions_since_commit,
@@ -9894,11 +10370,12 @@ static void write_collective_candidate_pool(const char *dir)
     Term t = topform_to_term(e->clause);
     String_buf sb = get_string_buf();
     fprintf(fp,
-            "%u %u %u %llu %llu %llu %llu %llu %llu %llu %u %a\n",
+            "%u %u %u %llu %llu %llu %llu %llu %llu %llu %u %u %a\n",
             (unsigned) e->source, e->kind, e->selector_priority,
             e->selector_mask, e->given_id, e->raw_ordinal,
             e->insertion_ordinal, e->hint_id, e->fingerprint,
-            e->hint_epoch, e->simplifier_epoch, e->adjusted_weight);
+            e->hint_epoch, e->simplifier_epoch,
+            e->discovery_promotion ? 1U : 0U, e->adjusted_weight);
     fwrite_term(fp, t);
     fprintf(fp, ".\n");
     sb_write_just(sb, e->clause->justification, NULL);
@@ -9911,21 +10388,25 @@ static void write_collective_candidate_pool(const char *dir)
     fatal_error("write_collective_candidate_pool: close failed");
 }
 
-static void read_collective_candidate_pool(const char *dir)
+static void read_collective_candidate_pool(const char *dir, BOOL discovery_format)
 {
   char path[600], magic[16];
   FILE *fp;
   unsigned long long count, insertion, i;
   unsigned expansions, commits_since_fair;
+  BOOL pool3;
 
   snprintf(path, sizeof(path), "%s/collective_candidates.txt", dir);
   fp = fopen(path, "r");
   if (fp == NULL)
     fatal_error("resume: balanced candidate-pool state is missing");
   if (fscanf(fp, " %15s %llu %llu %u %u", magic, &count, &insertion,
-             &expansions, &commits_since_fair) != 5 ||
-      strcmp(magic, "P9CPOOL2") != 0)
+             &expansions, &commits_since_fair) != 5)
     fatal_error("resume: corrupt collective candidate-pool header");
+  pool3 = strcmp(magic, "P9CPOOL3") == 0;
+  if ((!pool3 && strcmp(magic, "P9CPOOL2") != 0) ||
+      pool3 != discovery_format)
+    fatal_error("resume: candidate-pool version does not match frontier");
   if (count > (unsigned long long) parm(Opt->collective_candidate_cache) ||
       expansions >
         (unsigned) parm(Opt->collective_candidate_commit_interval) ||
@@ -9934,17 +10415,29 @@ static void read_collective_candidate_pool(const char *dir)
     fatal_error("resume: invalid collective candidate-pool bounds");
   for (i = 0; i < count; i++) {
     struct collective_pool_entry *e = safe_calloc(1, sizeof(*e));
-    unsigned source, kind, priority, simplifier_epoch;
+    unsigned source, kind, priority, simplifier_epoch, discovery_promotion;
     unsigned long long selector_mask, given_id, raw_ordinal, entry_insertion;
     unsigned long long hint_id, fingerprint, hint_epoch;
     double adjusted_weight;
     Term clause_term, just_term;
-    if (fscanf(fp,
-               " %u %u %u %llu %llu %llu %llu %llu %llu %llu %u %la",
-               &source, &kind, &priority, &selector_mask, &given_id,
-               &raw_ordinal, &entry_insertion, &hint_id, &fingerprint,
-               &hint_epoch, &simplifier_epoch, &adjusted_weight) != 12)
-      fatal_error("resume: truncated collective candidate metadata");
+    if (pool3) {
+      if (fscanf(fp,
+                 " %u %u %u %llu %llu %llu %llu %llu %llu %llu %u %u %la",
+                 &source, &kind, &priority, &selector_mask, &given_id,
+                 &raw_ordinal, &entry_insertion, &hint_id, &fingerprint,
+                 &hint_epoch, &simplifier_epoch, &discovery_promotion,
+                 &adjusted_weight) != 13)
+        fatal_error("resume: truncated collective candidate metadata");
+    }
+    else {
+      if (fscanf(fp,
+                 " %u %u %u %llu %llu %llu %llu %llu %llu %llu %u %la",
+                 &source, &kind, &priority, &selector_mask, &given_id,
+                 &raw_ordinal, &entry_insertion, &hint_id, &fingerprint,
+                 &hint_epoch, &simplifier_epoch, &adjusted_weight) != 12)
+        fatal_error("resume: truncated collective candidate metadata");
+      discovery_promotion = 0;
+    }
     clause_term = read_term(fp, stderr);
     just_term = read_term(fp, stderr);
     if (clause_term == NULL || just_term == NULL)
@@ -9958,7 +10451,8 @@ static void read_collective_candidate_pool(const char *dir)
          kind != COLLECTIVE_PARAMOD_INTO &&
          kind != COLLECTIVE_POS_HYPER &&
          kind != COLLECTIVE_NEG_HYPER) ||
-        priority > 2 || !isfinite(adjusted_weight) ||
+        priority > 2 || discovery_promotion > 1 ||
+        !isfinite(adjusted_weight) ||
         entry_insertion >= insertion)
       fatal_error("resume: invalid collective candidate metadata");
     e->source = (enum inference_source) source;
@@ -9972,6 +10466,7 @@ static void read_collective_candidate_pool(const char *dir)
     e->fingerprint = fingerprint;
     e->hint_epoch = hint_epoch;
     e->simplifier_epoch = simplifier_epoch;
+    e->discovery_promotion = discovery_promotion != 0;
     e->adjusted_weight = adjusted_weight;
     e->bytes = sizeof(*e) + sizeof(struct topform) +
                clause_body_storage_bytes(e->clause);
@@ -9988,6 +10483,173 @@ static void read_collective_candidate_pool(const char *dir)
         Stats.collective_candidate_pool_peak_bytes)
     Stats.collective_candidate_pool_peak_bytes =
       collective_candidate_pool_allocated_bytes();
+}
+
+static void write_collective_para_iterator(
+  FILE *fp, const Para_iterator *pi, const char *error)
+{
+  uint32_t from_literal = pi->from_literal;
+  uint32_t into_literal = pi->into_literal;
+  uint32_t from_side = pi->from_side;
+  uint32_t into_argument = pi->into_argument;
+  uint32_t path_depth = pi->path_depth;
+  uint32_t positioned = pi->positioned ? 1U : 0U;
+  uint32_t complete = pi->complete ? 1U : 0U;
+  if (fwrite(&from_literal, sizeof(from_literal), 1, fp) != 1 ||
+      fwrite(&into_literal, sizeof(into_literal), 1, fp) != 1 ||
+      fwrite(&from_side, sizeof(from_side), 1, fp) != 1 ||
+      fwrite(&into_argument, sizeof(into_argument), 1, fp) != 1 ||
+      fwrite(&path_depth, sizeof(path_depth), 1, fp) != 1 ||
+      fwrite(&positioned, sizeof(positioned), 1, fp) != 1 ||
+      fwrite(&complete, sizeof(complete), 1, fp) != 1 ||
+      (path_depth != 0 &&
+       fwrite(pi->path, sizeof(*pi->path), path_depth, fp) != path_depth))
+    fatal_error((char *) error);
+}
+
+static void write_collective_hyper_iterator(
+  FILE *fp, const Hyper_iterator *hi, const char *error)
+{
+  uint32_t initialized = hi->initialized;
+  uint32_t satellite_mode = hi->satellite_mode;
+  uint32_t complete = hi->complete;
+  uint32_t given_literal = hi->given_literal;
+  uint32_t given_phase = hi->given_phase;
+  uint32_t outer_literal = hi->outer_literal;
+  uint32_t nucleus_selected = hi->nucleus_selected;
+  uint32_t nucleus_literal = hi->nucleus_literal;
+  uint32_t depth = hi->depth;
+  uint32_t mate_phase = hi->mate_phase;
+  uint32_t mate_literal = hi->mate_literal;
+  unsigned i;
+  if (fwrite(&initialized, sizeof(initialized), 1, fp) != 1 ||
+      fwrite(&satellite_mode, sizeof(satellite_mode), 1, fp) != 1 ||
+      fwrite(&complete, sizeof(complete), 1, fp) != 1 ||
+      fwrite(&given_literal, sizeof(given_literal), 1, fp) != 1 ||
+      fwrite(&given_phase, sizeof(given_phase), 1, fp) != 1 ||
+      fwrite(&outer_literal, sizeof(outer_literal), 1, fp) != 1 ||
+      fwrite(&hi->outer_parent, sizeof(hi->outer_parent), 1, fp) != 1 ||
+      fwrite(&nucleus_selected, sizeof(nucleus_selected), 1, fp) != 1 ||
+      fwrite(&nucleus_literal, sizeof(nucleus_literal), 1, fp) != 1 ||
+      fwrite(&hi->nucleus_parent, sizeof(hi->nucleus_parent), 1, fp) != 1 ||
+      fwrite(&depth, sizeof(depth), 1, fp) != 1 ||
+      fwrite(&mate_phase, sizeof(mate_phase), 1, fp) != 1 ||
+      fwrite(&mate_literal, sizeof(mate_literal), 1, fp) != 1 ||
+      fwrite(&hi->mate_parent, sizeof(hi->mate_parent), 1, fp) != 1)
+    fatal_error((char *) error);
+  for (i = 0; i < hi->depth; i++) {
+    const Hyper_iterator_choice *choice = &hi->choices[i];
+    uint32_t literal = choice->literal;
+    uint32_t phase = choice->phase;
+    uint32_t resume_literal = choice->resume_literal;
+    uint32_t resume_phase = choice->resume_phase;
+    if (fwrite(&choice->parent_position,
+               sizeof(choice->parent_position), 1, fp) != 1 ||
+        fwrite(&choice->resume_parent,
+               sizeof(choice->resume_parent), 1, fp) != 1 ||
+        fwrite(&literal, sizeof(literal), 1, fp) != 1 ||
+        fwrite(&phase, sizeof(phase), 1, fp) != 1 ||
+        fwrite(&resume_literal, sizeof(resume_literal), 1, fp) != 1 ||
+        fwrite(&resume_phase, sizeof(resume_phase), 1, fp) != 1)
+      fatal_error((char *) error);
+  }
+}
+
+static void read_collective_para_iterator(
+  FILE *fp, Para_iterator *pi, const char *error)
+{
+  uint32_t from_literal, into_literal, from_side, into_argument;
+  uint32_t path_depth, positioned, complete;
+  if (fread(&from_literal, sizeof(from_literal), 1, fp) != 1 ||
+      fread(&into_literal, sizeof(into_literal), 1, fp) != 1 ||
+      fread(&from_side, sizeof(from_side), 1, fp) != 1 ||
+      fread(&into_argument, sizeof(into_argument), 1, fp) != 1 ||
+      fread(&path_depth, sizeof(path_depth), 1, fp) != 1 ||
+      fread(&positioned, sizeof(positioned), 1, fp) != 1 ||
+      fread(&complete, sizeof(complete), 1, fp) != 1)
+    fatal_error((char *) error);
+  if (from_side > 1 || positioned > 1 || complete != 0 ||
+      (!positioned && path_depth != 0))
+    fatal_error("resume: invalid collective paramodulation iterator");
+  pi->from_literal = from_literal;
+  pi->into_literal = into_literal;
+  pi->from_side = from_side;
+  pi->into_argument = into_argument;
+  pi->path_depth = path_depth;
+  pi->positioned = positioned != 0;
+  if (path_depth != 0) {
+    pi->path = safe_calloc(path_depth, sizeof(*pi->path));
+    pi->path_capacity = path_depth;
+    if (fread(pi->path, sizeof(*pi->path), path_depth, fp) != path_depth)
+      fatal_error((char *) error);
+  }
+}
+
+static void read_collective_hyper_iterator(
+  FILE *fp, Hyper_iterator *hi, unsigned long long activation_limit,
+  const char *error)
+{
+  uint32_t initialized, satellite_mode, complete;
+  uint32_t given_literal, given_phase, outer_literal;
+  uint32_t nucleus_selected, nucleus_literal, depth;
+  uint32_t mate_phase, mate_literal;
+  unsigned i;
+  if (fread(&initialized, sizeof(initialized), 1, fp) != 1 ||
+      fread(&satellite_mode, sizeof(satellite_mode), 1, fp) != 1 ||
+      fread(&complete, sizeof(complete), 1, fp) != 1 ||
+      fread(&given_literal, sizeof(given_literal), 1, fp) != 1 ||
+      fread(&given_phase, sizeof(given_phase), 1, fp) != 1 ||
+      fread(&outer_literal, sizeof(outer_literal), 1, fp) != 1 ||
+      fread(&hi->outer_parent, sizeof(hi->outer_parent), 1, fp) != 1 ||
+      fread(&nucleus_selected, sizeof(nucleus_selected), 1, fp) != 1 ||
+      fread(&nucleus_literal, sizeof(nucleus_literal), 1, fp) != 1 ||
+      fread(&hi->nucleus_parent, sizeof(hi->nucleus_parent), 1, fp) != 1 ||
+      fread(&depth, sizeof(depth), 1, fp) != 1 ||
+      fread(&mate_phase, sizeof(mate_phase), 1, fp) != 1 ||
+      fread(&mate_literal, sizeof(mate_literal), 1, fp) != 1 ||
+      fread(&hi->mate_parent, sizeof(hi->mate_parent), 1, fp) != 1)
+    fatal_error((char *) error);
+  if (initialized > 1 || satellite_mode > 1 || complete != 0 ||
+      given_phase > 1 || nucleus_selected > 1 || mate_phase > 3 ||
+      hi->outer_parent > activation_limit ||
+      hi->mate_parent > activation_limit ||
+      (nucleus_selected && hi->nucleus_parent >= activation_limit))
+    fatal_error("resume: invalid collective hyperresolution iterator");
+  hi->initialized = initialized;
+  hi->satellite_mode = satellite_mode;
+  hi->given_literal = given_literal;
+  hi->given_phase = given_phase;
+  hi->outer_literal = outer_literal;
+  hi->nucleus_selected = nucleus_selected;
+  hi->nucleus_literal = nucleus_literal;
+  hi->depth = depth;
+  hi->mate_phase = mate_phase;
+  hi->mate_literal = mate_literal;
+  if (depth != 0) {
+    hi->choices = safe_calloc(depth, sizeof(*hi->choices));
+    hi->choice_capacity = depth;
+  }
+  for (i = 0; i < depth; i++) {
+    Hyper_iterator_choice *choice = &hi->choices[i];
+    uint32_t literal, phase, resume_literal, resume_phase;
+    if (fread(&choice->parent_position,
+              sizeof(choice->parent_position), 1, fp) != 1 ||
+        fread(&choice->resume_parent,
+              sizeof(choice->resume_parent), 1, fp) != 1 ||
+        fread(&literal, sizeof(literal), 1, fp) != 1 ||
+        fread(&phase, sizeof(phase), 1, fp) != 1 ||
+        fread(&resume_literal, sizeof(resume_literal), 1, fp) != 1 ||
+        fread(&resume_phase, sizeof(resume_phase), 1, fp) != 1)
+      fatal_error((char *) error);
+    if (phase > 2 || resume_phase > 3 ||
+        (phase <= 1 && choice->parent_position >= activation_limit) ||
+        choice->resume_parent > activation_limit)
+      fatal_error("resume: invalid collective hyper iterator choice");
+    choice->literal = literal;
+    choice->phase = phase;
+    choice->resume_literal = resume_literal;
+    choice->resume_phase = resume_phase;
+  }
 }
 
 static
@@ -10009,11 +10671,15 @@ void write_collective_checkpoint(const char *dir)
   uint32_t balanced_turns_since_oldest =
     Collective_balanced_turns_since_oldest;
   uint32_t drain_mode = Collective_drain_mode ? 1U : 0U;
+  uint32_t discovery_turns_since_fair =
+    Collective_discovery_turns_since_fair;
+  uint32_t discovery_turns_since_general =
+    Collective_discovery_turns_since_general;
 
   if (!collective_frontier_mode())
     return;
   if (collective_balanced_mode())
-    magic[6] = 'E';
+    magic[6] = 'F';
   snprintf(path, sizeof(path), "%s/collective_frontier.bin", dir);
   fp = fopen(path, "wb");
   if (fp == NULL)
@@ -10036,6 +10702,12 @@ void write_collective_checkpoint(const char *dir)
               sizeof(balanced_turns_since_oldest), 1, fp) != 1 ||
        fwrite(&drain_mode, sizeof(drain_mode), 1, fp) != 1))
     fatal_error("write_collective_checkpoint: balanced state write failed");
+  if (collective_balanced_mode() &&
+      (fwrite(&discovery_turns_since_fair,
+              sizeof(discovery_turns_since_fair), 1, fp) != 1 ||
+       fwrite(&discovery_turns_since_general,
+              sizeof(discovery_turns_since_general), 1, fp) != 1))
+    fatal_error("write_collective_checkpoint: discovery state write failed");
 
   for (i = 0; i < Collective_activation_count; i++) {
     unsigned long long id = collective_activation_id(i);
@@ -10138,6 +10810,31 @@ void write_collective_checkpoint(const char *dir)
             fatal_error("write_collective_checkpoint: hyper choice write failed");
         }
       }
+      {
+        uint32_t initialized = b->discovery_initialized ? 1U : 0U;
+        uint32_t complete = b->discovery_complete ? 1U : 0U;
+        uint32_t hot = b->discovery_hot ? 1U : 0U;
+        uint32_t consumed = b->consumed_count;
+        unsigned i;
+        if (fwrite(&b->discovery_cursor,
+                   sizeof(b->discovery_cursor), 1, fp) != 1 ||
+            fwrite(&b->discovery_ordinal,
+                   sizeof(b->discovery_ordinal), 1, fp) != 1 ||
+            fwrite(&initialized, sizeof(initialized), 1, fp) != 1 ||
+            fwrite(&complete, sizeof(complete), 1, fp) != 1 ||
+            fwrite(&hot, sizeof(hot), 1, fp) != 1 ||
+            fwrite(&consumed, sizeof(consumed), 1, fp) != 1)
+          fatal_error("write_collective_checkpoint: discovery descriptor failed");
+        write_collective_para_iterator(
+          fp, &b->discovery_para_iterator,
+          "write_collective_checkpoint: discovery para iterator failed");
+        write_collective_hyper_iterator(
+          fp, &b->discovery_hyper_iterator,
+          "write_collective_checkpoint: discovery hyper iterator failed");
+        for (i = 0; i < b->consumed_count; i++)
+          if (fwrite(&b->consumed[i], sizeof(b->consumed[i]), 1, fp) != 1)
+            fatal_error("write_collective_checkpoint: consumed ordinal failed");
+      }
     }
   }
   if (fclose(fp) != 0)
@@ -10156,8 +10853,10 @@ void read_collective_checkpoint(const char *dir)
   uint32_t priority_turns_since_fair;
   uint32_t balanced_lane = 0, balanced_lane_credit = 0;
   uint32_t balanced_turns_since_oldest = 0, drain_mode = 0;
+  uint32_t discovery_turns_since_fair = 0;
+  uint32_t discovery_turns_since_general = 0;
   BOOL format6, format7, format8, format9, format_a, format_b, format_c,
-       format_d, format_e;
+       format_d, format_e, format_f;
 
   if (!collective_frontier_mode())
     return;
@@ -10167,6 +10866,7 @@ void read_collective_checkpoint(const char *dir)
     fatal_error("resume: collective frontier state is missing");
   if (fread(magic, sizeof(magic), 1, fp) != 1)
     fatal_error("resume: corrupt collective frontier header");
+  format_f = memcmp(magic, "P9COLLF", 7) == 0;
   format_e = memcmp(magic, "P9COLLE", 7) == 0;
   format_d = memcmp(magic, "P9COLLD", 7) == 0;
   format_c = memcmp(magic, "P9COLLC", 7) == 0;
@@ -10176,7 +10876,7 @@ void read_collective_checkpoint(const char *dir)
   format8 = memcmp(magic, "P9COLL8", 7) == 0;
   format7 = memcmp(magic, "P9COLL7", 7) == 0;
   format6 = memcmp(magic, "P9COLL6", 7) == 0;
-  if ((!format_e && !format_d && !format_c && !format_b && !format_a && !format9 && !format8 &&
+  if ((!format_f && !format_e && !format_d && !format_c && !format_b && !format_a && !format9 && !format8 &&
        !format7 && !format6 &&
        memcmp(magic, "P9COLL5", 7) != 0) ||
       fread(&activations, sizeof(activations), 1, fp) != 1 ||
@@ -10185,21 +10885,21 @@ void read_collective_checkpoint(const char *dir)
       fread(&givens_since_batch, sizeof(givens_since_batch), 1, fp) != 1)
     fatal_error("resume: corrupt collective frontier header");
   if (format6 || format7 || format8 || format9 || format_a || format_b ||
-      format_e ||
+      format_e || format_f ||
       format_c || format_d) {
     if (fread(&hint_probe_credit, sizeof(hint_probe_credit), 1, fp) != 1)
       fatal_error("resume: corrupt collective frontier probe state");
   }
   else
     hint_probe_credit = 1U;
-  if (format_a || format_b || format_c || format_d || format_e) {
+  if (format_a || format_b || format_c || format_d || format_e || format_f) {
     if (fread(&priority_turns_since_fair,
               sizeof(priority_turns_since_fair), 1, fp) != 1)
       fatal_error("resume: corrupt collective priority scheduler state");
   }
   else
     priority_turns_since_fair = 0;
-  if (format_b || format_c || format_d || format_e) {
+  if (format_b || format_c || format_d || format_e || format_f) {
     if (fread(&balanced_lane, sizeof(balanced_lane), 1, fp) != 1 ||
         fread(&balanced_lane_credit,
               sizeof(balanced_lane_credit), 1, fp) != 1 ||
@@ -10208,7 +10908,13 @@ void read_collective_checkpoint(const char *dir)
         fread(&drain_mode, sizeof(drain_mode), 1, fp) != 1)
       fatal_error("resume: corrupt balanced collective scheduler state");
   }
-  if ((format_b || format_c || format_d || format_e) !=
+  if (format_f &&
+      (fread(&discovery_turns_since_fair,
+             sizeof(discovery_turns_since_fair), 1, fp) != 1 ||
+       fread(&discovery_turns_since_general,
+             sizeof(discovery_turns_since_general), 1, fp) != 1))
+    fatal_error("resume: corrupt collective discovery scheduler state");
+  if ((format_b || format_c || format_d || format_e || format_f) !=
         collective_balanced_mode())
     fatal_error("resume: collective scheduler policy does not match checkpoint");
   if (turn > 1 || hint_probe_credit > 1)
@@ -10218,7 +10924,7 @@ void read_collective_checkpoint(const char *dir)
       (!flag(Opt->collective_promising_scheduler) &&
        priority_turns_since_fair != 0))
     fatal_error("resume: invalid collective priority scheduler state");
-  if ((format_b || format_c || format_d || format_e) &&
+  if ((format_b || format_c || format_d || format_e || format_f) &&
       (balanced_lane >= COLLECTIVE_LANE_COUNT ||
        balanced_lane_credit >
          collective_balanced_lane_share(balanced_lane) ||
@@ -10226,6 +10932,12 @@ void read_collective_checkpoint(const char *dir)
          (unsigned) parm(Opt->collective_balanced_fair_interval) ||
        drain_mode > 1))
     fatal_error("resume: invalid balanced collective scheduler state");
+  if (format_f &&
+      (discovery_turns_since_fair >=
+         (unsigned) parm(Opt->collective_discovery_turn_interval) ||
+       discovery_turns_since_general >=
+         (unsigned) parm(Opt->collective_discovery_general_interval)))
+    fatal_error("resume: invalid collective discovery scheduler state");
 
   for (i = 0; i < activations; i++) {
     unsigned long long id;
@@ -10247,7 +10959,7 @@ void read_collective_checkpoint(const char *dir)
         fread(&b->activation_limit, sizeof(b->activation_limit), 1, fp) != 1)
       fatal_error("resume: truncated collective batch queue");
     if (format7 || format8 || format9 || format_a || format_b || format_c ||
-        format_e ||
+        format_e || format_f ||
         format_d) {
       if (fread(&b->conclusion_cursor,
                 sizeof(b->conclusion_cursor), 1, fp) != 1 ||
@@ -10259,7 +10971,7 @@ void read_collective_checkpoint(const char *dir)
       b->conclusion_cursor = 0;
       b->conclusion_prefix_hash = 0;
     }
-    if (format9 || format_a || format_b || format_c || format_d || format_e) {
+    if (format9 || format_a || format_b || format_c || format_d || format_e || format_f) {
       if (fread(&b->conclusion_order_weight,
                 sizeof(b->conclusion_order_weight), 1, fp) != 1 ||
           fread(&b->conclusion_order_ordinal,
@@ -10270,7 +10982,7 @@ void read_collective_checkpoint(const char *dir)
                 sizeof(b->conclusion_next_ordinal), 1, fp) != 1)
         fatal_error("resume: truncated collective promising cursor");
     }
-    if (format_e &&
+    if ((format_e || format_f) &&
         fread(&b->candidate_ordinal,
               sizeof(b->candidate_ordinal), 1, fp) != 1)
       fatal_error("resume: truncated collective candidate ordinal");
@@ -10283,11 +10995,11 @@ void read_collective_checkpoint(const char *dir)
     b->snapshot_epoch = epoch;
     if ((kind & COLLECTIVE_INFERENCE_MASK) == 0 ||
         (kind & ~COLLECTIVE_KIND_MASK) != 0 ||
-        (!format_e && !format_d && !format_c && !format_b && !format_a && !format9 &&
+        (!format_f && !format_e && !format_d && !format_c && !format_b && !format_a && !format9 &&
          !format8 &&
          !format7 && !format6 &&
          (kind & COLLECTIVE_HINT_PROBE) != 0) ||
-        (!format_e && !format_d && !format_c && !format_b && !format_a && !format9 &&
+        (!format_f && !format_e && !format_d && !format_c && !format_b && !format_a && !format9 &&
          (kind & COLLECTIVE_PROMISING_CURSOR) != 0) ||
         (format7 && b->conclusion_cursor != 0 &&
          (kind & (COLLECTIVE_POS_HYPER | COLLECTIVE_NEG_HYPER)) == 0) ||
@@ -10312,16 +11024,16 @@ void read_collective_checkpoint(const char *dir)
             b->conclusion_next_weight, b->conclusion_next_ordinal) >= 0)) ||
         ((kind & COLLECTIVE_HINT_PROBE) != 0 &&
          (i != 0 || hint_probe_credit != 0)) ||
-        ((format_b || format_c || format_d || format_e) &&
+        ((format_b || format_c || format_d || format_e || format_f) &&
          kind != COLLECTIVE_PARAMOD_FROM &&
          kind != COLLECTIVE_PARAMOD_INTO &&
          kind != COLLECTIVE_POS_HYPER &&
          kind != COLLECTIVE_NEG_HYPER) ||
-        (!format_b && !format_c && !format_d && !format_e &&
+        (!format_b && !format_c && !format_d && !format_e && !format_f &&
          (kind & (COLLECTIVE_PARAMOD_FROM | COLLECTIVE_PARAMOD_INTO)) != 0))
       fatal_error("resume: invalid collective batch kind");
     b->kind = kind;
-    if (format_c || format_d || format_e) {
+    if (format_c || format_d || format_e || format_f) {
       uint32_t from_literal, into_literal, from_side, into_argument;
       uint32_t path_depth, positioned, complete;
       if (fread(&from_literal, sizeof(from_literal), 1, fp) != 1 ||
@@ -10354,7 +11066,7 @@ void read_collective_checkpoint(const char *dir)
           fatal_error("resume: truncated paramodulation iterator path");
       }
     }
-    if (format_d || format_e) {
+    if (format_d || format_e || format_f) {
       Hyper_iterator *hi = &b->hyper_iterator;
       uint32_t initialized, satellite_mode, complete_hyper;
       uint32_t given_literal, given_phase, outer_literal;
@@ -10429,6 +11141,62 @@ void read_collective_checkpoint(const char *dir)
         choice->resume_phase = resume_phase;
       }
     }
+    if (format_f) {
+      uint32_t initialized, complete, hot, consumed;
+      unsigned j;
+      if (fread(&b->discovery_cursor,
+                sizeof(b->discovery_cursor), 1, fp) != 1 ||
+          fread(&b->discovery_ordinal,
+                sizeof(b->discovery_ordinal), 1, fp) != 1 ||
+          fread(&initialized, sizeof(initialized), 1, fp) != 1 ||
+          fread(&complete, sizeof(complete), 1, fp) != 1 ||
+          fread(&hot, sizeof(hot), 1, fp) != 1 ||
+          fread(&consumed, sizeof(consumed), 1, fp) != 1)
+        fatal_error("resume: truncated collective discovery descriptor");
+      if (initialized > 1 || complete > 1 || hot > 1 ||
+          b->discovery_cursor > b->activation_limit ||
+          consumed >
+            (unsigned) parm(Opt->collective_discovery_promotion_cap))
+        fatal_error("resume: invalid collective discovery descriptor");
+      b->discovery_initialized = initialized != 0;
+      b->discovery_complete = complete != 0;
+      b->discovery_hot = hot != 0;
+      read_collective_para_iterator(
+        fp, &b->discovery_para_iterator,
+        "resume: truncated discovery paramodulation iterator");
+      read_collective_hyper_iterator(
+        fp, &b->discovery_hyper_iterator, b->activation_limit,
+        "resume: truncated discovery hyperresolution iterator");
+      if ((kind == COLLECTIVE_POS_HYPER ||
+           kind == COLLECTIVE_NEG_HYPER) &&
+          !para_iterator_at_start(&b->discovery_para_iterator))
+        fatal_error("resume: hyper discovery has paramodulation state");
+      if ((kind == COLLECTIVE_PARAMOD_FROM ||
+           kind == COLLECTIVE_PARAMOD_INTO) &&
+          (b->discovery_hyper_iterator.initialized ||
+           b->discovery_hyper_iterator.depth != 0))
+        fatal_error("resume: paramodulation discovery has hyper state");
+      if (!b->discovery_initialized &&
+          (consumed != 0 || b->discovery_cursor != 0 ||
+           b->discovery_ordinal != 0 ||
+           !para_iterator_at_start(&b->discovery_para_iterator) ||
+           b->discovery_hyper_iterator.initialized))
+        fatal_error("resume: uninitialized discovery has cursor state");
+      if (consumed != 0) {
+        b->consumed = safe_calloc(consumed, sizeof(*b->consumed));
+        b->consumed_capacity = consumed;
+      }
+      for (j = 0; j < consumed; j++) {
+        if (fread(&b->consumed[j], sizeof(b->consumed[j]), 1, fp) != 1)
+          fatal_error("resume: truncated collective consumed ordinal");
+        if (b->consumed[j].ordinal < b->candidate_ordinal ||
+            b->consumed[j].ordinal >= b->discovery_ordinal ||
+            (j != 0 && b->consumed[j-1].ordinal >=
+                         b->consumed[j].ordinal))
+          fatal_error("resume: invalid collective consumed ordinal");
+      }
+      b->consumed_count = consumed;
+    }
     collective_append_batch(b);
   }
   Collective_batch_turn = turn != 0;
@@ -10439,11 +11207,13 @@ void read_collective_checkpoint(const char *dir)
   Collective_balanced_lane_credit = balanced_lane_credit;
   Collective_balanced_turns_since_oldest = balanced_turns_since_oldest;
   Collective_drain_mode = drain_mode != 0;
+  Collective_discovery_turns_since_fair = discovery_turns_since_fair;
+  Collective_discovery_turns_since_general = discovery_turns_since_general;
   if (fgetc(fp) != EOF)
     fatal_error("resume: trailing data in collective frontier state");
   fclose(fp);
-  if (format_e)
-    read_collective_candidate_pool(dir);
+  if (format_e || format_f)
+    read_collective_candidate_pool(dir, format_f);
 }
 
 /*************
@@ -10668,6 +11438,32 @@ void write_checkpoint(void)
             Stats.collective_candidate_priority_commits);
     fprintf(fp, "collective_candidate_fair_commits %llu\n",
             Stats.collective_candidate_fair_commits);
+    fprintf(fp, "collective_discovery_turns %llu\n",
+            Stats.collective_discovery_turns);
+    fprintf(fp, "collective_discovery_hot_turns %llu\n",
+            Stats.collective_discovery_hot_turns);
+    fprintf(fp, "collective_discovery_general_turns %llu\n",
+            Stats.collective_discovery_general_turns);
+    fprintf(fp, "collective_discovery_forced_fair_turns %llu\n",
+            Stats.collective_discovery_forced_fair_turns);
+    fprintf(fp, "collective_discovery_raw_steps %llu\n",
+            Stats.collective_discovery_raw_steps);
+    fprintf(fp, "collective_discovery_candidates %llu\n",
+            Stats.collective_discovery_candidates);
+    fprintf(fp, "collective_discovery_promotions %llu\n",
+            Stats.collective_discovery_promotions);
+    fprintf(fp, "collective_discovery_confirmed %llu\n",
+            Stats.collective_discovery_confirmed);
+    fprintf(fp, "collective_discovery_false_positives %llu\n",
+            Stats.collective_discovery_false_positives);
+    fprintf(fp, "collective_discovery_duplicate_skips %llu\n",
+            Stats.collective_discovery_duplicate_skips);
+    fprintf(fp, "collective_discovery_catchups %llu\n",
+            Stats.collective_discovery_catchups);
+    fprintf(fp, "collective_discovery_distance_max %llu\n",
+            Stats.collective_discovery_distance_max);
+    fprintf(fp, "collective_discovery_cap_stalls %llu\n",
+            Stats.collective_discovery_cap_stalls);
     fprintf(fp, "simplifier_epoch %u\n", Simplifier_epoch);
     fprintf(fp, "hint_state_epoch %llu\n", hint_state_epoch());
     fprintf(fp, "user_seconds %.2f\n", user_seconds());
@@ -11611,6 +12407,57 @@ void resume_load_clauses(const char *dir)
     rewind(fp); (void) read_metadata_ull_if_present(
       fp, "collective_candidate_fair_commits",
       &Stats.collective_candidate_fair_commits);
+    Stats.collective_discovery_turns = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_discovery_turns", &Stats.collective_discovery_turns);
+    Stats.collective_discovery_hot_turns = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_discovery_hot_turns",
+      &Stats.collective_discovery_hot_turns);
+    Stats.collective_discovery_general_turns = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_discovery_general_turns",
+      &Stats.collective_discovery_general_turns);
+    Stats.collective_discovery_forced_fair_turns = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_discovery_forced_fair_turns",
+      &Stats.collective_discovery_forced_fair_turns);
+    Stats.collective_discovery_raw_steps = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_discovery_raw_steps",
+      &Stats.collective_discovery_raw_steps);
+    Stats.collective_discovery_candidates = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_discovery_candidates",
+      &Stats.collective_discovery_candidates);
+    Stats.collective_discovery_promotions = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_discovery_promotions",
+      &Stats.collective_discovery_promotions);
+    Stats.collective_discovery_confirmed = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_discovery_confirmed",
+      &Stats.collective_discovery_confirmed);
+    Stats.collective_discovery_false_positives = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_discovery_false_positives",
+      &Stats.collective_discovery_false_positives);
+    Stats.collective_discovery_duplicate_skips = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_discovery_duplicate_skips",
+      &Stats.collective_discovery_duplicate_skips);
+    Stats.collective_discovery_catchups = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_discovery_catchups",
+      &Stats.collective_discovery_catchups);
+    Stats.collective_discovery_distance_max = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_discovery_distance_max",
+      &Stats.collective_discovery_distance_max);
+    Stats.collective_discovery_cap_stalls = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_discovery_cap_stalls",
+      &Stats.collective_discovery_cap_stalls);
   }
   rewind(fp); Simplifier_epoch =
     (unsigned) read_metadata_ull(fp, "simplifier_epoch");
@@ -12854,6 +13701,24 @@ Prover_results search(Prover_input p)
           fprintf(stderr,
                   "\nCheckpoint saved with %llu candidate-pool entries.\n",
                   (unsigned long long) Collective_candidate_heap_count);
+          fflush(stderr);
+          if (flag(Opt->checkpoint_exit))
+            done_with_search(CHECKPOINT_EXIT);
+        }
+
+        if (parm(Opt->checkpoint_discovery_promotions) >= 0 &&
+            Collective_candidate_heap_count != 0 &&
+            Stats.collective_discovery_promotions >=
+              (unsigned long long)
+                parm(Opt->checkpoint_discovery_promotions)) {
+          fprintf(stderr,
+                  "\nScheduled checkpoint after %llu discovery promotions...\n",
+                  Stats.collective_discovery_promotions);
+          fflush(stderr);
+          assign_parm(Opt->checkpoint_discovery_promotions, -1, TRUE);
+          write_checkpoint();
+          fprintf(stderr,
+                  "\nCheckpoint saved with discovery work ahead of fair cursor.\n");
           fflush(stderr);
           if (flag(Opt->checkpoint_exit))
             done_with_search(CHECKPOINT_EXIT);

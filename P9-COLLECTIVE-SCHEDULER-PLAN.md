@@ -134,6 +134,41 @@ claim a bounded raw-work turn; native continuation is the next phase.
   matches, count/byte accounting, stale refresh, and checkpoint/resume with a
   nonempty candidate pool.
 
+### 2026-08-08: Phase 5 bounded dual-cursor discovery
+
+- Every balanced rule descriptor now owns independent native fair and
+  discovery continuations.  The discovery continuation is cloned from the
+  fair coordinate once and then advances monotonically; it never restarts a
+  raw prefix.  A looked-ahead conclusion is therefore visited at most once by
+  discovery and once by the authoritative fair iterator.
+- Exact previewed hint matches may enter the existing bounded global pool
+  early.  Each promotion records its local raw ordinal and an unsimplified
+  structural fingerprint.  When the fair cursor reaches that ordinal it must
+  reproduce the fingerprint exactly, removes the bounded record, and deletes
+  the duplicate raw body instead of committing it twice.
+- Per-descriptor promotion count and conclusion-distance caps stop lookahead
+  until fair work catches up.  Discovery turns also have their own raw-work
+  budget, alternate with mandatory fair descriptor turns, favor known hot
+  descriptors, and reserve a deterministic low-rate turn for the oldest
+  ordinary descriptor.
+- Promotions remain advisory.  They pass through unchanged authoritative
+  `cl_process` simplification and hint matching; every committed promotion is
+  counted as confirmed or as a preview false positive.  Pool fairness still
+  guarantees finite-delay commitment even if better preview keys continue to
+  arrive.
+- `P9COLLF` serializes the independent iterator coordinates, scheduler cycle
+  positions, discovery flags, and bounded ordinal/fingerprint sets.
+  `P9CPOOL3` marks promoted entries.  `P9COLLE`/`P9CPOOL2` checkpoints remain
+  readable with empty discovery state, while a mismatched frontier/pool pair
+  fails closed.
+- `checkpoint_discovery_promotions` provides a deterministic one-shot test
+  trigger.  The integration suite checkpoints with both a promoted pool body
+  and an ahead-consumed record live, verifies the pool marker, resumes, and
+  obtains the same terminal aggregate scheduler state as an uninterrupted
+  run.  It also requires hot and general discovery, forced fair service,
+  exact promotion/confirmation/skip counts, bounded distance, completed work
+  in every rule lane, and zero residual consumed records.
+
 ## Objective
 
 Make the collective DISCOUNT frontier discover and propagate useful hint

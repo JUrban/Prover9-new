@@ -118,10 +118,10 @@ test "$pool_count" -ge 1
   > "$test_tmp/pool-resumed.out" 2> "$test_tmp/pool-resumed.err" || true
 grep -Eq '^%   Verification: [0-9]+ passed, 0 failed\.$' \
   "$test_tmp/pool-resumed.out"
-grep -E '^(Given=|Collective_(frontier|rule_descriptors|work|balanced|chunks|candidate_cache|preview):)' \
-  "$test_tmp/balanced.out" | tail -8 > "$test_tmp/pool-control.stats"
-grep -E '^(Given=|Collective_(frontier|rule_descriptors|work|balanced|chunks|candidate_cache|preview):)' \
-  "$test_tmp/pool-resumed.out" | tail -8 > "$test_tmp/pool-resumed.stats"
+grep -E '^(Given=|Collective_(frontier|rule_descriptors|work|balanced|chunks|candidate_cache|preview|discovery):)' \
+  "$test_tmp/balanced.out" | tail -9 > "$test_tmp/pool-control.stats"
+grep -E '^(Given=|Collective_(frontier|rule_descriptors|work|balanced|chunks|candidate_cache|preview|discovery):)' \
+  "$test_tmp/pool-resumed.out" | tail -9 > "$test_tmp/pool-resumed.stats"
 diff -u "$test_tmp/pool-control.stats" "$test_tmp/pool-resumed.stats"
 
 # Exact hint preview is advisory but must agree with authoritative matching
@@ -133,9 +133,58 @@ grep -Eq 'Collective_preview: calls=[1-9][0-9]*, predicted_hints=[1-9][0-9]*, au
   "$test_tmp/preview.out"
 grep -Eq 'Collective_candidate_pool: .*commits=[1-9][0-9]*, priority_commits=[1-9][0-9]*, fair_commits=[1-9][0-9]*\.' \
   "$test_tmp/preview.out"
+grep -Eq 'Collective_discovery: enabled=1, .*turns=[1-9][0-9]*, hot_turns=[1-9][0-9]*, general_turns=[1-9][0-9]*, forced_fair=[1-9][0-9]*, raw_steps=[1-9][0-9]*, inspected=[1-9][0-9]*, promotions=[1-9][0-9]*, confirmed=[1-9][0-9]*, false_positives=0, duplicate_skips=[1-9][0-9]*, catchups=[1-9][0-9]*, distance_max=[1-9][0-9]*, cap_stalls=[0-9]+, consumed_records=0, consumed_bytes=[0-9]+\.' \
+  "$test_tmp/preview.out"
+promotions=$(sed -n 's/.*Collective_discovery:.* promotions=\([0-9][0-9]*\),.*/\1/p' \
+  "$test_tmp/preview.out" | tail -1)
+duplicate_skips=$(sed -n 's/.*Collective_discovery:.* duplicate_skips=\([0-9][0-9]*\),.*/\1/p' \
+  "$test_tmp/preview.out" | tail -1)
+confirmed=$(sed -n 's/.*Collective_discovery:.* confirmed=\([0-9][0-9]*\),.*/\1/p' \
+  "$test_tmp/preview.out" | tail -1)
+discovery_distance=$(sed -n 's/.*Collective_discovery:.* distance_max=\([0-9][0-9]*\),.*/\1/p' \
+  "$test_tmp/preview.out" | tail -1)
+test "$promotions" -eq "$duplicate_skips"
+test "$promotions" -eq "$confirmed"
+test "$discovery_distance" -le 256
 preview_peak=$(sed -n 's/.*Collective_candidate_cache:.* peak=\([0-9][0-9]*\),.*/\1/p' \
   "$test_tmp/preview.out" | tail -1)
 test -n "$preview_peak"
 test "$preview_peak" -le 4
+
+# Save and resume while dual-cursor discovery has both a promoted candidate
+# in the bounded pool and its corresponding ahead-consumed ordinal.  This
+# exercises the P9COLLF fair/discovery iterator state and the P9CPOOL3
+# discovery marker, rather than checkpointing only after fair catch-up.
+sed '1i assign(checkpoint_discovery_promotions,1).\nset(checkpoint_exit).\nset(checkpoint_verify).' \
+  "$repo_dir/test.src/collective_preview.in" \
+  > "$test_tmp/discovery-checkpoint.in"
+discovery_case="$test_tmp/discovery-checkpoint-case"
+mkdir "$discovery_case"
+(
+  cd "$discovery_case"
+  "$repo_dir/bin/prover9" < "$test_tmp/discovery-checkpoint.in" \
+    > before.out 2> before.err || true
+)
+discovery_checkpoint_dir=$(find "$discovery_case" -maxdepth 1 -type d \
+  -name 'prover9_*_ckpt_*' -print)
+test -n "$discovery_checkpoint_dir"
+grep -q '^P9CPOOL3 ' \
+  "$discovery_checkpoint_dir/collective_candidates.txt"
+awk 'NR > 1 && NF == 13 && $12 == 1 { found = 1 }
+     END { exit !found }' \
+  "$discovery_checkpoint_dir/collective_candidates.txt"
+"$repo_dir/bin/prover9" -r "$discovery_checkpoint_dir" < /dev/null \
+  > "$test_tmp/discovery-resumed.out" \
+  2> "$test_tmp/discovery-resumed.err" || true
+grep -Eq '^%   Verification: [0-9]+ passed, 0 failed\.$' \
+  "$test_tmp/discovery-resumed.out"
+grep -E '^(Given=|Collective_(frontier|rule_descriptors|work|balanced|chunks|candidate_cache|preview|discovery):)' \
+  "$test_tmp/preview.out" | tail -9 \
+  > "$test_tmp/discovery-control.stats"
+grep -E '^(Given=|Collective_(frontier|rule_descriptors|work|balanced|chunks|candidate_cache|preview|discovery):)' \
+  "$test_tmp/discovery-resumed.out" | tail -9 \
+  > "$test_tmp/discovery-resumed.stats"
+diff -u "$test_tmp/discovery-control.stats" \
+  "$test_tmp/discovery-resumed.stats"
 
 echo 'collective_balanced_test: PASS'

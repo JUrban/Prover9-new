@@ -90,6 +90,7 @@ struct prover_options {
     collective_hint_probes,  // one bounded early expansion for hinted givens
     collective_promising_candidates, // raw-weight order within inference set
     collective_promising_scheduler, // prioritize known next raw keys
+    collective_hint_discovery, // bounded dual-cursor hint lookahead
     print_matched_hints,     // print matched/unmatched hints per proof
     print_derivations,       // print derivation for clauses in hitlist file
     derivations_only,        // exit after last hitlist derivation
@@ -180,6 +181,11 @@ struct prover_options {
     collective_candidate_window,      // target shared raw-candidate window
     collective_candidate_commit_interval, // max expansion turns before commit
     collective_candidate_fair_interval, // one oldest pool commit per N
+    collective_discovery_raw_budget, // raw iterator steps per lookahead turn
+    collective_discovery_distance, // max conclusions ahead of fair cursor
+    collective_discovery_promotion_cap, // max ahead-consumed records per item
+    collective_discovery_general_interval, // one ordinary lookahead per N
+    collective_discovery_turn_interval, // mandatory fair expansion per N turns
 
     fold_denial_max,
 
@@ -236,6 +242,7 @@ struct prover_options {
     checkpoint_minutes,    // periodic checkpoint interval in minutes (-1 = off)
     checkpoint_given,      // one-shot deterministic checkpoint at given count
     checkpoint_candidate_pool, // one-shot at collective pool occupancy
+    checkpoint_discovery_promotions, // one-shot after N lookahead promotions
     checkpoint_keep,       // max auto-checkpoint dirs to retain (default 3)
     sine,                  // SInE premise selection (-1=auto, 0=off, >0=tolerancex100)
     sine_depth,            // SInE BFS depth limit (0=unlimited/fixpoint)
@@ -427,6 +434,21 @@ struct prover_stats {
     collective_candidate_pool_commits,
     collective_candidate_priority_commits,
     collective_candidate_fair_commits,
+    collective_discovery_turns,
+    collective_discovery_hot_turns,
+    collective_discovery_general_turns,
+    collective_discovery_forced_fair_turns,
+    collective_discovery_raw_steps,
+    collective_discovery_candidates,
+    collective_discovery_promotions,
+    collective_discovery_confirmed,
+    collective_discovery_false_positives,
+    collective_discovery_duplicate_skips,
+    collective_discovery_catchups,
+    collective_discovery_distance_max,
+    collective_discovery_cap_stalls,
+    collective_discovery_consumed_records,
+    collective_discovery_consumed_bytes,
     compression_attempted,
     compression_successful,
     compression_skipped,
