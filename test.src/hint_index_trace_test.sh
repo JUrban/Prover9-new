@@ -27,5 +27,8 @@ diff -u "$test_tmp/fpa.trace" "$test_tmp/packed.trace"
 grep -q 'THEOREM PROVED' "$test_tmp/compact.out"
 grep -q 'THEOREM PROVED' "$test_tmp/fpa.out"
 grep -q 'THEOREM PROVED' "$test_tmp/packed.out"
+for hint_op in equivalence match flipped_match back_demod; do
+  grep -q "^Packed_hint_operation: op=$hint_op," "$test_tmp/packed.out"
+done
 
 echo 'hint_index_trace_test: PASS'

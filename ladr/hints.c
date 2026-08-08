@@ -18,6 +18,7 @@
 
 #include "hints.h"
 #include "compress.h"
+#include "clock.h"
 
 /* Private definitions and types */
 
@@ -49,6 +50,75 @@ static unsigned Packed_candidate_serial = 1;
 static unsigned *Packed_candidates = NULL;
 static unsigned Packed_candidates_count = 0, Packed_candidates_capacity = 0;
 static unsigned long long Packed_candidate_checks = 0;
+
+/* Attribute candidate selection and exact materialization cost to the four
+   packed operations.  These counters intentionally live with the hint bank:
+   initial hint indexing and back-demodulation are not covered by the search
+   loop's ordinary hint-matching clock. */
+
+#define PACKED_HINT_OPERATIONS 4
+#define PACKED_HINT_CANDIDATE_BUCKETS 8
+
+enum packed_hint_operation {
+  PACKED_HINT_EQUIVALENCE = 0,
+  PACKED_HINT_MATCH = 1,
+  PACKED_HINT_FLIPPED_MATCH = 2,
+  PACKED_HINT_BACK_DEMOD = 3
+};
+
+struct packed_hint_operation_stats {
+  unsigned long long queries;
+  unsigned long long posting_candidates;
+  unsigned long long unique_candidates;
+  unsigned long long materializations;
+  unsigned long long exact_positives;
+  unsigned long long rewrites;
+  unsigned long long reindexes;
+  unsigned long long stale_skips;
+  unsigned long long candidate_max;
+  unsigned long long candidate_buckets[PACKED_HINT_CANDIDATE_BUCKETS];
+  Clock clock;
+};
+
+static struct packed_hint_operation_stats
+  Packed_operation_stats[PACKED_HINT_OPERATIONS];
+
+static const char *Packed_operation_names[PACKED_HINT_OPERATIONS] = {
+  "equivalence", "match", "flipped_match", "back_demod"
+};
+
+static unsigned packed_candidate_bucket(unsigned n)
+{
+  if (n == 0) return 0;
+  else if (n == 1) return 1;
+  else if (n <= 7) return 2;
+  else if (n <= 31) return 3;
+  else if (n <= 127) return 4;
+  else if (n <= 1023) return 5;
+  else if (n <= 16383) return 6;
+  else return 7;
+}
+
+static void packed_operation_begin(enum packed_hint_operation op)
+{
+  Packed_operation_stats[op].queries++;
+  clock_start(Packed_operation_stats[op].clock);
+}
+
+static void packed_operation_candidates(enum packed_hint_operation op)
+{
+  struct packed_hint_operation_stats *s = Packed_operation_stats + op;
+  unsigned n = Packed_candidates_count;
+  s->unique_candidates += n;
+  if (n > s->candidate_max)
+    s->candidate_max = n;
+  s->candidate_buckets[packed_candidate_bucket(n)]++;
+}
+
+static void packed_operation_end(enum packed_hint_operation op)
+{
+  clock_stop(Packed_operation_stats[op].clock);
+}
 
 static void packed_reserve_hints(unsigned id)
 {
@@ -228,7 +298,8 @@ static void packed_begin_candidates(void)
   }
 }
 
-static void packed_collect_term_candidates(Term t, int sign)
+static void packed_collect_term_candidates(Term t, int sign,
+                                           enum packed_hint_operation op)
 {
   unsigned long long mask = packed_term_feature_mask(t, TRUE);
   unsigned bit, best = 0;
@@ -236,8 +307,12 @@ static void packed_collect_term_candidates(Term t, int sign)
   unsigned word;
   if (mask == 0) {
     unsigned id;
-    for (id = 1; id < Packed_hint_capacity; id++)
+    for (id = 1; id < Packed_hint_capacity; id++) {
+      Packed_operation_stats[op].posting_candidates++;
+      if (!Packed_hint_active[id])
+        Packed_operation_stats[op].stale_skips++;
       packed_add_candidate(id);
+    }
     return;
   }
   for (bit = 0; bit < 64; bit++) {
@@ -255,6 +330,9 @@ static void packed_collect_term_candidates(Term t, int sign)
       unsigned id = word * 64 + offset;
       unsigned long long stored = sign ? Packed_hint_pos_features[id] :
                                          Packed_hint_neg_features[id];
+      Packed_operation_stats[op].posting_candidates++;
+      if (id >= Packed_hint_capacity || !Packed_hint_active[id])
+        Packed_operation_stats[op].stale_skips++;
       if (id < Packed_hint_capacity && (stored & mask) == mask)
         packed_add_candidate(id);
       bits &= bits - 1;
@@ -269,13 +347,18 @@ static int packed_id_decreasing(const void *a, const void *b)
   return x < y ? 1 : x > y ? -1 : 0;
 }
 
-static void packed_finish_candidates(BOOL include_anyconst)
+static void packed_finish_candidates(BOOL include_anyconst,
+                                     enum packed_hint_operation op)
 {
   unsigned id;
   if (include_anyconst) {
     for (id = 1; id < Packed_hint_capacity; id++) {
-      if (Packed_hint_anyconst[id])
+      if (Packed_hint_anyconst[id]) {
+        Packed_operation_stats[op].posting_candidates++;
+        if (!Packed_hint_active[id])
+          Packed_operation_stats[op].stale_skips++;
         packed_add_candidate(id);
+      }
     }
   }
   qsort(Packed_candidates, Packed_candidates_count, sizeof(unsigned),
@@ -355,6 +438,12 @@ void init_hints(Uniftype utype,
   Back_demod_hints = back_demod_hints;
   Packed_index = packed_index;
   Demod_proc = demod_proc;
+  if (packed_index) {
+    unsigned i;
+    for (i = 0; i < PACKED_HINT_OPERATIONS; i++)
+      Packed_operation_stats[i].clock =
+        clock_init((char *) Packed_operation_names[i]);
+  }
   /* Keep an empty Lindex in packed mode so the established lifecycle and
      checkpoint code can use the same ownership boundary. */
   Hints_idx = lindex_init(FPA, utype, packed_index ? 1 : fpa_depth,
@@ -405,6 +494,14 @@ void done_with_hints(void)
   Packed_candidates_count = Packed_candidates_capacity = 0;
   memset(Packed_feature_counts, 0, sizeof(Packed_feature_counts));
   Packed_candidate_checks = 0;
+  {
+    unsigned i;
+    for (i = 0; i < PACKED_HINT_OPERATIONS; i++) {
+      if (Packed_operation_stats[i].clock != NULL)
+        free_clock(Packed_operation_stats[i].clock);
+    }
+    memset(Packed_operation_stats, 0, sizeof(Packed_operation_stats));
+  }
   Packed_index = FALSE;
 }  /* done_with_hints */
 
@@ -514,20 +611,24 @@ Topform find_matching_hint(Topform c, Lindex idx)
   return hint;
 }  /* find_matching_hint */
 
-static void packed_collect_clause_candidates(Topform c)
+static void packed_collect_clause_candidates(Topform c,
+                                             enum packed_hint_operation op)
 {
   Literals first = c->literals;
   packed_begin_candidates();
   if (first != NULL)
-    packed_collect_term_candidates(first->atom, first->sign ? 1 : 0);
-  packed_finish_candidates(MATCH_HINTS_ANYCONST);
+    packed_collect_term_candidates(first->atom, first->sign ? 1 : 0, op);
+  packed_finish_candidates(MATCH_HINTS_ANYCONST, op);
+  packed_operation_candidates(op);
 }
 
 static Topform packed_find_equivalent_hint(Topform c)
 {
   unsigned i;
   int nc = number_of_literals(c->literals);
-  packed_collect_clause_candidates(c);
+  enum packed_hint_operation op = PACKED_HINT_EQUIVALENCE;
+  packed_operation_begin(op);
+  packed_collect_clause_candidates(c, op);
   for (i = 0; i < Packed_candidates_count; i++) {
     Topform h = Packed_hint_by_id[Packed_candidates[i]];
     BOOL was_compressed;
@@ -535,25 +636,35 @@ static Topform packed_find_equivalent_hint(Topform c)
     if (h == NULL || h == c)
       continue;
     was_compressed = h->compressed != NULL;
-    if (was_compressed && !materialize_clause(h))
-      fatal_error("packed_find_equivalent_hint: invalid packed hint");
+    if (was_compressed) {
+      Packed_operation_stats[op].materializations++;
+      if (!materialize_clause(h))
+        fatal_error("packed_find_equivalent_hint: invalid packed hint");
+    }
     Packed_candidate_checks++;
     c_sub_h = nc <= number_of_literals(h->literals) && subsumes(c, h);
     h_sub_c = c_sub_h && subsumes(h, c);
     if (was_compressed && !recompress_clause(h))
       fatal_error("packed_find_equivalent_hint: cannot recompress hint");
-    if (h_sub_c)
+    if (h_sub_c) {
+      Packed_operation_stats[op].exact_positives++;
+      packed_operation_end(op);
       return h;
+    }
   }
+  packed_operation_end(op);
   return NULL;
 }
 
-static Topform packed_find_matching_hint(Topform c)
+static Topform packed_find_matching_hint(Topform c, BOOL flipped)
 {
   unsigned i;
   int nc = number_of_literals(c->literals);
   Topform match_hint = NULL;
-  packed_collect_clause_candidates(c);
+  enum packed_hint_operation op = flipped ? PACKED_HINT_FLIPPED_MATCH :
+                                            PACKED_HINT_MATCH;
+  packed_operation_begin(op);
+  packed_collect_clause_candidates(c, op);
   /* Legacy back_subsume() returns hints in decreasing clause-ID order.
      It chooses the first equivalent hint, or the last proper subsumee.
      Preserve that tie-breaking exactly, independent of trie traversal. */
@@ -564,18 +675,24 @@ static Topform packed_find_matching_hint(Topform c)
     if (h == NULL || h == c)
       continue;
     was_compressed = h->compressed != NULL;
-    if (was_compressed && !materialize_clause(h))
-      fatal_error("packed_find_matching_hint: invalid packed hint");
+    if (was_compressed) {
+      Packed_operation_stats[op].materializations++;
+      if (!materialize_clause(h))
+        fatal_error("packed_find_matching_hint: invalid packed hint");
+    }
     Packed_candidate_checks++;
     c_sub_h = nc <= number_of_literals(h->literals) && subsumes(c, h);
     equivalent = c_sub_h && subsumes(h, c);
-    if (c_sub_h)
+    if (c_sub_h) {
+      Packed_operation_stats[op].exact_positives++;
       match_hint = h;
+    }
     if (was_compressed && !recompress_clause(h))
       fatal_error("packed_find_matching_hint: cannot recompress hint");
     if (equivalent)
       break;
   }
+  packed_operation_end(op);
   return match_hint;
 }
 
@@ -718,7 +835,7 @@ void adjust_weight_with_hints(Topform c,
 			      BOOL degrade,
 			      BOOL breadth_first_hints)
 {
-  Topform hint = Packed_index ? packed_find_matching_hint(c) :
+  Topform hint = Packed_index ? packed_find_matching_hint(c, FALSE) :
                                 find_matching_hint(c, Hints_idx);
 
   if (hint == NULL &&
@@ -730,7 +847,7 @@ void adjust_weight_with_hints(Topform c,
 
     Term save_atom = c->literals->atom;
     c->literals->atom = top_flip(save_atom);
-    hint = Packed_index ? packed_find_matching_hint(c) :
+    hint = Packed_index ? packed_find_matching_hint(c, TRUE) :
                           find_matching_hint(c, Hints_idx);
     zap_top_flip(c->literals->atom);
     c->literals->atom = save_atom;
@@ -858,6 +975,8 @@ void back_demod_hints(Topform demod, int type, BOOL lex_order_vars)
     unsigned i, candidate_count;
     unsigned *candidate_ids;
     unsigned long long wanted = 0;
+    enum packed_hint_operation op = PACKED_HINT_BACK_DEMOD;
+    packed_operation_begin(op);
     packed_begin_candidates();
     if (type == ORIENTED || type == LEX_DEP_LR || type == LEX_DEP_BOTH) {
       if (VARIABLE(alpha))
@@ -872,12 +991,15 @@ void back_demod_hints(Topform demod, int type, BOOL lex_order_vars)
         wanted |= 1ULL << (((unsigned) SYMNUM(beta) * 2654435761U) >> 26);
     }
     for (i = 1; i < Packed_hint_capacity; i++) {
+      if (Packed_hint_active[i])
+        Packed_operation_stats[op].posting_candidates++;
       if (Packed_hint_active[i] &&
           (wanted == ULLONG_MAX ||
            (Packed_hint_rewrite_symbols[i] & wanted) != 0))
         packed_add_candidate(i);
     }
-    packed_finish_candidates(FALSE);
+    packed_finish_candidates(FALSE, op);
+    packed_operation_candidates(op);
     candidate_count = Packed_candidates_count;
     candidate_ids = candidate_count == 0 ? NULL :
       safe_malloc((size_t) candidate_count * sizeof(unsigned));
@@ -890,26 +1012,35 @@ void back_demod_hints(Topform demod, int type, BOOL lex_order_vars)
       Topform before;
       BOOL changed;
       if (hint == NULL || !Packed_hint_active[id] ||
-          (MATCH_HINTS_ANYCONST && Packed_hint_anyconst[id]))
+          (MATCH_HINTS_ANYCONST && Packed_hint_anyconst[id])) {
+        if (hint == NULL || !Packed_hint_active[id])
+          Packed_operation_stats[op].stale_skips++;
         continue;
-      if (hint->compressed != NULL && !materialize_clause(hint))
-        fatal_error("back_demod_hints: invalid packed hint");
+      }
+      if (hint->compressed != NULL) {
+        Packed_operation_stats[op].materializations++;
+        if (!materialize_clause(hint))
+          fatal_error("back_demod_hints: invalid packed hint");
+      }
       if (!rewritable_clause_type(demod, hint, type, lex_order_vars)) {
         if (compress_clause(hint) == CLAUSE_COMPRESS_INVALID)
           fatal_error("back_demod_hints: cannot recompress filtered hint");
         continue;
       }
+      Packed_operation_stats[op].exact_positives++;
       before = copy_clause(hint);
       (*Demod_proc)(hint, 1000, 1000, FALSE, lex_order_vars);
       changed = !clause_ident(before->literals, hint->literals);
       zap_topform(before);
       if (changed) {
+        Packed_operation_stats[op].rewrites++;
         unindex_hint(hint);
         orient_equalities(hint, TRUE);
         simplify_literals2(hint);
         merge_literals(hint);
         renumber_variables(hint, MAX_VARS);
         index_hint(hint);
+        Packed_operation_stats[op].reindexes++;
         hint->weight = 0;
       }
       else if (compress_clause(hint) == CLAUSE_COMPRESS_INVALID)
@@ -918,6 +1049,7 @@ void back_demod_hints(Topform demod, int type, BOOL lex_order_vars)
     }
     if (candidate_ids != NULL)
       safe_free(candidate_ids);
+    packed_operation_end(op);
   }
   else if (Back_demod_hints) {
     Plist rewritables = back_demod_indexed(demod, type, Back_demod_idx,
@@ -1071,6 +1203,34 @@ void packed_hint_index_stats(unsigned long long *node_bytes,
        3 * sizeof(unsigned long long)) +
     (unsigned long long) Packed_candidates_capacity * sizeof(unsigned) : 0;
   *candidate_checks = Packed_candidate_checks;
+}
+
+/* PUBLIC */
+void fprint_packed_hint_operation_stats(FILE *fp)
+{
+  unsigned i;
+  if (!Packed_index)
+    return;
+  for (i = 0; i < PACKED_HINT_OPERATIONS; i++) {
+    struct packed_hint_operation_stats *s = Packed_operation_stats + i;
+    fprintf(fp,
+            "Packed_hint_operation: op=%s, seconds=%.3f, queries=%llu, "
+            "posting_candidates=%llu, unique_candidates=%llu, mean=%.2f, "
+            "max=%llu, materialized=%llu, exact_positive=%llu, rewrites=%llu, "
+            "reindexes=%llu, stale_skips=%llu, "
+            "buckets=0:%llu/1:%llu/2-7:%llu/8-31:%llu/32-127:%llu/"
+            "128-1023:%llu/1024-16383:%llu/16384+:%llu.\n",
+            Packed_operation_names[i], clock_seconds(s->clock), s->queries,
+            s->posting_candidates, s->unique_candidates,
+            s->queries == 0 ? 0.0 :
+              (double) s->unique_candidates / (double) s->queries,
+            s->candidate_max, s->materializations, s->exact_positives,
+            s->rewrites, s->reindexes, s->stale_skips,
+            s->candidate_buckets[0], s->candidate_buckets[1],
+            s->candidate_buckets[2], s->candidate_buckets[3],
+            s->candidate_buckets[4], s->candidate_buckets[5],
+            s->candidate_buckets[6], s->candidate_buckets[7]);
+  }
 }
 
 /*************

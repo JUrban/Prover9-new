@@ -85,6 +85,8 @@ void packed_hint_index_stats(unsigned long long *node_bytes,
 			     unsigned long long *table_bytes,
 			     unsigned long long *candidate_checks);
 
+void fprint_packed_hint_operation_stats(FILE *fp);
+
 void print_hint_match_stats(FILE *fp, Clist hint_list);
 
 #endif  /* conditional compilation of whole file */

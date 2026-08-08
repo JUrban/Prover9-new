@@ -2077,13 +2077,16 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
           comma_num(s.hint_body_bytes),
           comma_num(s.hint_estimated_full_body_bytes));
   if (packed_hints_enabled())
-    fprintf(fp,
-            "Packed_hint_index: nodes=%s, references=%s, tables=%s, "
-            "candidate_checks=%s.\n",
-            comma_num(s.hint_index_node_bytes),
-            comma_num(s.hint_index_reference_bytes),
-            comma_num(s.hint_index_table_bytes),
-            comma_num(s.hint_candidate_checks));
+    {
+      fprintf(fp,
+              "Packed_hint_index: nodes=%s, references=%s, tables=%s, "
+              "candidate_checks=%s.\n",
+              comma_num(s.hint_index_node_bytes),
+              comma_num(s.hint_index_reference_bytes),
+              comma_num(s.hint_index_table_bytes),
+              comma_num(s.hint_candidate_checks));
+      fprint_packed_hint_operation_stats(fp);
+    }
   fprintf(fp,
           "Ancestor_store: records=%s, record_bytes=%s, backing_bytes=%s, "
           "handle_bytes=%s, materialized=%s, validation_failures=%s.\n",
