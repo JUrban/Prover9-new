@@ -237,6 +237,7 @@ struct collective_batch {
   unsigned long long conclusion_next_ordinal;
   unsigned snapshot_epoch;
   unsigned kind;
+  Para_iterator para_iterator;
   size_t priority_heap_index;
   struct collective_batch *prev;
   struct collective_batch *next;
@@ -451,6 +452,7 @@ void collective_clear_state(void)
   while (Collective_batch_head != NULL) {
     b = Collective_batch_head;
     Collective_batch_head = b->next;
+    para_iterator_zap(&b->para_iterator);
     safe_free(b);
   }
   Collective_batch_tail = NULL;
@@ -544,6 +546,12 @@ void collective_reset_state(void)
   Stats.collective_givens_withheld = 0;
   Stats.collective_paramod_from_turns = 0;
   Stats.collective_paramod_into_turns = 0;
+  Stats.collective_iterator_raw_steps = 0;
+  Stats.collective_iterator_candidates = 0;
+  Stats.collective_iterator_completions = 0;
+  Stats.collective_iterator_invalidations = 0;
+  Stats.collective_iterator_raw_peak = 0;
+  Stats.collective_iterator_path_bytes = 0;
 }
 
 static
@@ -756,8 +764,15 @@ void collective_note_deactivation(Topform c)
 static struct collective_batch *collective_new_batch(void)
 {
   struct collective_batch *b = safe_calloc(1, sizeof(*b));
+  para_iterator_init(&b->para_iterator);
   b->priority_heap_index = COLLECTIVE_NO_HEAP_INDEX;
   return b;
+}
+
+static void collective_free_batch(struct collective_batch *b)
+{
+  para_iterator_zap(&b->para_iterator);
+  safe_free(b);
 }
 
 static BOOL collective_batch_priority_less(
@@ -1017,7 +1032,7 @@ void collective_rotate_or_complete_batch(struct collective_batch *b)
     if ((b->kind & (COLLECTIVE_PARAMOD | COLLECTIVE_PARAMOD_FROM |
                     COLLECTIVE_PARAMOD_INTO)) != 0)
       Stats.collective_completed_paramod++;
-    safe_free(b);
+    collective_free_batch(b);
     Stats.collective_batches_completed++;
   }
   else
@@ -1202,6 +1217,16 @@ unsigned long long collective_history_bytes(void)
            sizeof(*Collective_activation_pages) +
          (unsigned long long) Collective_deactivation_capacity *
            sizeof(*Collective_deactivations);
+}
+
+static unsigned long long collective_iterator_path_bytes(void)
+{
+  struct collective_batch *b;
+  unsigned long long bytes = 0;
+  for (b = Collective_batch_head; b != NULL; b = b->next)
+    bytes += (unsigned long long) b->para_iterator.path_capacity *
+             sizeof(*b->para_iterator.path);
+  return bytes;
 }
 
 static
@@ -1532,6 +1557,8 @@ Prover_options init_prover_options(void)
     init_parm("collective_candidate_chunk", 64, 1, INT_MAX);
   p->collective_candidate_cache =
     init_parm("collective_candidate_cache", 4096, 1, INT_MAX);
+  p->collective_raw_work_budget =
+    init_parm("collective_raw_work_budget", 64, 1, INT_MAX);
   p->collective_promising_fair_interval =
     init_parm("collective_promising_fair_interval", 8, 1, 1000);
   p->collective_descriptor_high_water =
@@ -2232,6 +2259,8 @@ void update_stats(void)
   Stats.collective_descriptor_bytes = Collective_batch_count *
                                       sizeof(struct collective_batch) +
     Collective_priority_heap_capacity * sizeof(*Collective_priority_heap);
+  Stats.collective_iterator_path_bytes = collective_iterator_path_bytes();
+  Stats.collective_descriptor_bytes += Stats.collective_iterator_path_bytes;
   Stats.collective_history_bytes = collective_history_bytes();
   collective_history_clause_stats(&Stats.collective_history_clauses,
                                    &Stats.collective_history_indexed_clauses,
@@ -2356,6 +2385,17 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             comma_num(s.collective_raw_candidates_seen),
             comma_num(s.collective_deferred_turns),
             comma_num(s.collective_raw_candidates_peak));
+    fprintf(fp,
+            "Collective_iterators: raw_budget=%d, raw_steps=%s, "
+            "candidates=%s, completions=%s, invalidations=%s, "
+            "raw_turn_peak=%s, path_bytes=%s.\n",
+            parm(Opt->collective_raw_work_budget),
+            comma_num(s.collective_iterator_raw_steps),
+            comma_num(s.collective_iterator_candidates),
+            comma_num(s.collective_iterator_completions),
+            comma_num(s.collective_iterator_invalidations),
+            comma_num(s.collective_iterator_raw_peak),
+            comma_num(s.collective_iterator_path_bytes));
     fprintf(fp,
             "Collective_candidate_cache: limit=%d, current=%s, peak=%s, "
             "stalls=%s.\n",
@@ -6745,7 +6785,8 @@ BOOL collective_expand_one_batch(void)
     BOOL good_given, good_pair;
 
     if (deactivated != 0 && deactivated <= b->snapshot_epoch) {
-      if (b->conclusion_cursor != 0)
+      if (b->conclusion_cursor != 0 ||
+          !para_iterator_at_start(&b->para_iterator))
         fatal_error("partial collective pair became inactive in its snapshot");
       b->cursor++;
       Stats.collective_partners_skipped++;
@@ -6770,56 +6811,109 @@ BOOL collective_expand_one_batch(void)
     if (!restricted_denial(partner) && good_pair &&
         !over_parm_limit(number_of_literals(partner->literals),
                          Opt->para_lit_limit)) {
-      Context cf = get_context();
-      Context ci = get_context();
       unsigned long long generated_before = Stats.generated;
       unsigned long long kept_before = Stats.kept;
-      struct collective_candidate_chunk chunk;
       BOOL complete;
-      collective_chunk_init(&chunk, b);
-      clock_start(Clocks.infer);
-      Current_inference_source = INFER_SOURCE_PARAMOD;
-      Current_collective_chunk = &chunk;
-      if ((b->kind &
-           (COLLECTIVE_PARAMOD | COLLECTIVE_PARAMOD_FROM)) != 0) {
-        para_from_into(given, cf, partner, ci, FALSE,
-                       collective_chunk_cl_process);
-        Stats.collective_paramod_from_turns++;
+      if (collective_balanced_mode() && b->conclusion_cursor == 0) {
+        Topform from = b->kind == COLLECTIVE_PARAMOD_FROM ? given : partner;
+        Topform into = b->kind == COLLECTIVE_PARAMOD_FROM ? partner : given;
+        BOOL check_top = b->kind == COLLECTIVE_PARAMOD_INTO;
+        unsigned long long raw_steps, yielded;
+        unsigned long long candidate_budget = collective_candidate_budget();
+        if (candidate_budget == 0)
+          fatal_error("bounded paramodulation has no candidate-pool space");
+        clock_start(Clocks.infer);
+        Current_inference_source = INFER_SOURCE_PARAMOD;
+        complete = para_from_into_bounded(
+          from, into, check_top, &b->para_iterator,
+          (unsigned long long) parm(Opt->collective_raw_work_budget),
+          candidate_budget, cl_process, &raw_steps, &yielded);
+        Current_inference_source = INFER_SOURCE_OTHER;
+        clock_stop(Clocks.infer);
+        Stats.collective_iterator_raw_steps += raw_steps;
+        Stats.collective_iterator_candidates += yielded;
+        Stats.collective_candidates_emitted += yielded;
+        Stats.collective_raw_candidates_seen += yielded;
+        if (raw_steps > Stats.collective_iterator_raw_peak)
+          Stats.collective_iterator_raw_peak = raw_steps;
+        if (yielded > Stats.collective_raw_candidates_peak)
+          Stats.collective_raw_candidates_peak = yielded;
+        if (!complete) {
+          Stats.collective_deferred_turns++;
+        }
+        else {
+          Stats.collective_iterator_completions++;
+          para_iterator_reset(&b->para_iterator);
+          b->cursor++;
+          Stats.collective_pair_expansions++;
+        }
+        if (b->kind == COLLECTIVE_PARAMOD_FROM)
+          Stats.collective_paramod_from_turns++;
+        else
+          Stats.collective_paramod_into_turns++;
+        Stats.collective_pair_turns++;
+        if (flag(Opt->collective_trace))
+          printf("%sCOLLECTIVE_TRACE kind=%s given=%llu partner=%llu "
+                 "epoch=%u generated=%llu kept=%llu historical=1 "
+                 "hint_probe=0 raw=%llu emitted=%llu cursor=0 "
+                 "complete=%d native=1.\n",
+                 TPTP_PFX,
+                 b->kind == COLLECTIVE_PARAMOD_FROM ?
+                   "paramod_from" : "paramod_into",
+                 b->given_id, partner_id, b->snapshot_epoch,
+                 Stats.generated - generated_before,
+                 Stats.kept - kept_before, raw_steps, yielded, complete);
       }
-      if ((b->kind &
-           (COLLECTIVE_PARAMOD | COLLECTIVE_PARAMOD_INTO)) != 0) {
-        para_from_into(partner, cf, given, ci, TRUE,
-                       collective_chunk_cl_process);
-        Stats.collective_paramod_into_turns++;
+      else {
+        Context cf = get_context();
+        Context ci = get_context();
+        struct collective_candidate_chunk chunk;
+        collective_chunk_init(&chunk, b);
+        clock_start(Clocks.infer);
+        Current_inference_source = INFER_SOURCE_PARAMOD;
+        Current_collective_chunk = &chunk;
+        if ((b->kind &
+             (COLLECTIVE_PARAMOD | COLLECTIVE_PARAMOD_FROM)) != 0) {
+          para_from_into(given, cf, partner, ci, FALSE,
+                         collective_chunk_cl_process);
+          Stats.collective_paramod_from_turns++;
+        }
+        if ((b->kind &
+             (COLLECTIVE_PARAMOD | COLLECTIVE_PARAMOD_INTO)) != 0) {
+          para_from_into(partner, cf, given, ci, TRUE,
+                         collective_chunk_cl_process);
+          Stats.collective_paramod_into_turns++;
+        }
+        complete = collective_chunk_finish(
+          &chunk, b, "collective paramodulation replay order changed");
+        Current_collective_chunk = NULL;
+        Current_inference_source = INFER_SOURCE_OTHER;
+        clock_stop(Clocks.infer);
+        free_context(cf);
+        free_context(ci);
+        if (complete) {
+          b->cursor++;
+          Stats.collective_pair_expansions++;
+        }
+        Stats.collective_pair_turns++;
+        if (flag(Opt->collective_trace))
+          printf("%sCOLLECTIVE_TRACE kind=%s given=%llu partner=%llu "
+                 "epoch=%u generated=%llu kept=%llu historical=1 "
+                 "hint_probe=%d raw=%llu emitted=%llu cursor=%llu "
+                 "complete=%d.\n",
+                 TPTP_PFX,
+                 b->kind == COLLECTIVE_PARAMOD_FROM ? "paramod_from" :
+                 b->kind == COLLECTIVE_PARAMOD_INTO ? "paramod_into" :
+                                                      "paramod",
+                 b->given_id, partner_id, b->snapshot_epoch,
+                 Stats.generated - generated_before,
+                 Stats.kept - kept_before, hint_probe, chunk.seen,
+                 chunk.emitted, b->conclusion_cursor, complete);
       }
-      complete = collective_chunk_finish(
-        &chunk, b, "collective paramodulation replay order changed");
-      Current_collective_chunk = NULL;
-      Current_inference_source = INFER_SOURCE_OTHER;
-      clock_stop(Clocks.infer);
-      free_context(cf);
-      free_context(ci);
-      if (complete) {
-        b->cursor++;
-        Stats.collective_pair_expansions++;
-      }
-      Stats.collective_pair_turns++;
-      if (flag(Opt->collective_trace))
-        printf("%sCOLLECTIVE_TRACE kind=%s given=%llu partner=%llu "
-               "epoch=%u generated=%llu kept=%llu historical=1 "
-               "hint_probe=%d raw=%llu emitted=%llu cursor=%llu "
-               "complete=%d.\n",
-               TPTP_PFX,
-               b->kind == COLLECTIVE_PARAMOD_FROM ? "paramod_from" :
-               b->kind == COLLECTIVE_PARAMOD_INTO ? "paramod_into" :
-                                                    "paramod",
-               b->given_id, partner_id, b->snapshot_epoch,
-               Stats.generated - generated_before, Stats.kept - kept_before,
-               hint_probe, chunk.seen, chunk.emitted,
-               b->conclusion_cursor, complete);
     }
     else {
-      if (b->conclusion_cursor != 0)
+      if (b->conclusion_cursor != 0 ||
+          !para_iterator_at_start(&b->para_iterator))
         fatal_error("partial collective pair became ineligible");
       b->cursor++;
       Stats.collective_partners_skipped++;
@@ -9250,7 +9344,7 @@ void write_collective_checkpoint(const char *dir)
   if (!collective_frontier_mode())
     return;
   if (collective_balanced_mode())
-    magic[6] = 'B';
+    magic[6] = 'C';
   snprintf(path, sizeof(path), "%s/collective_frontier.bin", dir);
   fp = fopen(path, "wb");
   if (fp == NULL)
@@ -9304,6 +9398,26 @@ void write_collective_checkpoint(const char *dir)
         fwrite(&epoch, sizeof(epoch), 1, fp) != 1 ||
         fwrite(&kind, sizeof(kind), 1, fp) != 1)
       fatal_error("write_collective_checkpoint: descriptor write failed");
+    if (collective_balanced_mode()) {
+      uint32_t from_literal = b->para_iterator.from_literal;
+      uint32_t into_literal = b->para_iterator.into_literal;
+      uint32_t from_side = b->para_iterator.from_side;
+      uint32_t into_argument = b->para_iterator.into_argument;
+      uint32_t path_depth = b->para_iterator.path_depth;
+      uint32_t positioned = b->para_iterator.positioned ? 1U : 0U;
+      uint32_t complete = b->para_iterator.complete ? 1U : 0U;
+      if (fwrite(&from_literal, sizeof(from_literal), 1, fp) != 1 ||
+          fwrite(&into_literal, sizeof(into_literal), 1, fp) != 1 ||
+          fwrite(&from_side, sizeof(from_side), 1, fp) != 1 ||
+          fwrite(&into_argument, sizeof(into_argument), 1, fp) != 1 ||
+          fwrite(&path_depth, sizeof(path_depth), 1, fp) != 1 ||
+          fwrite(&positioned, sizeof(positioned), 1, fp) != 1 ||
+          fwrite(&complete, sizeof(complete), 1, fp) != 1 ||
+          (path_depth != 0 &&
+           fwrite(b->para_iterator.path, sizeof(*b->para_iterator.path),
+                  path_depth, fp) != path_depth))
+        fatal_error("write_collective_checkpoint: iterator write failed");
+    }
   }
   if (fclose(fp) != 0)
     fatal_error("write_collective_checkpoint: close failed");
@@ -9319,7 +9433,7 @@ void read_collective_checkpoint(const char *dir)
   uint32_t priority_turns_since_fair;
   uint32_t balanced_lane = 0, balanced_lane_credit = 0;
   uint32_t balanced_turns_since_oldest = 0, drain_mode = 0;
-  BOOL format6, format7, format8, format9, format_a, format_b;
+  BOOL format6, format7, format8, format9, format_a, format_b, format_c;
 
   if (!collective_frontier_mode())
     return;
@@ -9329,33 +9443,36 @@ void read_collective_checkpoint(const char *dir)
     fatal_error("resume: collective frontier state is missing");
   if (fread(magic, sizeof(magic), 1, fp) != 1)
     fatal_error("resume: corrupt collective frontier header");
+  format_c = memcmp(magic, "P9COLLC", 7) == 0;
   format_b = memcmp(magic, "P9COLLB", 7) == 0;
   format_a = memcmp(magic, "P9COLLA", 7) == 0;
   format9 = memcmp(magic, "P9COLL9", 7) == 0;
   format8 = memcmp(magic, "P9COLL8", 7) == 0;
   format7 = memcmp(magic, "P9COLL7", 7) == 0;
   format6 = memcmp(magic, "P9COLL6", 7) == 0;
-  if ((!format_b && !format_a && !format9 && !format8 && !format7 && !format6 &&
+  if ((!format_c && !format_b && !format_a && !format9 && !format8 &&
+       !format7 && !format6 &&
        memcmp(magic, "P9COLL5", 7) != 0) ||
       fread(&activations, sizeof(activations), 1, fp) != 1 ||
       fread(&batches, sizeof(batches), 1, fp) != 1 ||
       fread(&turn, sizeof(turn), 1, fp) != 1 ||
       fread(&givens_since_batch, sizeof(givens_since_batch), 1, fp) != 1)
     fatal_error("resume: corrupt collective frontier header");
-  if (format6 || format7 || format8 || format9 || format_a || format_b) {
+  if (format6 || format7 || format8 || format9 || format_a || format_b ||
+      format_c) {
     if (fread(&hint_probe_credit, sizeof(hint_probe_credit), 1, fp) != 1)
       fatal_error("resume: corrupt collective frontier probe state");
   }
   else
     hint_probe_credit = 1U;
-  if (format_a || format_b) {
+  if (format_a || format_b || format_c) {
     if (fread(&priority_turns_since_fair,
               sizeof(priority_turns_since_fair), 1, fp) != 1)
       fatal_error("resume: corrupt collective priority scheduler state");
   }
   else
     priority_turns_since_fair = 0;
-  if (format_b) {
+  if (format_b || format_c) {
     if (fread(&balanced_lane, sizeof(balanced_lane), 1, fp) != 1 ||
         fread(&balanced_lane_credit,
               sizeof(balanced_lane_credit), 1, fp) != 1 ||
@@ -9364,7 +9481,7 @@ void read_collective_checkpoint(const char *dir)
         fread(&drain_mode, sizeof(drain_mode), 1, fp) != 1)
       fatal_error("resume: corrupt balanced collective scheduler state");
   }
-  if (format_b != collective_balanced_mode())
+  if ((format_b || format_c) != collective_balanced_mode())
     fatal_error("resume: collective scheduler policy does not match checkpoint");
   if (turn > 1 || hint_probe_credit > 1)
     fatal_error("resume: invalid collective scheduler state");
@@ -9373,7 +9490,7 @@ void read_collective_checkpoint(const char *dir)
       (!flag(Opt->collective_promising_scheduler) &&
        priority_turns_since_fair != 0))
     fatal_error("resume: invalid collective priority scheduler state");
-  if (format_b &&
+  if ((format_b || format_c) &&
       (balanced_lane >= COLLECTIVE_LANE_COUNT ||
        balanced_lane_credit >
          collective_balanced_lane_share(balanced_lane) ||
@@ -9401,7 +9518,7 @@ void read_collective_checkpoint(const char *dir)
         fread(&b->cursor, sizeof(b->cursor), 1, fp) != 1 ||
         fread(&b->activation_limit, sizeof(b->activation_limit), 1, fp) != 1)
       fatal_error("resume: truncated collective batch queue");
-    if (format7 || format8 || format9 || format_a || format_b) {
+    if (format7 || format8 || format9 || format_a || format_b || format_c) {
       if (fread(&b->conclusion_cursor,
                 sizeof(b->conclusion_cursor), 1, fp) != 1 ||
           fread(&b->conclusion_prefix_hash,
@@ -9412,7 +9529,7 @@ void read_collective_checkpoint(const char *dir)
       b->conclusion_cursor = 0;
       b->conclusion_prefix_hash = 0;
     }
-    if (format9 || format_a || format_b) {
+    if (format9 || format_a || format_b || format_c) {
       if (fread(&b->conclusion_order_weight,
                 sizeof(b->conclusion_order_weight), 1, fp) != 1 ||
           fread(&b->conclusion_order_ordinal,
@@ -9432,9 +9549,10 @@ void read_collective_checkpoint(const char *dir)
     b->snapshot_epoch = epoch;
     if ((kind & COLLECTIVE_INFERENCE_MASK) == 0 ||
         (kind & ~COLLECTIVE_KIND_MASK) != 0 ||
-        (!format_b && !format_a && !format9 && !format8 && !format7 && !format6 &&
+        (!format_c && !format_b && !format_a && !format9 && !format8 &&
+         !format7 && !format6 &&
          (kind & COLLECTIVE_HINT_PROBE) != 0) ||
-        (!format_b && !format_a && !format9 &&
+        (!format_c && !format_b && !format_a && !format9 &&
          (kind & COLLECTIVE_PROMISING_CURSOR) != 0) ||
         (format7 && b->conclusion_cursor != 0 &&
          (kind & (COLLECTIVE_POS_HYPER | COLLECTIVE_NEG_HYPER)) == 0) ||
@@ -9459,14 +9577,47 @@ void read_collective_checkpoint(const char *dir)
             b->conclusion_next_weight, b->conclusion_next_ordinal) >= 0)) ||
         ((kind & COLLECTIVE_HINT_PROBE) != 0 &&
          (i != 0 || hint_probe_credit != 0)) ||
-        (format_b && kind != COLLECTIVE_PARAMOD_FROM &&
+        ((format_b || format_c) && kind != COLLECTIVE_PARAMOD_FROM &&
          kind != COLLECTIVE_PARAMOD_INTO &&
          kind != COLLECTIVE_POS_HYPER &&
          kind != COLLECTIVE_NEG_HYPER) ||
-        (!format_b &&
+        (!format_b && !format_c &&
          (kind & (COLLECTIVE_PARAMOD_FROM | COLLECTIVE_PARAMOD_INTO)) != 0))
       fatal_error("resume: invalid collective batch kind");
     b->kind = kind;
+    if (format_c) {
+      uint32_t from_literal, into_literal, from_side, into_argument;
+      uint32_t path_depth, positioned, complete;
+      if (fread(&from_literal, sizeof(from_literal), 1, fp) != 1 ||
+          fread(&into_literal, sizeof(into_literal), 1, fp) != 1 ||
+          fread(&from_side, sizeof(from_side), 1, fp) != 1 ||
+          fread(&into_argument, sizeof(into_argument), 1, fp) != 1 ||
+          fread(&path_depth, sizeof(path_depth), 1, fp) != 1 ||
+          fread(&positioned, sizeof(positioned), 1, fp) != 1 ||
+          fread(&complete, sizeof(complete), 1, fp) != 1)
+        fatal_error("resume: truncated paramodulation iterator");
+      if (from_side > 1 || positioned > 1 || complete != 0 ||
+          (!positioned && path_depth != 0) ||
+          ((kind == COLLECTIVE_POS_HYPER ||
+            kind == COLLECTIVE_NEG_HYPER) &&
+           (from_literal != 0 || into_literal != 0 || from_side != 0 ||
+            into_argument != 0 || path_depth != 0 || positioned != 0)))
+        fatal_error("resume: invalid paramodulation iterator");
+      b->para_iterator.from_literal = from_literal;
+      b->para_iterator.into_literal = into_literal;
+      b->para_iterator.from_side = from_side;
+      b->para_iterator.into_argument = into_argument;
+      b->para_iterator.path_depth = path_depth;
+      b->para_iterator.positioned = positioned != 0;
+      if (path_depth != 0) {
+        b->para_iterator.path =
+          safe_calloc(path_depth, sizeof(*b->para_iterator.path));
+        b->para_iterator.path_capacity = path_depth;
+        if (fread(b->para_iterator.path,
+                  sizeof(*b->para_iterator.path), path_depth, fp) != path_depth)
+          fatal_error("resume: truncated paramodulation iterator path");
+      }
+    }
     collective_append_batch(b);
   }
   Collective_batch_turn = turn != 0;
@@ -9668,6 +9819,16 @@ void write_checkpoint(void)
             Stats.collective_paramod_from_turns);
     fprintf(fp, "collective_paramod_into_turns %llu\n",
             Stats.collective_paramod_into_turns);
+    fprintf(fp, "collective_iterator_raw_steps %llu\n",
+            Stats.collective_iterator_raw_steps);
+    fprintf(fp, "collective_iterator_candidates %llu\n",
+            Stats.collective_iterator_candidates);
+    fprintf(fp, "collective_iterator_completions %llu\n",
+            Stats.collective_iterator_completions);
+    fprintf(fp, "collective_iterator_invalidations %llu\n",
+            Stats.collective_iterator_invalidations);
+    fprintf(fp, "collective_iterator_raw_peak %llu\n",
+            Stats.collective_iterator_raw_peak);
     fprintf(fp, "simplifier_epoch %u\n", Simplifier_epoch);
     fprintf(fp, "hint_state_epoch %llu\n", hint_state_epoch());
     fprintf(fp, "user_seconds %.2f\n", user_seconds());
@@ -10540,6 +10701,26 @@ void resume_load_clauses(const char *dir)
     rewind(fp); (void) read_metadata_ull_if_present(
       fp, "collective_paramod_into_turns",
       &Stats.collective_paramod_into_turns);
+    Stats.collective_iterator_raw_steps = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_iterator_raw_steps",
+      &Stats.collective_iterator_raw_steps);
+    Stats.collective_iterator_candidates = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_iterator_candidates",
+      &Stats.collective_iterator_candidates);
+    Stats.collective_iterator_completions = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_iterator_completions",
+      &Stats.collective_iterator_completions);
+    Stats.collective_iterator_invalidations = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_iterator_invalidations",
+      &Stats.collective_iterator_invalidations);
+    Stats.collective_iterator_raw_peak = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_iterator_raw_peak",
+      &Stats.collective_iterator_raw_peak);
   }
   rewind(fp); Simplifier_epoch =
     (unsigned) read_metadata_ull(fp, "simplifier_epoch");

@@ -53,6 +53,30 @@ Status: implementation in progress on the opt-in development branch.
 Phase 1 deliberately still uses the replay generators.  Its reports do not
 claim a bounded raw-work turn; native continuation is the next phase.
 
+### 2026-08-08: Phase 2 native paramodulation continuation
+
+- The LADR paramodulator now exposes a stable continuation consisting of the
+  from literal, into literal, equality side, atom argument, and a dynamically
+  bounded subterm path.  It resumes directly at that coordinate instead of
+  regenerating an ordinal prefix.
+- Every eligible subterm visit is charged, including failed unifications and
+  roots suppressed by `check_top`.  `collective_raw_work_budget` is therefore
+  a hard per-turn paramodulation bound rather than a conclusion-only target.
+- Balanced from/into descriptors use the native iterator and the ordinary
+  `cl_process` callback.  Existing legacy descriptors and a partially replayed
+  `P9COLLB` pair retain their compatibility path until that pair completes.
+- `P9COLLC` serializes the complete paramodulation coordinate and path in
+  addition to scheduler state.  Dynamic path bytes are included in descriptor
+  memory accounting.
+- `paramod_iterator_test` compares eager structural sequences with every
+  forced raw budget from 1 through 64, for both directions, `check_top`, and
+  ordered/instance-checked operation.  It clones and resumes the remaining
+  suffix after every unit-budget coordinate boundary.
+- The balanced proof test forces a raw budget of one, observes a raw-turn peak
+  of one and zero replay, and validates the proof with `prooftrans`.  The
+  policy checkpoint/resume comparison, legacy focused suites, and `make test1`
+  pass.
+
 ## Objective
 
 Make the collective DISCOUNT frontier discover and propagate useful hint

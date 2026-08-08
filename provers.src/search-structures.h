@@ -168,6 +168,7 @@ struct prover_options {
     collective_given_ratio, // givens per collective descriptor expansion
     collective_candidate_chunk, // max collective conclusions per turn
     collective_candidate_cache, // max passives exposed by collective turns
+    collective_raw_work_budget, // max iterator positions examined per turn
     collective_promising_fair_interval, // one FIFO turn per N expansions
     collective_descriptor_high_water, // hard balanced descriptor bound
     collective_descriptor_low_water,  // balanced drain exit threshold
@@ -401,6 +402,12 @@ struct prover_stats {
     collective_givens_withheld,
     collective_paramod_from_turns,
     collective_paramod_into_turns,
+    collective_iterator_raw_steps,
+    collective_iterator_candidates,
+    collective_iterator_completions,
+    collective_iterator_invalidations,
+    collective_iterator_raw_peak,
+    collective_iterator_path_bytes,
     compression_attempted,
     compression_successful,
     compression_skipped,

@@ -519,6 +519,308 @@ void para_from_into(Topform from, Context cf,
   }
 }  /* para_from_into */
 
+static Literals para_iterator_literal(Literals lits, unsigned position)
+{
+  while (lits != NULL && position != 0) {
+    lits = lits->next;
+    position--;
+  }
+  return lits;
+}
+
+static BOOL para_iterator_term_eligible(Term t)
+{
+  return (((!VARIABLE(t)) | Para_into_vars) && basic_check(t));
+}
+
+static void para_iterator_reserve_path(Para_iterator *it, unsigned need)
+{
+  unsigned capacity;
+  unsigned *path;
+  if (need <= it->path_capacity)
+    return;
+  capacity = it->path_capacity == 0 ? 8 : it->path_capacity;
+  while (capacity < need) {
+    if (capacity > UINT_MAX / 2)
+      fatal_error("paramodulation iterator path overflow");
+    capacity *= 2;
+  }
+  path = safe_calloc(capacity, sizeof(*path));
+  if (it->path != NULL) {
+    memcpy(path, it->path, it->path_depth * sizeof(*path));
+    safe_free(it->path);
+  }
+  it->path = path;
+  it->path_capacity = capacity;
+}
+
+static Term para_iterator_term_at_path(
+  Term root, const Para_iterator *it, unsigned depth)
+{
+  unsigned i;
+  Term t = root;
+  for (i = 0; i < depth; i++) {
+    unsigned child = it->path[i];
+    if (!COMPLEX(t) || child >= (unsigned) ARITY(t))
+      fatal_error("invalid paramodulation iterator term path");
+    t = ARG(t, child);
+  }
+  return t;
+}
+
+/* Move from root to its first postorder eligible descendant. */
+static void para_iterator_descend_first(Para_iterator *it, Term root)
+{
+  Term t = root;
+  while (COMPLEX(t)) {
+    int i;
+    for (i = 0; i < ARITY(t); i++)
+      if (para_iterator_term_eligible(ARG(t, i)))
+        break;
+    if (i == ARITY(t))
+      break;
+    para_iterator_reserve_path(it, it->path_depth + 1);
+    it->path[it->path_depth++] = (unsigned) i;
+    t = ARG(t, i);
+  }
+}
+
+/* Advance one position in the same children-before-parent order used by
+   para_into().  FALSE means the top-level atom argument is complete. */
+static BOOL para_iterator_next_path(Para_iterator *it, Term root)
+{
+  Term parent;
+  unsigned current, i;
+  if (it->path_depth == 0)
+    return FALSE;
+  parent = para_iterator_term_at_path(root, it, it->path_depth - 1);
+  current = it->path[it->path_depth - 1];
+  for (i = current + 1; i < (unsigned) ARITY(parent); i++)
+    if (para_iterator_term_eligible(ARG(parent, i))) {
+      it->path[it->path_depth - 1] = i;
+      para_iterator_descend_first(it, ARG(parent, i));
+      return TRUE;
+    }
+  /* All siblings are done; the parent itself is next. */
+  it->path_depth--;
+  return TRUE;
+}
+
+static void para_iterator_next_into_literal(Para_iterator *it)
+{
+  it->into_literal++;
+  it->from_side = 0;
+  it->into_argument = 0;
+  it->path_depth = 0;
+  it->positioned = FALSE;
+}
+
+static void para_iterator_next_from_literal(Para_iterator *it)
+{
+  it->from_literal++;
+  it->into_literal = 0;
+  it->from_side = 0;
+  it->into_argument = 0;
+  it->path_depth = 0;
+  it->positioned = FALSE;
+}
+
+/* Establish the next stable coordinate without enumerating any earlier raw
+   inference position.  Parent/literal eligibility is immutable for a
+   collective historical pair, so skipped axes never need to be revisited. */
+static BOOL para_iterator_prepare(
+  Topform from, Topform into, Para_iterator *it)
+{
+  if (it->complete)
+    return FALSE;
+  if (exists_selected_literal(from->literals)) {
+    it->complete = TRUE;
+    return FALSE;
+  }
+  while (!it->positioned) {
+    Literals from_lit =
+      para_iterator_literal(from->literals, it->from_literal);
+    Literals into_lit;
+    Term into_atom, root;
+    if (from_lit == NULL) {
+      it->complete = TRUE;
+      return FALSE;
+    }
+    if (!from_parent_test(from_lit, FLAG_CHECK)) {
+      para_iterator_next_from_literal(it);
+      continue;
+    }
+    into_lit = para_iterator_literal(into->literals, it->into_literal);
+    if (into_lit == NULL) {
+      para_iterator_next_from_literal(it);
+      continue;
+    }
+    if (!into_parent_test(into_lit, FLAG_CHECK)) {
+      para_iterator_next_into_literal(it);
+      continue;
+    }
+    if (it->from_side > 1 ||
+        (it->from_side == 1 && !para_from_right(from_lit->atom))) {
+      para_iterator_next_into_literal(it);
+      continue;
+    }
+    if (VARIABLE(ARG(from_lit->atom, it->from_side)) && !Para_from_vars) {
+      it->from_side++;
+      it->into_argument = 0;
+      it->path_depth = 0;
+      continue;
+    }
+    into_atom = into_lit->atom;
+    if (it->into_argument >= (unsigned) ARITY(into_atom)) {
+      it->from_side++;
+      it->into_argument = 0;
+      it->path_depth = 0;
+      continue;
+    }
+    root = ARG(into_atom, it->into_argument);
+    if (!para_iterator_term_eligible(root)) {
+      it->into_argument++;
+      it->path_depth = 0;
+      continue;
+    }
+    it->path_depth = 0;
+    para_iterator_descend_first(it, root);
+    it->positioned = TRUE;
+  }
+  return TRUE;
+}
+
+static Ilist para_iterator_from_position(
+  const Para_iterator *it)
+{
+  Ilist pos = NULL;
+  pos = ilist_append(pos, (int) it->from_literal + 1);
+  pos = ilist_append(pos, (int) it->from_side + 1);
+  return pos;
+}
+
+static Ilist para_iterator_into_position(
+  const Para_iterator *it)
+{
+  unsigned i;
+  Ilist pos = NULL;
+  pos = ilist_append(pos, (int) it->into_literal + 1);
+  pos = ilist_append(pos, (int) it->into_argument + 1);
+  for (i = 0; i < it->path_depth; i++)
+    pos = ilist_append(pos, (int) it->path[i] + 1);
+  return pos;
+}
+
+static void para_iterator_advance(Para_iterator *it, Term root)
+{
+  if (para_iterator_next_path(it, root))
+    it->positioned = TRUE;
+  else {
+    it->into_argument++;
+    it->path_depth = 0;
+    it->positioned = FALSE;
+  }
+}
+
+/* PUBLIC */
+void para_iterator_init(Para_iterator *it)
+{
+  memset(it, 0, sizeof(*it));
+}
+
+/* PUBLIC */
+void para_iterator_reset(Para_iterator *it)
+{
+  unsigned *path = it->path;
+  unsigned capacity = it->path_capacity;
+  memset(it, 0, sizeof(*it));
+  it->path = path;
+  it->path_capacity = capacity;
+}
+
+/* PUBLIC */
+void para_iterator_zap(Para_iterator *it)
+{
+  safe_free(it->path);
+  memset(it, 0, sizeof(*it));
+}
+
+/* PUBLIC */
+BOOL para_iterator_at_start(const Para_iterator *it)
+{
+  return it->from_literal == 0 && it->into_literal == 0 &&
+         it->from_side == 0 && it->into_argument == 0 &&
+         it->path_depth == 0 && !it->positioned && !it->complete;
+}
+
+/* Enumerate a bounded suffix of para_from_into() in exactly its original
+   raw conclusion order.  Every eligible subterm visit consumes one raw
+   unit, including a failed unification or a check_top-suppressed root.
+   Hence both successful and unsuccessful searches have a hard turn bound. */
+/* PUBLIC */
+BOOL para_from_into_bounded(Topform from, Topform into, BOOL check_top,
+			    Para_iterator *it,
+			    unsigned long long raw_budget,
+			    unsigned long long yield_budget,
+			    void (*proc_proc) (Topform),
+			    unsigned long long *raw_steps,
+			    unsigned long long *yielded)
+{
+  Context cf, ci;
+  if (raw_budget == 0 || yield_budget == 0)
+    fatal_error("bounded paramodulation requires nonzero budgets");
+  *raw_steps = 0;
+  *yielded = 0;
+  cf = get_context();
+  ci = get_context();
+  while (*raw_steps < raw_budget && *yielded < yield_budget &&
+         para_iterator_prepare(from, into, it)) {
+    Literals from_lit =
+      para_iterator_literal(from->literals, it->from_literal);
+    Literals into_lit =
+      para_iterator_literal(into->literals, it->into_literal);
+    Term root = ARG(into_lit->atom, it->into_argument);
+    Term cur = para_iterator_term_at_path(root, it, it->path_depth);
+    BOOL positive_equality = pos_eq(into_lit);
+    BOOL skip_top = check_top && positive_equality && it->path_depth == 0 &&
+      (it->into_argument == 0 ||
+       (it->into_argument == 1 && para_from_right(into_lit->atom)));
+    Ilist from_pos = NULL, into_pos = NULL;
+    Trail tr = NULL;
+    Topform result = NULL;
+
+    (*raw_steps)++;
+    if (!skip_top) {
+      Term alpha = ARG(from_lit->atom, it->from_side);
+      if (unify(alpha, cf, cur, ci, &tr)) {
+        if (check_instances(from_lit, (int) it->from_side, cf,
+                            into_lit, cur, ci)) {
+          from_pos = para_iterator_from_position(it);
+          into_pos = para_iterator_into_position(it);
+          result = paramodulate(from_lit, (int) it->from_side, cf,
+                                into, into_pos, ci);
+          result->justification = para_just(
+            PARA_JUST, from_lit->atom->container, copy_ilist(from_pos),
+            into, copy_ilist(into_pos));
+        }
+        undo_subst(tr);
+      }
+    }
+    para_iterator_advance(it, root);
+    zap_ilist(from_pos);
+    zap_ilist(into_pos);
+    if (result != NULL) {
+      (*yielded)++;
+      (*proc_proc)(result);
+    }
+  }
+  if (!it->complete)
+    (void) para_iterator_prepare(from, into, it);
+  free_context(cf);
+  free_context(ci);
+  return it->complete;
+}  /* para_from_into_bounded */
+
 /*************
  *
  *   para_pos()
@@ -641,4 +943,3 @@ Topform para_pos2(Topform from, Ilist from_pos, Topform into, Ilist into_pos)
   free_context(into_subst);
   return p;
 }  /* para_pos2 */
-

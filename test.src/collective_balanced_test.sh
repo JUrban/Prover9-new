@@ -35,6 +35,25 @@ grep -q 'COLLECTIVE_TRACE kind=paramod_into' "$test_tmp/trace.out"
 grep -q 'COLLECTIVE_TRACE kind=pos_hyper' "$test_tmp/trace.out"
 grep -q 'COLLECTIVE_TRACE kind=neg_hyper' "$test_tmp/trace.out"
 
+# Force a one-position native paramodulation budget on the equality proof.
+# No raw prefix is regenerated, both directions still advance, and the
+# authoritative proof path remains translatable.
+sed -e '1i assign(sos_limit,-1).\nassign(collective_raw_work_budget,1).\nassign(collective_candidate_chunk,1).' \
+    -e 's/assign(passive_store,compressed)\./assign(passive_store,dense)./' \
+    -e 's/set(collective_hint_probes)\./clear(collective_hint_probes)./' \
+    -e '/assign(inference_frontier,collective)\./a assign(collective_scheduler,balanced_hint).' \
+  "$repo_dir/test.src/collective_frontier.in" > "$test_tmp/paramod.in"
+"$repo_dir/bin/prover9" < "$test_tmp/paramod.in" \
+  > "$test_tmp/paramod.out" 2> "$test_tmp/paramod.err"
+grep -q 'THEOREM PROVED' "$test_tmp/paramod.out"
+grep -Eq 'Collective_iterators: raw_budget=1, raw_steps=[1-9][0-9]*, candidates=[1-9][0-9]*, completions=[1-9][0-9]*, invalidations=0, raw_turn_peak=1, path_bytes=[0-9]+\.' \
+  "$test_tmp/paramod.out"
+grep -Eq 'Collective_chunks: limit=1, emitted=[1-9][0-9]*, replayed=0, raw_seen=[1-9][0-9]*, deferred_turns=[1-9][0-9]*, raw_peak=1\.' \
+  "$test_tmp/paramod.out"
+"$repo_dir/bin/prooftrans" expand < "$test_tmp/paramod.out" \
+  > "$test_tmp/paramod-proof.out"
+grep -q 'end of proof' "$test_tmp/paramod-proof.out"
+
 # The checkpoint policy byte and scheduler state are required for fail-closed
 # resume.  Compare the terminal aggregate state with an uninterrupted run.
 sed '1i assign(checkpoint_given,5).\nset(checkpoint_exit).\nset(checkpoint_verify).' \
