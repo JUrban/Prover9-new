@@ -1990,6 +1990,30 @@ static int compare_doubles(const void *a, const void *b)
 
 /*************
  *
+ *   matched_hints()
+ *
+ *   Return the number of input hints that have been matched at least once.
+ *   Hint weights are the authoritative cumulative match counters.
+ *
+ *************/
+
+/* PUBLIC */
+int matched_hints(Clist hint_list)
+{
+  int n = 0;
+  Clist_pos p;
+
+  if (hint_list == NULL)
+    return 0;
+  for (p = hint_list->first; p; p = p->next) {
+    if (p->c->weight > 0)
+      n++;
+  }
+  return n;
+}  /* matched_hints */
+
+/*************
+ *
  *   print_hint_match_stats()
  *
  *   Print min/mean/median/max of match counts for hints
@@ -2009,11 +2033,7 @@ void print_hint_match_stats(FILE *fp, Clist hint_list)
     return;
 
   /* Count hints with at least one match */
-  total = 0;
-  for (p = hint_list->first; p; p = p->next) {
-    if (p->c->weight > 0)
-      total++;
-  }
+  total = matched_hints(hint_list);
 
   if (total == 0) {
     fprintf(fp,

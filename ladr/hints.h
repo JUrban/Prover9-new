@@ -79,6 +79,8 @@ int expire_old_hints(unsigned long long current_given,
 
 int active_hints(void);
 
+int matched_hints(Clist hint_list);
+
 BOOL packed_hints_enabled(void);
 
 void packed_hint_index_stats(unsigned long long *node_bytes,

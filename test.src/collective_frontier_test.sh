@@ -13,13 +13,17 @@ grep -Eq 'Search_loop: mode=discount, frontier=collective, active_indexed=[0-9]+
   "$test_tmp/prover.out"
 grep -Eq 'Collective_frontier: batches_created=[1-9][0-9]*, completed=[1-9][0-9]*, pending=[1-9][0-9]*, peak=[1-9][0-9]*, ratio=1, skipped=[0-9]+, parent_materializations=0, activations=[1-9][0-9]*\.' \
   "$test_tmp/prover.out"
+grep -Eq 'Collective_backlog: paramod=[1-9][0-9]*, pos_hyper=0, neg_hyper=0, lag_mean=[0-9]+\.[0-9], lag_p50=[0-9]+, lag_p95=[0-9]+, lag_max=[0-9]+\.' \
+  "$test_tmp/prover.out"
 grep -Eq 'Collective_work: paramod_turns=[1-9][0-9]*, paramod_pairs_completed=[1-9][0-9]*, hyper_turns=[0-9]+, hyper_sets_completed=[0-9]+\.' \
   "$test_tmp/prover.out"
-grep -Eq 'Collective_chunks: limit=64, emitted=[0-9]+, replayed=[0-9]+, deferred_turns=[0-9]+, raw_peak=[0-9]+\.' \
+grep -Eq 'Collective_chunks: limit=64, emitted=[0-9]+, replayed=[0-9]+, raw_seen=[1-9][0-9]*, deferred_turns=[0-9]+, raw_peak=[0-9]+\.' \
   "$test_tmp/prover.out"
-grep -Eq 'Collective_candidate_cache: limit=4096, peak=[1-9][0-9]*, stalls=[0-9]+\.' \
+grep -Eq 'Collective_candidate_cache: limit=4096, current=[0-9]+, peak=[1-9][0-9]*, stalls=[0-9]+\.' \
   "$test_tmp/prover.out"
 grep -Eq 'Collective_hint_probes: scheduled=[1-9][0-9]*, expanded=[1-9][0-9]*, credit=(available|consumed)\.' \
+  "$test_tmp/prover.out"
+grep -Eq 'Collective_hint_selection: selected=[1-9][0-9]*, Hha=[0-9]+, Hw=[0-9]+, LH=[0-9]+, other=[0-9]+, distinct_matched=[1-9][0-9]*\.' \
   "$test_tmp/prover.out"
 grep -Eq 'Collective_memory: descriptor_bytes=[1-9][0-9]*, history_bytes=[1-9][0-9]*, deactivations=14\.' \
   "$test_tmp/prover.out"
@@ -52,9 +56,9 @@ sed '1i assign(collective_candidate_cache,4).\nassign(collective_candidate_chunk
 grep -q 'THEOREM PROVED' "$test_tmp/paramod-chunk1.out"
 grep -Eq 'Collective_work: paramod_turns=[1-9][0-9]*, paramod_pairs_completed=[1-9][0-9]*, hyper_turns=0, hyper_sets_completed=0\.' \
   "$test_tmp/paramod-chunk1.out"
-grep -Eq 'Collective_chunks: limit=1, emitted=[1-9][0-9]*, replayed=[1-9][0-9]*, deferred_turns=[1-9][0-9]*, raw_peak=([2-9]|[1-9][0-9]+)\.' \
+grep -Eq 'Collective_chunks: limit=1, emitted=[1-9][0-9]*, replayed=[1-9][0-9]*, raw_seen=[1-9][0-9]*, deferred_turns=[1-9][0-9]*, raw_peak=([2-9]|[1-9][0-9]+)\.' \
   "$test_tmp/paramod-chunk1.out"
-grep -Eq 'Collective_candidate_cache: limit=4, peak=4, stalls=[1-9][0-9]*\.' \
+grep -Eq 'Collective_candidate_cache: limit=4, current=[0-9]+, peak=4, stalls=[1-9][0-9]*\.' \
   "$test_tmp/paramod-chunk1.out"
 "$repo_dir/bin/prooftrans" expand < "$test_tmp/paramod-chunk1.out" \
   > "$test_tmp/paramod-chunk1-parents.out"
@@ -69,9 +73,9 @@ sed '1i set(collective_promising_candidates).\nset(collective_promising_schedule
 "$repo_dir/bin/prover9" < "$test_tmp/promising.in" \
   > "$test_tmp/promising.out" 2> "$test_tmp/promising.err"
 grep -q 'THEOREM PROVED' "$test_tmp/promising.out"
-grep -Eq 'Collective_chunks: limit=1, emitted=[1-9][0-9]*, replayed=[1-9][0-9]*, deferred_turns=[1-9][0-9]*, raw_peak=([2-9]|[1-9][0-9]+)\.' \
+grep -Eq 'Collective_chunks: limit=1, emitted=[1-9][0-9]*, replayed=[1-9][0-9]*, raw_seen=[1-9][0-9]*, deferred_turns=[1-9][0-9]*, raw_peak=([2-9]|[1-9][0-9]+)\.' \
   "$test_tmp/promising.out"
-grep -Eq 'Collective_candidate_cache: limit=4, peak=4, stalls=[1-9][0-9]*\.' \
+grep -Eq 'Collective_candidate_cache: limit=4, current=[0-9]+, peak=4, stalls=[1-9][0-9]*\.' \
   "$test_tmp/promising.out"
 grep -Eq 'Collective_promising: enabled=1, scans=[1-9][0-9]*, considered=[1-9][0-9]*, buffer_peak=1\.' \
   "$test_tmp/promising.out"
@@ -116,7 +120,7 @@ sed '1i assign(collective_candidate_chunk,1).' \
 grep -q 'THEOREM PROVED' "$test_tmp/hyper-chunk1.out"
 grep -Eq 'Collective_work: paramod_turns=0, paramod_pairs_completed=0, hyper_turns=[1-9][0-9]*, hyper_sets_completed=[1-9][0-9]*\.' \
   "$test_tmp/hyper-chunk1.out"
-grep -Eq 'Collective_chunks: limit=1, emitted=[1-9][0-9]*, replayed=[1-9][0-9]*, deferred_turns=[1-9][0-9]*, raw_peak=([2-9]|[1-9][0-9]+)\.' \
+grep -Eq 'Collective_chunks: limit=1, emitted=[1-9][0-9]*, replayed=[1-9][0-9]*, raw_seen=[1-9][0-9]*, deferred_turns=[1-9][0-9]*, raw_peak=([2-9]|[1-9][0-9]+)\.' \
   "$test_tmp/hyper-chunk1.out"
 "$repo_dir/bin/prooftrans" expand < "$test_tmp/hyper-chunk1.out" \
   > "$test_tmp/hyper-chunk1-parents.out"
@@ -140,5 +144,34 @@ grep -Eq 'Collective_history_index: clauses=6, indexed=6, shared=4, retained=2, 
   "$test_tmp/historical-hyper.out"
 grep -Eq 'New_demodulators=1 .*Back_demodulated=2\.' \
   "$test_tmp/historical-hyper.out"
+
+# Collective cumulative attribution is part of deterministic checkpoint
+# state.  Compare a checkpoint/resume boundary with an uninterrupted run,
+# including physical raw visits and hint-selected-given counters.
+sed '1i assign(max_proofs,-1).\nassign(max_given,35).\nset(checkpoint_verify).' \
+  "$repo_dir/test.src/collective_frontier.in" > "$test_tmp/control.in"
+sed '1i assign(checkpoint_given,10).\nset(checkpoint_exit).' \
+  "$test_tmp/control.in" > "$test_tmp/checkpoint.in"
+"$repo_dir/bin/prover9" < "$test_tmp/control.in" \
+  > "$test_tmp/control.out" 2> "$test_tmp/control.err" || true
+checkpoint_case="$test_tmp/checkpoint-case"
+mkdir "$checkpoint_case"
+(
+  cd "$checkpoint_case"
+  "$repo_dir/bin/prover9" < "$test_tmp/checkpoint.in" \
+    > before.out 2> before.err || true
+)
+checkpoint_dir=$(find "$checkpoint_case" -maxdepth 1 -type d \
+  -name 'prover9_*_ckpt_10' -print)
+test -n "$checkpoint_dir"
+"$repo_dir/bin/prover9" -r "$checkpoint_dir" < /dev/null \
+  > "$test_tmp/resumed.out" 2> "$test_tmp/resumed.err" || true
+grep -Eq '^%   Verification: [0-9]+ passed, 0 failed\.$' \
+  "$test_tmp/resumed.out"
+grep -E '^(Given=|Collective_(frontier|work|chunks|hint_selection):)' \
+  "$test_tmp/control.out" | tail -5 > "$test_tmp/control.stats"
+grep -E '^(Given=|Collective_(frontier|work|chunks|hint_selection):)' \
+  "$test_tmp/resumed.out" | tail -5 > "$test_tmp/resumed.stats"
+diff -u "$test_tmp/control.stats" "$test_tmp/resumed.stats"
 
 echo 'collective_frontier_test: PASS'

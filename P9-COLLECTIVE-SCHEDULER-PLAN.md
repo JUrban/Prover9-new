@@ -2,9 +2,28 @@
 
 Date: 2026-08-08 (Europe/Berlin)
 
-Branch: `better-packed`
+Branch: `better-collective-scheduler`
 
-Status: design and acceptance plan only; no scheduler code has been changed.
+Status: implementation in progress on the opt-in development branch.
+
+## Implementation log
+
+### 2026-08-08: Phase 0 attribution
+
+- Frozen artifact hashes and configurations are recorded in
+  `P9-COLLECTIVE-SCHEDULER-BASELINES.md`.
+- `test.src/osborn_collective_controls.sh` prepares the four bounded control
+  policies with explicit time, memory, and given limits.
+- Aggregate reporting now distinguishes physical raw enumeration from
+  emitted/replayed candidates, reports pending rule work and exact descriptor
+  lag quantiles without allocating per-descriptor report memory, counts
+  cumulative hint-selected givens by selector, and reports distinct matched
+  hints.
+- Periodic reports include interval deltas for raw visits, committed generated
+  clauses, hint-selected givens, and newly matched distinct hints.
+- The legacy collective schedule and proof traces are unchanged; the focused
+  collective, DISCOUNT, hint-index, hint-checkpoint, and standard proof suites
+  pass.
 
 ## Objective
 

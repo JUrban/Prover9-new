@@ -451,8 +451,10 @@ void collective_reset_state(void)
   Stats.collective_candidates_replayed = 0;
   Stats.collective_deferred_turns = 0;
   Stats.collective_raw_candidates_peak = 0;
+  Stats.collective_raw_candidates_seen = 0;
   Stats.collective_candidate_cache_peak = 0;
   Stats.collective_candidate_cache_stalls = 0;
+  Stats.collective_candidate_cache_current = 0;
   Stats.collective_promising_scans = 0;
   Stats.collective_promising_considered = 0;
   Stats.collective_promising_buffer_peak = 0;
@@ -475,8 +477,21 @@ void collective_reset_state(void)
   Stats.collective_history_rejected_inactive = 0;
   Stats.collective_hint_probes_scheduled = 0;
   Stats.collective_hint_probes_expanded = 0;
+  Stats.collective_hint_selected_total = 0;
+  Stats.collective_hint_selected_hha = 0;
+  Stats.collective_hint_selected_hw = 0;
+  Stats.collective_hint_selected_lh = 0;
+  Stats.collective_hint_selected_other = 0;
+  Stats.collective_distinct_hints_matched = 0;
   Stats.collective_batches_pending = 0;
+  Stats.collective_pending_paramod = 0;
+  Stats.collective_pending_pos_hyper = 0;
+  Stats.collective_pending_neg_hyper = 0;
   Stats.collective_batches_peak = 0;
+  Stats.collective_descriptor_lag_sum = 0;
+  Stats.collective_descriptor_lag_p50 = 0;
+  Stats.collective_descriptor_lag_p95 = 0;
+  Stats.collective_descriptor_lag_max = 0;
   Stats.collective_activation_entries = 0;
   Stats.collective_deactivation_entries = 0;
   Stats.collective_descriptor_bytes = 0;
@@ -1007,6 +1022,83 @@ unsigned long long collective_history_bytes(void)
            sizeof(*Collective_activation_pages) +
          (unsigned long long) Collective_deactivation_capacity *
            sizeof(*Collective_deactivations);
+}
+
+static
+unsigned long long collective_descriptor_lag(struct collective_batch *b)
+{
+  return Collective_activation_count > b->activation_limit ?
+    Collective_activation_count - b->activation_limit : 0;
+}
+
+/* Return the exact zero-based order statistic without allocating an array
+   proportional to the pending frontier.  The extra queue passes occur only
+   when aggregate statistics are requested. */
+static
+unsigned long long collective_descriptor_lag_at_rank(
+  unsigned long long rank, unsigned long long maximum)
+{
+  unsigned long long low = 0;
+  unsigned long long high = maximum;
+
+  while (low < high) {
+    unsigned long long midpoint = low + (high - low) / 2;
+    unsigned long long at_or_below = 0;
+    struct collective_batch *b;
+    for (b = Collective_batch_head; b != NULL; b = b->next) {
+      if (collective_descriptor_lag(b) <= midpoint)
+        at_or_below++;
+    }
+    if (at_or_below > rank)
+      high = midpoint;
+    else
+      low = midpoint + 1;
+  }
+  return low;
+}
+
+static
+void collective_descriptor_stats(
+  unsigned long long *paramod,
+  unsigned long long *pos_hyper,
+  unsigned long long *neg_hyper,
+  unsigned long long *lag_sum,
+  unsigned long long *lag_p50,
+  unsigned long long *lag_p95,
+  unsigned long long *lag_max)
+{
+  struct collective_batch *b;
+  unsigned long long count = 0;
+
+  *paramod = 0;
+  *pos_hyper = 0;
+  *neg_hyper = 0;
+  *lag_sum = 0;
+  *lag_p50 = 0;
+  *lag_p95 = 0;
+  *lag_max = 0;
+
+  for (b = Collective_batch_head; b != NULL; b = b->next) {
+    unsigned long long lag = collective_descriptor_lag(b);
+    count++;
+    if ((b->kind & COLLECTIVE_PARAMOD) != 0)
+      (*paramod)++;
+    if ((b->kind & COLLECTIVE_POS_HYPER) != 0)
+      (*pos_hyper)++;
+    if ((b->kind & COLLECTIVE_NEG_HYPER) != 0)
+      (*neg_hyper)++;
+    *lag_sum += lag;
+    if (lag > *lag_max)
+      *lag_max = lag;
+  }
+
+  if (count != 0) {
+    unsigned long long p50_rank = (count - 1) / 2;
+    unsigned long long p95_count =
+      (count / 100) * 95 + ((count % 100) * 95 + 99) / 100;
+    *lag_p50 = collective_descriptor_lag_at_rank(p50_rank, *lag_max);
+    *lag_p95 = collective_descriptor_lag_at_rank(p95_count - 1, *lag_max);
+  }
 }
 
 static
@@ -1862,8 +1954,18 @@ void update_stats(void)
   Stats.passive_indexed_clauses = discount_mode() ? 0 : Stats.sos_size;
   Stats.delayed_demodulators = delayed_demodulator_count();
   Stats.collective_batches_pending = Collective_batch_count;
+  collective_descriptor_stats(&Stats.collective_pending_paramod,
+                              &Stats.collective_pending_pos_hyper,
+                              &Stats.collective_pending_neg_hyper,
+                              &Stats.collective_descriptor_lag_sum,
+                              &Stats.collective_descriptor_lag_p50,
+                              &Stats.collective_descriptor_lag_p95,
+                              &Stats.collective_descriptor_lag_max);
   Stats.collective_activation_entries = Collective_activation_count;
   Stats.collective_deactivation_entries = Collective_deactivation_count;
+  Stats.collective_candidate_cache_current =
+    collective_candidate_occupancy();
+  Stats.collective_distinct_hints_matched = matched_hints(Glob.hints);
   Stats.collective_descriptor_bytes = Collective_batch_count *
                                       sizeof(struct collective_batch) +
     Collective_priority_heap_capacity * sizeof(*Collective_priority_heap);
@@ -1931,6 +2033,18 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             comma_num(s.collective_parent_materializations),
             comma_num(s.collective_activation_entries));
     fprintf(fp,
+            "Collective_backlog: paramod=%s, pos_hyper=%s, neg_hyper=%s, "
+            "lag_mean=%.1f, lag_p50=%s, lag_p95=%s, lag_max=%s.\n",
+            comma_num(s.collective_pending_paramod),
+            comma_num(s.collective_pending_pos_hyper),
+            comma_num(s.collective_pending_neg_hyper),
+            s.collective_batches_pending == 0 ? 0.0 :
+              (double) s.collective_descriptor_lag_sum /
+                (double) s.collective_batches_pending,
+            comma_num(s.collective_descriptor_lag_p50),
+            comma_num(s.collective_descriptor_lag_p95),
+            comma_num(s.collective_descriptor_lag_max));
+    fprintf(fp,
             "Collective_work: paramod_turns=%s, paramod_pairs_completed=%s, "
             "hyper_turns=%s, hyper_sets_completed=%s.\n",
             comma_num(s.collective_pair_turns),
@@ -1939,15 +2053,18 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             comma_num(s.collective_hyper_sets_completed));
     fprintf(fp,
             "Collective_chunks: limit=%d, emitted=%s, replayed=%s, "
-            "deferred_turns=%s, raw_peak=%s.\n",
+            "raw_seen=%s, deferred_turns=%s, raw_peak=%s.\n",
             parm(Opt->collective_candidate_chunk),
             comma_num(s.collective_candidates_emitted),
             comma_num(s.collective_candidates_replayed),
+            comma_num(s.collective_raw_candidates_seen),
             comma_num(s.collective_deferred_turns),
             comma_num(s.collective_raw_candidates_peak));
     fprintf(fp,
-            "Collective_candidate_cache: limit=%d, peak=%s, stalls=%s.\n",
+            "Collective_candidate_cache: limit=%d, current=%s, peak=%s, "
+            "stalls=%s.\n",
             parm(Opt->collective_candidate_cache),
+            comma_num(s.collective_candidate_cache_current),
             comma_num(s.collective_candidate_cache_peak),
             comma_num(s.collective_candidate_cache_stalls));
     fprintf(fp,
@@ -1973,6 +2090,15 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             comma_num(s.collective_hint_probes_scheduled),
             comma_num(s.collective_hint_probes_expanded),
             Collective_hint_probe_credit ? "available" : "consumed");
+    fprintf(fp,
+            "Collective_hint_selection: selected=%s, Hha=%s, Hw=%s, "
+            "LH=%s, other=%s, distinct_matched=%s.\n",
+            comma_num(s.collective_hint_selected_total),
+            comma_num(s.collective_hint_selected_hha),
+            comma_num(s.collective_hint_selected_hw),
+            comma_num(s.collective_hint_selected_lh),
+            comma_num(s.collective_hint_selected_other),
+            comma_num(s.collective_distinct_hints_matched));
     fprintf(fp,
             "Collective_memory: descriptor_bytes=%s, history_bytes=%s, "
             "deactivations=%s.\n",
@@ -3912,6 +4038,10 @@ void report(FILE *fp, char *level)
   static unsigned long long prev_query_special = 0;
   static unsigned long long prev_intersect_merge = 0;
   static unsigned long long prev_given = 0;
+  static unsigned long long prev_collective_raw[2] = {0, 0};
+  static unsigned long long prev_collective_generated[2] = {0, 0};
+  static unsigned long long prev_collective_hint_selected[2] = {0, 0};
+  static unsigned long long prev_collective_distinct_hints[2] = {0, 0};
 
   if (fp != stderr)
     fprintf(fp, "\nNOTE: Report at %.2f seconds, %s", seconds, get_date());
@@ -3920,6 +4050,26 @@ void report(FILE *fp, char *level)
     level = (Opt ? stringparm1(Opt->stats) : "lots");
 
   fprint_all_stats(fp, level);
+
+  if (collective_frontier_mode()) {
+    int slot = fp == stderr ? 1 : 0;
+    fprintf(fp,
+            "Collective_interval: raw_seen=+%s, generated=+%s, "
+            "hint_selected=+%s, distinct_hints=+%s.\n",
+            comma_num(Stats.collective_raw_candidates_seen -
+                      prev_collective_raw[slot]),
+            comma_num(Stats.generated - prev_collective_generated[slot]),
+            comma_num(Stats.collective_hint_selected_total -
+                      prev_collective_hint_selected[slot]),
+            comma_num(Stats.collective_distinct_hints_matched -
+                      prev_collective_distinct_hints[slot]));
+    prev_collective_raw[slot] = Stats.collective_raw_candidates_seen;
+    prev_collective_generated[slot] = Stats.generated;
+    prev_collective_hint_selected[slot] =
+      Stats.collective_hint_selected_total;
+    prev_collective_distinct_hints[slot] =
+      Stats.collective_distinct_hints_matched;
+  }
 
   /* Print FPA index statistics if requested */
   if (flag(Opt->report_index_stats)) {
@@ -6150,6 +6300,7 @@ static BOOL collective_chunk_finish(
 
   if (chunk->seen > Stats.collective_raw_candidates_peak)
     Stats.collective_raw_candidates_peak = chunk->seen;
+  Stats.collective_raw_candidates_seen += chunk->seen;
   Stats.collective_candidates_emitted += chunk->emitted;
   Stats.collective_candidates_replayed += chunk->replayed;
   if (!complete)
@@ -6621,6 +6772,17 @@ void make_inferences(void)
     Stats.given++;
     given_clause->was_given = TRUE;
     set_hints_given_count(Stats.given);
+    if (collective_frontier_mode() && given_clause->matching_hint != NULL) {
+      Stats.collective_hint_selected_total++;
+      if (strcmp(selection_type, "Hha") == 0)
+        Stats.collective_hint_selected_hha++;
+      else if (strcmp(selection_type, "Hw") == 0)
+        Stats.collective_hint_selected_hw++;
+      else if (strcmp(selection_type, "LH") == 0)
+        Stats.collective_hint_selected_lh++;
+      else
+        Stats.collective_hint_selected_other++;
+    }
 
     /* max_nohints: exit after N consecutive givens w/o hint match (Veroff) */
     {
@@ -9040,6 +9202,8 @@ void write_checkpoint(void)
             Stats.collective_deferred_turns);
     fprintf(fp, "collective_raw_candidates_peak %llu\n",
             Stats.collective_raw_candidates_peak);
+    fprintf(fp, "collective_raw_candidates_seen %llu\n",
+            Stats.collective_raw_candidates_seen);
     fprintf(fp, "collective_candidate_cache_peak %llu\n",
             Stats.collective_candidate_cache_peak);
     fprintf(fp, "collective_candidate_cache_stalls %llu\n",
@@ -9078,6 +9242,16 @@ void write_checkpoint(void)
             Stats.collective_hint_probes_scheduled);
     fprintf(fp, "collective_hint_probes_expanded %llu\n",
             Stats.collective_hint_probes_expanded);
+    fprintf(fp, "collective_hint_selected_total %llu\n",
+            Stats.collective_hint_selected_total);
+    fprintf(fp, "collective_hint_selected_hha %llu\n",
+            Stats.collective_hint_selected_hha);
+    fprintf(fp, "collective_hint_selected_hw %llu\n",
+            Stats.collective_hint_selected_hw);
+    fprintf(fp, "collective_hint_selected_lh %llu\n",
+            Stats.collective_hint_selected_lh);
+    fprintf(fp, "collective_hint_selected_other %llu\n",
+            Stats.collective_hint_selected_other);
     fprintf(fp, "collective_batches_peak %llu\n",
             Stats.collective_batches_peak);
     fprintf(fp, "simplifier_epoch %u\n", Simplifier_epoch);
@@ -9808,6 +9982,10 @@ void resume_load_clauses(const char *dir)
     rewind(fp); (void) read_metadata_ull_if_present(
       fp, "collective_raw_candidates_peak",
       &Stats.collective_raw_candidates_peak);
+    Stats.collective_raw_candidates_seen = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_raw_candidates_seen",
+      &Stats.collective_raw_candidates_seen);
     Stats.collective_candidate_cache_peak = 0;
     rewind(fp); (void) read_metadata_ull_if_present(
       fp, "collective_candidate_cache_peak",
@@ -9866,6 +10044,26 @@ void resume_load_clauses(const char *dir)
     rewind(fp); (void) read_metadata_ull_if_present(
       fp, "collective_hint_probes_expanded",
       &Stats.collective_hint_probes_expanded);
+    Stats.collective_hint_selected_total = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_hint_selected_total",
+      &Stats.collective_hint_selected_total);
+    Stats.collective_hint_selected_hha = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_hint_selected_hha",
+      &Stats.collective_hint_selected_hha);
+    Stats.collective_hint_selected_hw = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_hint_selected_hw",
+      &Stats.collective_hint_selected_hw);
+    Stats.collective_hint_selected_lh = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_hint_selected_lh",
+      &Stats.collective_hint_selected_lh);
+    Stats.collective_hint_selected_other = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_hint_selected_other",
+      &Stats.collective_hint_selected_other);
     rewind(fp); Stats.collective_batches_peak =
       read_metadata_ull(fp, "collective_batches_peak");
   }
