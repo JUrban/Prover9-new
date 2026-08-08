@@ -81,14 +81,16 @@ The implemented design makes seven related changes:
         mmap-backed bodies rather than live clause graphs in active indexes.
   \item Hints use a packed exact-matching representation rather than an FPA
         forest of complete clause trees.
-  \item Collective descriptors represent complete inference sets without
-        first materializing every conclusion.
-  \item A bounded cache limits resident collective conclusions.
-  \item Optional promising scans expose low raw-weight candidates early, and
-        an optional global heap compares known keys while mandatory FIFO turns
-        preserve fairness.
-  \item Historical active state, proof parents, cursors, checksums, and
-        scheduler state are compact and checkpointable.
+  \item A balanced collective policy splits each inference rule and both
+        paramodulation directions into independent fairly serviced work.
+  \item Native pointer-free paramodulation and hyperresolution continuations
+        bound raw work without regenerating prefixes.
+  \item A bounded pool ranks exact read-only hint previews; every committed
+        clause still follows the authoritative Prover9 path.
+  \item A bounded dual cursor can promote a hint match ahead of fair
+        enumeration and verify/skip that exact raw ordinal at catch-up.
+  \item Historical state, proof parents, both cursors, bounded promotion
+        records, and scheduler/pool state are checkpointable.
 \end{enumerate}
 
 With a cache of 4096, the old archived SOS counts imply structural resident
@@ -174,63 +176,64 @@ order.  \setting{hint\_index=hybrid} is a compatibility alias, and
 \setting{hint\_index=packed\_legacy} selects the former broad algorithm only
 for diagnostics.
 
-\subsection{Collective inference frontier}
+\subsection{Balanced collective inference}
 
-\setting{assign(inference\_frontier,collective)} replaces eager generation of
-most paramodulation and hyperresolution conclusions by one descriptor per
-activated given.  A descriptor records partner ranges, rule bits, activation
-and deactivation epochs, a partner cursor, a conclusion cursor or promising
-threshold, a replay checksum, a known candidate key, and scheduler state.
+The stronger opt-in policy is
+\setting{assign(collective\_scheduler,balanced\_hint)}.  Each selected given
+creates independent positive/negative hyperresolution and
+paramodulation-from/into descriptors.  Weighted rule lanes and a mandatory
+oldest turn prevent rule starvation.  Admission stops at a hard descriptor
+high-water and drains toward a low-water mark.  Bounded measurements selected
+256/192 descriptors and an oldest activation lag of 256 as the defaults,
+replacing loose provisional development values of 4096/3072/4096.
 
-An append-only activation history and persistent historical FPA index recreate
-the active set visible when each descriptor was created.  Active bodies are
-shared directly.  Only bodies later deactivated transfer to history ownership,
-so this state grows with selected givens rather than generated or passive
-clauses.
+An append-only activation history recreates the active set visible at each
+descriptor epoch.  Active bodies are shared; only later-deactivated bodies
+transfer to history ownership.  State therefore follows selected active work,
+not the passive/generated clause count.
 
-\subsection{Bounded candidates and resumable chunks}
+\subsection{Native continuations and bounded windows}
 
-\setting{collective\_candidate\_cache} defaults to 4096 and bounds
-materialized conclusions emitted by collective paramodulation/hyperresolution.
-When the selector reaches the limit, expansion pauses while normal given
-selection drains resident candidates.  The budget includes current limbo
-state, preventing a single turn from overfilling it.
+Balanced paramodulation and hyperresolution have stable pointer-free native
+continuations over partner, literal, equality-side, subterm-path, nested-clash,
+and mate-phase coordinates.  The raw-work budget (default 64) is a hard bound
+per fair turn and no conclusion prefix is replayed.
 
-\setting{collective\_candidate\_chunk} defaults to 64 and bounds raw
-conclusions passed through clause processing in one descriptor turn.  Partial
-inference units rotate fairly and resume later.  Generator-prefix mode checks
-a rolling prefix hash; promising mode checks the complete immutable raw
-sequence.  Nothing in a finite descriptor is silently discarded.  Every
-exposed conclusion uses the existing simplification, exact hint, filtering,
-weighting, proof-parent, and selection code.
+Yielded clauses enter one global pool.  A 64-entry ranked window, forced
+commit interval, and periodic oldest-entry commit give bounded cross-descriptor
+choice and resident fairness.  The candidate cache remains the global hard
+body-count bound.  Every entry is processed by unchanged authoritative
+simplification, hint matching, filtering, weighting, proof-parent, and
+selection code.  Initial SOS and eager binary/UR rules remain outside this
+pool.
 
-The bound does not presently cover an oversized initial SOS or separately
-enabled eager binary/UR rules.  The tested AIM strategy disables automatic
-inference and enables collective paramodulation and hyperresolution, covering
-the dominant generated frontier.
+\subsection{Exact preview and dual-cursor discovery}
 
-\subsection{Optional promising scheduling}
+Preview normalizes an owned scratch clause, queries the configured exact hint
+index read-only, and predicts the real selector key without assigning IDs,
+mutating hints, copying labels, degrading hints, or changing authoritative
+statistics.  Tautologies are not preview-matched because authoritative clause
+processing deletes them first.  Stale hint/simplifier epochs are refreshed.
 
-\setting{collective\_promising\_candidates} scans one immutable inference set
-and retains only the lowest chunk-sized set of keys
-\((\hbox{raw weight},\hbox{generator ordinal})\).  Other temporary clauses are
-deleted before IDs or hint state can observe them.  A partial descriptor stores
-the committed threshold and exact next key.
+Each descriptor can also hold an independent bounded discovery continuation.
+Hot descendants receive additional service, low-rate general turns explore
+ordinary work, and mandatory fair turns remain.  A promoted match is rematched
+through the normal path; its raw ordinal and fingerprint are retained until
+the fair iterator reproduces and verifies it, then skips the duplicate body.
+A looked-ahead conclusion is visited at most twice and committed exactly once.
 
-\setting{collective\_promising\_scheduler} maintains a min-heap over
-descriptors whose next key is known.  With the default fair interval of 8, no
-more than seven priority turns occur before a mandatory FIFO turn.  FIFO
-discovers unknown keys and prevents starvation.  Raw weight is not a lower
-bound after simplification and hint adjustment, so both options remain off by
-default.
+The older promising-candidate, global promising-scheduler, and hint-probe
+options remain available as legacy comparison policies and are off in the
+recommended balanced profile.
 
 \subsection{Checkpoint/restart}
 
-The current collective checkpoint magic is \setting{P9COLLA}.  It stores
-activation history, queue order, partial inference cursors, keys and checksums,
-hint-probe credit, and the priority/fairness cycle.  The heap is rebuilt
-canonically.  Readers remain compatible with \setting{P9COLL5} through
-\setting{P9COLL9}.
+Balanced discovery uses \setting{P9COLLF} and live pool files use
+\setting{P9CPOOL3}.  Queue/lane/drain state, both native cursors, bounded
+consumed ordinal/fingerprint records, preview metadata, and live bodies are
+serialized.  A regression resumes with both a promotion and its consumed
+record live.  Older \setting{P9COLL5--P9COLLE} formats remain readable under
+their matching policy; version/policy mismatches fail closed.
 
 \section{Semantic contract}
 
@@ -239,14 +242,17 @@ sequence depends on eager operations over passive clauses, precisely the work
 being removed.  The intended guarantees are sound proofs, fair completion of
 finite collective inference sets, complete proof-parent reconstruction,
 historically correct active epochs, deterministic restart within a fixed
-configuration, and exact hint behavior whenever a candidate materializes.
+configuration, exact preview/commit hint behavior, and hard bounds on raw
+turns, descriptors, candidate bodies, discovery distance, and promotion data.
 
 For a materialized normalized clause, exact hint behavior includes
 subsumption/equivalence, flipped equality, matcher ID, adjusted weight, labels,
 degradation, match-once and matcher limits, breadth-first hints, and hint age.
-An unseen conclusion cannot affect hint-prioritized selection before its
-descriptor is explored.  Starvation-safe hint probes exist, but substantially
-perturbed the tested frontier and therefore remain off by default.
+Discovery may inspect a bounded prefix ahead of fair enumeration.  A
+nonmatching scratch clause is later revisited fairly; a promoted clause is
+rematched authoritatively and fingerprint-checked at catch-up.  Mandatory
+ordinary discovery, oldest descriptor turns, and oldest pool commits preserve
+finite-work fairness.
 
 \section{How to build and use the implementation}
 
@@ -256,6 +262,8 @@ perturbed the tested frontier and therefore remain off by default.
 cd /project/Prover9
 make all -j2
 make test1
+make -C test.src iterator-tests hint-postings-test
+./test.src/collective_balanced_test.sh
 ./test.src/discount_loop_test.sh
 ./test.src/collective_frontier_test.sh
 ./test.src/hint_index_trace_test.sh
@@ -266,7 +274,7 @@ make test1
 Broader repository test targets should also be run before a release or long
 deployment.
 
-\subsection{Conservative AIM configuration}
+\subsection{Recommended balanced-hint AIM configuration}
 
 Place these settings after any automatic settings so they win:
 
@@ -280,11 +288,23 @@ assign(passive_store,dense).
 assign(hint_index,packed).
 assign(inference_frontier,collective).
 assign(ancestor_store,mmap).
+assign(collective_scheduler,balanced_hint).
 
 assign(sos_limit,-1).
-assign(collective_given_ratio,4).
-assign(collective_candidate_chunk,64).
 assign(collective_candidate_cache,4096).
+assign(collective_candidate_window,64).
+assign(collective_raw_work_budget,64).
+
+assign(collective_descriptor_high_water,256).
+assign(collective_descriptor_low_water,192).
+assign(collective_oldest_lag_limit,256).
+
+set(collective_hint_discovery).
+assign(collective_discovery_raw_budget,32).
+assign(collective_discovery_distance,256).
+assign(collective_discovery_promotion_cap,32).
+assign(collective_discovery_general_interval,8).
+assign(collective_discovery_turn_interval,2).
 
 clear(collective_hint_probes).
 clear(collective_promising_candidates).
@@ -294,13 +314,14 @@ set(clocks).
 assign(stats,all).
 \end{lstlisting}
 
-This is the conservative measured setup: stable-ID packed hints, dense passives,
-collective paramodulation/hyperresolution, a 4096-candidate cache, and FIFO
-descriptor scheduling.  Dense passive storage requires
-\setting{sos\_limit=-1}; collective mode requires DISCOUNT and a memory or mmap
-ancestor store.  A given ratio of 4 schedules one descriptor-expansion turn
-after four activations.  If SOS empties, the finite descriptor queue is still
-drained.
+This is the measured stronger setup: stable-ID packed hints, dense passives,
+split native rule iterators, a global exact-preview window, admission
+backpressure, and bounded dual-cursor discovery.  The 256/192/256 profile is
+the balanced default and is explicit here for reproducibility.  Dense passive
+storage requires \setting{sos\_limit=-1}; collective mode requires DISCOUNT
+and a memory or mmap ancestor store.  For the legacy control, omit the
+balanced scheduler assignment, use a given ratio of 4, and clear discovery.
+Legacy and balanced checkpoints must not be mixed.
 
 For an isolated hint-index comparison, keep every other option fixed and vary
 only:
@@ -320,10 +341,16 @@ the operating system page cold records and lowers resident pressure, but still
 requires adequate local temporary-filesystem capacity.  The backing files are
 not restart files; Prover9 checkpoints provide restart.
 
-\subsection{Tighter-memory experiment}
+\subsection{Tighter-memory and legacy-order experiments}
 
 \begin{lstlisting}
 assign(collective_candidate_cache,64).
+assign(collective_candidate_window,64).
+\end{lstlisting}
+
+The older replay/raw-weight comparison policy is separately enabled by:
+
+\begin{lstlisting}
 set(collective_promising_candidates).
 clear(collective_promising_scheduler).
 \end{lstlisting}
@@ -336,19 +363,20 @@ set(collective_promising_scheduler).
 assign(collective_promising_fair_interval,8).
 \end{lstlisting}
 
-A cache of 64 is not known to be universally optimal.  It changes which
-deferred candidates become active early and can increase replay.  Begin at
-4096 for compatibility and coverage, then compare 1024, 256, and 64 on a
-representative solved suite.
+A cache of 64 is not universally optimal and changes early ordering.  Native
+balanced iterators do not replay prefixes, but legacy promising policies can.
+Compare 4096, 1024, 256, and 64 on a representative solved suite.
 
 \subsection{Statistics, checkpoints, and proofs}
 
 Important full-statistics groups include \setting{Search\_loop},
 \setting{Passive\_refresh}, \setting{Collective\_frontier},
-\setting{Collective\_work}, \setting{Collective\_chunks}, the candidate-cache
-peak and stalls, promising scheduler counters, collective memory/history,
-clause-body and dense-passive bytes, hint storage, allocator accounting, and
-external RSS.  The cache peak includes initial preprocessing SOS occupancy.
+\setting{Collective\_work}, \setting{Collective\_balanced},
+\setting{Collective\_iterators}, \setting{Collective\_candidate\_pool},
+\setting{Collective\_preview}, and \setting{Collective\_discovery}, plus
+collective memory/history, dense-passive bytes, hint storage, allocator
+accounting, and external RSS.  The cache peak includes initial preprocessing
+SOS occupancy.
 
 \begin{lstlisting}
 set(checkpoint_verify).
@@ -366,13 +394,32 @@ bin/prooftrans expand < run.out > expanded-proof.out
 bin/directproof < run.out > direct-proof.out
 \end{lstlisting}
 
+\subsection{Bounded comparison harness}
+
+The harness arguments are input, output directory, maximum givens, maximum
+CPU seconds, and maximum MiB.  Select only the desired policy to avoid
+rerunning historical controls:
+
+\begin{lstlisting}[language=bash]
+OSBORN_CASES=balanced_hint_packed \
+  test.src/osborn_collective_controls.sh \
+  /path/to/input.in results/balanced 500 3600 4096
+\end{lstlisting}
+
+The harness records the effective input, binary/input hashes, limits, exit
+status, output/error streams, and \setting{/usr/bin/time -v}.  Available cases
+include OTTER/FPA, DISCOUNT clauses, legacy collective controls, and balanced
+compact/packed variants.  \setting{OSBORN\_BALANCED\_OPTIONS} records explicit
+per-run tuning overrides.
+
 \section{Measured bounded results}
 
 Development began with hundreds of givens, 30 seconds, 256\,MiB, and a
 deterministic 10\% sample (31,014 hints).  After those gates passed, the full
-310,153-hint input was run only to 100 givens under 90-CPU-second and
+310,153-hint input was run only to 100 givens under 120-CPU-second and
 512\,MiB limits.  No week-long or 1,000/4,000-given improved run was performed
-on the development host.
+on the development host.  All stronger-policy results used zero native prefix
+replay.
 
 \subsection{Component measurements}
 
@@ -398,7 +445,43 @@ to 13.01 MB used+resident logical bytes (50.7\%); always-resident portion
 \bottomrule
 \end{longtable}
 
-\subsection{Frontier results at 250 givens}
+\subsection{Stronger scheduler results}
+
+Loose provisional descriptor watermarks left 715 of 750 rule descriptors
+pending at the 250-given 10\%-hint boundary.  The bounded 256/192 profile
+forced inference debt to catch up:
+
+\begin{center}
+\small
+\begin{tabular}{lrrrrr}
+\toprule
+Input/profile & Generated & Kept & Hints & Completed/peak & RSS KiB \\
+\midrule
+Osborn 10\%, loose & 866 & 588 & 38 & 35/715 & 43,984 \\
+Osborn 10\%, bounded & 60,703 & 16,449 & 266 & 525/255 & 46,436 \\
+Osborn full, packed, 100 & 825 & 550 & 141 & 82/254 & 296,192 \\
+AIM Osborn+Kcom, 100 & 14,273 & 271 & 181 & 108/254 & 9,984 \\
+AIM generalized-Bol, 100 & 1,972 & 107 & 102 & 49/251 & 15,496 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The bounded 250-given run used 20.15 user seconds, confirmed all 3,314
+committed discovery promotions, completed both rule families, replayed zero
+candidates, held the candidate pool below 126 bodies, and used only about
+124\,KiB of descriptors plus 25\,KiB of consumed-record storage.  The
+archived conservative point reported 48 current matches and only two completed
+descriptors.
+
+A 30-second 500-given request stopped on time.  Reports at 10 and 20 CPU
+seconds reached givens 176 and 255, adding 252 then seven distinct current
+matches while Hha selection continued and the descriptor peak stayed 255.
+The full-hint peak is the already measured packed-hint startup high-water; at
+termination allocator live/reserved memory was 52.1/97.5\,MB.  Preview and
+authoritative matching agreed with zero false positives in all final bounded
+runs.
+
+\subsection{Earlier frontier results at 250 givens}
 
 \begin{center}
 \small
@@ -443,6 +526,12 @@ generated clauses, 11,854 priority turns, 1835 fair turns, heap peak 68, and
 Stable-ID packed hints checkpointed at givens 0, 2, and 6 reproduce the
 uninterrupted post-checkpoint hint trace byte-for-byte, including a boundary
 after hint rewrite/reindex activity.
+
+Native paramodulation and hyperresolution tests reproduce eager raw sequences
+for budgets 1--64 and resume every suffix.  A \setting{P9COLLF} regression
+checkpoints with a promoted body and ahead-consumed ordinal both live, resumes,
+and reproduces terminal pool, preview, promotion, skip, and scheduler
+accounting with all integrity checks passing.
 
 \subsection{Better packed hint-index results}
 
@@ -549,10 +638,11 @@ that explains at least 95\% of the delta.
 \section{Limitations and next work}
 
 \begin{enumerate}
-  \item Raw promising weight is not a lower bound after simplification or
-        hint adjustment; a safe hint-aware predictor remains research work.
-  \item Unmaterialized conclusions cannot match or subsume hints before their
-        descriptor is visited; every materialized conclusion is exact.
+  \item Discovery is deliberately bounded.  A match beyond its configured
+        distance/raw schedule still waits for fair enumeration; more
+        lookahead trades CPU/search order rather than RAM.
+  \item Preview is exact at its recorded epochs but advisory.  Later hint or
+        simplifier changes trigger refresh and every promotion is rematched.
   \item Binary and UR resolution remain eager and may exceed the cache.
   \item Initial SOS can exceed a small cache and is drained, not rejected.
   \item Historical bodies are shared ordinary term trees; packing immutable
@@ -588,6 +678,12 @@ Commit & Main change \\
 \setting{24413df} & Occurrence-correlated rewrite features \\
 \setting{a6b36f6} & Deterministic packed-hint checkpoint regression \\
 \setting{7611da4} & Promote improved \setting{hint\_index=packed} \\
+\setting{cc87d70} & Attribute inference debt and interval hint progress \\
+\setting{502e6c0} & Split rule lanes, fairness, and bounded admission \\
+\setting{b99df36} & Native resumable paramodulation iterators \\
+\setting{da8d1de} & Native resumable hyperresolution iterators \\
+\setting{7935082} & Bounded exact-preview candidate windows \\
+\setting{f1eb990} & Bounded dual-cursor discovery and checkpoints \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -598,13 +694,18 @@ Primary implementation and verification files are
 \setting{provers.src/cold\_passive\_store.c},
 \setting{provers.src/cold\_passive\_store.h},
 \setting{test.src/collective\_frontier\_test.sh},
+\setting{test.src/collective\_balanced\_test.sh},
+\setting{test.src/osborn\_collective\_controls.sh},
 \setting{test.src/discount\_loop\_test.sh},
 \setting{test.src/hint\_index\_trace\_test.sh},
 \setting{test.src/hint\_checkpoint\_test.sh},
 \setting{ladr/hint\_postings.c}, and \setting{ladr/hints.c}.  The detailed
 design and prior measurements are in
 \setting{P9-DISCOUNT-WALDMEISTER-PLAN.md},
-\setting{P9-BETTER-PACKED-PLAN.md}, \setting{P9-MEMORY-RESULTS.md}, and
+\setting{P9-BETTER-PACKED-PLAN.md},
+\setting{P9-COLLECTIVE-SCHEDULER-PLAN.md},
+\setting{P9-COLLECTIVE-SCHEDULER-BASELINES.md},
+\setting{P9-MEMORY-RESULTS.md}, and
 \setting{Checkpoint-Format-Spec.txt}.
 
 \section{Conclusion}

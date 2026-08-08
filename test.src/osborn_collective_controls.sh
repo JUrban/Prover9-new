@@ -8,6 +8,9 @@ max_given=${3:-100}
 max_seconds=${4:-120}
 max_megs=${5:-2048}
 prover="$repo_dir/bin/prover9"
+all_cases='otter_fpa discount_clauses collective_conservative collective_aids balanced_hint balanced_hint_packed'
+selected_cases=${OSBORN_CASES:-$all_cases}
+balanced_options=${OSBORN_BALANCED_OPTIONS:-}
 
 if test ! -f "$input"; then
   echo "input not found: $input" >&2
@@ -24,11 +27,16 @@ sha256sum "$input" "$prover" > "$output_dir/hashes.txt"
   echo "max_given=$max_given"
   echo "max_seconds=$max_seconds"
   echo "max_megs=$max_megs"
+  echo "cases=$selected_cases"
+  echo 'balanced_options_begin'
+  printf '%s\n' "$balanced_options"
+  echo 'balanced_options_end'
 } > "$output_dir/limits.txt"
 
 filtered_input="$output_dir/base-filtered.in"
 awk '
   /^assign\(max_(given|seconds|megs),/ { next }
+  /^assign\(sos_limit,/ { next }
   /^(set|clear)\(print_(gen|kept|given|initial_clauses)\)\./ { next }
   /^assign\((search_loop|passive_store|hint_index|inference_frontier|ancestor_store|collective_[a-z_]+),/ { next }
   /^(set|clear)\(collective_[a-z_]+\)\./ { next }
@@ -39,6 +47,10 @@ make_case()
 {
   name=$1
   policy=$2
+  case " $selected_cases " in
+    *" $name "*) ;;
+    *) return ;;
+  esac
   case_input="$output_dir/$name.in"
   {
     echo 'clear(print_gen).'
@@ -52,6 +64,9 @@ make_case()
     echo "assign(max_seconds,$max_seconds)."
     echo "assign(max_megs,$max_megs)."
     printf '%s\n' "$policy"
+    case "$name" in
+      balanced_hint*) printf '%s\n' "$balanced_options" ;;
+    esac
     cat "$filtered_input"
   } > "$case_input"
 }
@@ -61,6 +76,7 @@ assign(search_loop,otter).
 assign(passive_store,full).
 assign(hint_index,fpa).
 assign(inference_frontier,clauses).
+assign(sos_limit,-1).
 assign(ancestor_store,off).'
 
 make_case discount_clauses '
@@ -68,6 +84,7 @@ assign(search_loop,discount).
 assign(passive_store,dense).
 assign(hint_index,compact).
 assign(inference_frontier,clauses).
+assign(sos_limit,-1).
 assign(ancestor_store,mmap).'
 
 make_case collective_conservative '
@@ -76,6 +93,7 @@ assign(passive_store,dense).
 assign(hint_index,compact).
 assign(inference_frontier,collective).
 assign(ancestor_store,mmap).
+assign(sos_limit,-1).
 assign(collective_given_ratio,4).
 clear(collective_hint_probes).
 clear(collective_promising_candidates).
@@ -87,13 +105,47 @@ assign(passive_store,dense).
 assign(hint_index,compact).
 assign(inference_frontier,collective).
 assign(ancestor_store,mmap).
+assign(sos_limit,-1).
 assign(collective_given_ratio,1).
 set(collective_hint_probes).
 set(collective_promising_candidates).
 set(collective_promising_scheduler).'
 
-for name in otter_fpa discount_clauses collective_conservative collective_aids
+make_case balanced_hint '
+assign(search_loop,discount).
+assign(passive_store,dense).
+assign(hint_index,compact).
+assign(inference_frontier,collective).
+assign(ancestor_store,mmap).
+assign(sos_limit,-1).
+assign(collective_scheduler,balanced_hint).
+set(collective_hint_discovery).
+clear(collective_hint_probes).
+clear(collective_promising_candidates).
+clear(collective_promising_scheduler).'
+
+make_case balanced_hint_packed '
+assign(search_loop,discount).
+assign(passive_store,dense).
+assign(hint_index,packed).
+assign(inference_frontier,collective).
+assign(ancestor_store,mmap).
+assign(sos_limit,-1).
+assign(collective_scheduler,balanced_hint).
+set(collective_hint_discovery).
+clear(collective_hint_probes).
+clear(collective_promising_candidates).
+clear(collective_promising_scheduler).'
+
+for name in $selected_cases
 do
+  case " $all_cases " in
+    *" $name "*) ;;
+    *)
+      echo "unknown Osborn control case: $name" >&2
+      exit 2
+      ;;
+  esac
   status=0
   if /usr/bin/time -v -o "$output_dir/$name.time" \
        "$prover" < "$output_dir/$name.in" \

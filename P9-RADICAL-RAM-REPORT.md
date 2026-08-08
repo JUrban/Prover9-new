@@ -29,15 +29,18 @@ The implemented solution changes the architecture:
    bodies instead of live `Topform` graphs in active indexes.
 3. Hints use a packed exact-matching representation rather than an FPA forest
    of complete clause trees.
-4. Waldmeister-style collective descriptors represent whole inference sets
-   without first materializing every conclusion.
-5. A bounded candidate cache controls how many collective conclusions may be
-   resident at once.
-6. Optional promising scans expose the lowest raw-weight conclusions first;
-   an optional min-heap compares known next keys across descriptors, with
-   mandatory FIFO turns for fairness.
-7. Historical active states, proof parents, cursors, checksums, and scheduler
-   state are compact and checkpointable.
+4. A balanced Waldmeister-style scheduler splits positive hyperresolution,
+   negative hyperresolution, and both paramodulation directions into
+   independent, fairly serviced descriptors with admission backpressure.
+5. Native pointer-free paramodulation and hyperresolution continuations bound
+   every raw-enumeration turn without regenerating prefixes.
+6. One global bounded pool ranks exact, read-only normalized hint previews,
+   while every committed clause still follows the authoritative Prover9 path.
+7. A bounded dual cursor can discover and promote a hint match ahead of fair
+   enumeration, then verifies and skips that exact raw ordinal once the fair
+   cursor catches it.
+8. Historical active states, proof parents, both cursors, bounded promotion
+   records, and scheduler/pool state are compact and checkpointable.
 
 For the AIM configuration using collective paramodulation and hyperresolution,
 the default 4,096-entry cache changes the dominant passive term from millions
@@ -144,79 +147,87 @@ raw/adjusted weight, labels, degradation, hint epoch, and proof result.
 `assign(hint_index,packed_legacy)` selects the former broad packed algorithm
 only for diagnostics.
 
-### 2.5 Collective inference frontier
+### 2.5 Balanced collective inference
 
-`assign(inference_frontier,collective)` replaces eager generation of most
-paramodulation and hyperresolution conclusions with one descriptor per
-activated given.  A descriptor records:
-
-- given and historical partner ranges;
-- inference-rule bits;
-- activation and deactivation epochs;
-- a partner cursor;
-- a conclusion cursor or promising-order threshold;
-- a structural replay/sequence checksum;
-- the next known raw candidate key;
-- checkpointed scheduler state.
-
-An append-only activation history and persistent historical FPA index recreate
-the active set seen when the descriptor was created.  Active bodies are shared
-directly.  Only bodies that are later deactivated transfer to history
-ownership, so historical state grows with selected givens, not generated or
-passive clauses.
-
-### 2.6 Bounded candidate cache and chunks
-
-`collective_candidate_cache` defaults to 4,096.  It bounds materialized
-conclusions emitted by the collective paramodulation/hyper frontier.  When the
-selector reaches the limit, descriptor expansion pauses and ordinary given
-selection drains the best already-materialized clauses.  The budget includes
-the current limbo list, so one collective turn cannot overfill the cache.
-
-`collective_candidate_chunk` defaults to 64 and bounds raw conclusions sent
-through `cl_process` in one descriptor turn.  A partial inference unit rotates
-fairly and resumes later.  Generator-prefix mode verifies a rolling prefix
-checksum.  Promising mode verifies a checksum of the complete immutable raw
-sequence.
-
-Nothing is silently discarded: every conclusion in a finite descriptor is
-eventually exposed by the fair path.  Every exposed conclusion uses the
-unchanged simplification, exact hint matching, rule filtering, weighting,
-keep/delete, proof-parent, and given-selection code.
-
-Initial SOS clauses and separately enabled eager binary/UR inference are not
-currently governed by the collective cache.  The tested AIM/Osborn
-configuration clears automatic inference and uses paramodulation plus
-hyperresolution, so the dominant generated frontier is covered.
-
-### 2.7 Optional promising ordering
-
-`set(collective_promising_candidates)` scans one immutable inference set and
-retains only the lowest `collective_candidate_chunk` keys in a temporary fixed
-buffer.  Keys are `(raw clause weight, generator ordinal)`.  Clauses outside
-the buffer are deleted before clause IDs or hint state can observe them.  A
-partial descriptor stores the committed threshold and exact next raw key.
-
-`set(collective_promising_scheduler)` additionally maintains a min-heap over
-descriptors with known next keys.  It requires promising candidates.  By
-default, at most seven priority turns occur before one mandatory FIFO turn:
+`assign(inference_frontier,collective)` still selects the compact frontier.
+The stronger policy is separately opt-in:
 
 ```text
-assign(collective_promising_fair_interval,8).
+assign(collective_scheduler,balanced_hint).
 ```
 
-The FIFO turn discovers descriptors whose key is not known and prevents
-starvation.  Raw weight is a predictor, not a conservative lower bound on the
-post-simplification or hint-adjusted selector key.  Both promising features
-therefore remain default-off.
+Each selected given creates independent descriptors for positive and negative
+hyperresolution and for paramodulation from and into historical partners.
+Weighted rule lanes plus a mandatory oldest turn prevent one large inference
+rule from hiding another.  Descriptor admission stops at a hard high-water
+mark and drains toward the low-water mark before selecting more givens.  The
+bounded measurements selected defaults of 256/192 descriptors and an oldest
+activation lag of 256; these replace the intentionally loose provisional
+4096/3072 development values.
 
-### 2.8 Checkpoint/resume
+An append-only activation history recreates the active set visible at each
+descriptor epoch.  Active bodies are shared; only later-deactivated bodies
+transfer to history ownership.  Descriptor/history growth therefore follows
+selected active work rather than the passive/generated clause count.
 
-The current collective checkpoint magic is `P9COLLA` (the single-byte
-version-10 marker).  It stores activation history, queue order, partial
-inference cursors/keys/checksums, hint-probe credit, and the global
-priority/fairness cycle.  The priority heap is rebuilt canonically from saved
-keys.  Readers remain compatible with `P9COLL5` through `P9COLL9`.
+### 2.6 Native continuations and bounded candidate windows
+
+Balanced paramodulation and hyperresolution use stable pointer-free native
+continuations over partner, literal, equality side, subterm path, nested clash,
+and mate-phase coordinates.  `collective_raw_work_budget` (default 64) is a
+hard raw-visit bound per fair iterator turn.  No conclusion prefix is replayed.
+
+Yielded clauses enter one global pool.  `collective_candidate_window`
+(default 64) bounds the active ranked window;
+`collective_candidate_commit_interval` forces regular authoritative commits,
+and `collective_candidate_fair_interval` commits the oldest resident entry at
+fixed intervals.  `collective_candidate_cache` remains the global hard count
+bound across transient pool/limbo bodies.
+
+Every pool member is normalized, hint-matched, filtered, weighed, and retained
+or deleted by the unchanged `cl_process` path.  The preview changes ordering
+only.  Initial SOS and separately enabled eager binary/UR inference are not
+covered by the collective pool.
+
+### 2.7 Exact preview and dual-cursor discovery
+
+The pool preview normalizes an owned scratch clause, queries the configured
+exact hint index read-only, and predicts the actual high/low selector key.  It
+does not allocate a clause ID, mutate hints, copy labels, degrade a hint, or
+change authoritative hint/index statistics.  Tautologies are deliberately not
+preview-matched because `cl_process` deletes them before authoritative hint
+matching.  Hint or simplifier epoch changes trigger lazy refresh before a
+candidate can affect priority.
+
+With `set(collective_hint_discovery)` (the balanced-policy default), every
+descriptor also has an independent lookahead continuation.  Hot descendants
+get additional turns, a low-rate general turn explores the oldest ordinary
+descriptor, and every discovery turn is raw-work bounded.  Lookahead stops at
+a configured conclusion distance or promotion count until fair work catches
+up.  A previewed match may be committed early through `cl_process`; its raw
+ordinal and structural fingerprint are retained in a small bounded set.  The
+fair iterator later reproduces and verifies that conclusion exactly, removes
+the record, and deletes the duplicate body.  A looked-ahead conclusion is thus
+enumerated at most twice, and is authoritatively committed exactly once.
+
+### 2.8 Legacy promising policies
+
+The older `collective_promising_candidates`,
+`collective_promising_scheduler`, and `collective_hint_probes` options remain
+available for controlled comparisons but remain off in the balanced profile.
+They use replay/raw-weight predictors and should not be combined casually with
+the native preview scheduler.
+
+### 2.9 Checkpoint/resume
+
+Balanced discovery checkpoints use `P9COLLF`; live pool files use
+`P9CPOOL3`.  They serialize queue/lane/drain state, both native cursors,
+bounded consumed ordinal/fingerprint records, preview metadata, and candidate
+bodies.  A regression checkpoints while both a promoted body and its
+ahead-consumed record are live, resumes, and reproduces the uninterrupted
+terminal accounting.  The reader still accepts legacy `P9COLL5`--`P9COLLA`
+and the preceding balanced `P9COLLB`--`P9COLLE` formats under their matching
+policy; frontier/pool version mismatches fail closed.
 
 ## 3. Semantic and correctness guarantees
 
@@ -229,17 +240,21 @@ what the new design removes.  The intended guarantees are:
 - complete proof-parent reconstruction;
 - historical inference against the correct activation epoch;
 - deterministic resume within a fixed mode/configuration;
-- exact hint behavior whenever a candidate is materialized.
+- exact hint behavior for every preview and authoritative commitment;
+- bounded raw work, descriptor count, candidate bodies, discovery distance,
+  and promotion metadata.
 
 For a materialized normalized clause, exact hint behavior includes
 subsumption/equivalence, flipped equality matching, matcher ID, adjusted
 weight, copied labels, degradation, `hint_match_once`, matcher limits,
 `breadth_first_hints`, and `hint_age` state.
 
-An unseen conclusion cannot yet influence hint-prioritized selection before
-its descriptor is explored.  A starvation-safe `collective_hint_probes` flag
-exists, but experiments showed that it can perturb the frontier substantially,
-so it is also default-off.
+The discovery cursor may inspect a bounded prefix ahead of fair enumeration.
+A nonmatching scratch conclusion is simply discarded and later revisited by
+the fair cursor; it is never treated as redundant.  A promoted match is
+rematched authoritatively and fingerprint-checked at fair catch-up.  Mandatory
+ordinary discovery, oldest descriptor service, and oldest pool commitment
+preserve finite-work fairness even under a continuing stream of hinted work.
 
 ## 4. How to build and use it
 
@@ -249,6 +264,8 @@ so it is also default-off.
 cd /project/Prover9
 make all -j2
 make test1
+make -C test.src iterator-tests hint-postings-test
+./test.src/collective_balanced_test.sh
 ./test.src/discount_loop_test.sh
 ./test.src/collective_frontier_test.sh
 ./test.src/hint_index_trace_test.sh
@@ -259,7 +276,7 @@ make test1
 release or long-run deployment, run the broader repository test targets as
 well.
 
-### 4.2 Recommended conservative AIM configuration
+### 4.2 Recommended balanced-hint AIM configuration
 
 Place the following after any automatic settings, so later assignments win:
 
@@ -273,11 +290,23 @@ assign(passive_store,dense).
 assign(hint_index,packed).
 assign(inference_frontier,collective).
 assign(ancestor_store,mmap).
+assign(collective_scheduler,balanced_hint).
 
 assign(sos_limit,-1).
-assign(collective_given_ratio,4).
-assign(collective_candidate_chunk,64).
 assign(collective_candidate_cache,4096).
+assign(collective_candidate_window,64).
+assign(collective_raw_work_budget,64).
+
+assign(collective_descriptor_high_water,256).
+assign(collective_descriptor_low_water,192).
+assign(collective_oldest_lag_limit,256).
+
+set(collective_hint_discovery).
+assign(collective_discovery_raw_budget,32).
+assign(collective_discovery_distance,256).
+assign(collective_discovery_promotion_cap,32).
+assign(collective_discovery_general_interval,8).
+assign(collective_discovery_turn_interval,2).
 
 clear(collective_hint_probes).
 clear(collective_promising_candidates).
@@ -287,11 +316,18 @@ set(clocks).
 assign(stats,all).
 ```
 
-This is the conservative measured configuration: stable-ID packed hints, dense
-passives, collective paramodulation/hyperresolution, a 4,096-candidate cache,
-and FIFO descriptor scheduling.  `passive_store=dense` currently requires
-`sos_limit=-1`; collective mode requires DISCOUNT and a memory or mmap ancestor
-store.
+This is the bounded stronger configuration: stable-ID packed hints, dense
+passives, split native paramodulation/hyperresolution iterators, a globally
+bounded preview pool, descriptor backpressure, and exact dual-cursor hint
+discovery.  The 256/192/256 descriptor profile is now the balanced-policy
+default and is written explicitly above so long-run command files remain
+self-documenting.  `passive_store=dense` requires `sos_limit=-1`; collective
+mode requires DISCOUNT and a memory or mmap ancestor store.
+
+For the old trajectory/control policy, omit `collective_scheduler` (its
+default is `legacy`), use `collective_given_ratio=4`, and clear discovery and
+the three older aids.  Do not resume a legacy checkpoint under the balanced
+policy or vice versa.
 
 For an isolated hint-index comparison that preserves the current radical
 search trajectory, keep every other option identical and vary only:
@@ -311,17 +347,27 @@ resident pressure by letting the operating system page cold records, but they
 still need adequate local temporary-filesystem capacity.  They are not restart
 files; use Prover9 checkpoints for restart.
 
-`collective_given_ratio=4` means one descriptor-expansion turn is due after
-four given activations.  The default is 1.  Raising the value delays collective
-work and can reduce short-prefix residency, but also changes the search.  It
-does not drop work: if SOS empties, the finite descriptor queue is drained.
+`collective_given_ratio` is primarily a legacy-policy control.  Balanced mode
+uses admission high/low watermarks: lowering them spends more time completing
+inference debt before selecting new givens, while raising them admits more
+pending rule work.  The Osborn gate showed that the provisional value 4096
+allowed the 250-given prefix to finish with 715 of 750 descriptors pending;
+256/192 completed 525 descriptors and materially restored the hint stream.
 
-### 4.3 Tighter-memory experimental configuration
+### 4.3 Tighter-memory and legacy-order experiments
 
-To study a much smaller materialized frontier:
+To make the balanced hard count agree with its default 64-entry ranked
+window:
 
 ```text
 assign(collective_candidate_cache,64).
+assign(collective_candidate_window,64).
+```
+
+The following are older replay/raw-weight comparison policies, not additions
+to the recommended balanced profile:
+
+```text
 set(collective_promising_candidates).
 clear(collective_promising_scheduler).
 ```
@@ -334,10 +380,10 @@ set(collective_promising_scheduler).
 assign(collective_promising_fair_interval,8).
 ```
 
-Do not assume 64 is universally optimal.  A very small cache changes which
-deferred candidates become active early and increases replay work.  Start with
-4,096 for compatibility/coverage testing, then compare 1,024, 256, and 64 on a
-representative solved suite.
+Do not assume 64 is universally optimal.  A small pool changes which deferred
+candidates become active first.  Native balanced iterators do not replay raw
+prefixes, but legacy promising modes can.  Compare 4,096, 1,024, 256, and 64
+on a representative solved suite before changing an established deployment.
 
 ### 4.4 Statistics to watch
 
@@ -347,9 +393,13 @@ With `assign(stats,all)`, the important lines are:
 - `Passive_refresh`: stale selection/requeue/subsumption work;
 - `Collective_frontier`: created, completed, pending descriptors;
 - `Collective_work`: physical turns versus completed pairs/sets;
+- `Collective_balanced`: per-rule turns, oldest turns, and withheld givens;
 - `Collective_chunks`: emitted, replayed, deferred, and raw peak;
+- `Collective_iterators`: raw bounds and native continuation storage;
 - `Collective_candidate_cache`: configured limit, observed peak, stalls;
-- `Collective_promising` and `Collective_promising_scheduler`;
+- `Collective_candidate_pool` and `Collective_preview`;
+- `Collective_discovery`: hot/general/fair turns, confirmations, skips,
+  distance, caps, and live consumed-record bytes;
 - `Collective_memory` and `Collective_history_index`;
 - `Clause_body_bytes`, `Dense_passive`, `Hint_store`, and
   `Packed_hint_index`, including per-operation `Packed_hint_operation` and
@@ -398,13 +448,46 @@ bin/prooftrans expand < run.out > expanded-proof.out
 bin/directproof < run.out > direct-proof.out
 ```
 
+### 4.6 Bounded comparison harness
+
+The control harness arguments are input, output directory, maximum givens,
+maximum CPU seconds, and maximum MiB.  `OSBORN_CASES` prevents accidental
+reruns of policies not under test:
+
+```sh
+OSBORN_CASES=balanced_hint_packed \
+  test.src/osborn_collective_controls.sh \
+  /path/to/osborn.in results/osborn-balanced 500 3600 4096
+```
+
+Available cases are `otter_fpa`, `discount_clauses`,
+`collective_conservative`, `collective_aids`, `balanced_hint` (compact/FPA
+hints), and `balanced_hint_packed` (recommended).  The harness writes the
+exact effective input, binary/input hashes, limits, exit status, stdout,
+stderr, and `/usr/bin/time -v` output.  Optional balanced overrides are
+recorded verbatim:
+
+```sh
+OSBORN_CASES=balanced_hint_packed \
+OSBORN_BALANCED_OPTIONS='assign(collective_candidate_cache,256).
+assign(collective_candidate_window,64).' \
+  test.src/osborn_collective_controls.sh \
+  /path/to/input.in results/tuned 250 120 2048
+```
+
+For a long production run, keep the limits in the generated input even when
+an external job scheduler also enforces them.  Use periodic checkpoints and
+retain the `.out`, `.err`, `.time`, `hashes.txt`, and `limits.txt` files for
+the old/new comparison.
+
 ## 5. Measured results
 
 Development began with at most hundreds of givens, 30 seconds, 256 MiB, and a
 deterministic 10% (31,014) hint sample.  After those gates passed, the complete
-310,153-hint input was run only to 100 givens with 90 CPU seconds and 512 MiB
+310,153-hint input was run only to 100 givens with 120 CPU seconds and 512 MiB
 as hard limits.  No week-long or 1,000/4,000-given improved run was launched
-on the current host.
+on the current host.  All stronger-scheduler results below use zero native
+prefix replay.
 
 ### 5.1 Component results
 
@@ -417,7 +500,45 @@ on the current host.
 | Original persistent collective scaffold | descriptor/history/retained state 132,944 to 46,808 bytes (64.8%) at that revision |
 | Synthetic ancestor archive, 100,000 records | 26.4 MB replaced graph/bookkeeping estimate to 13.01 MB used+resident logical bytes (50.7%); always-resident portion 92.8% lower |
 
-### 5.2 Frontier results at 250 givens
+### 5.2 Stronger scheduler results
+
+The decisive tuning variable was inference debt, not a larger lookahead raw
+budget.  With the provisional 4096/3072 descriptor watermarks, a 250-given
+10%-hint run ended with 715 of 750 descriptors pending and found no real
+lookahead promotion after tautologies were excluded from preview matching.
+The bounded 256/192 profile instead forced rule work to catch up:
+
+| Input/profile | Given | Generated | Kept | Currently matched hints | Completed / peak descriptors | Confirmed promotions | User CPU | Peak RSS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Osborn 10%, loose 4096/3072 | 251 | 866 | 588 | 38 | 35 / 715 | 0 | 7.60 s | 43,984 KiB |
+| Osborn 10%, bounded 256/192 | 251 | 60,703 | 16,449 | 266 | 525 / 255 | 3,314 | 20.15 s | 46,436 KiB |
+| Osborn full, packed, bounded | 101 | 825 | 550 | 141 | 82 / 254 | 67 | 79.09 s | 296,192 KiB |
+| AIM Osborn+Kcom, packed | 101 | 14,273 | 271 | 181 | 108 / 254 | 228 | 2.70 s | 9,984 KiB |
+| AIM generalized-Bol, packed | 101 | 1,972 | 107 | 102 | 49 / 251 | 84 | 1.61 s | 15,496 KiB |
+
+The 10%-hint bounded run completed work in both rule families, performed
+1,060,082 fair raw visits plus 372,295 discovery visits, kept the candidate
+pool below 126 transient bodies, and reported zero replay and zero preview
+false positives.  Its descriptor and consumed-record storage was about
+124 KiB and 25 KiB respectively.  The older conservative 250-given artifact
+reported 48 matched hints and only two completed descriptors; this is the
+specific flat-hint/debt failure the new profile addresses.
+
+A 30-second 500-given attempt stopped on its time limit as intended.  Reports
+at 10 and 20 CPU seconds reached givens 176 and 255: the first interval added
+252 distinct current hint matches and the next added seven, while `Hha`
+selection continued.  The hint slope slowed but did not stop; no larger run
+was attempted locally.
+
+The full-hint input was deterministically recovered from the archived echoed
+input (SHA-256
+`d18adfc55494c56895ed5c15adbef8c09c3e3ca1619d7f49231759b70494eb60`).
+Its 296 MiB peak is the same packed-hint preprocessing high-water already seen
+in the earlier 100-given runs.  At termination allocator live/reserved memory
+had fallen to 52.1/97.5 MB; the bounded scheduler itself did not recreate the
+old passive-RAM peak.
+
+### 5.3 Earlier frontier results at 250 givens
 
 | Configuration | Generated | Kept | SOS | Peak RSS | Wall/CPU observation |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -439,7 +560,7 @@ from one prefix.  Per-set promising ordering improved SOS quality substantially
 finished at 15.  All three stay tiny relative to the eager 4,846-clause
 frontier, but broader proof coverage is needed.
 
-### 5.3 Checkpoint and proof evidence
+### 5.4 Checkpoint and proof evidence
 
 - Focused DISCOUNT equality proofs pass `prooftrans` and `directproof`.
 - Collective equality and hyperresolution proofs pass `prooftrans`.
@@ -454,8 +575,13 @@ frontier, but broader proof coverage is needed.
 - Stable-ID packed hints checkpointed at givens 0, 2, and 6 reproduce the
   uninterrupted post-checkpoint `HINT_TRACE` byte-for-byte, including a
   boundary after hint rewrite/reindex activity.
+- Native paramodulation and hyperresolution differential tests reproduce the
+  eager raw sequence for budgets 1--64 and resume every continuation suffix.
+- `P9COLLF` checkpoint/resume with a live promoted pool entry and live
+  ahead-consumed ordinal reproduces terminal scheduler, preview, promotion,
+  and fair-skip accounting with all integrity checks passing.
 
-### 5.4 Better packed hint-index results
+### 5.5 Better packed hint-index results
 
 The archived 1,000-given full-hint results established the target:
 
@@ -557,10 +683,12 @@ component accounting to explain 95% of the delta.
 
 ## 7. Current limitations and next work
 
-1. Raw promising weight is not a lower bound after simplification or hint
-   adjustment.  A safe hint-aware predictor remains research work.
-2. Unmaterialized conclusions cannot exactly subsume/match hints before their
-   descriptor is visited.  Every materialized conclusion is matched exactly.
+1. Discovery is deliberately bounded.  A hint deeper than the configured
+   distance/raw schedule can still wait for fair enumeration; increasing
+   lookahead is a CPU/search-policy tradeoff, not a RAM fix.
+2. Preview is exact for its current epochs but advisory.  Later hint or
+   simplifier changes can change a key, so stale entries are refreshed and
+   every promotion is rematched authoritatively.
 3. Binary and UR resolution are still eager and can exceed the collective
    cache if enabled heavily.
 4. Initial SOS may exceed a small cache and is drained rather than rejected.
@@ -596,6 +724,12 @@ The implementation was split into reviewable commits, including:
 | `24413df` | Occurrence-correlated rewrite features |
 | `a6b36f6` | Deterministic packed-hint checkpoint regression |
 | `7611da4` | Promote the improved index to `hint_index=packed` |
+| `cc87d70` | Attribute inference debt and interval hint progress |
+| `502e6c0` | Split rule lanes, fairness, and bounded admission |
+| `b99df36` | Native resumable paramodulation iterators |
+| `da8d1de` | Native resumable hyperresolution iterators |
+| `7935082` | Bounded exact-preview candidate windows |
+| `f1eb990` | Bounded dual-cursor hint discovery and checkpointing |
 
 Important implementation and documentation files are:
 
@@ -604,12 +738,16 @@ Important implementation and documentation files are:
 - [`provers.src/cold_passive_store.c`](provers.src/cold_passive_store.c)
 - [`provers.src/cold_passive_store.h`](provers.src/cold_passive_store.h)
 - [`test.src/collective_frontier_test.sh`](test.src/collective_frontier_test.sh)
+- [`test.src/collective_balanced_test.sh`](test.src/collective_balanced_test.sh)
+- [`test.src/osborn_collective_controls.sh`](test.src/osborn_collective_controls.sh)
 - [`test.src/discount_loop_test.sh`](test.src/discount_loop_test.sh)
 - [`test.src/hint_index_trace_test.sh`](test.src/hint_index_trace_test.sh)
 - [`test.src/hint_checkpoint_test.sh`](test.src/hint_checkpoint_test.sh)
 - [`ladr/hint_postings.c`](ladr/hint_postings.c)
 - [`ladr/hints.c`](ladr/hints.c)
 - [`P9-BETTER-PACKED-PLAN.md`](P9-BETTER-PACKED-PLAN.md)
+- [`P9-COLLECTIVE-SCHEDULER-PLAN.md`](P9-COLLECTIVE-SCHEDULER-PLAN.md)
+- [`P9-COLLECTIVE-SCHEDULER-BASELINES.md`](P9-COLLECTIVE-SCHEDULER-BASELINES.md)
 - [`P9-DISCOUNT-WALDMEISTER-PLAN.md`](P9-DISCOUNT-WALDMEISTER-PLAN.md)
 - [`P9-MEMORY-RESULTS.md`](P9-MEMORY-RESULTS.md)
 - [`Checkpoint-Format-Spec.txt`](Checkpoint-Format-Spec.txt)

@@ -4,7 +4,8 @@ Date: 2026-08-08 (Europe/Berlin)
 
 Branch: `better-collective-scheduler`
 
-Status: implementation in progress on the opt-in development branch.
+Status: phases 0--6 implemented on the opt-in development branch; the
+suitable-host long-run acceptance phase remains intentionally pending.
 
 ## Implementation log
 
@@ -168,6 +169,43 @@ claim a bounded raw-work turn; native continuation is the next phase.
   run.  It also requires hot and general discovery, forced fair service,
   exact promotion/confirmation/skip counts, bounded distance, completed work
   in every rule lane, and zero residual consumed records.
+
+### 2026-08-08: Phase 6 bounded tuning and cross-prefix checks
+
+- The Osborn harness can select individual policies through `OSBORN_CASES`
+  and records optional balanced overrides.  This avoided rerunning expensive
+  historical controls on the low-RAM host.  Every run retained explicit
+  given, CPU, and RAM limits plus input/binary hashes and `/usr/bin/time -v`.
+- Production Osborn data exposed an uncovered preview case: normalization
+  turned many raw conclusions into tautologies, which authoritative
+  `cl_process_delete` rejects before hint matching.  Preview now follows that
+  ordering.  The 250-given rerun changed 185/188 apparent false-positive
+  promotions into zero promotions and zero false positives, confirming that
+  the matcher itself had not diverged.
+- Raising the discovery raw budget did not improve coverage because the early
+  descriptors completed before spending it.  Lowering the provisional
+  descriptor high/low/lag profile from 4096/3072/4096 to 256/192/256 was the
+  decisive change; these are now the balanced-policy defaults.
+- At 250 givens with the deterministic 31,014-hint sample, the bounded profile
+  generated 60,703 clauses, kept 16,449, reported 266 current matched hints,
+  completed 525/750 descriptors, confirmed all 3,314 committed discovery
+  promotions, replayed zero raw candidates, held the descriptor peak to 255,
+  and peaked at 46,436 KiB RSS in 20.15 user seconds.  The archived
+  conservative 250-given point reported 48 matches and two completions.
+- A 30-second 500-given request stopped on time.  Its 10/20-second reports
+  reached givens 176/255, added 252 then seven distinct current hint matches,
+  continued `Hha` selection, and kept the descriptor peak at 255 and RSS near
+  46 MiB.  No local 1,000-given or multi-hour run was started.
+- The recovered full 310,153-hint input ran once to 100 givens with packed
+  hints and 120-second/512-MiB limits.  It reported 141 current matched hints,
+  67/67 confirmed promotions, zero false positives/replay, and a descriptor
+  peak of 254.  Peak RSS was 296,192 KiB, the established packed-hint startup
+  floor; terminal allocator live/reserved memory was 52.1/97.5 MB.
+- Two independent AIM prefixes at 100 givens also kept all bounds and exact
+  promotion accounting.  Osborn+Kcom used 9,984 KiB RSS with 228 confirmed
+  promotions; generalized-Bol-to-Osborn used 15,496 KiB with 84.  This does
+  not replace solved-suite or suitable-host acceptance, but it rejects a
+  scheduler profile tuned only to one input parser or one inference mix.
 
 ## Objective
 

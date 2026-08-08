@@ -1804,11 +1804,11 @@ Prover_options init_prover_options(void)
   p->collective_promising_fair_interval =
     init_parm("collective_promising_fair_interval", 8, 1, 1000);
   p->collective_descriptor_high_water =
-    init_parm("collective_descriptor_high_water", 4096, 4, INT_MAX);
+    init_parm("collective_descriptor_high_water", 256, 4, INT_MAX);
   p->collective_descriptor_low_water =
-    init_parm("collective_descriptor_low_water", 3072, 0, INT_MAX);
+    init_parm("collective_descriptor_low_water", 192, 0, INT_MAX);
   p->collective_oldest_lag_limit =
-    init_parm("collective_oldest_lag_limit", 4096, 1, INT_MAX);
+    init_parm("collective_oldest_lag_limit", 256, 1, INT_MAX);
   p->collective_balanced_fair_interval =
     init_parm("collective_balanced_fair_interval", 8, 1, 1000);
   p->collective_paramod_share =
@@ -2711,7 +2711,8 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             "confirmed=%s, false_positives=%s, duplicate_skips=%s, "
             "catchups=%s, distance_max=%s, cap_stalls=%s, "
             "consumed_records=%s, consumed_bytes=%s.\n",
-            flag(Opt->collective_hint_discovery),
+            collective_balanced_mode() &&
+              flag(Opt->collective_hint_discovery),
             parm(Opt->collective_discovery_raw_budget),
             parm(Opt->collective_discovery_distance),
             parm(Opt->collective_discovery_promotion_cap),
@@ -5939,10 +5940,15 @@ static void collective_preview_pool_entry(struct collective_pool_entry *e)
   Topform hint = NULL;
   double weight;
   BOOL flipped = FALSE;
+  BOOL tautology;
 
   collective_preview_normalize(scratch);
+  tautology = true_clause(scratch->literals);
   weight = clause_weight(scratch->literals);
-  if (!clist_empty(Glob.hints)) {
+  /* cl_process_delete() rejects a true clause before authoritative hint
+     matching.  Treat it the same way here: matching the normalized $T body
+     would manufacture an advisory hint that can never be confirmed. */
+  if (!tautology && !clist_empty(Glob.hints)) {
     if (!scratch->normal_vars)
       renumber_variables(scratch, MAX_VARS);
     hint = preview_weight_with_hints(
