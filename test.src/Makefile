@@ -11,7 +11,7 @@ CFLAGS = $(XFLAGS) -g  -O0 -Wall
 # CFLAGS = $(XFLAGS) -pg -O -Wall
 # CFLAGS = $(XFLAGS)  -Wall -pedantic
 
-PROGRAMS = avltest memory_lifecycle_test allocator_churn_test bookkeeping_lifecycle_test ancestor_store_test ancestor_store_scale_test checkpoint_selector_test dense_selector_compaction_test
+PROGRAMS = avltest memory_lifecycle_test allocator_churn_test bookkeeping_lifecycle_test ancestor_store_test ancestor_store_scale_test checkpoint_selector_test dense_selector_compaction_test hint_postings_test
 
 all: ladr apps
 
@@ -54,6 +54,9 @@ checkpoint_selector_test: checkpoint_selector_test.o ../provers.src/giv_select.o
 dense_selector_compaction_test: dense_selector_compaction_test.o ../provers.src/giv_select.o ../provers.src/semantics.o ../ladr/libladr.a
 	$(CC) $(CFLAGS) -o dense_selector_compaction_test dense_selector_compaction_test.o ../provers.src/giv_select.o ../provers.src/semantics.o ../ladr/libladr.a -lm
 
+hint_postings_test: hint_postings_test.o ../ladr/libladr.a
+	$(CC) $(CFLAGS) -o hint_postings_test hint_postings_test.o ../ladr/libladr.a -lm
+
 memory_lifecycle_test.o allocator_churn_test.o bookkeeping_lifecycle_test.o ancestor_store_test.o: ../ladr/topform.h
 
 bookkeeping_lifecycle_test.o: ../ladr/clause_store.h ../ladr/clauseid.h
@@ -79,6 +82,9 @@ checkpoint-tests: checkpoint_selector_test dense_selector_compaction_test
 
 bookkeeping-tests: bookkeeping_lifecycle_test
 	./bookkeeping_lifecycle_test
+
+hint-postings-test: hint_postings_test
+	./hint_postings_test
 
 ancestor-store-scale: ancestor_store_scale_test
 	./ancestor_store_scale_test

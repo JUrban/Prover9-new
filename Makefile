@@ -71,6 +71,10 @@ memory-tests:
 bookkeeping-tests:
 	cd test.src && $(MAKE) bookkeeping-tests
 
+
+hint-postings-test: lib
+	cd test.src && $(MAKE) hint-postings-test
+
 discount-tests: all
 	./test.src/discount_loop_test.sh
 	./test.src/collective_frontier_test.sh

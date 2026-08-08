@@ -113,8 +113,8 @@ CLAS_OBJ = formula.o definitions.o literals.o topform.o clist.o clause_store.o\
            int_code.o features.o di_tree.o fastparse.o\
            random.o subsume.o clause_misc.o clause_eval.o complex.o
 INFE_OBJ = dollar.o flatdemod.o demod.o clash.o resolve.o paramod.o\
-           backdemod.o\
-           hints.o ac_redun.o xproofs.o ivy.o
+	   backdemod.o\
+	   hint_postings.o hints.o ac_redun.o xproofs.o ivy.o
 MODL_OBJ = interp.o
 MISC_OBJ = std_options.o banner.o ioutil.o tptp_trans.o top_input.o tptp_parse.o sine.o tstp_proof.o
 
