@@ -102,6 +102,7 @@ PRVR_OBJ = index_lits.o forward_subsume.o demodulate.o\
            pred_elim.o unfold.o semantics.o\
 	   giv_select.o white_black.o actions.o\
 	   cold_passive_store.o\
+	   rewrite_only_store.o\
 	   search.o\
 	   utilities.o\
 	   provers.o\
