@@ -59,6 +59,16 @@ static unsigned long long Packed_candidate_checks = 0;
 
 static Hint_postings Better_postings = NULL;
 static unsigned long long Better_feature_live_count = 0;
+static unsigned long long Better_equivalence_live_count = 0;
+struct better_equivalence_reference {
+  unsigned id;
+  unsigned next;
+};
+static unsigned *Better_equivalence_buckets = NULL;
+static unsigned Better_equivalence_bucket_capacity = 0;
+static struct better_equivalence_reference *Better_equivalence_references = NULL;
+static unsigned Better_equivalence_reference_count = 0;
+static unsigned Better_equivalence_reference_capacity = 0;
 static unsigned *Better_hint_feature_count = NULL;
 static unsigned short *Better_hint_positive_count = NULL;
 static unsigned short *Better_hint_negative_count = NULL;
@@ -438,6 +448,99 @@ static unsigned long long better_feature_key(unsigned kind, unsigned path,
          (unsigned) symbol;
 }
 
+static unsigned long long better_equivalence_key(
+  unsigned long long positive_mask, unsigned long long negative_mask,
+  unsigned positive, unsigned negative)
+{
+  unsigned long long x = positive_mask ^
+    ((negative_mask << 29) | (negative_mask >> 35)) ^
+    ((unsigned long long) positive << 48) ^
+    ((unsigned long long) negative << 32);
+  x ^= x >> 30;
+  x *= 0xbf58476d1ce4e5b9ULL;
+  x ^= x >> 27;
+  x *= 0x94d049bb133111ebULL;
+  return x ^ (x >> 31);
+}
+
+static void better_equivalence_reserve_references(unsigned needed)
+{
+  if (needed > Better_equivalence_reference_capacity) {
+    unsigned capacity = Better_equivalence_reference_capacity == 0 ? 1024 :
+                        Better_equivalence_reference_capacity;
+    while (capacity < needed) {
+      unsigned grown = capacity + (capacity + 1) / 2;
+      if (grown <= capacity)
+        fatal_error("better equivalence reference capacity overflow");
+      capacity = grown;
+    }
+    Better_equivalence_references = safe_realloc(
+      Better_equivalence_references,
+      (size_t) capacity * sizeof(struct better_equivalence_reference));
+    Better_equivalence_reference_capacity = capacity;
+  }
+}
+
+static void better_equivalence_append(unsigned id)
+{
+  unsigned long long key = better_equivalence_key(
+    Packed_hint_pos_features[id], Packed_hint_neg_features[id],
+    Better_hint_positive_count[id], Better_hint_negative_count[id]);
+  unsigned bucket = (unsigned) key &
+                    (Better_equivalence_bucket_capacity - 1);
+  unsigned position = Better_equivalence_reference_count;
+  better_equivalence_reserve_references(position + 1);
+  Better_equivalence_references[position].id = id;
+  Better_equivalence_references[position].next =
+    Better_equivalence_buckets[bucket];
+  Better_equivalence_buckets[bucket] = position;
+  Better_equivalence_reference_count++;
+}
+
+static void better_equivalence_rebuild(unsigned requested_capacity)
+{
+  unsigned capacity = requested_capacity < 1024 ? 1024 : requested_capacity;
+  unsigned id, i;
+  while ((Better_equivalence_live_count + 1ULL) * 10ULL >=
+         (unsigned long long) capacity * 7) {
+    if (capacity > UINT_MAX / 2)
+      fatal_error("better equivalence bucket capacity overflow");
+    capacity *= 2;
+  }
+  if (Better_equivalence_buckets != NULL)
+    safe_free(Better_equivalence_buckets);
+  Better_equivalence_buckets = safe_malloc((size_t) capacity * sizeof(unsigned));
+  Better_equivalence_bucket_capacity = capacity;
+  for (i = 0; i < capacity; i++)
+    Better_equivalence_buckets[i] = UINT_MAX;
+  Better_equivalence_reference_count = 0;
+  for (id = 1; id < Packed_hint_capacity; id++) {
+    if (Packed_hint_active[id] && Packed_hint_by_id[id] != NULL)
+      better_equivalence_append(id);
+  }
+  if (Better_equivalence_reference_count != Better_equivalence_live_count)
+    fatal_error("better equivalence live count mismatch");
+}
+
+static void better_equivalence_add(unsigned id)
+{
+  if (Better_equivalence_bucket_capacity == 0 ||
+      ((unsigned long long) Better_equivalence_reference_count + 1) * 10 >=
+      (unsigned long long) Better_equivalence_bucket_capacity * 7) {
+    unsigned capacity;
+    if (Better_equivalence_bucket_capacity == 0)
+      capacity = 1024;
+    else {
+      if (Better_equivalence_bucket_capacity > UINT_MAX / 2)
+        fatal_error("better equivalence bucket capacity overflow");
+      capacity = Better_equivalence_bucket_capacity * 2;
+    }
+    better_equivalence_rebuild(capacity);
+  }
+  else
+    better_equivalence_append(id);
+}
+
 static void better_scratch_clear(void)
 {
   Better_key_scratch_count = 0;
@@ -533,6 +636,7 @@ static void better_rebuild_postings(void)
 {
   Hint_postings postings = hint_postings_init();
   unsigned long long live = 0;
+  unsigned long long equivalence_live = 0;
   unsigned id;
   for (id = 1; id < Packed_hint_capacity; id++) {
     Topform h = Packed_hint_by_id[id];
@@ -552,6 +656,7 @@ static void better_rebuild_postings(void)
       live += Better_key_scratch_count;
       for (i = 0; i < Better_key_scratch_count; i++)
         hint_postings_add(postings, Better_key_scratch[i], id);
+      equivalence_live++;
       if (was_compressed && !recompress_clause(h))
         fatal_error("better_rebuild_postings: cannot recompress hint");
       if (!Packed_hint_active[id]) {
@@ -564,8 +669,10 @@ static void better_rebuild_postings(void)
   hint_postings_destroy(Better_postings);
   Better_postings = postings;
   Better_feature_live_count = live;
+  Better_equivalence_live_count = equivalence_live;
+  better_equivalence_rebuild(Better_equivalence_bucket_capacity);
   Better_posting_rebuilds++;
-  Better_posting_rebuild_refs += live;
+  Better_posting_rebuild_refs += live + equivalence_live;
 }
 
 static void better_maybe_rebuild_postings(void)
@@ -573,11 +680,15 @@ static void better_maybe_rebuild_postings(void)
   struct hint_postings_stats stats;
   unsigned long long stale;
   hint_postings_get_stats(Better_postings, &stats);
-  if (stats.references < Better_feature_live_count)
+  if (stats.references < Better_feature_live_count ||
+      Better_equivalence_reference_count < Better_equivalence_live_count)
     fatal_error("better_maybe_rebuild_postings: reference count underflow");
   stale = stats.references - Better_feature_live_count;
+  stale += Better_equivalence_reference_count -
+           Better_equivalence_live_count;
   if (stale >= BETTER_REBUILD_STALE_MIN &&
-      stale > Better_feature_live_count / 2)
+      stale > (Better_feature_live_count +
+               Better_equivalence_live_count) / 4)
     better_rebuild_postings();
 }
 
@@ -590,6 +701,9 @@ static void better_deactivate_hint(unsigned id)
   if (count > Better_feature_live_count)
     fatal_error("better_deactivate_hint: live feature count underflow");
   Better_feature_live_count -= count;
+  if (Better_equivalence_live_count == 0)
+    fatal_error("better_deactivate_hint: equivalence count underflow");
+  Better_equivalence_live_count--;
   Better_hint_feature_count[id] = 0;
   Better_hint_positive_count[id] = 0;
   Better_hint_negative_count[id] = 0;
@@ -611,6 +725,8 @@ static void better_index_hint_terms(Topform h, BOOL anyconst)
     hint_postings_add(Better_postings, key, id);
   }
   Better_feature_live_count += Better_key_scratch_count;
+  Better_equivalence_live_count++;
+  better_equivalence_add(id);
   better_maybe_rebuild_postings();
 }
 
@@ -855,6 +971,8 @@ void done_with_hints(void)
   if (Better_intersection_ids) safe_free(Better_intersection_ids);
   if (Better_key_scratch) safe_free(Better_key_scratch);
   hint_postings_destroy(Better_postings);
+  if (Better_equivalence_buckets) safe_free(Better_equivalence_buckets);
+  if (Better_equivalence_references) safe_free(Better_equivalence_references);
   Packed_hint_by_id = NULL; Packed_hint_active = NULL;
   Packed_hint_anyconst = NULL; Packed_candidate_mark = NULL;
   Packed_hint_rewrite_symbols = NULL;
@@ -863,12 +981,18 @@ void done_with_hints(void)
   Packed_feature_words = 0;
   Packed_candidates = NULL;
   Better_postings = NULL;
+  Better_equivalence_buckets = NULL;
+  Better_equivalence_references = NULL;
+  Better_equivalence_bucket_capacity = 0;
+  Better_equivalence_reference_count = 0;
+  Better_equivalence_reference_capacity = 0;
   Better_hint_feature_count = NULL;
   Better_hint_positive_count = Better_hint_negative_count = NULL;
   Better_intersection_member = Better_intersection_match = NULL;
   Better_intersection_ids = NULL;
   Better_key_scratch = NULL;
   Better_feature_live_count = 0;
+  Better_equivalence_live_count = 0;
   Better_intersection_serial = Better_match_serial = 1;
   Better_intersection_count = Better_intersection_capacity = 0;
   Better_key_scratch_count = Better_key_scratch_capacity = 0;
@@ -1011,31 +1135,6 @@ static void better_collect_clause_candidates(
   BOOL equivalence = op == PACKED_HINT_EQUIVALENCE;
   BOOL query_anyconst = MATCH_HINTS_ANYCONST && AnyConstsEnabled &&
                         hint_contains_anyconst(c);
-  packed_begin_candidates();
-  if (first != NULL && !query_anyconst) {
-    if (equivalence)
-      packed_collect_term_candidates(first->atom, first->sign ? 1 : 0, op);
-    else {
-      unsigned kind = first->sign ? BETTER_FEATURE_MATCH_POS :
-                                    BETTER_FEATURE_MATCH_NEG;
-      better_scratch_clear();
-      better_collect_relative_features(first->atom, kind, 0, 0,
-                                       BETTER_MATCH_FEATURE_DEPTH);
-      better_intersect_scratch_candidates(op, TRUE, FALSE);
-    }
-  }
-
-  /* AnyConst can stand on either side of match_hints.  A query containing it
-     can therefore match any active hint; otherwise all AnyConst hints must be
-     admitted even though their concrete structural keys are unknown. */
-  for (i = 1; i < Packed_hint_capacity; i++) {
-    if (Packed_hint_active[i] && query_anyconst) {
-      Packed_operation_stats[op].posting_candidates++;
-      packed_add_candidate(i);
-    }
-  }
-  packed_finish_candidates(!query_anyconst && MATCH_HINTS_ANYCONST, op);
-
   for (lit = c->literals; lit != NULL; lit = lit->next) {
     unsigned long long mask = packed_term_feature_mask(lit->atom, FALSE);
     if (lit->sign) {
@@ -1047,6 +1146,44 @@ static void better_collect_clause_candidates(
       negative_mask |= mask;
     }
   }
+  packed_begin_candidates();
+  if (equivalence) {
+    unsigned long long key = better_equivalence_key(
+      positive_mask, negative_mask, positive, negative);
+    unsigned position = Better_equivalence_bucket_capacity == 0 ? UINT_MAX :
+      Better_equivalence_buckets[(unsigned) key &
+        (Better_equivalence_bucket_capacity - 1)];
+    while (position != UINT_MAX) {
+      unsigned id = Better_equivalence_references[position].id;
+      Packed_operation_stats[op].posting_candidates++;
+      if (id == 0 || id >= Packed_hint_capacity ||
+          !Packed_hint_active[id])
+        Packed_operation_stats[op].stale_skips++;
+      else
+        packed_add_candidate(id);
+      position = Better_equivalence_references[position].next;
+    }
+  }
+  else if (first != NULL && !query_anyconst) {
+      unsigned kind = first->sign ? BETTER_FEATURE_MATCH_POS :
+                                    BETTER_FEATURE_MATCH_NEG;
+      better_scratch_clear();
+      better_collect_relative_features(first->atom, kind, 0, 0,
+                                       BETTER_MATCH_FEATURE_DEPTH);
+      better_intersect_scratch_candidates(op, TRUE, FALSE);
+  }
+
+  /* AnyConst can stand on either side of match_hints.  A query containing it
+     can therefore match any active hint; otherwise all AnyConst hints must be
+     admitted even though their concrete structural keys are unknown. */
+  for (i = 1; i < Packed_hint_capacity; i++) {
+    if (!equivalence && Packed_hint_active[i] && query_anyconst) {
+      Packed_operation_stats[op].posting_candidates++;
+      packed_add_candidate(i);
+    }
+  }
+  packed_finish_candidates(!equivalence && !query_anyconst &&
+                           MATCH_HINTS_ANYCONST, op);
   keep = 0;
   for (i = 0; i < Packed_candidates_count; i++) {
     unsigned id = Packed_candidates[i];
@@ -1695,12 +1832,16 @@ void packed_hint_index_stats(unsigned long long *node_bytes,
   if (Better_packed_index) {
     hint_postings_get_stats(Better_postings, &posting_stats);
     *node_bytes += posting_stats.table_bytes;
-    *reference_bytes += posting_stats.reference_bytes;
+    *reference_bytes += posting_stats.reference_bytes +
+      (unsigned long long) Better_equivalence_reference_capacity *
+        sizeof(struct better_equivalence_reference);
     *table_bytes += (unsigned long long) Packed_hint_capacity *
       (3 * sizeof(unsigned) + 2 * sizeof(unsigned short)) +
       (unsigned long long) Better_key_scratch_capacity *
         sizeof(unsigned long long) +
-      (unsigned long long) Better_intersection_capacity * sizeof(unsigned);
+      (unsigned long long) Better_intersection_capacity * sizeof(unsigned) +
+      (unsigned long long) Better_equivalence_bucket_capacity *
+        sizeof(unsigned);
   }
 }
 
@@ -1732,15 +1873,33 @@ void fprint_packed_hint_operation_stats(FILE *fp)
   }
   if (Better_packed_index) {
     struct hint_postings_stats s;
+    unsigned long long equivalence_stale;
+    unsigned long long table_bytes;
+    unsigned long long reference_bytes;
     hint_postings_get_stats(Better_postings, &s);
+    if (Better_equivalence_reference_count < Better_equivalence_live_count)
+      fatal_error("fprint_packed_hint_operation_stats: reference underflow");
+    equivalence_stale = Better_equivalence_reference_count -
+                        Better_equivalence_live_count;
+    table_bytes = s.table_bytes +
+      (unsigned long long) Better_equivalence_bucket_capacity *
+        sizeof(unsigned);
+    reference_bytes = s.reference_bytes +
+      (unsigned long long) Better_equivalence_reference_capacity *
+        sizeof(struct better_equivalence_reference);
     fprintf(fp,
             "Better_packed_postings: keys=%llu, references=%llu, "
             "live_features=%llu, stale_features=%llu, max_posting=%llu, "
+            "equivalence_buckets=%u, equivalence_references=%u, "
+            "equivalence_live=%llu, equivalence_stale=%llu, "
             "table_bytes=%llu, reference_bytes=%llu, rebuilds=%llu, "
             "rebuilt_references=%llu, rebuild_materializations=%llu.\n",
             s.keys, s.references, Better_feature_live_count,
             s.references - Better_feature_live_count,
-            s.maximum_posting, s.table_bytes, s.reference_bytes,
+            s.maximum_posting, Better_equivalence_bucket_capacity,
+            Better_equivalence_reference_count,
+            Better_equivalence_live_count,
+            equivalence_stale, table_bytes, reference_bytes,
             Better_posting_rebuilds, Better_posting_rebuild_refs,
             Better_posting_rebuild_materializations);
   }
