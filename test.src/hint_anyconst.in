@@ -1,0 +1,28 @@
+clear(print_initial_clauses).
+clear(print_given).
+assign(search_loop,discount).
+assign(passive_store,compressed).
+assign(hint_index,compact).
+assign(ancestor_store,memory).
+assign(stats,all).
+assign(max_seconds,10).
+set(hint_trace).
+
+formulas(hints).
+  f(_AnyConst) = _AnyConst # label(generic_anyconst).
+  g(_AnyConst_1,_AnyConst_1) = e # label(repeated_anyconst).
+  g(_AnyConst_1,_AnyConst_2) = e # label(distinct_anyconsts).
+  -p(x) | q(f(x)) # label(multiliteral_variant_a).
+  q(f(y)) | -p(y) # label(multiliteral_variant_b).
+end_of_list.
+
+formulas(sos).
+  f(a) = a.
+  f(b) = b.
+  g(a,a) = e.
+  g(a,b) = e.
+end_of_list.
+
+formulas(goals).
+  g(a,a) = e.
+end_of_list.

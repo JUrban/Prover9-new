@@ -57,9 +57,11 @@ static unsigned long long Packed_candidate_checks = 0;
 /* Experimental stable-ID structural index.  Rewrites leave conservative
    stale IDs; a bounded rebuild materializes one active body at a time. */
 
-static Hint_postings Better_back_postings = NULL;
+static Hint_postings Better_postings = NULL;
 static unsigned long long Better_feature_live_count = 0;
 static unsigned *Better_hint_feature_count = NULL;
+static unsigned short *Better_hint_positive_count = NULL;
+static unsigned short *Better_hint_negative_count = NULL;
 static unsigned *Better_intersection_member = NULL;
 static unsigned *Better_intersection_match = NULL;
 static unsigned Better_intersection_serial = 1;
@@ -76,7 +78,10 @@ static unsigned Better_key_scratch_count = 0;
 static unsigned Better_key_scratch_capacity = 0;
 
 #define BETTER_FEATURE_BACK 1U
-#define BETTER_FEATURE_DEPTH 2U
+#define BETTER_FEATURE_MATCH_POS 2U
+#define BETTER_FEATURE_MATCH_NEG 3U
+#define BETTER_BACK_FEATURE_DEPTH 2U
+#define BETTER_MATCH_FEATURE_DEPTH 2U
 #define BETTER_REBUILD_STALE_MIN 65536ULL
 
 /* Attribute candidate selection and exact materialization cost to the four
@@ -188,6 +193,12 @@ static void packed_reserve_hints(unsigned id)
     if (Better_packed_index) {
       Better_hint_feature_count = safe_realloc(
         Better_hint_feature_count, (size_t) cap * sizeof(unsigned));
+      Better_hint_positive_count = safe_realloc(
+        Better_hint_positive_count,
+        (size_t) cap * sizeof(unsigned short));
+      Better_hint_negative_count = safe_realloc(
+        Better_hint_negative_count,
+        (size_t) cap * sizeof(unsigned short));
       Better_intersection_member = safe_realloc(
         Better_intersection_member, (size_t) cap * sizeof(unsigned));
       Better_intersection_match = safe_realloc(
@@ -208,6 +219,10 @@ static void packed_reserve_hints(unsigned id)
     if (Better_packed_index) {
       memset(Better_hint_feature_count + old, 0,
              (size_t) (cap - old) * sizeof(unsigned));
+      memset(Better_hint_positive_count + old, 0,
+             (size_t) (cap - old) * sizeof(unsigned short));
+      memset(Better_hint_negative_count + old, 0,
+             (size_t) (cap - old) * sizeof(unsigned short));
       memset(Better_intersection_member + old, 0,
              (size_t) (cap - old) * sizeof(unsigned));
       memset(Better_intersection_match + old, 0,
@@ -253,7 +268,7 @@ static unsigned long long packed_term_feature_mask_rec(Term t, unsigned path)
 
 static unsigned long long packed_term_feature_mask(Term t, BOOL query)
 {
-  if (query && packed_term_has_theory_symbol(t))
+  if (query && !Better_packed_index && packed_term_has_theory_symbol(t))
     return VARIABLE(t) ? 0 :
       1ULL << packed_feature_bit(SYMNUM(t), 1);
   return packed_term_feature_mask_rec(t, 1);
@@ -279,7 +294,13 @@ static void packed_index_hint_terms(Topform h, BOOL anyconst)
   packed_reserve_hints(id);
   Packed_hint_by_id[id] = h;
   Packed_hint_active[id] = 1;
-  if (anyconst)
+  if (Better_packed_index) {
+    Packed_hint_anyconst[id] = anyconst ? 1 : 0;
+    Packed_hint_rewrite_symbols[id] = 0;
+    Packed_hint_pos_features[id] = 0;
+    Packed_hint_neg_features[id] = 0;
+  }
+  else if (anyconst)
     Packed_hint_anyconst[id] = 1;
   for (lit = h->literals; lit != NULL; lit = lit->next) {
     int i;
@@ -454,18 +475,20 @@ static unsigned better_child_path(unsigned path, unsigned depth,
 /* Collect exact positional symbols that a one-way syntactic match must
    preserve.  Variables contribute no restriction. */
 static void better_collect_relative_features(Term t, unsigned kind,
-                                             unsigned path, unsigned depth)
+                                             unsigned path, unsigned depth,
+                                             unsigned maximum_depth)
 {
   unsigned i;
   if (VARIABLE(t))
     return;
   better_scratch_add(better_feature_key(kind, path, SYMNUM(t)));
-  if (depth >= BETTER_FEATURE_DEPTH)
+  if (depth >= maximum_depth)
     return;
   for (i = 0; i < (unsigned) ARITY(t); i++) {
     unsigned child_path = better_child_path(path, depth, i);
     if (child_path != UINT_MAX)
-      better_collect_relative_features(ARG(t,i), kind, child_path, depth + 1);
+      better_collect_relative_features(ARG(t,i), kind, child_path, depth + 1,
+                                       maximum_depth);
   }
 }
 
@@ -474,20 +497,36 @@ static void better_collect_back_occurrences(Term t)
   int i;
   if (VARIABLE(t))
     return;
-  better_collect_relative_features(t, BETTER_FEATURE_BACK, 0, 0);
+  better_collect_relative_features(t, BETTER_FEATURE_BACK, 0, 0,
+                                   BETTER_BACK_FEATURE_DEPTH);
   for (i = 0; i < ARITY(t); i++)
     better_collect_back_occurrences(ARG(t,i));
 }
 
-static void better_collect_hint_back_features(Topform h)
+static void better_collect_hint_features(Topform h, BOOL anyconst)
 {
   Literals lit;
+  unsigned positive = 0, negative = 0;
   better_scratch_clear();
   for (lit = h->literals; lit != NULL; lit = lit->next) {
-    int i;
-    for (i = 0; i < ARITY(lit->atom); i++)
-      better_collect_back_occurrences(ARG(lit->atom,i));
+    if (lit->sign)
+      positive++;
+    else
+      negative++;
+    if (!anyconst) {
+      int i;
+      unsigned kind = lit->sign ? BETTER_FEATURE_MATCH_POS :
+                                  BETTER_FEATURE_MATCH_NEG;
+      better_collect_relative_features(lit->atom, kind, 0, 0,
+                                       BETTER_MATCH_FEATURE_DEPTH);
+      for (i = 0; i < ARITY(lit->atom); i++)
+        better_collect_back_occurrences(ARG(lit->atom,i));
+    }
   }
+  if (positive > USHRT_MAX || negative > USHRT_MAX)
+    fatal_error("better_collect_hint_features: too many literals");
+  Better_hint_positive_count[h->id] = (unsigned short) positive;
+  Better_hint_negative_count[h->id] = (unsigned short) negative;
 }
 
 static void better_rebuild_postings(void)
@@ -498,7 +537,9 @@ static void better_rebuild_postings(void)
   for (id = 1; id < Packed_hint_capacity; id++) {
     Topform h = Packed_hint_by_id[id];
     Better_hint_feature_count[id] = 0;
-    if (Packed_hint_active[id] && h != NULL && !Packed_hint_anyconst[id]) {
+    Better_hint_positive_count[id] = 0;
+    Better_hint_negative_count[id] = 0;
+    if (Packed_hint_active[id] && h != NULL) {
       BOOL was_compressed = h->compressed != NULL;
       unsigned i;
       if (was_compressed) {
@@ -506,7 +547,7 @@ static void better_rebuild_postings(void)
         if (!materialize_clause(h))
           fatal_error("better_rebuild_postings: invalid packed hint");
       }
-      better_collect_hint_back_features(h);
+      better_collect_hint_features(h, Packed_hint_anyconst[id]);
       Better_hint_feature_count[id] = Better_key_scratch_count;
       live += Better_key_scratch_count;
       for (i = 0; i < Better_key_scratch_count; i++)
@@ -520,8 +561,8 @@ static void better_rebuild_postings(void)
       }
     }
   }
-  hint_postings_destroy(Better_back_postings);
-  Better_back_postings = postings;
+  hint_postings_destroy(Better_postings);
+  Better_postings = postings;
   Better_feature_live_count = live;
   Better_posting_rebuilds++;
   Better_posting_rebuild_refs += live;
@@ -531,7 +572,7 @@ static void better_maybe_rebuild_postings(void)
 {
   struct hint_postings_stats stats;
   unsigned long long stale;
-  hint_postings_get_stats(Better_back_postings, &stats);
+  hint_postings_get_stats(Better_postings, &stats);
   if (stats.references < Better_feature_live_count)
     fatal_error("better_maybe_rebuild_postings: reference count underflow");
   stale = stats.references - Better_feature_live_count;
@@ -550,6 +591,8 @@ static void better_deactivate_hint(unsigned id)
     fatal_error("better_deactivate_hint: live feature count underflow");
   Better_feature_live_count -= count;
   Better_hint_feature_count[id] = 0;
+  Better_hint_positive_count[id] = 0;
+  Better_hint_negative_count[id] = 0;
   better_maybe_rebuild_postings();
 }
 
@@ -561,43 +604,31 @@ static void better_index_hint_terms(Topform h, BOOL anyconst)
     return;
   if (Better_hint_feature_count[id] != 0)
     fatal_error("better_index_hint_terms: hint already has live features");
-  if (anyconst)
-    return;
-  better_collect_hint_back_features(h);
+  better_collect_hint_features(h, anyconst);
   Better_hint_feature_count[id] = Better_key_scratch_count;
   for (i = 0; i < Better_key_scratch_count; i++) {
     unsigned long long key = Better_key_scratch[i];
-    hint_postings_add(Better_back_postings, key, id);
+    hint_postings_add(Better_postings, key, id);
   }
   Better_feature_live_count += Better_key_scratch_count;
   better_maybe_rebuild_postings();
 }
 
-static void better_collect_back_pattern_candidates(
-  Term pattern, enum packed_hint_operation op)
+static void better_intersect_scratch_candidates(
+  enum packed_hint_operation op, BOOL exclude_anyconst, BOOL all_features)
 {
   unsigned i, j;
-  if (VARIABLE(pattern)) {
-    unsigned id;
-    for (id = 1; id < Packed_hint_capacity; id++) {
-      if (Packed_hint_active[id] && !Packed_hint_anyconst[id]) {
-        Packed_operation_stats[op].posting_candidates++;
-        packed_add_candidate(id);
-      }
-    }
+  if (Better_key_scratch_count == 0)
     return;
-  }
-  better_scratch_clear();
-  better_collect_relative_features(pattern, BETTER_FEATURE_BACK, 0, 0);
 
   /* Put posting keys in increasing raw-count order.  Stale entries can only
      make a posting appear less selective; they cannot remove an answer. */
-  for (i = 0; i < Better_key_scratch_count; i++) {
+  for (i = 0; i < (all_features ? Better_key_scratch_count : 1); i++) {
     unsigned best = i;
     unsigned best_count = UINT_MAX;
     for (j = i; j < Better_key_scratch_count; j++) {
       unsigned count;
-      hint_postings_get(Better_back_postings, Better_key_scratch[j], &count);
+      hint_postings_get(Better_postings, Better_key_scratch[j], &count);
       if (count == 0)
         return;
       if (count < best_count) {
@@ -622,7 +653,7 @@ static void better_collect_back_pattern_candidates(
   for (i = 0; i < Better_key_scratch_count; i++) {
     unsigned count;
     const unsigned *ids = hint_postings_get(
-      Better_back_postings, Better_key_scratch[i], &count);
+      Better_postings, Better_key_scratch[i], &count);
     Better_match_serial++;
     if (Better_match_serial == 0) {
       memset(Better_intersection_match, 0,
@@ -633,7 +664,8 @@ static void better_collect_back_pattern_candidates(
       unsigned id = ids[j];
       Packed_operation_stats[op].posting_candidates++;
       if (id == 0 || id >= Packed_hint_capacity ||
-          !Packed_hint_active[id] || Packed_hint_anyconst[id]) {
+          !Packed_hint_active[id] ||
+          (exclude_anyconst && Packed_hint_anyconst[id])) {
         Packed_operation_stats[op].stale_skips++;
         continue;
       }
@@ -670,6 +702,25 @@ static void better_collect_back_pattern_candidates(
   }
   for (i = 0; i < Better_intersection_count; i++)
     packed_add_candidate(Better_intersection_ids[i]);
+}
+
+static void better_collect_back_pattern_candidates(
+  Term pattern, enum packed_hint_operation op)
+{
+  if (VARIABLE(pattern)) {
+    unsigned id;
+    for (id = 1; id < Packed_hint_capacity; id++) {
+      if (Packed_hint_active[id] && !Packed_hint_anyconst[id]) {
+        Packed_operation_stats[op].posting_candidates++;
+        packed_add_candidate(id);
+      }
+    }
+    return;
+  }
+  better_scratch_clear();
+  better_collect_relative_features(pattern, BETTER_FEATURE_BACK, 0, 0,
+                                   BETTER_BACK_FEATURE_DEPTH);
+  better_intersect_scratch_candidates(op, TRUE, TRUE);
 }
 
 /* pointer to procedure for demodulating hints (when back demod hints) */
@@ -750,7 +801,7 @@ void init_hints(Uniftype utype,
   if (Better_packed_index && !Packed_index)
     fatal_error("init_hints: better packed index requires packed hint bank");
   if (Better_packed_index)
-    Better_back_postings = hint_postings_init();
+    Better_postings = hint_postings_init();
   if (packed_index) {
     unsigned i;
     for (i = 0; i < PACKED_HINT_OPERATIONS; i++)
@@ -797,11 +848,13 @@ void done_with_hints(void)
   if (Packed_candidate_mark) safe_free(Packed_candidate_mark);
   if (Packed_candidates) safe_free(Packed_candidates);
   if (Better_hint_feature_count) safe_free(Better_hint_feature_count);
+  if (Better_hint_positive_count) safe_free(Better_hint_positive_count);
+  if (Better_hint_negative_count) safe_free(Better_hint_negative_count);
   if (Better_intersection_member) safe_free(Better_intersection_member);
   if (Better_intersection_match) safe_free(Better_intersection_match);
   if (Better_intersection_ids) safe_free(Better_intersection_ids);
   if (Better_key_scratch) safe_free(Better_key_scratch);
-  hint_postings_destroy(Better_back_postings);
+  hint_postings_destroy(Better_postings);
   Packed_hint_by_id = NULL; Packed_hint_active = NULL;
   Packed_hint_anyconst = NULL; Packed_candidate_mark = NULL;
   Packed_hint_rewrite_symbols = NULL;
@@ -809,8 +862,9 @@ void done_with_hints(void)
   Packed_feature_bitsets = NULL;
   Packed_feature_words = 0;
   Packed_candidates = NULL;
-  Better_back_postings = NULL;
+  Better_postings = NULL;
   Better_hint_feature_count = NULL;
+  Better_hint_positive_count = Better_hint_negative_count = NULL;
   Better_intersection_member = Better_intersection_match = NULL;
   Better_intersection_ids = NULL;
   Better_key_scratch = NULL;
@@ -942,9 +996,86 @@ Topform find_matching_hint(Topform c, Lindex idx)
   return hint;
 }  /* find_matching_hint */
 
+static BOOL hint_contains_anyconst(Topform c);
+
+static void better_collect_clause_candidates(
+  Topform c, enum packed_hint_operation op)
+{
+  Literals lit;
+  Literals first = c->literals;
+  unsigned positive = 0, negative = 0;
+  unsigned i, keep;
+  unsigned long long positive_mask = 0, negative_mask = 0;
+  unsigned long long first_mask = first == NULL ? 0 :
+    packed_term_feature_mask(first->atom, TRUE);
+  BOOL equivalence = op == PACKED_HINT_EQUIVALENCE;
+  BOOL query_anyconst = MATCH_HINTS_ANYCONST && AnyConstsEnabled &&
+                        hint_contains_anyconst(c);
+  packed_begin_candidates();
+  if (first != NULL && !query_anyconst) {
+    if (equivalence)
+      packed_collect_term_candidates(first->atom, first->sign ? 1 : 0, op);
+    else {
+      unsigned kind = first->sign ? BETTER_FEATURE_MATCH_POS :
+                                    BETTER_FEATURE_MATCH_NEG;
+      better_scratch_clear();
+      better_collect_relative_features(first->atom, kind, 0, 0,
+                                       BETTER_MATCH_FEATURE_DEPTH);
+      better_intersect_scratch_candidates(op, TRUE, FALSE);
+    }
+  }
+
+  /* AnyConst can stand on either side of match_hints.  A query containing it
+     can therefore match any active hint; otherwise all AnyConst hints must be
+     admitted even though their concrete structural keys are unknown. */
+  for (i = 1; i < Packed_hint_capacity; i++) {
+    if (Packed_hint_active[i] && query_anyconst) {
+      Packed_operation_stats[op].posting_candidates++;
+      packed_add_candidate(i);
+    }
+  }
+  packed_finish_candidates(!query_anyconst && MATCH_HINTS_ANYCONST, op);
+
+  for (lit = c->literals; lit != NULL; lit = lit->next) {
+    unsigned long long mask = packed_term_feature_mask(lit->atom, FALSE);
+    if (lit->sign) {
+      positive++;
+      positive_mask |= mask;
+    }
+    else {
+      negative++;
+      negative_mask |= mask;
+    }
+  }
+  keep = 0;
+  for (i = 0; i < Packed_candidates_count; i++) {
+    unsigned id = Packed_candidates[i];
+    unsigned long long stored = first != NULL && first->sign ?
+      Packed_hint_pos_features[id] : Packed_hint_neg_features[id];
+    BOOL profile_ok = equivalence ?
+      Better_hint_positive_count[id] == positive &&
+        Better_hint_negative_count[id] == negative :
+      Better_hint_positive_count[id] >= positive &&
+        Better_hint_negative_count[id] >= negative;
+    BOOL feature_ok = equivalence ?
+      Packed_hint_pos_features[id] == positive_mask &&
+        Packed_hint_neg_features[id] == negative_mask :
+      first_mask == 0 || query_anyconst || Packed_hint_anyconst[id] ||
+        (stored & first_mask) == first_mask;
+    if (profile_ok && feature_ok)
+      Packed_candidates[keep++] = id;
+  }
+  Packed_candidates_count = keep;
+  packed_operation_candidates(op);
+}
+
 static void packed_collect_clause_candidates(Topform c,
                                              enum packed_hint_operation op)
 {
+  if (Better_packed_index) {
+    better_collect_clause_candidates(c, op);
+    return;
+  }
   Literals first = c->literals;
   packed_begin_candidates();
   if (first != NULL)
@@ -1042,16 +1173,29 @@ labels on C are copied to H, and C is not indexed.
 /* PUBLIC */
 /*************
  *
- *   hint_contains_anyconst() -- check if a hint has generic _AnyConst
+ *   hint_contains_anyconst() -- check for generic or numbered _AnyConst
  *
  *************/
+
+static BOOL term_contains_anyconst(Term t)
+{
+  int i;
+  if (VARIABLE(t))
+    return FALSE;
+  if (ARITY(t) == 0 && any_const(SYMNUM(t)) != -1)
+    return TRUE;
+  for (i = 0; i < ARITY(t); i++) {
+    if (term_contains_anyconst(ARG(t,i)))
+      return TRUE;
+  }
+  return FALSE;
+}
 
 static BOOL hint_contains_anyconst(Topform c)
 {
   Literals lit;
-  int sn = any_const_sn(0);  /* symnum for _AnyConst */
   for (lit = c->literals; lit; lit = lit->next) {
-    if (lit->atom != NULL && symbol_in_term(sn, lit->atom))
+    if (lit->atom != NULL && term_contains_anyconst(lit->atom))
       return TRUE;
   }
   return FALSE;
@@ -1110,7 +1254,7 @@ void index_hint(Topform c)
     else
       lindex_update(Hints_idx, c, INSERT);
     if (Back_demod_hints && !Packed_index) {
-      /* Do not index hints containing generic _AnyConst for back-demod.
+      /* Do not index hints containing any _AnyConst for back-demod.
          Back-demodulating _AnyConst would be unsound. */
       if (MATCH_HINTS_ANYCONST && hint_contains_anyconst(c))
         ;  /* skip back-demod indexing */
@@ -1549,11 +1693,11 @@ void packed_hint_index_stats(unsigned long long *node_bytes,
     (unsigned long long) Packed_candidates_capacity * sizeof(unsigned) : 0;
   *candidate_checks = Packed_candidate_checks;
   if (Better_packed_index) {
-    hint_postings_get_stats(Better_back_postings, &posting_stats);
+    hint_postings_get_stats(Better_postings, &posting_stats);
     *node_bytes += posting_stats.table_bytes;
     *reference_bytes += posting_stats.reference_bytes;
     *table_bytes += (unsigned long long) Packed_hint_capacity *
-      (3 * sizeof(unsigned)) +
+      (3 * sizeof(unsigned) + 2 * sizeof(unsigned short)) +
       (unsigned long long) Better_key_scratch_capacity *
         sizeof(unsigned long long) +
       (unsigned long long) Better_intersection_capacity * sizeof(unsigned);
@@ -1588,7 +1732,7 @@ void fprint_packed_hint_operation_stats(FILE *fp)
   }
   if (Better_packed_index) {
     struct hint_postings_stats s;
-    hint_postings_get_stats(Better_back_postings, &s);
+    hint_postings_get_stats(Better_postings, &s);
     fprintf(fp,
             "Better_packed_postings: keys=%llu, references=%llu, "
             "live_features=%llu, stale_features=%llu, max_posting=%llu, "
