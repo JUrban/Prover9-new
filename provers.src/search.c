@@ -238,6 +238,7 @@ struct collective_batch {
   unsigned snapshot_epoch;
   unsigned kind;
   Para_iterator para_iterator;
+  Hyper_iterator hyper_iterator;
   size_t priority_heap_index;
   struct collective_batch *prev;
   struct collective_batch *next;
@@ -453,6 +454,7 @@ void collective_clear_state(void)
     b = Collective_batch_head;
     Collective_batch_head = b->next;
     para_iterator_zap(&b->para_iterator);
+    hyper_iterator_zap(&b->hyper_iterator);
     safe_free(b);
   }
   Collective_batch_tail = NULL;
@@ -552,6 +554,10 @@ void collective_reset_state(void)
   Stats.collective_iterator_invalidations = 0;
   Stats.collective_iterator_raw_peak = 0;
   Stats.collective_iterator_path_bytes = 0;
+  Stats.collective_hyper_iterator_raw_steps = 0;
+  Stats.collective_hyper_iterator_candidates = 0;
+  Stats.collective_hyper_iterator_completions = 0;
+  Stats.collective_hyper_iterator_choice_bytes = 0;
 }
 
 static
@@ -765,6 +771,7 @@ static struct collective_batch *collective_new_batch(void)
 {
   struct collective_batch *b = safe_calloc(1, sizeof(*b));
   para_iterator_init(&b->para_iterator);
+  hyper_iterator_init(&b->hyper_iterator);
   b->priority_heap_index = COLLECTIVE_NO_HEAP_INDEX;
   return b;
 }
@@ -772,6 +779,7 @@ static struct collective_batch *collective_new_batch(void)
 static void collective_free_batch(struct collective_batch *b)
 {
   para_iterator_zap(&b->para_iterator);
+  hyper_iterator_zap(&b->hyper_iterator);
   safe_free(b);
 }
 
@@ -1226,6 +1234,16 @@ static unsigned long long collective_iterator_path_bytes(void)
   for (b = Collective_batch_head; b != NULL; b = b->next)
     bytes += (unsigned long long) b->para_iterator.path_capacity *
              sizeof(*b->para_iterator.path);
+  return bytes;
+}
+
+static unsigned long long collective_hyper_iterator_choice_bytes(void)
+{
+  struct collective_batch *b;
+  unsigned long long bytes = 0;
+  for (b = Collective_batch_head; b != NULL; b = b->next)
+    bytes += (unsigned long long) b->hyper_iterator.choice_capacity *
+             sizeof(*b->hyper_iterator.choices);
   return bytes;
 }
 
@@ -2261,6 +2279,10 @@ void update_stats(void)
     Collective_priority_heap_capacity * sizeof(*Collective_priority_heap);
   Stats.collective_iterator_path_bytes = collective_iterator_path_bytes();
   Stats.collective_descriptor_bytes += Stats.collective_iterator_path_bytes;
+  Stats.collective_hyper_iterator_choice_bytes =
+    collective_hyper_iterator_choice_bytes();
+  Stats.collective_descriptor_bytes +=
+    Stats.collective_hyper_iterator_choice_bytes;
   Stats.collective_history_bytes = collective_history_bytes();
   collective_history_clause_stats(&Stats.collective_history_clauses,
                                    &Stats.collective_history_indexed_clauses,
@@ -2388,14 +2410,20 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
     fprintf(fp,
             "Collective_iterators: raw_budget=%d, raw_steps=%s, "
             "candidates=%s, completions=%s, invalidations=%s, "
-            "raw_turn_peak=%s, path_bytes=%s.\n",
+            "raw_turn_peak=%s, path_bytes=%s, hyper_raw_steps=%s, "
+            "hyper_candidates=%s, hyper_completions=%s, "
+            "hyper_choice_bytes=%s.\n",
             parm(Opt->collective_raw_work_budget),
             comma_num(s.collective_iterator_raw_steps),
             comma_num(s.collective_iterator_candidates),
             comma_num(s.collective_iterator_completions),
             comma_num(s.collective_iterator_invalidations),
             comma_num(s.collective_iterator_raw_peak),
-            comma_num(s.collective_iterator_path_bytes));
+            comma_num(s.collective_iterator_path_bytes),
+            comma_num(s.collective_hyper_iterator_raw_steps),
+            comma_num(s.collective_hyper_iterator_candidates),
+            comma_num(s.collective_hyper_iterator_completions),
+            comma_num(s.collective_hyper_iterator_choice_bytes));
     fprintf(fp,
             "Collective_candidate_cache: limit=%d, current=%s, peak=%s, "
             "stalls=%s.\n",
@@ -6341,6 +6369,26 @@ struct collective_history_filter {
   unsigned long long rejected_inactive;
 };
 
+struct collective_hyper_source_data {
+  struct collective_history_filter *filter;
+  unsigned long long activation_limit;
+};
+
+static unsigned long long collective_hyper_source_count(void *data)
+{
+  struct collective_hyper_source_data *source = data;
+  return source->activation_limit;
+}
+
+static Topform collective_hyper_source_clause(
+  unsigned long long position, void *data)
+{
+  struct collective_hyper_source_data *source = data;
+  if (position >= source->activation_limit)
+    fatal_error("collective hyper iterator parent cursor out of bounds");
+  return collective_activation_clause(position);
+}
+
 struct collective_candidate_chunk {
   unsigned long long skip;
   unsigned long long limit;
@@ -6676,6 +6724,14 @@ BOOL collective_history_clause_test(Topform c, void *data)
   return TRUE;
 }
 
+static BOOL collective_hyper_source_test(Topform c, void *data)
+{
+  struct collective_hyper_source_data *source = data;
+  if (restricted_denial(c))
+    return FALSE;
+  return collective_history_clause_test(c, source->filter);
+}
+
 /* Expand at most one historical active partner from the oldest round-robin
    batch.  Both paramodulation directions for that pair are performed before
    yielding.  Conclusions still go through cl_process(), including exact
@@ -6719,7 +6775,8 @@ BOOL collective_expand_one_batch(void)
     unsigned long long given_position;
     unsigned long long generated_before = Stats.generated;
     unsigned long long kept_before = Stats.kept;
-    struct collective_candidate_chunk chunk;
+    unsigned long long raw = 0, emitted = 0;
+    BOOL complete, native = FALSE;
     Topform given;
     unsigned hyper_kind = (b->kind & COLLECTIVE_POS_HYPER) != 0 ?
                           COLLECTIVE_POS_HYPER : COLLECTIVE_NEG_HYPER;
@@ -6732,15 +6789,63 @@ BOOL collective_expand_one_batch(void)
       fatal_error("collective hyper batch is not anchored by its given");
     memset(&filter, 0, sizeof(filter));
     filter.snapshot_epoch = b->snapshot_epoch;
-    collective_chunk_init(&chunk, b);
-    clock_start(Clocks.infer);
-    Current_inference_source = INFER_SOURCE_HYPER;
-    Current_collective_chunk = &chunk;
-    hyper_resolution_with_clause_test(
-      given, direction, Collective_historical_idx,
-      collective_history_clause_test, &filter, collective_chunk_cl_process);
-    if (collective_chunk_finish(
-          &chunk, b, "collective hyper replay order changed")) {
+    if (collective_balanced_mode() && b->conclusion_cursor == 0) {
+      struct collective_hyper_source_data source_data;
+      Hyper_parent_source source;
+      unsigned long long candidate_budget = collective_candidate_budget();
+      if (candidate_budget == 0)
+        fatal_error("bounded hyperresolution has no candidate-pool space");
+      source_data.filter = &filter;
+      source_data.activation_limit = b->activation_limit;
+      source.count = collective_hyper_source_count;
+      source.clause = collective_hyper_source_clause;
+      source.test = collective_hyper_source_test;
+      source.data = &source_data;
+      clock_start(Clocks.infer);
+      Current_inference_source = INFER_SOURCE_HYPER;
+      complete = hyper_resolution_bounded(
+        given, direction, &source, &b->hyper_iterator,
+        (unsigned long long) parm(Opt->collective_raw_work_budget),
+        candidate_budget, cl_process, &raw, &emitted);
+      Current_inference_source = INFER_SOURCE_OTHER;
+      clock_stop(Clocks.infer);
+      native = TRUE;
+      Stats.collective_iterator_raw_steps += raw;
+      Stats.collective_iterator_candidates += emitted;
+      Stats.collective_hyper_iterator_raw_steps += raw;
+      Stats.collective_hyper_iterator_candidates += emitted;
+      Stats.collective_candidates_emitted += emitted;
+      Stats.collective_raw_candidates_seen += emitted;
+      if (raw > Stats.collective_iterator_raw_peak)
+        Stats.collective_iterator_raw_peak = raw;
+      if (emitted > Stats.collective_raw_candidates_peak)
+        Stats.collective_raw_candidates_peak = emitted;
+      if (!complete)
+        Stats.collective_deferred_turns++;
+      else {
+        Stats.collective_iterator_completions++;
+        Stats.collective_hyper_iterator_completions++;
+        hyper_iterator_reset(&b->hyper_iterator);
+      }
+    }
+    else {
+      struct collective_candidate_chunk chunk;
+      collective_chunk_init(&chunk, b);
+      clock_start(Clocks.infer);
+      Current_inference_source = INFER_SOURCE_HYPER;
+      Current_collective_chunk = &chunk;
+      hyper_resolution_with_clause_test(
+        given, direction, Collective_historical_idx,
+        collective_history_clause_test, &filter, collective_chunk_cl_process);
+      complete = collective_chunk_finish(
+        &chunk, b, "collective hyper replay order changed");
+      Current_collective_chunk = NULL;
+      Current_inference_source = INFER_SOURCE_OTHER;
+      clock_stop(Clocks.infer);
+      raw = chunk.seen;
+      emitted = chunk.emitted;
+    }
+    if (complete) {
       b->kind &= ~hyper_kind;
       Stats.collective_hyper_sets_completed++;
       if (hyper_kind == COLLECTIVE_POS_HYPER)
@@ -6748,27 +6853,28 @@ BOOL collective_expand_one_batch(void)
       else
         Stats.collective_completed_neg_hyper++;
     }
-    Current_collective_chunk = NULL;
-    Current_inference_source = INFER_SOURCE_OTHER;
-    clock_stop(Clocks.infer);
     Stats.collective_hyper_expansions++;
     Stats.collective_history_queries++;
     Stats.collective_history_candidates += filter.accepted;
     Stats.collective_history_rejected_future += filter.rejected_future;
     Stats.collective_history_rejected_inactive += filter.rejected_inactive;
-    if (flag(Opt->collective_trace))
+    if (flag(Opt->collective_trace)) {
       printf("%sCOLLECTIVE_TRACE kind=%s given=%llu epoch=%u "
              "history_candidates=%llu future_rejected=%llu "
              "inactive_rejected=%llu generated=%llu kept=%llu "
              "hint_probe=%d raw=%llu emitted=%llu cursor=%llu "
-             "complete=%d.\n",
+             "complete=%d",
              TPTP_PFX,
              hyper_kind == COLLECTIVE_POS_HYPER ? "pos_hyper" : "neg_hyper",
              b->given_id, b->snapshot_epoch, filter.accepted,
              filter.rejected_future, filter.rejected_inactive,
              Stats.generated - generated_before, Stats.kept - kept_before,
-             hint_probe, chunk.seen, chunk.emitted, b->conclusion_cursor,
+             hint_probe, raw, emitted, b->conclusion_cursor,
              (b->kind & hyper_kind) == 0);
+      if (native)
+        printf(" native=1");
+      printf(".\n");
+    }
     collective_finish_batch_turn(b);
     return TRUE;
   }
@@ -9344,7 +9450,7 @@ void write_collective_checkpoint(const char *dir)
   if (!collective_frontier_mode())
     return;
   if (collective_balanced_mode())
-    magic[6] = 'C';
+    magic[6] = 'D';
   snprintf(path, sizeof(path), "%s/collective_frontier.bin", dir);
   fp = fopen(path, "wb");
   if (fp == NULL)
@@ -9417,6 +9523,55 @@ void write_collective_checkpoint(const char *dir)
            fwrite(b->para_iterator.path, sizeof(*b->para_iterator.path),
                   path_depth, fp) != path_depth))
         fatal_error("write_collective_checkpoint: iterator write failed");
+      {
+        Hyper_iterator *hi = &b->hyper_iterator;
+        uint32_t initialized = hi->initialized;
+        uint32_t satellite_mode = hi->satellite_mode;
+        uint32_t complete_hyper = hi->complete;
+        uint32_t given_literal = hi->given_literal;
+        uint32_t given_phase = hi->given_phase;
+        uint32_t outer_literal = hi->outer_literal;
+        uint32_t nucleus_selected = hi->nucleus_selected;
+        uint32_t nucleus_literal = hi->nucleus_literal;
+        uint32_t depth = hi->depth;
+        uint32_t mate_phase = hi->mate_phase;
+        uint32_t mate_literal = hi->mate_literal;
+        unsigned i;
+        if (fwrite(&initialized, sizeof(initialized), 1, fp) != 1 ||
+            fwrite(&satellite_mode, sizeof(satellite_mode), 1, fp) != 1 ||
+            fwrite(&complete_hyper, sizeof(complete_hyper), 1, fp) != 1 ||
+            fwrite(&given_literal, sizeof(given_literal), 1, fp) != 1 ||
+            fwrite(&given_phase, sizeof(given_phase), 1, fp) != 1 ||
+            fwrite(&outer_literal, sizeof(outer_literal), 1, fp) != 1 ||
+            fwrite(&hi->outer_parent, sizeof(hi->outer_parent), 1, fp) != 1 ||
+            fwrite(&nucleus_selected,
+                   sizeof(nucleus_selected), 1, fp) != 1 ||
+            fwrite(&nucleus_literal, sizeof(nucleus_literal), 1, fp) != 1 ||
+            fwrite(&hi->nucleus_parent,
+                   sizeof(hi->nucleus_parent), 1, fp) != 1 ||
+            fwrite(&depth, sizeof(depth), 1, fp) != 1 ||
+            fwrite(&mate_phase, sizeof(mate_phase), 1, fp) != 1 ||
+            fwrite(&mate_literal, sizeof(mate_literal), 1, fp) != 1 ||
+            fwrite(&hi->mate_parent, sizeof(hi->mate_parent), 1, fp) != 1)
+          fatal_error("write_collective_checkpoint: hyper iterator write failed");
+        for (i = 0; i < hi->depth; i++) {
+          Hyper_iterator_choice *choice = &hi->choices[i];
+          uint32_t literal = choice->literal;
+          uint32_t phase = choice->phase;
+          uint32_t resume_literal = choice->resume_literal;
+          uint32_t resume_phase = choice->resume_phase;
+          if (fwrite(&choice->parent_position,
+                     sizeof(choice->parent_position), 1, fp) != 1 ||
+              fwrite(&choice->resume_parent,
+                     sizeof(choice->resume_parent), 1, fp) != 1 ||
+              fwrite(&literal, sizeof(literal), 1, fp) != 1 ||
+              fwrite(&phase, sizeof(phase), 1, fp) != 1 ||
+              fwrite(&resume_literal,
+                     sizeof(resume_literal), 1, fp) != 1 ||
+              fwrite(&resume_phase, sizeof(resume_phase), 1, fp) != 1)
+            fatal_error("write_collective_checkpoint: hyper choice write failed");
+        }
+      }
     }
   }
   if (fclose(fp) != 0)
@@ -9433,7 +9588,8 @@ void read_collective_checkpoint(const char *dir)
   uint32_t priority_turns_since_fair;
   uint32_t balanced_lane = 0, balanced_lane_credit = 0;
   uint32_t balanced_turns_since_oldest = 0, drain_mode = 0;
-  BOOL format6, format7, format8, format9, format_a, format_b, format_c;
+  BOOL format6, format7, format8, format9, format_a, format_b, format_c,
+       format_d;
 
   if (!collective_frontier_mode())
     return;
@@ -9443,6 +9599,7 @@ void read_collective_checkpoint(const char *dir)
     fatal_error("resume: collective frontier state is missing");
   if (fread(magic, sizeof(magic), 1, fp) != 1)
     fatal_error("resume: corrupt collective frontier header");
+  format_d = memcmp(magic, "P9COLLD", 7) == 0;
   format_c = memcmp(magic, "P9COLLC", 7) == 0;
   format_b = memcmp(magic, "P9COLLB", 7) == 0;
   format_a = memcmp(magic, "P9COLLA", 7) == 0;
@@ -9450,7 +9607,7 @@ void read_collective_checkpoint(const char *dir)
   format8 = memcmp(magic, "P9COLL8", 7) == 0;
   format7 = memcmp(magic, "P9COLL7", 7) == 0;
   format6 = memcmp(magic, "P9COLL6", 7) == 0;
-  if ((!format_c && !format_b && !format_a && !format9 && !format8 &&
+  if ((!format_d && !format_c && !format_b && !format_a && !format9 && !format8 &&
        !format7 && !format6 &&
        memcmp(magic, "P9COLL5", 7) != 0) ||
       fread(&activations, sizeof(activations), 1, fp) != 1 ||
@@ -9459,20 +9616,20 @@ void read_collective_checkpoint(const char *dir)
       fread(&givens_since_batch, sizeof(givens_since_batch), 1, fp) != 1)
     fatal_error("resume: corrupt collective frontier header");
   if (format6 || format7 || format8 || format9 || format_a || format_b ||
-      format_c) {
+      format_c || format_d) {
     if (fread(&hint_probe_credit, sizeof(hint_probe_credit), 1, fp) != 1)
       fatal_error("resume: corrupt collective frontier probe state");
   }
   else
     hint_probe_credit = 1U;
-  if (format_a || format_b || format_c) {
+  if (format_a || format_b || format_c || format_d) {
     if (fread(&priority_turns_since_fair,
               sizeof(priority_turns_since_fair), 1, fp) != 1)
       fatal_error("resume: corrupt collective priority scheduler state");
   }
   else
     priority_turns_since_fair = 0;
-  if (format_b || format_c) {
+  if (format_b || format_c || format_d) {
     if (fread(&balanced_lane, sizeof(balanced_lane), 1, fp) != 1 ||
         fread(&balanced_lane_credit,
               sizeof(balanced_lane_credit), 1, fp) != 1 ||
@@ -9481,7 +9638,7 @@ void read_collective_checkpoint(const char *dir)
         fread(&drain_mode, sizeof(drain_mode), 1, fp) != 1)
       fatal_error("resume: corrupt balanced collective scheduler state");
   }
-  if ((format_b || format_c) != collective_balanced_mode())
+  if ((format_b || format_c || format_d) != collective_balanced_mode())
     fatal_error("resume: collective scheduler policy does not match checkpoint");
   if (turn > 1 || hint_probe_credit > 1)
     fatal_error("resume: invalid collective scheduler state");
@@ -9490,7 +9647,7 @@ void read_collective_checkpoint(const char *dir)
       (!flag(Opt->collective_promising_scheduler) &&
        priority_turns_since_fair != 0))
     fatal_error("resume: invalid collective priority scheduler state");
-  if ((format_b || format_c) &&
+  if ((format_b || format_c || format_d) &&
       (balanced_lane >= COLLECTIVE_LANE_COUNT ||
        balanced_lane_credit >
          collective_balanced_lane_share(balanced_lane) ||
@@ -9518,7 +9675,8 @@ void read_collective_checkpoint(const char *dir)
         fread(&b->cursor, sizeof(b->cursor), 1, fp) != 1 ||
         fread(&b->activation_limit, sizeof(b->activation_limit), 1, fp) != 1)
       fatal_error("resume: truncated collective batch queue");
-    if (format7 || format8 || format9 || format_a || format_b || format_c) {
+    if (format7 || format8 || format9 || format_a || format_b || format_c ||
+        format_d) {
       if (fread(&b->conclusion_cursor,
                 sizeof(b->conclusion_cursor), 1, fp) != 1 ||
           fread(&b->conclusion_prefix_hash,
@@ -9529,7 +9687,7 @@ void read_collective_checkpoint(const char *dir)
       b->conclusion_cursor = 0;
       b->conclusion_prefix_hash = 0;
     }
-    if (format9 || format_a || format_b || format_c) {
+    if (format9 || format_a || format_b || format_c || format_d) {
       if (fread(&b->conclusion_order_weight,
                 sizeof(b->conclusion_order_weight), 1, fp) != 1 ||
           fread(&b->conclusion_order_ordinal,
@@ -9549,10 +9707,11 @@ void read_collective_checkpoint(const char *dir)
     b->snapshot_epoch = epoch;
     if ((kind & COLLECTIVE_INFERENCE_MASK) == 0 ||
         (kind & ~COLLECTIVE_KIND_MASK) != 0 ||
-        (!format_c && !format_b && !format_a && !format9 && !format8 &&
+        (!format_d && !format_c && !format_b && !format_a && !format9 &&
+         !format8 &&
          !format7 && !format6 &&
          (kind & COLLECTIVE_HINT_PROBE) != 0) ||
-        (!format_c && !format_b && !format_a && !format9 &&
+        (!format_d && !format_c && !format_b && !format_a && !format9 &&
          (kind & COLLECTIVE_PROMISING_CURSOR) != 0) ||
         (format7 && b->conclusion_cursor != 0 &&
          (kind & (COLLECTIVE_POS_HYPER | COLLECTIVE_NEG_HYPER)) == 0) ||
@@ -9577,15 +9736,16 @@ void read_collective_checkpoint(const char *dir)
             b->conclusion_next_weight, b->conclusion_next_ordinal) >= 0)) ||
         ((kind & COLLECTIVE_HINT_PROBE) != 0 &&
          (i != 0 || hint_probe_credit != 0)) ||
-        ((format_b || format_c) && kind != COLLECTIVE_PARAMOD_FROM &&
+        ((format_b || format_c || format_d) &&
+         kind != COLLECTIVE_PARAMOD_FROM &&
          kind != COLLECTIVE_PARAMOD_INTO &&
          kind != COLLECTIVE_POS_HYPER &&
          kind != COLLECTIVE_NEG_HYPER) ||
-        (!format_b && !format_c &&
+        (!format_b && !format_c && !format_d &&
          (kind & (COLLECTIVE_PARAMOD_FROM | COLLECTIVE_PARAMOD_INTO)) != 0))
       fatal_error("resume: invalid collective batch kind");
     b->kind = kind;
-    if (format_c) {
+    if (format_c || format_d) {
       uint32_t from_literal, into_literal, from_side, into_argument;
       uint32_t path_depth, positioned, complete;
       if (fread(&from_literal, sizeof(from_literal), 1, fp) != 1 ||
@@ -9616,6 +9776,81 @@ void read_collective_checkpoint(const char *dir)
         if (fread(b->para_iterator.path,
                   sizeof(*b->para_iterator.path), path_depth, fp) != path_depth)
           fatal_error("resume: truncated paramodulation iterator path");
+      }
+    }
+    if (format_d) {
+      Hyper_iterator *hi = &b->hyper_iterator;
+      uint32_t initialized, satellite_mode, complete_hyper;
+      uint32_t given_literal, given_phase, outer_literal;
+      uint32_t nucleus_selected, nucleus_literal, depth;
+      uint32_t mate_phase, mate_literal;
+      unsigned j;
+      if (fread(&initialized, sizeof(initialized), 1, fp) != 1 ||
+          fread(&satellite_mode, sizeof(satellite_mode), 1, fp) != 1 ||
+          fread(&complete_hyper, sizeof(complete_hyper), 1, fp) != 1 ||
+          fread(&given_literal, sizeof(given_literal), 1, fp) != 1 ||
+          fread(&given_phase, sizeof(given_phase), 1, fp) != 1 ||
+          fread(&outer_literal, sizeof(outer_literal), 1, fp) != 1 ||
+          fread(&hi->outer_parent, sizeof(hi->outer_parent), 1, fp) != 1 ||
+          fread(&nucleus_selected,
+                sizeof(nucleus_selected), 1, fp) != 1 ||
+          fread(&nucleus_literal, sizeof(nucleus_literal), 1, fp) != 1 ||
+          fread(&hi->nucleus_parent,
+                sizeof(hi->nucleus_parent), 1, fp) != 1 ||
+          fread(&depth, sizeof(depth), 1, fp) != 1 ||
+          fread(&mate_phase, sizeof(mate_phase), 1, fp) != 1 ||
+          fread(&mate_literal, sizeof(mate_literal), 1, fp) != 1 ||
+          fread(&hi->mate_parent, sizeof(hi->mate_parent), 1, fp) != 1)
+        fatal_error("resume: truncated hyperresolution iterator");
+      if (initialized > 1 || satellite_mode > 1 || complete_hyper != 0 ||
+          given_phase > 1 || nucleus_selected > 1 || mate_phase > 3 ||
+          hi->outer_parent > b->activation_limit ||
+          hi->mate_parent > b->activation_limit ||
+          (nucleus_selected &&
+           hi->nucleus_parent >= b->activation_limit) ||
+          ((kind == COLLECTIVE_PARAMOD_FROM ||
+            kind == COLLECTIVE_PARAMOD_INTO) &&
+           (initialized != 0 || satellite_mode != 0 || given_literal != 0 ||
+            given_phase != 0 || outer_literal != 0 ||
+            hi->outer_parent != 0 || nucleus_selected != 0 ||
+            nucleus_literal != 0 || hi->nucleus_parent != 0 || depth != 0 ||
+            mate_phase != 0 || mate_literal != 0 || hi->mate_parent != 0)))
+        fatal_error("resume: invalid hyperresolution iterator");
+      hi->initialized = initialized;
+      hi->satellite_mode = satellite_mode;
+      hi->given_literal = given_literal;
+      hi->given_phase = given_phase;
+      hi->outer_literal = outer_literal;
+      hi->nucleus_selected = nucleus_selected;
+      hi->nucleus_literal = nucleus_literal;
+      hi->depth = depth;
+      hi->mate_phase = mate_phase;
+      hi->mate_literal = mate_literal;
+      if (depth != 0) {
+        hi->choices = safe_calloc(depth, sizeof(*hi->choices));
+        hi->choice_capacity = depth;
+      }
+      for (j = 0; j < depth; j++) {
+        Hyper_iterator_choice *choice = &hi->choices[j];
+        uint32_t literal, phase, resume_literal, resume_phase;
+        if (fread(&choice->parent_position,
+                  sizeof(choice->parent_position), 1, fp) != 1 ||
+            fread(&choice->resume_parent,
+                  sizeof(choice->resume_parent), 1, fp) != 1 ||
+            fread(&literal, sizeof(literal), 1, fp) != 1 ||
+            fread(&phase, sizeof(phase), 1, fp) != 1 ||
+            fread(&resume_literal, sizeof(resume_literal), 1, fp) != 1 ||
+            fread(&resume_phase, sizeof(resume_phase), 1, fp) != 1)
+          fatal_error("resume: truncated hyperresolution iterator choice");
+        if (phase > 2 || resume_phase > 3 ||
+            (phase <= 1 &&
+             choice->parent_position >= b->activation_limit) ||
+            choice->resume_parent > b->activation_limit)
+          fatal_error("resume: invalid hyperresolution iterator choice");
+        choice->literal = literal;
+        choice->phase = phase;
+        choice->resume_literal = resume_literal;
+        choice->resume_phase = resume_phase;
       }
     }
     collective_append_batch(b);
@@ -9829,6 +10064,12 @@ void write_checkpoint(void)
             Stats.collective_iterator_invalidations);
     fprintf(fp, "collective_iterator_raw_peak %llu\n",
             Stats.collective_iterator_raw_peak);
+    fprintf(fp, "collective_hyper_iterator_raw_steps %llu\n",
+            Stats.collective_hyper_iterator_raw_steps);
+    fprintf(fp, "collective_hyper_iterator_candidates %llu\n",
+            Stats.collective_hyper_iterator_candidates);
+    fprintf(fp, "collective_hyper_iterator_completions %llu\n",
+            Stats.collective_hyper_iterator_completions);
     fprintf(fp, "simplifier_epoch %u\n", Simplifier_epoch);
     fprintf(fp, "hint_state_epoch %llu\n", hint_state_epoch());
     fprintf(fp, "user_seconds %.2f\n", user_seconds());
@@ -10721,6 +10962,18 @@ void resume_load_clauses(const char *dir)
     rewind(fp); (void) read_metadata_ull_if_present(
       fp, "collective_iterator_raw_peak",
       &Stats.collective_iterator_raw_peak);
+    Stats.collective_hyper_iterator_raw_steps = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_hyper_iterator_raw_steps",
+      &Stats.collective_hyper_iterator_raw_steps);
+    Stats.collective_hyper_iterator_candidates = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_hyper_iterator_candidates",
+      &Stats.collective_hyper_iterator_candidates);
+    Stats.collective_hyper_iterator_completions = 0;
+    rewind(fp); (void) read_metadata_ull_if_present(
+      fp, "collective_hyper_iterator_completions",
+      &Stats.collective_hyper_iterator_completions);
   }
   rewind(fp); Simplifier_epoch =
     (unsigned) read_metadata_ull(fp, "simplifier_epoch");

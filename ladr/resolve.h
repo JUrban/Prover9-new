@@ -60,6 +60,59 @@ void hyper_resolution_with_clause_test(Topform c, int pos_or_neg, Lindex idx,
 				       void *clause_test_data,
 				       void (*proc_proc) (Topform));
 
+typedef unsigned long long (*Hyper_parent_count_proc)(void *);
+typedef Topform (*Hyper_parent_clause_proc)(unsigned long long, void *);
+typedef BOOL (*Hyper_parent_test_proc)(Topform, void *);
+
+typedef struct hyper_parent_source {
+  Hyper_parent_count_proc count;
+  Hyper_parent_clause_proc clause;
+  Hyper_parent_test_proc test;
+  void *data;
+} Hyper_parent_source;
+
+typedef struct hyper_iterator_choice {
+  unsigned long long parent_position;
+  unsigned long long resume_parent;
+  unsigned literal;
+  unsigned phase;
+  unsigned resume_literal;
+  unsigned resume_phase;
+} Hyper_iterator_choice;
+
+typedef struct hyper_iterator {
+  unsigned initialized;
+  unsigned satellite_mode;
+  unsigned complete;
+  unsigned given_literal;
+  unsigned given_phase;
+  unsigned outer_literal;
+  unsigned long long outer_parent;
+  unsigned nucleus_selected;
+  unsigned nucleus_literal;
+  unsigned long long nucleus_parent;
+  unsigned depth;
+  unsigned choice_capacity;
+  Hyper_iterator_choice *choices;
+  unsigned mate_phase;
+  unsigned mate_literal;
+  unsigned long long mate_parent;
+} Hyper_iterator;
+
+void hyper_iterator_init(Hyper_iterator *it);
+
+void hyper_iterator_reset(Hyper_iterator *it);
+
+void hyper_iterator_zap(Hyper_iterator *it);
+
+BOOL hyper_iterator_at_start(const Hyper_iterator *it);
+
+BOOL hyper_resolution_bounded(
+  Topform given, int pos_or_neg, const Hyper_parent_source *source,
+  Hyper_iterator *it, unsigned long long raw_budget,
+  unsigned long long yield_budget, void (*proc_proc) (Topform),
+  unsigned long long *raw_steps, unsigned long long *yielded);
+
 void ur_resolution(Topform c, int target_constraint, Lindex idx,
 		   void (*proc_proc) (Topform));
 

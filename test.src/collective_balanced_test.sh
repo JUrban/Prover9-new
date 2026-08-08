@@ -46,13 +46,31 @@ sed -e '1i assign(sos_limit,-1).\nassign(collective_raw_work_budget,1).\nassign(
 "$repo_dir/bin/prover9" < "$test_tmp/paramod.in" \
   > "$test_tmp/paramod.out" 2> "$test_tmp/paramod.err"
 grep -q 'THEOREM PROVED' "$test_tmp/paramod.out"
-grep -Eq 'Collective_iterators: raw_budget=1, raw_steps=[1-9][0-9]*, candidates=[1-9][0-9]*, completions=[1-9][0-9]*, invalidations=0, raw_turn_peak=1, path_bytes=[0-9]+\.' \
+grep -Eq 'Collective_iterators: raw_budget=1, raw_steps=[1-9][0-9]*, candidates=[1-9][0-9]*, completions=[1-9][0-9]*, invalidations=0, raw_turn_peak=1, path_bytes=[0-9]+, hyper_raw_steps=0, hyper_candidates=0, hyper_completions=0, hyper_choice_bytes=0\.' \
   "$test_tmp/paramod.out"
 grep -Eq 'Collective_chunks: limit=1, emitted=[1-9][0-9]*, replayed=0, raw_seen=[1-9][0-9]*, deferred_turns=[1-9][0-9]*, raw_peak=1\.' \
   "$test_tmp/paramod.out"
 "$repo_dir/bin/prooftrans" expand < "$test_tmp/paramod.out" \
   > "$test_tmp/paramod-proof.out"
 grep -q 'end of proof' "$test_tmp/paramod-proof.out"
+
+# The same unit raw-work bound applies inside nested hyperresolution clashes.
+# In particular, a large clash cannot hide the paramodulation lane behind one
+# opaque generator call.
+sed -e '1i assign(sos_limit,-1).\nassign(collective_raw_work_budget,1).\nassign(collective_candidate_chunk,1).' \
+    -e 's/assign(passive_store,compressed)\./assign(passive_store,dense)./' \
+    -e '/assign(inference_frontier,collective)\./a assign(collective_scheduler,balanced_hint).' \
+  "$repo_dir/test.src/collective_hyper.in" > "$test_tmp/hyper.in"
+"$repo_dir/bin/prover9" < "$test_tmp/hyper.in" \
+  > "$test_tmp/hyper.out" 2> "$test_tmp/hyper.err"
+grep -q 'THEOREM PROVED' "$test_tmp/hyper.out"
+grep -Eq 'Collective_iterators: raw_budget=1, raw_steps=[1-9][0-9]*, candidates=[1-9][0-9]*, completions=[1-9][0-9]*, invalidations=0, raw_turn_peak=1, path_bytes=0, hyper_raw_steps=[1-9][0-9]*, hyper_candidates=[1-9][0-9]*, hyper_completions=[1-9][0-9]*, hyper_choice_bytes=[1-9][0-9]*\.' \
+  "$test_tmp/hyper.out"
+grep -Eq 'Collective_chunks: limit=1, emitted=[1-9][0-9]*, replayed=0, raw_seen=[1-9][0-9]*, deferred_turns=[1-9][0-9]*, raw_peak=1\.' \
+  "$test_tmp/hyper.out"
+"$repo_dir/bin/prooftrans" expand < "$test_tmp/hyper.out" \
+  > "$test_tmp/hyper-proof.out"
+grep -q 'end of proof' "$test_tmp/hyper-proof.out"
 
 # The checkpoint policy byte and scheduler state are required for fail-closed
 # resume.  Compare the terminal aggregate state with an uninterrupted run.

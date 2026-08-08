@@ -78,6 +78,8 @@ void clash_with_clause_test(Clash c,
 			    Just_type rule,
 			    void (*proc_proc) (Topform));
 
+Topform clash_resolve(Clash first, Just_type rule);
+
 void set_clash_deadline(time_t deadline);
 
 BOOL clash_deadline_expired(void);

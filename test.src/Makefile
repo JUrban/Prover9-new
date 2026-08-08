@@ -11,7 +11,7 @@ CFLAGS = $(XFLAGS) -g  -O0 -Wall
 # CFLAGS = $(XFLAGS) -pg -O -Wall
 # CFLAGS = $(XFLAGS)  -Wall -pedantic
 
-PROGRAMS = avltest memory_lifecycle_test allocator_churn_test bookkeeping_lifecycle_test ancestor_store_test ancestor_store_scale_test checkpoint_selector_test dense_selector_compaction_test hint_postings_test paramod_iterator_test
+PROGRAMS = avltest memory_lifecycle_test allocator_churn_test bookkeeping_lifecycle_test ancestor_store_test ancestor_store_scale_test checkpoint_selector_test dense_selector_compaction_test hint_postings_test paramod_iterator_test hyper_iterator_test
 
 all: ladr apps
 
@@ -60,6 +60,9 @@ hint_postings_test: hint_postings_test.o ../ladr/libladr.a
 paramod_iterator_test: paramod_iterator_test.o ../ladr/libladr.a
 	$(CC) $(CFLAGS) -o paramod_iterator_test paramod_iterator_test.o ../ladr/libladr.a -lm
 
+hyper_iterator_test: hyper_iterator_test.o ../ladr/libladr.a
+	$(CC) $(CFLAGS) -o hyper_iterator_test hyper_iterator_test.o ../ladr/libladr.a -lm
+
 memory_lifecycle_test.o allocator_churn_test.o bookkeeping_lifecycle_test.o ancestor_store_test.o: ../ladr/topform.h
 
 bookkeeping_lifecycle_test.o: ../ladr/clause_store.h ../ladr/clauseid.h
@@ -89,8 +92,9 @@ bookkeeping-tests: bookkeeping_lifecycle_test
 hint-postings-test: hint_postings_test
 	./hint_postings_test
 
-iterator-tests: paramod_iterator_test
+iterator-tests: paramod_iterator_test hyper_iterator_test
 	./paramod_iterator_test
+	./hyper_iterator_test
 
 ancestor-store-scale: ancestor_store_scale_test
 	./ancestor_store_scale_test

@@ -77,6 +77,30 @@ claim a bounded raw-work turn; native continuation is the next phase.
   policy checkpoint/resume comparison, legacy focused suites, and `make test1`
   pass.
 
+### 2026-08-08: Phase 3 native hyperresolution continuation
+
+- Hyperresolution now has a pointer-free continuation over stable historical
+  parent/literal coordinates, nested satellite choices, normal/flipped mate
+  phases, the built-in `x=x` phase, and the outer satellite/nucleus cursor.
+  Selected substitutions are reconstructed only to nucleus depth; no raw
+  conclusion prefix is regenerated or retained.
+- Historical parents and literals are visited in reverse append/insertion
+  order, matching the FPA oracle while remaining directly checkpointable.
+  Inactive-parent and literal visits consume raw work, so a long rejected
+  prefix cannot evade `collective_raw_work_budget`.
+- Both positive and negative hyperresolution, and both given-as-nucleus and
+  given-as-satellite paths, use the bounded iterator in balanced mode.  The
+  legacy FPA/replay implementation remains unchanged as an oracle and for old
+  partially replayed checkpoints.
+- `P9COLLD` serializes outer/nucleus cursors, nested choices, resume positions,
+  and mate phases.  Choice-array memory is included in descriptor accounting.
+- `hyper_iterator_test` compares exact eager sequences for positive/negative
+  nucleus and satellite cases at budgets 1--64 and restores the exact suffix
+  after every unit raw step.  The balanced hyper proof observes a raw-turn
+  peak of one with zero replay and passes `prooftrans`.
+- Paramod/hyper iterator tests, balanced checkpoint/fairness/backpressure,
+  all focused legacy suites, and `make test1` pass together.
+
 ## Objective
 
 Make the collective DISCOUNT frontier discover and propagate useful hint

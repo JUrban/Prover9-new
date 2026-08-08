@@ -336,6 +336,12 @@ Topform resolve(Clash first, Just_type rule)
   return r;
 }  /* resolve */
 
+/* PUBLIC */
+Topform clash_resolve(Clash first, Just_type rule)
+{
+  return resolve(first, rule);
+}
+
 /*************
  *
  *   clash_recurse()

@@ -289,6 +289,584 @@ void hyper_resolution_with_clause_test(Topform c, int pos_or_neg, Lindex idx,
                   proc_proc);
 }  /* hyper_resolution_with_clause_test */
 
+enum hyper_scan_result {
+  HYPER_SCAN_FOUND,
+  HYPER_SCAN_BUDGET,
+  HYPER_SCAN_EXHAUSTED
+};
+
+static Literals hyper_iterator_literal(Literals lits, unsigned position)
+{
+  while (lits != NULL && position != 0) {
+    lits = lits->next;
+    position--;
+  }
+  return lits;
+}
+
+static unsigned hyper_iterator_literal_count(Literals lits)
+{
+  unsigned n = 0;
+  while (lits != NULL) {
+    n++;
+    lits = lits->next;
+  }
+  return n;
+}
+
+static BOOL hyper_iterator_clashable(Literals lit, BOOL positive)
+{
+  if (!Production_mode)
+    return positive ? !lit->sign : lit->sign;
+  else
+    return positive && !lit->sign &&
+           !evaluable_predicate(SYMNUM(lit->atom));
+}
+
+static BOOL hyper_iterator_sat_test(Literals lit, BOOL positive)
+{
+  return positive ? pos_hyper_sat_test(lit) : neg_hyper_sat_test(lit);
+}
+
+static void hyper_iterator_reserve_choices(Hyper_iterator *it, unsigned need)
+{
+  unsigned capacity;
+  Hyper_iterator_choice *choices;
+  if (need <= it->choice_capacity)
+    return;
+  capacity = it->choice_capacity == 0 ? 4 : it->choice_capacity;
+  while (capacity < need) {
+    if (capacity > UINT_MAX / 2)
+      fatal_error("hyperresolution iterator choice overflow");
+    capacity *= 2;
+  }
+  choices = safe_calloc(capacity, sizeof(*choices));
+  if (it->choices != NULL) {
+    memcpy(choices, it->choices, it->depth * sizeof(*choices));
+    safe_free(it->choices);
+  }
+  it->choices = choices;
+  it->choice_capacity = capacity;
+}
+
+static void hyper_iterator_reset_scan(
+  unsigned long long count, unsigned long long *parent, unsigned *literal)
+{
+  *parent = count;
+  *literal = UINT_MAX;
+}
+
+/* Search stable parents in reverse activation/literal insertion order.  FPA
+   answers are descending insertion IDs, so this is the pointer-free order
+   corresponding to the collective append-only history.  Rejected historical
+   parents and inspected literals are both charged, ensuring a hard turn
+   bound even across a long inactive prefix. */
+static enum hyper_scan_result hyper_iterator_scan(
+  Term query, Context query_subst, Context found_subst,
+  BOOL wanted_sign, BOOL require_satellite,
+  const Hyper_parent_source *source,
+  unsigned long long *parent_cursor, unsigned *literal_cursor,
+  unsigned long long raw_budget, unsigned long long *raw_steps,
+  unsigned long long *found_parent, unsigned *found_literal, Trail *found_trail)
+{
+  while (*parent_cursor != 0) {
+    unsigned long long parent_position = *parent_cursor - 1;
+    Topform c = source->clause(parent_position, source->data);
+    if (*literal_cursor == UINT_MAX) {
+      if (*raw_steps >= raw_budget)
+        return HYPER_SCAN_BUDGET;
+      if (source->test != NULL && !source->test(c, source->data)) {
+        (*raw_steps)++;
+        (*parent_cursor)--;
+        continue;
+      }
+      *literal_cursor = hyper_iterator_literal_count(c->literals);
+    }
+    if (*literal_cursor == 0) {
+      (*parent_cursor)--;
+      *literal_cursor = UINT_MAX;
+      continue;
+    }
+    else {
+      unsigned literal_position;
+      Literals lit;
+      Trail tr = NULL;
+      if (*raw_steps >= raw_budget)
+        return HYPER_SCAN_BUDGET;
+      literal_position = --(*literal_cursor);
+      lit = hyper_iterator_literal(c->literals, literal_position);
+      (*raw_steps)++;
+      if (lit->sign != wanted_sign ||
+          (require_satellite &&
+           !hyper_iterator_sat_test(lit, wanted_sign)))
+        continue;
+      if (unify(query, query_subst, lit->atom, found_subst, &tr)) {
+        *found_parent = parent_position;
+        *found_literal = literal_position;
+        *found_trail = tr;
+        return HYPER_SCAN_FOUND;
+      }
+    }
+  }
+  return HYPER_SCAN_EXHAUSTED;
+}
+
+static Clash hyper_iterator_build_clash(
+  Topform nucleus, BOOL positive, int preselected_literal,
+  Clash **frames_out, unsigned *frame_count_out, Context *nuc_subst_out)
+{
+  unsigned literal_position = 0, frame_count = 0;
+  unsigned literal_count = hyper_iterator_literal_count(nucleus->literals);
+  Clash *frames = safe_calloc(literal_count == 0 ? 1 : literal_count,
+                              sizeof(*frames));
+  Context nuc_subst = get_context();
+  Clash first = NULL, last = NULL;
+  Literals lit;
+  for (lit = nucleus->literals; lit != NULL;
+       lit = lit->next, literal_position++) {
+    Clash p = append_clash(last);
+    if (first == NULL)
+      first = p;
+    last = p;
+    p->clashable = hyper_iterator_clashable(lit, positive);
+    p->nuc_lit = lit;
+    p->nuc_subst = nuc_subst;
+    if (p->clashable) {
+      p->sat_subst = get_context();
+      if ((int) literal_position != preselected_literal)
+        frames[frame_count++] = p;
+    }
+  }
+  *frames_out = frames;
+  *frame_count_out = frame_count;
+  *nuc_subst_out = nuc_subst;
+  return first;
+}
+
+static void hyper_iterator_cleanup_clash(
+  Clash first, Context nuc_subst, Clash *frames,
+  Trail *trails, Term *flips, unsigned depth,
+  Trail preselected_trail, Term preselected_flip)
+{
+  unsigned i;
+  Clash p;
+  for (i = depth; i != 0; i--) {
+    if (trails[i - 1] != NULL)
+      undo_subst(trails[i - 1]);
+    if (flips[i - 1] != NULL)
+      zap_top_flip(flips[i - 1]);
+  }
+  if (preselected_trail != NULL)
+    undo_subst(preselected_trail);
+  if (preselected_flip != NULL)
+    zap_top_flip(preselected_flip);
+  for (p = first; p != NULL; p = p->next)
+    p->clashed = FALSE;
+  zap_clash(first);
+  free_context(nuc_subst);
+  safe_free(frames);
+  safe_free(trails);
+  safe_free(flips);
+}
+
+static void hyper_iterator_backtrack(
+  Hyper_iterator *it, Clash *frames, Trail *trails, Term *flips)
+{
+  unsigned at;
+  Hyper_iterator_choice *choice;
+  if (it->depth == 0)
+    fatal_error("hyperresolution iterator backtrack underflow");
+  at = --it->depth;
+  choice = &it->choices[at];
+  if (trails[at] != NULL) {
+    undo_subst(trails[at]);
+    trails[at] = NULL;
+  }
+  if (flips[at] != NULL) {
+    zap_top_flip(flips[at]);
+    flips[at] = NULL;
+  }
+  frames[at]->clashed = FALSE;
+  frames[at]->sat_lit = NULL;
+  it->mate_phase = choice->resume_phase;
+  it->mate_parent = choice->resume_parent;
+  it->mate_literal = choice->resume_literal;
+}
+
+static void hyper_iterator_reconstruct_choices(
+  Hyper_iterator *it, Clash *frames, unsigned frame_count,
+  const Hyper_parent_source *source, Trail *trails, Term *flips)
+{
+  unsigned i;
+  if (it->depth > frame_count)
+    fatal_error("invalid hyperresolution iterator depth");
+  for (i = 0; i < it->depth; i++) {
+    Hyper_iterator_choice *choice = &it->choices[i];
+    Clash p = frames[i];
+    Trail tr = NULL;
+    if (choice->phase <= 1) {
+      Topform sat = source->clause(choice->parent_position, source->data);
+      Literals lit = hyper_iterator_literal(sat->literals, choice->literal);
+      Term query = p->nuc_lit->atom;
+      if (lit == NULL)
+        fatal_error("invalid hyperresolution iterator satellite literal");
+      if (choice->phase == 1) {
+        query = top_flip(query);
+        flips[i] = query;
+      }
+      if (!unify(query, p->nuc_subst, lit->atom, p->sat_subst, &tr))
+        fatal_error("hyperresolution iterator choice no longer unifies");
+      p->sat_lit = lit;
+      p->flipped = choice->phase == 1;
+    }
+    else if (choice->phase == 2) {
+      if (!neg_eq(p->nuc_lit) ||
+          !unify(ARG(p->nuc_lit->atom, 0), p->nuc_subst,
+                 ARG(p->nuc_lit->atom, 1), p->nuc_subst, &tr))
+        fatal_error("hyperresolution iterator x=x choice changed");
+      p->sat_lit = NULL;
+      p->flipped = FALSE;
+    }
+    else
+      fatal_error("invalid hyperresolution iterator choice phase");
+    trails[i] = tr;
+    p->clashed = TRUE;
+  }
+}
+
+enum hyper_inner_result {
+  HYPER_INNER_COMPLETE,
+  HYPER_INNER_BUDGET
+};
+
+static enum hyper_inner_result hyper_iterator_run_inner(
+  Topform nucleus, BOOL positive, int preselected_literal,
+  Literals given_satellite, BOOL given_flipped,
+  const Hyper_parent_source *source, Hyper_iterator *it,
+  unsigned long long raw_budget, unsigned long long yield_budget,
+  void (*proc_proc) (Topform), unsigned long long *raw_steps,
+  unsigned long long *yielded)
+{
+  Clash *frames, first;
+  unsigned frame_count, i;
+  Context nuc_subst;
+  Trail preselected_trail = NULL;
+  Term preselected_flip = NULL;
+  Trail *trails;
+  Term *flips;
+
+  first = hyper_iterator_build_clash(
+    nucleus, positive, preselected_literal,
+    &frames, &frame_count, &nuc_subst);
+  trails = safe_calloc(frame_count == 0 ? 1 : frame_count,
+                        sizeof(*trails));
+  flips = safe_calloc(frame_count == 0 ? 1 : frame_count,
+                       sizeof(*flips));
+
+  if (preselected_literal >= 0) {
+    Clash p;
+    unsigned position = 0;
+    Term query = given_satellite->atom;
+    for (p = first; p != NULL && position < (unsigned) preselected_literal;
+         p = p->next, position++)
+      ;
+    if (p == NULL || !p->clashable)
+      fatal_error("invalid hyperresolution iterator nucleus literal");
+    if (given_flipped) {
+      query = top_flip(query);
+      preselected_flip = query;
+    }
+    if (!unify(query, p->sat_subst, p->nuc_lit->atom,
+               p->nuc_subst, &preselected_trail))
+      fatal_error("hyperresolution iterator nucleus no longer unifies");
+    p->sat_lit = given_satellite;
+    p->flipped = given_flipped;
+    p->clashed = TRUE;
+  }
+
+  hyper_iterator_reconstruct_choices(
+    it, frames, frame_count, source, trails, flips);
+
+  while (*yielded < yield_budget) {
+    Clash p;
+    if (it->depth == frame_count) {
+      if (frame_count == 0 && it->mate_phase >= 3)
+        break;
+      (*proc_proc)(clash_resolve(first, HYPER_RES_JUST));
+      (*yielded)++;
+      if (frame_count == 0)
+        it->mate_phase = 3;
+      else
+        hyper_iterator_backtrack(it, frames, trails, flips);
+      continue;
+    }
+
+    p = frames[it->depth];
+    if (it->mate_phase <= 1) {
+      Term query = p->nuc_lit->atom;
+      Term flip = NULL;
+      unsigned long long found_parent;
+      unsigned found_literal;
+      Trail tr = NULL;
+      enum hyper_scan_result scan;
+      if (it->mate_phase == 1) {
+        if (!eq_term(query)) {
+          it->mate_phase = 2;
+          hyper_iterator_reset_scan(
+            source->count(source->data),
+            &it->mate_parent, &it->mate_literal);
+          continue;
+        }
+        flip = top_flip(query);
+        query = flip;
+      }
+      scan = hyper_iterator_scan(
+        query, p->nuc_subst, p->sat_subst, positive, TRUE, source,
+        &it->mate_parent, &it->mate_literal,
+        raw_budget, raw_steps, &found_parent, &found_literal, &tr);
+      if (scan == HYPER_SCAN_BUDGET) {
+        if (flip != NULL)
+          zap_top_flip(flip);
+        hyper_iterator_cleanup_clash(
+          first, nuc_subst, frames, trails, flips, it->depth,
+          preselected_trail, preselected_flip);
+        return HYPER_INNER_BUDGET;
+      }
+      if (scan == HYPER_SCAN_EXHAUSTED) {
+        if (flip != NULL)
+          zap_top_flip(flip);
+        it->mate_phase++;
+        hyper_iterator_reset_scan(
+          source->count(source->data),
+          &it->mate_parent, &it->mate_literal);
+        continue;
+      }
+      hyper_iterator_reserve_choices(it, it->depth + 1);
+      it->choices[it->depth].parent_position = found_parent;
+      it->choices[it->depth].literal = found_literal;
+      it->choices[it->depth].phase = it->mate_phase;
+      it->choices[it->depth].resume_phase = it->mate_phase;
+      it->choices[it->depth].resume_parent = it->mate_parent;
+      it->choices[it->depth].resume_literal = it->mate_literal;
+      p->sat_lit = hyper_iterator_literal(
+        source->clause(found_parent, source->data)->literals,
+        found_literal);
+      p->flipped = it->mate_phase == 1;
+      p->clashed = TRUE;
+      trails[it->depth] = tr;
+      flips[it->depth] = flip;
+      it->depth++;
+      it->mate_phase = 0;
+      hyper_iterator_reset_scan(
+        source->count(source->data),
+        &it->mate_parent, &it->mate_literal);
+      continue;
+    }
+    else if (it->mate_phase == 2) {
+      Trail tr = NULL;
+      if (*raw_steps >= raw_budget) {
+        hyper_iterator_cleanup_clash(
+          first, nuc_subst, frames, trails, flips, it->depth,
+          preselected_trail, preselected_flip);
+        return HYPER_INNER_BUDGET;
+      }
+      (*raw_steps)++;
+      it->mate_phase = 3;
+      if (neg_eq(p->nuc_lit) &&
+          unify(ARG(p->nuc_lit->atom, 0), p->nuc_subst,
+                ARG(p->nuc_lit->atom, 1), p->nuc_subst, &tr)) {
+        hyper_iterator_reserve_choices(it, it->depth + 1);
+        it->choices[it->depth].parent_position = 0;
+        it->choices[it->depth].literal = 0;
+        it->choices[it->depth].phase = 2;
+        it->choices[it->depth].resume_phase = 3;
+        it->choices[it->depth].resume_parent = it->mate_parent;
+        it->choices[it->depth].resume_literal = it->mate_literal;
+        p->sat_lit = NULL;
+        p->flipped = FALSE;
+        p->clashed = TRUE;
+        trails[it->depth] = tr;
+        it->depth++;
+        it->mate_phase = 0;
+        hyper_iterator_reset_scan(
+          source->count(source->data),
+          &it->mate_parent, &it->mate_literal);
+      }
+      continue;
+    }
+    else if (it->depth == 0)
+      break;
+    else
+      hyper_iterator_backtrack(it, frames, trails, flips);
+  }
+
+  i = it->depth;
+  hyper_iterator_cleanup_clash(
+    first, nuc_subst, frames, trails, flips, i,
+    preselected_trail, preselected_flip);
+  return (it->depth == 0 && it->mate_phase >= 3) ?
+         HYPER_INNER_COMPLETE : HYPER_INNER_BUDGET;
+}
+
+static BOOL hyper_iterator_given_literal_ok(
+  Topform given, unsigned position)
+{
+  Literals lit = hyper_iterator_literal(given->literals, position);
+  return lit != NULL &&
+         (!Ordered || maximal_literal(given->literals, lit, FLAG_CHECK));
+}
+
+static void hyper_iterator_advance_given(
+  Topform given, Hyper_iterator *it, unsigned long long parent_count)
+{
+  Literals lit = hyper_iterator_literal(given->literals, it->given_literal);
+  if (it->given_phase == 0 && lit != NULL && pos_eq(lit))
+    it->given_phase = 1;
+  else {
+    it->given_literal++;
+    it->given_phase = 0;
+  }
+  hyper_iterator_reset_scan(
+    parent_count, &it->outer_parent, &it->outer_literal);
+}
+
+/* PUBLIC */
+void hyper_iterator_init(Hyper_iterator *it)
+{
+  memset(it, 0, sizeof(*it));
+}
+
+/* PUBLIC */
+void hyper_iterator_reset(Hyper_iterator *it)
+{
+  Hyper_iterator_choice *choices = it->choices;
+  unsigned capacity = it->choice_capacity;
+  memset(it, 0, sizeof(*it));
+  it->choices = choices;
+  it->choice_capacity = capacity;
+}
+
+/* PUBLIC */
+void hyper_iterator_zap(Hyper_iterator *it)
+{
+  safe_free(it->choices);
+  memset(it, 0, sizeof(*it));
+}
+
+/* PUBLIC */
+BOOL hyper_iterator_at_start(const Hyper_iterator *it)
+{
+  return !it->initialized && !it->complete && it->depth == 0 &&
+         !it->nucleus_selected;
+}
+
+/* Pointer-free, bounded hyperresolution over an append-only stable parent
+   source.  The source order must be activation insertion order. */
+/* PUBLIC */
+BOOL hyper_resolution_bounded(
+  Topform given, int pos_or_neg, const Hyper_parent_source *source,
+  Hyper_iterator *it, unsigned long long raw_budget,
+  unsigned long long yield_budget, void (*proc_proc) (Topform),
+  unsigned long long *raw_steps, unsigned long long *yielded)
+{
+  BOOL positive = pos_or_neg == POS_RES;
+  unsigned long long parent_count = source->count(source->data);
+  if (raw_budget == 0 || yield_budget == 0)
+    fatal_error("bounded hyperresolution requires nonzero budgets");
+  *raw_steps = 0;
+  *yielded = 0;
+  if (it->complete)
+    return TRUE;
+  if (!it->initialized) {
+    it->initialized = TRUE;
+    it->satellite_mode = positive ?
+      positive_clause(given->literals) : negative_clause(given->literals);
+    hyper_iterator_reset_scan(
+      parent_count, &it->outer_parent, &it->outer_literal);
+    hyper_iterator_reset_scan(
+      parent_count, &it->mate_parent, &it->mate_literal);
+  }
+
+  if (!it->satellite_mode) {
+    enum hyper_inner_result result = hyper_iterator_run_inner(
+      given, positive, -1, NULL, FALSE, source, it,
+      raw_budget, yield_budget, proc_proc, raw_steps, yielded);
+    if (result == HYPER_INNER_COMPLETE) {
+      it->complete = TRUE;
+      return TRUE;
+    }
+    return FALSE;
+  }
+
+  while (*raw_steps < raw_budget && *yielded < yield_budget) {
+    Literals given_lit;
+    if (it->nucleus_selected) {
+      Topform nucleus = source->clause(it->nucleus_parent, source->data);
+      enum hyper_inner_result result = hyper_iterator_run_inner(
+        nucleus, positive, (int) it->nucleus_literal,
+        hyper_iterator_literal(given->literals, it->given_literal),
+        it->given_phase == 1, source, it,
+        raw_budget, yield_budget, proc_proc, raw_steps, yielded);
+      if (result == HYPER_INNER_BUDGET)
+        return FALSE;
+      it->nucleus_selected = FALSE;
+      it->depth = 0;
+      it->mate_phase = 0;
+      hyper_iterator_reset_scan(
+        parent_count, &it->mate_parent, &it->mate_literal);
+      continue;
+    }
+
+    given_lit = hyper_iterator_literal(given->literals, it->given_literal);
+    if (given_lit == NULL) {
+      it->complete = TRUE;
+      return TRUE;
+    }
+    if (!hyper_iterator_given_literal_ok(given, it->given_literal) ||
+        (it->given_phase == 1 && !pos_eq(given_lit))) {
+      hyper_iterator_advance_given(given, it, parent_count);
+      continue;
+    }
+    else {
+      Context sat_subst = get_context();
+      Context nuc_subst = get_context();
+      Term query = given_lit->atom;
+      Term flip = NULL;
+      unsigned long long found_parent;
+      unsigned found_literal;
+      Trail tr = NULL;
+      enum hyper_scan_result scan;
+      if (it->given_phase == 1) {
+        flip = top_flip(query);
+        query = flip;
+      }
+      scan = hyper_iterator_scan(
+        query, sat_subst, nuc_subst, !positive, FALSE, source,
+        &it->outer_parent, &it->outer_literal,
+        raw_budget, raw_steps, &found_parent, &found_literal, &tr);
+      if (scan == HYPER_SCAN_FOUND) {
+        undo_subst(tr);
+        it->nucleus_selected = TRUE;
+        it->nucleus_parent = found_parent;
+        it->nucleus_literal = found_literal;
+        it->depth = 0;
+        it->mate_phase = 0;
+        hyper_iterator_reset_scan(
+          parent_count, &it->mate_parent, &it->mate_literal);
+      }
+      else if (scan == HYPER_SCAN_EXHAUSTED)
+        hyper_iterator_advance_given(given, it, parent_count);
+      if (flip != NULL)
+        zap_top_flip(flip);
+      free_context(sat_subst);
+      free_context(nuc_subst);
+      if (scan == HYPER_SCAN_BUDGET)
+        return FALSE;
+    }
+  }
+  return FALSE;
+}  /* hyper_resolution_bounded */
+
 /*************
  *
  *   target_check()
