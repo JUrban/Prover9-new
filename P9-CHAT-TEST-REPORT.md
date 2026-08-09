@@ -199,15 +199,15 @@ former packed implementation.
 
 ## Final post-fingerprint long runs
 
-Three 2,400-CPU-second guarded runs use commit `11f7226` and the exact same
-full input.  The external times below are from `/usr/bin/time`; status 4 is
-the normal Prover9 `max_seconds` exit.
+Three runs with a 2,400-second internal wall-clock guard use commit `11f7226`
+and the exact same full input.  The external times below are from
+`/usr/bin/time`; status 4 is the normal Prover9 `max_seconds` exit.
 
 | Mode | Result | Given | Generated | Kept | User CPU | Wall | Peak RSS |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | Packed OTTER | proof | 2,945 | 8,248,034 | 272,789 | 2,119.65 s | 37:11 | 444,080 KiB |
-| DISCOUNT clauses, selected | CPU limit | 2,529 | 6,748,855 | 451,706 | 2,310.14 s | 40:03 | 153,088 KiB |
-| DISCOUNT clauses, eager-interreduced | CPU limit | 2,467 | 6,351,482 | 234,066 | 2,325.17 s | 40:03 | 204,960 KiB |
+| DISCOUNT clauses, selected | time limit | 2,529 | 6,748,855 | 451,706 | 2,310.14 s | 40:03 | 153,088 KiB |
+| DISCOUNT clauses, eager-interreduced | time limit | 2,467 | 6,351,482 | 234,066 | 2,325.17 s | 40:03 | 204,960 KiB |
 
 Packed OTTER terminates at exactly the old/current-FPA boundary.  Its proof
 has the same 7,051 clauses in the same order; only the timing comment differs,
@@ -217,22 +217,23 @@ FPA's 778.16 seconds.  Packed storage is therefore semantically compatible,
 but it is not a competitive compatibility default on this input yet.
 
 Selected DISCOUNT is the best measured radical mode: its peak is 72.2% below
-old P9's proof RSS while retaining 448,838 dense passives at termination.
+old P9's proof RSS while retaining 448,838 dense passives at its last report.
 It does not prove within the guard.  Eager interreduction retains only 179,527
 dense passives, but its repeated rule-repair work and transient materialized
 state produce a higher 204,960-KiB peak.  It enters and exits rewrite drain
 eight times, yields 926 times, and ends live with ordinary inference still
 advancing; this is contraction overhead, not the former permanent-drain bug.
 
-The terminal `Hint match stats: ... matched=` value is a snapshot over hints
-that remain active, not a cumulative count of historical matches.  It is 452
-for the packed proof (whose proof itself records 3,231 new hints), 3,666 for
-selected, and 680 for eager.  This is why crossing an old run's displayed
-`matched` number neither implies the same proof path nor guarantees a proof.
+The last displayed `Hint match stats: ... matched=` value is a snapshot over
+hints that remain active, not a cumulative count of historical matches.  It
+is 452 for the packed proof (whose proof itself records 3,231 new hints),
+3,666 for selected, and 680 for eager.  This is why crossing an old run's
+displayed `matched` number neither implies the same proof path nor guarantees
+a proof.
 
 ### A report-driven mmap residency bug
 
-The selected terminal report shows 56,511,278 bytes of serialized passive
+The last pre-fix selected report shows 56,511,278 bytes of serialized passive
 records in a 68,952,417-byte mmap arena.  Before commit `edd4ff0`, every
 periodic statistics report visited every active dense passive and verified
 the CRC over its entire archived body merely to recompute three payload
@@ -247,8 +248,7 @@ same values in O(1) without reading the mmap body arena.  The cost is 16 bytes
 per allocated selector record: at the 300-given differential point, selector
 storage grows from 1,045,128 to 1,343,736 bytes, while all search counters,
 final hint state, and reported payload bytes are exact.  The full regression
-suite passes.  Long report/no-report results for this build are recorded
-below after both guarded processes terminate.
+suite passes.
 
 An intentionally aggressive `report=1` check emitted 51 full statistics
 blocks through the same 300-given boundary.  It preserved Generated=122,541,
@@ -267,6 +267,48 @@ exact; a regression cycles all four semantics values through direct
 deactivation/reactivation, selection, and compaction, and the full
 DISCOUNT test suite passes.
 
+### Controlled post-fix long runs
+
+Three simultaneous runs of the `edd4ff0` build used the same 2,400-second
+internal wall guard.  The selected pair differs only in reporting interval;
+`report=0` deliberately exercises no statistics traversal at all.  Because
+the signal-based time limit exits without a terminal statistics block, the
+table uses the last periodic state where one exists and external timing/RSS
+for every process.
+
+| Demodulation | Report | Last reported Given | Dense passives | User CPU | Wall | Peak RSS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Selected | 60 s | 2,268 | 384,755 | 2,312.71 s | 40:03 | 114,012 KiB |
+| Selected | off | not reported | not reported | 2,325.95 s | 40:03 | 113,856 KiB |
+| Eager-interreduced | 60 s | 2,311 | 155,549 | 2,328.97 s | 40:03 | 211,412 KiB |
+
+All three exited normally at the time guard without a proof.  At the last
+selected report, Generated=5,611,955 and Kept=387,359; eager reported
+Generated=5,777,032 and Kept=206,901.
+
+The selected controls differ by only 156 KiB (0.14%), with the reporting run
+slightly lower.  Periodic statistics therefore no longer drive mmap
+residency.  The measured 114,012-KiB peak is 25.5% below the otherwise
+equivalent pre-fix selected run and **79.3% below old P9's 550,400-KiB proof
+peak**.  This is a guarded-prefix comparison rather than a proof-boundary
+claim, but the new run had already retained 384,755 passives at its last
+report.  After an arena remap, live `/proc` samples showed a 67,340-KiB
+logical passive mapping with only 4--5 MiB resident; newly appended dirty
+pages between geometric remaps explain the remaining file-backed peak.
+
+These long runs predate the 64-byte record follow-up.  At 384,755 active
+records, `3a0dd66` stores about 3.0 MiB less live selector data than the
+measured 72-byte build, so the latest build is expected to land very close to
+an 80% old-P9 reduction at the same state.  This is a calculated estimate,
+not a substituted measurement.
+
+The mmap fix does not help eager mode's dominant allocation.  Eager retains
+far fewer dense passives, yet its 82,504 compact rewrite rules, 62.4-MB rule
+bank, repair arrays, and archived disabled clauses raise peak RSS to 211,412
+KiB.  It remains scheduler-live, with six completed rewrite drains and 862
+bounded yields, but it is not the radical-memory default for this hint
+trajectory.
+
 ## Current operational recommendation
 
 For compatibility-sensitive `chat_test` work, use current FPA OTTER.  It has
@@ -279,6 +321,7 @@ assign(passive_store,full).
 assign(hint_index,fpa).
 assign(inference_frontier,clauses).
 assign(ancestor_store,off).
+set(back_demod_hints).
 ```
 
 Use packed OTTER only when a larger hint bank demonstrably dominates FPA RAM;
@@ -296,6 +339,7 @@ assign(hint_index,fpa).
 assign(inference_frontier,clauses).
 assign(ancestor_store,mmap).
 assign(sos_limit,-1).
+set(back_demod_hints).
 ```
 
 For the best radical-memory/hint balance measured so far on `chat_test`, use
@@ -309,6 +353,7 @@ assign(hint_index,packed).
 assign(inference_frontier,clauses).
 assign(ancestor_store,mmap).
 assign(sos_limit,-1).
+set(back_demod_hints).
 ```
 
 Use eager-interreduced demodulation when contraction is more important than
