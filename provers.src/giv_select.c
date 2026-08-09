@@ -61,6 +61,9 @@ struct dense_passive_record {
   unsigned rewrite_epoch;
   int semantics;
   unsigned flags;
+  unsigned body_bytes;
+  unsigned justification_bytes;
+  unsigned logical_body_bytes;
 };
 
 typedef struct select_state *Select_state;
@@ -98,6 +101,31 @@ static unsigned Dense_rewrite_epoch = 1;
 static unsigned long long Dense_rewrite_fresh = 0;
 static unsigned long long Dense_rewrite_stale = 0;
 static unsigned long long Dense_rule_stale = 0;
+static unsigned long long Dense_body_bytes = 0;
+static unsigned long long Dense_justification_bytes = 0;
+static unsigned long long Dense_logical_body_bytes = 0;
+
+static void dense_add_payload(const struct dense_passive_record *r)
+{
+  if (ULLONG_MAX - Dense_body_bytes < r->body_bytes ||
+      ULLONG_MAX - Dense_justification_bytes < r->justification_bytes ||
+      ULLONG_MAX - Dense_logical_body_bytes < r->logical_body_bytes)
+    fatal_error("dense_add_payload: accounting overflow");
+  Dense_body_bytes += r->body_bytes;
+  Dense_justification_bytes += r->justification_bytes;
+  Dense_logical_body_bytes += r->logical_body_bytes;
+}
+
+static void dense_subtract_payload(const struct dense_passive_record *r)
+{
+  if (Dense_body_bytes < r->body_bytes ||
+      Dense_justification_bytes < r->justification_bytes ||
+      Dense_logical_body_bytes < r->logical_body_bytes)
+    fatal_error("dense_subtract_payload: accounting underflow");
+  Dense_body_bytes -= r->body_bytes;
+  Dense_justification_bytes -= r->justification_bytes;
+  Dense_logical_body_bytes -= r->logical_body_bytes;
+}
 
 static size_t dense_grow_capacity(size_t current, size_t element_size,
                                   char *where)
@@ -376,6 +404,19 @@ void dense_passive_memory(unsigned long long *record_bytes,
 }  /* dense_passive_memory */
 
 /* PUBLIC */
+void dense_passive_payload_memory(unsigned long long *body_bytes,
+                                  unsigned long long *justification_bytes,
+                                  unsigned long long *logical_body_bytes)
+{
+  if (body_bytes != NULL)
+    *body_bytes = Dense_body_bytes;
+  if (justification_bytes != NULL)
+    *justification_bytes = Dense_justification_bytes;
+  if (logical_body_bytes != NULL)
+    *logical_body_bytes = Dense_logical_body_bytes;
+}  /* dense_passive_payload_memory */
+
+/* PUBLIC */
 unsigned long long dense_passive_delayed_demodulators(void)
 {
   unsigned long long count = 0;
@@ -629,6 +670,9 @@ void reset_selector_indexes(void)
   Dense_rewrite_fresh = 0;
   Dense_rewrite_stale = 0;
   Dense_rule_stale = 0;
+  Dense_body_bytes = 0;
+  Dense_justification_bytes = 0;
+  Dense_logical_body_bytes = 0;
   Dense_compactions = 0;
   Dense_records_reclaimed = 0;
   Sos_size = 0;
@@ -872,7 +916,9 @@ static void dense_insert_passive(Topform c)
   r.flags = DENSE_PASSIVE_ACTIVE |
             (c->delayed_demodulator ? DENSE_PASSIVE_DELAYED : 0) |
             (c->rewrite_rule_dirty ? DENSE_PASSIVE_RULE_DIRTY : 0);
-  r.store_position = Dense_archive(c);
+  r.store_position = Dense_archive(c, &r.body_bytes,
+                                   &r.justification_bytes,
+                                   &r.logical_body_bytes);
   if (r.store_position == SIZE_MAX)
     fatal_error("dense_insert_passive: archive failed");
   if (Dense_record_count == Dense_record_capacity) {
@@ -886,6 +932,7 @@ static void dense_insert_passive(Topform c)
   record = (uint32_t) Dense_record_count;
   Dense_records[Dense_record_count++] = r;
   Dense_active_count++;
+  dense_add_payload(&r);
   if (r.rewrite_epoch == Dense_rewrite_epoch) {
     Dense_rewrite_fresh++;
   }
@@ -929,6 +976,7 @@ static void dense_deactivate_record(uint32_t record)
     Dense_rule_stale--;
   r->flags &= ~DENSE_PASSIVE_ACTIVE;
   Dense_active_count--;
+  dense_subtract_payload(r);
   for (p = High.selectors; p != NULL; p = p->next) {
     Giv_select gs = p->v;
     if ((r->selector_mask & (1ULL << gs->dense_bit)) != 0) {
@@ -954,6 +1002,7 @@ static void dense_reactivate_record(uint32_t record)
     fatal_error("dense_reactivate_record: active record");
   r->flags |= DENSE_PASSIVE_ACTIVE;
   Dense_active_count++;
+  dense_add_payload(r);
   if (r->rewrite_epoch == Dense_rewrite_epoch) {
     Dense_rewrite_fresh++;
   }
@@ -1543,6 +1592,9 @@ void zap_given_selectors(void)
   Dense_rewrite_fresh = 0;
   Dense_rewrite_stale = 0;
   Dense_rule_stale = 0;
+  Dense_body_bytes = 0;
+  Dense_justification_bytes = 0;
+  Dense_logical_body_bytes = 0;
 }  /* zap_given_selectors */
 
 /*************

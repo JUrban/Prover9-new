@@ -15,11 +15,16 @@ static void fail(char *message)
   exit(1);
 }
 
-static size_t archive_clause(Topform c)
+static size_t archive_clause(Topform c, unsigned *body_bytes,
+                             unsigned *justification_bytes,
+                             unsigned *logical_body_bytes)
 {
   size_t position = Stored_count;
   if (position >= CLAUSES)
     fail("archive callback overflow");
+  *body_bytes = (unsigned) c->id;
+  *justification_bytes = (unsigned) c->id * 2;
+  *logical_body_bytes = (unsigned) c->id * 3;
   Stored[Stored_count++] = c;
   return position;
 }
@@ -41,6 +46,30 @@ static size_t retain_position(size_t old_position, void *context)
 {
   (void) context;
   return old_position;
+}
+
+static unsigned long long range_sum(unsigned first, unsigned last)
+{
+  return ((unsigned long long) first + last) * (last - first + 1) / 2;
+}
+
+static void check_payload(unsigned first, unsigned last, char *where)
+{
+  unsigned long long body, justification, logical;
+  unsigned long long expected = first > last ? 0 : range_sum(first, last);
+  dense_passive_payload_memory(&body, &justification, &logical);
+  if (body != expected || justification != expected * 2 ||
+      logical != expected * 3)
+    fail(where);
+}
+
+static void check_payload_value(unsigned long long expected, char *where)
+{
+  unsigned long long body, justification, logical;
+  dense_passive_payload_memory(&body, &justification, &logical);
+  if (body != expected || justification != expected * 2 ||
+      logical != expected * 3)
+    fail(where);
 }
 
 int main(void)
@@ -65,6 +94,20 @@ int main(void)
     c->id = (unsigned long long) i + 1;
     insert_into_sos2(c, sos);
   }
+  check_payload(1, CLAUSES, "payload totals after insertion");
+  {
+    struct dense_passive_view view;
+    unsigned long long total = range_sum(1, CLAUSES);
+    if (!dense_passive_deactivate_id(CLAUSES, &view))
+      fail("payload test deactivation failed");
+    check_payload_value(total - CLAUSES,
+                        "payload totals after direct deactivation");
+    if (!dense_passive_reactivate_id(
+          CLAUSES, view.simplifier_epoch, view.rewrite_epoch,
+          view.delayed_demodulator, view.rewrite_rule_dirty))
+      fail("payload test reactivation failed");
+    check_payload_value(total, "payload totals after reactivation");
+  }
   for (i = 0; i < SELECT_BEFORE_COMPACT; i++) {
     char *type = NULL;
     Topform c = get_given_clause2(sos, i, NULL, &type);
@@ -72,6 +115,8 @@ int main(void)
         strcmp(type, "A") != 0)
       fail("age order changed before compaction");
   }
+  check_payload(SELECT_BEFORE_COMPACT + 1, CLAUSES,
+                "payload totals after deactivation");
   if (!dense_passive_compaction_needed())
     fail("expected compaction threshold was not reached");
   cursor_id = dense_passive_cursor_id(700);
@@ -87,6 +132,8 @@ int main(void)
     fail("incorrect compaction accounting");
   if (dense_passive_size() != CLAUSES - SELECT_BEFORE_COMPACT)
     fail("active count changed during compaction");
+  check_payload(SELECT_BEFORE_COMPACT + 1, CLAUSES,
+                "payload totals changed during compaction");
 
   for (i = SELECT_BEFORE_COMPACT; i < CLAUSES; i++) {
     char *type = NULL;
@@ -97,6 +144,7 @@ int main(void)
   }
   if (givens_available() || dense_passive_size() != 0)
     fail("dense selector was not empty after selection");
+  check_payload(1, 0, "payload totals did not reach zero");
 
   clist_free(sos);
   zap_given_selectors();

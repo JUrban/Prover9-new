@@ -222,7 +222,10 @@ void cold_passive_store_free(Cold_passive_store store)
   safe_free(store);
 }
 
-size_t cold_passive_store_archive(Cold_passive_store store, Topform c)
+size_t cold_passive_store_archive(Cold_passive_store store, Topform c,
+                                  unsigned *body_bytes,
+                                  unsigned *justification_bytes,
+                                  unsigned *logical_body_bytes)
 {
   char *attribute_data = NULL;
   unsigned attribute_size = 0;
@@ -231,6 +234,7 @@ size_t cold_passive_store_archive(Cold_passive_store store, Topform c)
   uint64_t total;
   size_t position;
   unsigned flags = 0;
+  unsigned justification_size;
   if (store == NULL || c == NULL || c->id == 0)
     return SIZE_MAX;
   if (c->compressed == NULL) {
@@ -239,6 +243,9 @@ size_t cold_passive_store_archive(Cold_passive_store store, Topform c)
       return SIZE_MAX;
   }
   if (!compressed_clause_is_valid(c) || !c->packed_justification)
+    return SIZE_MAX;
+  justification_size = compressed_clause_justification_bytes(c);
+  if (justification_size > c->compressed_size)
     return SIZE_MAX;
   if (c->attributes != NULL) {
     attribute_term = attributes_to_term(c->attributes, "#");
@@ -278,6 +285,12 @@ size_t cold_passive_store_archive(Cold_passive_store store, Topform c)
     goto bad;
   store->size += (size_t) total;
   store->records++;
+  if (body_bytes != NULL)
+    *body_bytes = c->compressed_size - justification_size;
+  if (justification_bytes != NULL)
+    *justification_bytes = justification_size;
+  if (logical_body_bytes != NULL)
+    *logical_body_bytes = c->uncompressed_body_bytes;
   if (attribute_term != NULL)
     zap_term(attribute_term);
   safe_free(attribute_data);

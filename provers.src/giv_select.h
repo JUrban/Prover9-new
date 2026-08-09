@@ -30,7 +30,10 @@
 
 /* Public function prototypes from giv_select.c */
 
-typedef size_t (*Dense_passive_archive_fn)(Topform c);
+typedef size_t (*Dense_passive_archive_fn)(Topform c,
+                                           unsigned *body_bytes,
+                                           unsigned *justification_bytes,
+                                           unsigned *logical_body_bytes);
 typedef Topform (*Dense_passive_activate_fn)(size_t store_position,
                                              unsigned long long id,
                                              unsigned long long hint_id);
@@ -105,6 +108,10 @@ unsigned long long dense_passive_rewrite_debt(void);
 void dense_passive_memory(unsigned long long *record_bytes,
                           unsigned long long *heap_bytes,
                           unsigned long long *records);
+
+void dense_passive_payload_memory(unsigned long long *body_bytes,
+                                  unsigned long long *justification_bytes,
+                                  unsigned long long *logical_body_bytes);
 
 unsigned long long dense_passive_delayed_demodulators(void);
 

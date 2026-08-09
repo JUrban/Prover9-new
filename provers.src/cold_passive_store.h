@@ -24,8 +24,12 @@ Cold_passive_store cold_passive_store_init(Cold_passive_store_mode mode);
 
 void cold_passive_store_free(Cold_passive_store store);
 
-/* Archive destroys c after detaching its official ID-table entry. */
-size_t cold_passive_store_archive(Cold_passive_store store, Topform c);
+/* Archive destroys c after detaching its official ID-table entry and returns
+   its three payload sizes without requiring a later mmap record scan. */
+size_t cold_passive_store_archive(Cold_passive_store store, Topform c,
+                                  unsigned *body_bytes,
+                                  unsigned *justification_bytes,
+                                  unsigned *logical_body_bytes);
 
 /* Decode one record.  Activation registers the supplied stable clause ID;
    peek materialization leaves it unregistered for checkpoint/stat use. */

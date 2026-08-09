@@ -2396,28 +2396,6 @@ unsigned long long delayed_demodulator_count(void)
   return count;
 }  /* delayed_demodulator_count */
 
-struct dense_payload_context {
-  unsigned long long body_bytes;
-  unsigned long long justification_bytes;
-  unsigned long long logical_body_bytes;
-  unsigned long long clauses;
-};
-
-static void dense_payload_visit(const struct dense_passive_view *view,
-                                void *context)
-{
-  struct dense_payload_context *ctx = context;
-  unsigned long long body, justification, logical;
-  if (!cold_passive_store_payload_sizes(Dense_body_store,
-                                        view->store_position,
-                                        &body, &justification, &logical))
-    fatal_error("dense_payload_visit: corrupt passive archive record");
-  ctx->body_bytes += body;
-  ctx->justification_bytes += justification;
-  ctx->logical_body_bytes += logical;
-  ctx->clauses++;
-}
-
 static
 void update_memory_stats(void)
 {
@@ -2456,13 +2434,10 @@ void update_memory_stats(void)
   Stats.dense_passive_arena_bytes_reclaimed =
     Dense_arena_bytes_reclaimed;
   if (dense_passive_mode()) {
-    struct dense_payload_context payload;
-    memset(&payload, 0, sizeof(payload));
-    dense_passive_foreach(dense_payload_visit, &payload);
-    Stats.passive_body_bytes = payload.body_bytes;
-    Stats.passive_justification_bytes = payload.justification_bytes;
-    Stats.passive_estimated_full_body_bytes = payload.logical_body_bytes;
-    Stats.passive_compressed_clauses = payload.clauses;
+    dense_passive_payload_memory(&Stats.passive_body_bytes,
+                                 &Stats.passive_justification_bytes,
+                                 &Stats.passive_estimated_full_body_bytes);
+    Stats.passive_compressed_clauses = Stats.dense_passive_records;
   }
   if (discount_mode()) {
     Stats.active_body_bytes = clist_body_bytes(Glob.usable);
@@ -5244,7 +5219,9 @@ static Topform take_rewrite_only_rule(unsigned long long id, int *type)
   return clone;
 }
 
-static size_t archive_dense_passive(Topform c)
+static size_t archive_dense_passive(Topform c, unsigned *body_bytes,
+                                    unsigned *justification_bytes,
+                                    unsigned *logical_body_bytes)
 {
   unsigned long long id;
   size_t position;
@@ -5254,7 +5231,9 @@ static size_t archive_dense_passive(Topform c)
   id = c->id;
   if (dense_passive_compaction_needed())
     compact_dense_passive_store();
-  position = cold_passive_store_archive(Dense_body_store, c);
+  position = cold_passive_store_archive(Dense_body_store, c, body_bytes,
+                                        justification_bytes,
+                                        logical_body_bytes);
   if (position == SIZE_MAX)
     return SIZE_MAX;
   clone = rewrite_only_store_find(Rewrite_only_rules, id, NULL, NULL);
