@@ -87,6 +87,7 @@ struct prover_options {
     hint_match_once,         // unindex hint immediately after first match
     hint_trace,              // exact committed-candidate hint tuple
     compact_otter_audit,     // dual-run legacy/compact OTTER demodulation
+    compact_otter_demodulation, // compact bank is authoritative in OTTER
     collective_trace,        // one line per collective batch expansion
     collective_hint_probes,  // one bounded early expansion for hinted givens
     collective_promising_candidates, // raw-weight order within inference set

@@ -129,6 +129,19 @@ static BOOL compact_otter_audit_mode(void)
   return Opt != NULL && flag(Opt->compact_otter_audit);
 }
 
+/* Stage-2 Phase-5 implementation mode: preserve the ordinary eager OTTER
+   rule lifecycle and ordering, but replace its pointer-heavy discrimination
+   tree with the already-audited compact rewrite bank. */
+static BOOL compact_otter_demod_mode(void)
+{
+  return Opt != NULL && flag(Opt->compact_otter_demodulation);
+}
+
+static BOOL compact_otter_bank_mode(void)
+{
+  return compact_otter_audit_mode() || compact_otter_demod_mode();
+}
+
 static BOOL maximum_discount_demod_mode(void)
 {
   return eager_legacy_demod_mode() || eager_interreduced_demod_mode();
@@ -499,7 +512,7 @@ static void current_demodulate_clause(Topform c, int step_limit,
                                       int increase_limit, BOOL print,
                                       BOOL lex_order_vars)
 {
-  if (eager_interreduced_demod_mode()) {
+  if (eager_interreduced_demod_mode() || compact_otter_demod_mode()) {
     (void) print;
     compact_rewrite_clause(Compact_rewrite_rules, c, step_limit,
                            increase_limit, lex_order_vars, TRUE);
@@ -1834,6 +1847,8 @@ Prover_options init_prover_options(void)
   p->hint_match_once        = init_flag("hint_match_once",        FALSE);
   p->hint_trace             = init_flag("hint_trace",             FALSE);
   p->compact_otter_audit    = init_flag("compact_otter_audit",    FALSE);
+  p->compact_otter_demodulation =
+    init_flag("compact_otter_demodulation", FALSE);
   p->collective_trace       = init_flag("collective_trace",       FALSE);
   p->collective_hint_probes = init_flag("collective_hint_probes",  FALSE);
   p->collective_promising_candidates =
@@ -2827,6 +2842,21 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             comma_num(s.compact_rewrite_attempts),
             comma_num(s.compact_rewrite_rewrites),
             comma_num(s.rewrite_bank_bytes));
+  }
+  if (compact_otter_demod_mode()) {
+    fprintf(fp,
+            "Compact_otter_demodulation: current_rules=%s, peak_rules=%s, "
+            "retired_rules=%s, physical_rules=%s, compactions=%s, "
+            "attempts=%s, rewrites=%s, bytes=%s, peak_bytes=%s.\n",
+            comma_num(s.compact_rewrite_rules_current),
+            comma_num(s.compact_rewrite_rules_peak),
+            comma_num(s.compact_rewrite_rules_retired),
+            comma_num(s.compact_rewrite_rules_physical),
+            comma_num(s.compact_rewrite_compactions),
+            comma_num(s.compact_rewrite_attempts),
+            comma_num(s.compact_rewrite_rewrites),
+            comma_num(s.rewrite_bank_bytes),
+            comma_num(s.rewrite_bank_peak_bytes));
   }
   if (collective_frontier_mode()) {
     fprintf(fp,
@@ -5498,7 +5528,7 @@ void disable_clause(Topform c)
   clock_start(Clocks.disable);
 
   if (clist_member(c, Glob.demods)) {
-    if (eager_interreduced_demod_mode()) {
+    if (eager_interreduced_demod_mode() || compact_otter_demod_mode()) {
       if (!compact_rewrite_remove(Compact_rewrite_rules, c->id))
         fatal_error("disable_clause: compact demodulator is missing");
       if (compact_rewrite_compaction_needed(Compact_rewrite_rules))
@@ -5577,7 +5607,7 @@ void free_search_memory(void)
 
   while (Glob.demods->first) {
     Topform c = Glob.demods->first->c;
-    if (eager_interreduced_demod_mode()) {
+    if (eager_interreduced_demod_mode() || compact_otter_demod_mode()) {
       if (!compact_rewrite_remove(Compact_rewrite_rules, c->id))
         fatal_error("free_search_memory: compact demodulator is missing");
     }
@@ -6944,10 +6974,10 @@ void cl_process_new_demod(Topform c, BOOL rewrite_transition)
       }
       print_new_demodulator(c, type, "");
       clist_append(c, Glob.demods);
-      if (eager_interreduced_demod_mode()) {
+      if (eager_interreduced_demod_mode() || compact_otter_demod_mode()) {
         if (!compact_rewrite_add(Compact_rewrite_rules, c, type))
           fatal_error("cl_process_new_demod: compact rule already present");
-        if (!rewrite_transition)
+        if (eager_interreduced_demod_mode() && !rewrite_transition)
           mark_compact_interreduction_candidates(c);
         if (compact_rewrite_compaction_needed(Compact_rewrite_rules))
           compact_rewrite_compact(Compact_rewrite_rules);
@@ -9867,7 +9897,7 @@ void index_and_process_initial_clauses(void)
 	  else
 	    fatal_error("input demoulator not allowed");
 	}
-	if (eager_interreduced_demod_mode()) {
+	if (eager_interreduced_demod_mode() || compact_otter_demod_mode()) {
 	  if (!compact_rewrite_add(Compact_rewrite_rules, c, type))
 	    fatal_error("index_and_process_initial_clauses: duplicate compact demodulator");
 	  update_rewrite_only_stats();
@@ -14721,6 +14751,18 @@ Prover_results search(Prover_input p)
       if (p->resume_dir != NULL)
         fatal_error("compact_otter_audit does not yet support checkpoint resume");
     }
+    if (compact_otter_demod_mode()) {
+      if (discount_mode())
+        fatal_error("compact_otter_demodulation requires search_loop=otter");
+      if (flag(Opt->eval_rewrite))
+        fatal_error("compact_otter_demodulation is incompatible with eval_rewrite");
+      if (!str_ident(stringparm1(Opt->inference_frontier), "clauses"))
+        fatal_error("compact_otter_demodulation requires inference_frontier=clauses");
+      if (p->resume_dir != NULL)
+        fatal_error("compact_otter_demodulation does not yet support checkpoint resume");
+      if (compact_otter_audit_mode())
+        fatal_error("compact_otter_demodulation and compact_otter_audit are mutually exclusive");
+    }
     if (maximum_discount_demod_mode()) {
       if (!dense_passive_mode())
         fatal_error(eager_legacy_demod_mode() ?
@@ -14853,7 +14895,7 @@ Prover_results search(Prover_input p)
     if (Compact_rewrite_rules != NULL)
       fatal_error("search: previous compact rewrite bank was not released");
     Compact_rewrite_rules =
-      (eager_interreduced_demod_mode() || compact_otter_audit_mode()) ?
+      (eager_interreduced_demod_mode() || compact_otter_bank_mode()) ?
       compact_rewrite_init() : NULL;
     Glob.empties  = NULL;
     cold_passive_store_free(Dense_body_store);

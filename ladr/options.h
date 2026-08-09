@@ -49,7 +49,7 @@ the following routines.
 
 /* Public definitions */
 
-#define MAX_FLAGS                100
+#define MAX_FLAGS                128
 #define MAX_PARMS                100
 #define MAX_STRINGPARMS          100
 #define MAX_FLOATPARMS           100
