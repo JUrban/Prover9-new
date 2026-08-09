@@ -2069,9 +2069,17 @@ Prover_options init_prover_options(void)
 					    "balanced_hint");
 
   p->ancestor_store = init_stringparm("ancestor_store", 3,
-				      "off",
-				      "memory",
-				      "mmap");
+			      "off",
+			      "memory",
+			      "mmap");
+
+  /* Keep the historical coupling by default.  `file` is a genuinely cold
+     passive-body backend; it does not change the proof ancestor backend. */
+  p->passive_backing = init_stringparm("passive_backing", 4,
+			       "auto",
+			       "memory",
+			       "mmap",
+			       "file");
 
   // Flag and parm Dependencies.  These cause other flags and parms
   // to be changed.  The changes happen immediately and can be undone
@@ -2436,8 +2444,13 @@ void update_memory_stats(void)
   Stats.dense_passive_arena_records = ps.records;
   Stats.dense_passive_arena_record_bytes = ps.record_bytes;
   Stats.dense_passive_arena_backing_bytes = ps.backing_bytes;
+  Stats.dense_passive_arena_physical_bytes = ps.physical_bytes;
   Stats.dense_passive_arena_materializations = ps.materializations;
   Stats.dense_passive_arena_validation_failures = ps.validation_failures;
+  Stats.dense_passive_arena_file_reads = ps.file_reads;
+  Stats.dense_passive_arena_file_read_bytes = ps.file_read_bytes;
+  Stats.dense_passive_arena_file_writes = ps.file_writes;
+  Stats.dense_passive_arena_file_write_bytes = ps.file_write_bytes;
   dense_passive_compaction_stats(&Stats.dense_passive_compactions,
                                  &Stats.dense_passive_records_reclaimed);
   Stats.dense_passive_arena_bytes_reclaimed =
@@ -3032,15 +3045,19 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
           comma_num(s.passive_estimated_full_body_bytes));
   if (dense_passive_mode())
     fprintf(fp,
-            "Dense_passive: records=%s, record_bytes=%s, heap_bytes=%s, "
-            "arena_records=%s, arena_record_bytes=%s, arena_backing=%s, "
+            "Dense_passive: backing=%s, records=%s, record_bytes=%s, "
+            "heap_bytes=%s, arena_records=%s, arena_record_bytes=%s, "
+            "arena_backing=%s, arena_physical=%s, "
             "allocated_bytes_per_active=%.2f.\n",
+            cold_passive_store_mode_name(
+              cold_passive_store_get_stats(Dense_body_store).mode),
             comma_num(s.dense_passive_records),
             comma_num(s.dense_passive_record_bytes),
             comma_num(s.dense_passive_heap_bytes),
             comma_num(s.dense_passive_arena_records),
             comma_num(s.dense_passive_arena_record_bytes),
             comma_num(s.dense_passive_arena_backing_bytes),
+            comma_num(s.dense_passive_arena_physical_bytes),
             s.dense_passive_records == 0 ? 0.0 :
             (double) (s.dense_passive_record_bytes +
                       s.dense_passive_heap_bytes +
@@ -3050,12 +3067,17 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
     fprintf(fp,
             "Dense_passive_gc: arena_materialized=%s, "
             "validation_failures=%s, compactions=%s, "
-            "records_reclaimed=%s, arena_bytes_reclaimed=%s.\n",
+            "records_reclaimed=%s, arena_bytes_reclaimed=%s, "
+            "file_reads=%s (%s bytes), file_writes=%s (%s bytes).\n",
             comma_num(s.dense_passive_arena_materializations),
             comma_num(s.dense_passive_arena_validation_failures),
             comma_num(s.dense_passive_compactions),
             comma_num(s.dense_passive_records_reclaimed),
-            comma_num(s.dense_passive_arena_bytes_reclaimed));
+            comma_num(s.dense_passive_arena_bytes_reclaimed),
+            comma_num(s.dense_passive_arena_file_reads),
+            comma_num(s.dense_passive_arena_file_read_bytes),
+            comma_num(s.dense_passive_arena_file_writes),
+            comma_num(s.dense_passive_arena_file_write_bytes));
   fprintf(fp,
           "Hint_store: compressed=%s, body_bytes=%s, estimated_full=%s.\n",
           comma_num(s.hint_compressed_clauses),
@@ -5121,9 +5143,17 @@ Clause_store new_disabled_store(void)
 
 static Cold_passive_store new_dense_body_store(void)
 {
-  Cold_passive_store_mode mode =
-    str_ident(stringparm1(Opt->ancestor_store), "mmap") ?
-    COLD_PASSIVE_MMAP : COLD_PASSIVE_MEMORY;
+  char *requested = stringparm1(Opt->passive_backing);
+  Cold_passive_store_mode mode;
+  if (str_ident(requested, "file"))
+    mode = COLD_PASSIVE_FILE;
+  else if (str_ident(requested, "mmap"))
+    mode = COLD_PASSIVE_MMAP;
+  else if (str_ident(requested, "memory"))
+    mode = COLD_PASSIVE_MEMORY;
+  else
+    mode = str_ident(stringparm1(Opt->ancestor_store), "mmap") ?
+      COLD_PASSIVE_MMAP : COLD_PASSIVE_MEMORY;
   Cold_passive_store store = cold_passive_store_init(mode);
   if (store == NULL)
     fatal_error("new_dense_body_store: cannot initialize compact arena");

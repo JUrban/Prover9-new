@@ -6,6 +6,7 @@
    and the packed clause blob already contains its complete justification. */
 
 #include "cold_passive_store.h"
+#include <errno.h>
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
@@ -31,9 +32,15 @@ struct cold_passive_store {
   size_t size;
   size_t capacity;
   int fd;
+  unsigned char *io_buffer;
+  size_t io_capacity;
   unsigned long long records;
   unsigned long long materializations;
   unsigned long long validation_failures;
+  unsigned long long file_reads;
+  unsigned long long file_read_bytes;
+  unsigned long long file_writes;
+  unsigned long long file_write_bytes;
 };
 
 struct cold_record_view {
@@ -105,6 +112,60 @@ static uint32_t crc32_bytes(const unsigned char *data, size_t size)
   return ~crc;
 }
 
+#ifndef __EMSCRIPTEN__
+static BOOL file_read_exact(Cold_passive_store store, void *buffer,
+                            size_t size, size_t position)
+{
+  size_t done = 0;
+  while (done < size) {
+    ssize_t n = pread(store->fd, (unsigned char *) buffer + done,
+                      size - done, (off_t) (position + done));
+    if (n < 0 && errno == EINTR)
+      continue;
+    if (n <= 0)
+      return FALSE;
+    done += (size_t) n;
+  }
+  store->file_reads++;
+  store->file_read_bytes += size;
+  return TRUE;
+}
+
+static BOOL file_write_exact(Cold_passive_store store, const void *buffer,
+                             size_t size, size_t position)
+{
+  size_t done = 0;
+  while (done < size) {
+    ssize_t n = pwrite(store->fd, (const unsigned char *) buffer + done,
+                       size - done, (off_t) (position + done));
+    if (n < 0 && errno == EINTR)
+      continue;
+    if (n <= 0)
+      return FALSE;
+    done += (size_t) n;
+  }
+  store->file_writes++;
+  store->file_write_bytes += size;
+  return TRUE;
+}
+#endif
+
+static BOOL ensure_io_buffer(Cold_passive_store store, size_t needed)
+{
+  size_t capacity = store->io_capacity == 0 ? 4096 : store->io_capacity;
+  if (needed <= store->io_capacity)
+    return TRUE;
+  while (capacity < needed) {
+    size_t grown = capacity + capacity / 2;
+    if (grown <= capacity)
+      return FALSE;
+    capacity = grown;
+  }
+  store->io_buffer = safe_realloc(store->io_buffer, capacity);
+  store->io_capacity = capacity;
+  return TRUE;
+}
+
 static BOOL ensure_backing(Cold_passive_store store, size_t needed)
 {
   size_t capacity;
@@ -122,6 +183,14 @@ static BOOL ensure_backing(Cold_passive_store store, size_t needed)
     store->capacity = capacity;
     return TRUE;
   }
+#ifndef __EMSCRIPTEN__
+  if (store->mode == COLD_PASSIVE_FILE) {
+    /* pwrite extends the file at commit time.  Capacity is logical only and
+       deliberately does not reserve or map every future byte. */
+    store->capacity = needed;
+    return TRUE;
+  }
+#endif
 #ifndef __EMSCRIPTEN__
   if (store->mode == COLD_PASSIVE_MMAP) {
     void *mapping;
@@ -143,6 +212,54 @@ static BOOL ensure_backing(Cold_passive_store store, size_t needed)
   return FALSE;
 }
 
+static BOOL append_record(Cold_passive_store store,
+                          const unsigned char *record, size_t size)
+{
+  if (store == NULL || record == NULL || size == 0 ||
+      store->size > SIZE_MAX - size ||
+      !ensure_backing(store, store->size + size))
+    return FALSE;
+#ifndef __EMSCRIPTEN__
+  if (store->mode == COLD_PASSIVE_FILE) {
+    if (!file_write_exact(store, record, size, store->size))
+      return FALSE;
+  }
+  else
+#endif
+    memcpy(store->backing + store->size, record, size);
+  store->size += size;
+  return TRUE;
+}
+
+/* Return a contiguous record image.  Memory and mmap stores already own one;
+   the file store reads into its single reusable scratch buffer. */
+static const unsigned char *record_image(Cold_passive_store store,
+                                         size_t position)
+{
+  const unsigned char *r;
+  uint32_t total;
+  if (store == NULL || position > store->size ||
+      store->size - position < COLD_HEADER_SIZE)
+    return NULL;
+#ifndef __EMSCRIPTEN__
+  if (store->mode == COLD_PASSIVE_FILE) {
+    unsigned char header[COLD_HEADER_SIZE];
+    if (!file_read_exact(store, header, sizeof(header), position) ||
+        memcmp(header, COLD_MAGIC, 4) != 0 ||
+        get16(header + 4) != COLD_VERSION)
+      return NULL;
+    total = get32(header + 8);
+    if (total < COLD_HEADER_SIZE || total > store->size - position ||
+        !ensure_io_buffer(store, total) ||
+        !file_read_exact(store, store->io_buffer, total, position))
+      return NULL;
+    return store->io_buffer;
+  }
+#endif
+  r = store->backing + position;
+  return r;
+}
+
 static BOOL record_view(Cold_passive_store store, size_t position,
                         struct cold_record_view *view)
 {
@@ -151,7 +268,9 @@ static BOOL record_view(Cold_passive_store store, size_t position,
   if (store == NULL || view == NULL || position > store->size ||
       store->size - position < COLD_HEADER_SIZE)
     goto bad;
-  r = store->backing + position;
+  r = record_image(store, position);
+  if (r == NULL)
+    goto bad;
   if (memcmp(r, COLD_MAGIC, 4) != 0 ||
       get16(r + 4) != COLD_VERSION ||
       (get16(r + 6) & ~0x001fU) != 0)
@@ -187,7 +306,7 @@ Cold_passive_store cold_passive_store_init(Cold_passive_store_mode mode)
   store->mode = mode;
   store->fd = -1;
 #ifndef __EMSCRIPTEN__
-  if (mode == COLD_PASSIVE_MMAP) {
+  if (mode == COLD_PASSIVE_MMAP || mode == COLD_PASSIVE_FILE) {
     char path[] = "/tmp/prover9-passive-XXXXXX";
     store->fd = mkstemp(path);
     if (store->fd < 0) {
@@ -197,7 +316,7 @@ Cold_passive_store cold_passive_store_init(Cold_passive_store_mode mode)
     unlink(path);
   }
 #else
-  if (mode == COLD_PASSIVE_MMAP) {
+  if (mode == COLD_PASSIVE_MMAP || mode == COLD_PASSIVE_FILE) {
     safe_free(store);
     return NULL;
   }
@@ -212,13 +331,16 @@ void cold_passive_store_free(Cold_passive_store store)
   if (store->mode == COLD_PASSIVE_MEMORY)
     safe_free(store->backing);
 #ifndef __EMSCRIPTEN__
-  else {
+  else if (store->mode == COLD_PASSIVE_MMAP) {
     if (store->backing != NULL)
       munmap(store->backing, store->capacity);
     if (store->fd >= 0)
       close(store->fd);
   }
+  else if (store->fd >= 0)
+    close(store->fd);
 #endif
+  safe_free(store->io_buffer);
   safe_free(store);
 }
 
@@ -230,7 +352,7 @@ size_t cold_passive_store_archive(Cold_passive_store store, Topform c,
   char *attribute_data = NULL;
   unsigned attribute_size = 0;
   Term attribute_term = NULL;
-  unsigned char *record;
+  unsigned char *record = NULL;
   uint64_t total;
   size_t position;
   unsigned flags = 0;
@@ -254,11 +376,10 @@ size_t cold_passive_store_archive(Cold_passive_store store, Topform c,
       goto bad;
   }
   total = COLD_HEADER_SIZE + (uint64_t) c->compressed_size + attribute_size;
-  if (total > UINT32_MAX || store->size > SIZE_MAX - (size_t) total ||
-      !ensure_backing(store, store->size + (size_t) total))
+  if (total > UINT32_MAX || store->size > SIZE_MAX - (size_t) total)
     goto bad;
   position = store->size;
-  record = store->backing + position;
+  record = safe_malloc((size_t) total);
   memset(record, 0, COLD_HEADER_SIZE);
   memcpy(record, COLD_MAGIC, 4);
   if (c->normal_vars) flags |= CF_NORMAL_VARS;
@@ -281,9 +402,10 @@ size_t cold_passive_store_archive(Cold_passive_store store, Topform c,
   put32(record + 28,
         crc32_bytes(record + COLD_HEADER_SIZE,
                     c->compressed_size + attribute_size));
+  if (!append_record(store, record, (size_t) total))
+    goto bad;
   if (!detach_clause_id(c))
     goto bad;
-  store->size += (size_t) total;
   store->records++;
   if (body_bytes != NULL)
     *body_bytes = c->compressed_size - justification_size;
@@ -294,12 +416,14 @@ size_t cold_passive_store_archive(Cold_passive_store store, Topform c,
   if (attribute_term != NULL)
     zap_term(attribute_term);
   safe_free(attribute_data);
+  safe_free(record);
   delete_clause(c);
   return position;
 bad:
   if (attribute_term != NULL)
     zap_term(attribute_term);
   safe_free(attribute_data);
+  safe_free(record);
   return SIZE_MAX;
 }
 
@@ -396,12 +520,11 @@ size_t cold_passive_store_clone_record(Cold_passive_store source,
   size_t new_position;
   if (source == NULL || destination == NULL || source == destination ||
       !record_view(source, position, &view) ||
-      destination->size > SIZE_MAX - view.total ||
-      !ensure_backing(destination, destination->size + view.total))
+      destination->size > SIZE_MAX - view.total)
     return SIZE_MAX;
   new_position = destination->size;
-  memcpy(destination->backing + destination->size, view.record, view.total);
-  destination->size += view.total;
+  if (!append_record(destination, view.record, view.total))
+    return SIZE_MAX;
   destination->records++;
   return new_position;
 }
@@ -412,6 +535,10 @@ void cold_passive_store_inherit_counters(Cold_passive_store destination,
   if (destination != NULL && source != NULL) {
     destination->materializations += source->materializations;
     destination->validation_failures += source->validation_failures;
+    destination->file_reads += source->file_reads;
+    destination->file_read_bytes += source->file_read_bytes;
+    destination->file_writes += source->file_writes;
+    destination->file_write_bytes += source->file_write_bytes;
   }
 }
 
@@ -422,8 +549,20 @@ BOOL cold_passive_store_sync(Cold_passive_store store)
 #ifndef __EMSCRIPTEN__
   if (store->mode == COLD_PASSIVE_MMAP && store->backing != NULL)
     return msync(store->backing, store->capacity, MS_SYNC) == 0;
+  if (store->mode == COLD_PASSIVE_FILE)
+    return fsync(store->fd) == 0;
 #endif
   return TRUE;
+}
+
+const char *cold_passive_store_mode_name(Cold_passive_store_mode mode)
+{
+  switch (mode) {
+  case COLD_PASSIVE_MEMORY: return "memory";
+  case COLD_PASSIVE_MMAP:   return "mmap";
+  case COLD_PASSIVE_FILE:   return "file";
+  default:                  return "unknown";
+  }
 }
 
 struct cold_passive_store_stats
@@ -432,11 +571,24 @@ cold_passive_store_get_stats(Cold_passive_store store)
   struct cold_passive_store_stats stats;
   memset(&stats, 0, sizeof(stats));
   if (store != NULL) {
+    struct stat st;
+    stats.mode = store->mode;
     stats.records = store->records;
     stats.record_bytes = store->size;
-    stats.backing_bytes = store->capacity;
+    stats.backing_bytes = store->mode == COLD_PASSIVE_FILE ?
+      store->io_capacity : store->capacity;
+#ifndef __EMSCRIPTEN__
+    if (store->fd >= 0 && fstat(store->fd, &st) == 0)
+      stats.physical_bytes = (unsigned long long) st.st_blocks * 512ULL;
+    else
+#endif
+      stats.physical_bytes = store->size;
     stats.materializations = store->materializations;
     stats.validation_failures = store->validation_failures;
+    stats.file_reads = store->file_reads;
+    stats.file_read_bytes = store->file_read_bytes;
+    stats.file_writes = store->file_writes;
+    stats.file_write_bytes = store->file_write_bytes;
   }
   return stats;
 }

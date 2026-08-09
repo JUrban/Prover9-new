@@ -277,7 +277,8 @@ struct prover_options {
     hint_index,          // fpa, compact, shallow, packed/hybrid, packed_legacy
     inference_frontier,  // clauses, collective
     collective_scheduler, // legacy, balanced_hint
-    ancestor_store;      // off, memory, mmap
+    ancestor_store,      // off, memory, mmap
+    passive_backing;     // auto, memory, mmap, file
 };
 
 // Clocks
@@ -521,8 +522,13 @@ struct prover_stats {
     dense_passive_arena_records,
     dense_passive_arena_record_bytes,
     dense_passive_arena_backing_bytes,
+    dense_passive_arena_physical_bytes,
     dense_passive_arena_materializations,
     dense_passive_arena_validation_failures,
+    dense_passive_arena_file_reads,
+    dense_passive_arena_file_read_bytes,
+    dense_passive_arena_file_writes,
+    dense_passive_arena_file_write_bytes,
     dense_passive_compactions,
     dense_passive_records_reclaimed,
     dense_passive_arena_bytes_reclaimed,

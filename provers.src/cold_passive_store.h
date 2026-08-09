@@ -9,16 +9,28 @@ typedef struct cold_passive_store * Cold_passive_store;
 
 typedef enum {
   COLD_PASSIVE_MEMORY,
-  COLD_PASSIVE_MMAP
+  COLD_PASSIVE_MMAP,
+  /* Anonymous-to-the-process file storage.  Records are accessed with
+     pread/pwrite through one bounded scratch buffer, so appended pages do
+     not become part of the process RSS as they do with MAP_SHARED. */
+  COLD_PASSIVE_FILE
 } Cold_passive_store_mode;
 
 struct cold_passive_store_stats {
+  Cold_passive_store_mode mode;
   unsigned long long records;
   unsigned long long record_bytes;
   unsigned long long backing_bytes;
+  unsigned long long physical_bytes;
   unsigned long long materializations;
   unsigned long long validation_failures;
+  unsigned long long file_reads;
+  unsigned long long file_read_bytes;
+  unsigned long long file_writes;
+  unsigned long long file_write_bytes;
 };
+
+const char *cold_passive_store_mode_name(Cold_passive_store_mode mode);
 
 Cold_passive_store cold_passive_store_init(Cold_passive_store_mode mode);
 
