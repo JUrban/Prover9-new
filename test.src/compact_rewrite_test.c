@@ -93,6 +93,24 @@ int main(void)
         stats.hash_bytes > 0 && stats.total_bytes > 0,
         "compact byte attribution");
 
+  {
+    unsigned long long identity = compact_rewrite_identity_hash(bank);
+    unsigned long long retired = stats.rules_retired;
+    CHECK(compact_rewrite_suspend(bank, 103), "suspend compact rule");
+    CHECK(!compact_rewrite_contains(bank, 103), "suspended rule is absent");
+    index_demodulator(rules[2], types[2], DELETE, Index_clock);
+    compare_case(bank, "p(g(a,b)).");
+    CHECK(compact_rewrite_add(bank, rules[2], types[2]),
+          "reinsert selected compact rule");
+    index_demodulator(rules[2], types[2], INSERT, Index_clock);
+    compact_rewrite_get_stats(bank, &stats);
+    CHECK(stats.rules_retired == retired,
+          "selection suspension is not semantic retirement");
+    CHECK(compact_rewrite_identity_hash(bank) == identity,
+          "selection reinsertion restores compact identity");
+    compare_case(bank, "p(g(a,b)).");
+  }
+
   CHECK(compact_rewrite_remove(bank, 102), "remove compact rule");
   CHECK(!compact_rewrite_contains(bank, 102), "removed rule is absent");
   index_demodulator(rules[1], types[1], DELETE, Index_clock);

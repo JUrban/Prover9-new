@@ -20,6 +20,7 @@
 #include "provers.h"
 #include "cold_passive_store.h"
 #include "rewrite_only_store.h"
+#include "compact_rewrite.h"
 #include "../ladr/ac_redun.h"
 #include "../ladr/std_options.h"
 #include "../ladr/memory.h"
@@ -60,8 +61,10 @@ static struct prover_clocks Clocks;      // Prover9 clocks
 static Cold_passive_store Dense_body_store = NULL;
 static unsigned long long Dense_arena_bytes_reclaimed = 0;
 static Rewrite_only_store Rewrite_only_rules = NULL;
+static Compact_rewrite_bank Compact_rewrite_rules = NULL;
 
 static void update_rewrite_only_stats(void);
+static void current_demodulate_clause(Topform, int, int, BOOL, BOOL);
 
 /* Progress callback for shared-memory IPC (set by -cores scheduler) */
 static Search_progress_fn Progress_callback = NULL;
@@ -102,6 +105,11 @@ static BOOL eager_interreduced_demod_mode(void)
   return discount_mode() && Opt != NULL &&
     str_ident(stringparm1(Opt->discount_demodulation),
               "eager_interreduced");
+}
+
+static BOOL maximum_discount_demod_mode(void)
+{
+  return eager_legacy_demod_mode() || eager_interreduced_demod_mode();
 }
 
 static BOOL demodulation_rules_available(void);
@@ -436,8 +444,28 @@ static struct {
 
 static BOOL demodulation_rules_available(void)
 {
+  struct compact_rewrite_stats compact;
+  compact_rewrite_get_stats(Compact_rewrite_rules, &compact);
   return (Glob.demods != NULL && !clist_empty(Glob.demods)) ||
-    rewrite_only_store_count(Rewrite_only_rules) != 0;
+    rewrite_only_store_count(Rewrite_only_rules) != 0 ||
+    compact.rules_current != 0;
+}
+
+/* Keep one demodulation callback at every consumer boundary.  In compact
+   mode the proof-producing search path and the hint-rewrite path use the
+   pointer-free bank; the selected/eager-legacy policies retain LADR's
+   established discrimination-tree implementation. */
+static void current_demodulate_clause(Topform c, int step_limit,
+                                      int increase_limit, BOOL print,
+                                      BOOL lex_order_vars)
+{
+  if (eager_interreduced_demod_mode()) {
+    (void) print;
+    compact_rewrite_clause(Compact_rewrite_rules, c, step_limit,
+                           increase_limit, lex_order_vars, TRUE);
+  }
+  else
+    demodulate_clause(c, step_limit, increase_limit, print, lex_order_vars);
 }
 
 /* The ordinary selector is the promising-candidate cache for collective
@@ -2518,9 +2546,13 @@ void update_memory_stats(void)
 static
 void update_stats(void)
 {
+  struct compact_rewrite_stats compact;
   update_rewrite_only_stats();
-  Stats.demod_attempts = demod_attempts() + fdemod_attempts();
-  Stats.demod_rewrites = demod_rewrites() + fdemod_rewrites();
+  compact_rewrite_get_stats(Compact_rewrite_rules, &compact);
+  Stats.demod_attempts = demod_attempts() + fdemod_attempts() +
+                         compact.attempts;
+  Stats.demod_rewrites = demod_rewrites() + fdemod_rewrites() +
+                         compact.rewrites;
   Stats.res_instance_prunes = res_instance_prunes();
   Stats.para_instance_prunes = para_instance_prunes();
   Stats.basic_para_prunes = basic_paramodulation_prunes();
@@ -2623,6 +2655,21 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             comma_num(s.rewrite_only_demodulators_peak),
             comma_num(s.rewrite_bank_bytes),
             comma_num(s.rewrite_bank_peak_bytes));
+    if (eager_interreduced_demod_mode())
+      fprintf(fp,
+              "Compact_rewrite: current=%s, peak=%s, retired=%s, "
+              "attempts=%s, rewrites=%s, nodes=%s, postings=%s, rules=%s, "
+              "terms=%s, hash=%s.\n",
+              comma_num(s.compact_rewrite_rules_current),
+              comma_num(s.compact_rewrite_rules_peak),
+              comma_num(s.compact_rewrite_rules_retired),
+              comma_num(s.compact_rewrite_attempts),
+              comma_num(s.compact_rewrite_rewrites),
+              comma_num(s.compact_rewrite_node_bytes),
+              comma_num(s.compact_rewrite_posting_bytes),
+              comma_num(s.compact_rewrite_rule_bytes),
+              comma_num(s.compact_rewrite_term_bytes),
+              comma_num(s.compact_rewrite_hash_bytes));
     fprintf(fp,
             "Passive_refresh: epoch=%u, checks=%s, requeued=%s, "
             "subsumed=%s.\n",
@@ -5035,18 +5082,29 @@ static void compact_dense_passive_store(void)
 
 static void update_rewrite_only_stats(void)
 {
+  struct compact_rewrite_stats compact;
+  unsigned long long shell_bytes =
+    rewrite_only_store_allocated_bytes(Rewrite_only_rules);
+  compact_rewrite_get_stats(Compact_rewrite_rules, &compact);
   Stats.rewrite_only_demodulators_current =
     rewrite_only_store_count(Rewrite_only_rules);
-  Stats.rewrite_bank_bytes =
-    rewrite_only_store_allocated_bytes(Rewrite_only_rules);
+  Stats.compact_rewrite_rules_current = compact.rules_current;
+  Stats.compact_rewrite_rules_peak = compact.rules_peak;
+  Stats.compact_rewrite_rules_retired = compact.rules_retired;
+  Stats.compact_rewrite_attempts = compact.attempts;
+  Stats.compact_rewrite_rewrites = compact.rewrites;
+  Stats.compact_rewrite_node_bytes = compact.node_bytes;
+  Stats.compact_rewrite_posting_bytes = compact.posting_bytes;
+  Stats.compact_rewrite_rule_bytes = compact.rule_bytes;
+  Stats.compact_rewrite_term_bytes = compact.term_bytes;
+  Stats.compact_rewrite_hash_bytes = compact.hash_bytes;
+  Stats.rewrite_bank_bytes = shell_bytes + compact.total_bytes;
   if (Stats.rewrite_only_demodulators_current >
       Stats.rewrite_only_demodulators_peak)
     Stats.rewrite_only_demodulators_peak =
       Stats.rewrite_only_demodulators_current;
-  if (rewrite_only_store_peak_allocated_bytes(Rewrite_only_rules) >
-      Stats.rewrite_bank_peak_bytes)
-    Stats.rewrite_bank_peak_bytes =
-      rewrite_only_store_peak_allocated_bytes(Rewrite_only_rules);
+  if (Stats.rewrite_bank_bytes > Stats.rewrite_bank_peak_bytes)
+    Stats.rewrite_bank_peak_bytes = Stats.rewrite_bank_bytes;
 }
 
 /* Remove the rewrite-only representation before a dense passive reclaims
@@ -5057,7 +5115,12 @@ static Topform take_rewrite_only_rule(unsigned long long id, int *type)
   Topform clone = rewrite_only_store_find(Rewrite_only_rules, id, type, NULL);
   if (clone == NULL)
     return NULL;
-  index_demodulator(clone, *type, DELETE, Clocks.index);
+  if (eager_interreduced_demod_mode()) {
+    if (!compact_rewrite_suspend(Compact_rewrite_rules, id))
+      fatal_error("take_rewrite_only_rule: compact rule is missing");
+  }
+  else
+    index_demodulator(clone, *type, DELETE, Clocks.index);
   clone = rewrite_only_store_remove(Rewrite_only_rules, id, type, NULL);
   if (clone == NULL)
     fatal_error("take_rewrite_only_rule: store changed during removal");
@@ -5237,10 +5300,16 @@ void disable_clause(Topform c)
   clock_start(Clocks.disable);
 
   if (clist_member(c, Glob.demods)) {
-    index_demodulator(c, demodulator_type(c,
-					  parm(Opt->lex_dep_demod_lim),
-					  flag(Opt->lex_dep_demod_sane)),
-		      DELETE, Clocks.index);
+    if (eager_interreduced_demod_mode()) {
+      if (!compact_rewrite_remove(Compact_rewrite_rules, c->id))
+        fatal_error("disable_clause: compact demodulator is missing");
+      update_rewrite_only_stats();
+    }
+    else
+      index_demodulator(c, demodulator_type(c,
+					    parm(Opt->lex_dep_demod_lim),
+					    flag(Opt->lex_dep_demod_sane)),
+			DELETE, Clocks.index);
     clist_remove(c, Glob.demods);
   }
 
@@ -5289,7 +5358,8 @@ void free_search_memory(void)
     Topform c = rewrite_only_store_take_any(Rewrite_only_rules, &type, NULL);
     if (c == NULL)
       fatal_error("free_search_memory: corrupt rewrite-only store");
-    index_demodulator(c, type, DELETE, Clocks.index);
+    if (!eager_interreduced_demod_mode())
+      index_demodulator(c, type, DELETE, Clocks.index);
     delete_clause(c);
   }
   rewrite_only_store_free(Rewrite_only_rules);
@@ -5299,10 +5369,15 @@ void free_search_memory(void)
 
   while (Glob.demods->first) {
     Topform c = Glob.demods->first->c;
-    index_demodulator(c, demodulator_type(c,
-					  parm(Opt->lex_dep_demod_lim),
-					  flag(Opt->lex_dep_demod_sane)),
-		      DELETE, Clocks.index);
+    if (eager_interreduced_demod_mode()) {
+      if (!compact_rewrite_remove(Compact_rewrite_rules, c->id))
+        fatal_error("free_search_memory: compact demodulator is missing");
+    }
+    else
+      index_demodulator(c, demodulator_type(c,
+					    parm(Opt->lex_dep_demod_lim),
+					    flag(Opt->lex_dep_demod_sane)),
+			DELETE, Clocks.index);
     clist_remove(c, Glob.demods);
     if (c->containers == NULL && !c->disabled)
       delete_clause(c);
@@ -5310,6 +5385,8 @@ void free_search_memory(void)
   clist_free(Glob.demods);
   
   destroy_demodulation_index();
+  compact_rewrite_free(Compact_rewrite_rules);
+  Compact_rewrite_rules = NULL;
 
   // Usable, Sos, Limbo
 
@@ -5773,11 +5850,11 @@ void cl_process_simplify(Topform c)
       c->normal_vars = FALSE;  // demodulation can make vars non-normal
     }
     clock_start(Clocks.demod);
-      demodulate_clause(c,
-			parm(Opt->demod_step_limit),
-			parm(Opt->demod_increase_limit),
-			!flag(Opt->quiet),
-			flag(Opt->lex_order_vars));
+      current_demodulate_clause(c,
+			       parm(Opt->demod_step_limit),
+			       parm(Opt->demod_increase_limit),
+			       !flag(Opt->quiet),
+			       flag(Opt->lex_order_vars));
     if (flag(Opt->print_gen)) {
       printf("%srewrite:     ", TPTP_PFX);
       fwrite_clause(stdout, c, CL_FORM_STD);
@@ -6023,10 +6100,16 @@ static void collective_preview_normalize(Topform c)
       renumber_variables(c, MAX_VARS);
       c->normal_vars = FALSE;
     }
-    demodulate_clause_preview(c,
+    if (eager_interreduced_demod_mode())
+      compact_rewrite_clause(Compact_rewrite_rules, c,
 			     parm(Opt->demod_step_limit),
 			     parm(Opt->demod_increase_limit),
-			     flag(Opt->lex_order_vars));
+			     flag(Opt->lex_order_vars), FALSE);
+    else
+      demodulate_clause_preview(c,
+			       parm(Opt->demod_step_limit),
+			       parm(Opt->demod_increase_limit),
+			       flag(Opt->lex_order_vars));
     if (flag(otter_style_demod_id())) {
       int junk_sn = str_to_sn("junk", 0);
       Literals lit;
@@ -6425,6 +6508,14 @@ static unsigned long long rewrite_only_clone_bytes(Topform c)
   return sizeof(struct topform) + clause_body_storage_bytes(c);
 }
 
+static unsigned long long rewrite_only_shell_bytes(Topform c)
+{
+  /* The compact bank owns the matching terms.  The shell retains only a
+     compressed printable body plus live attributes/ancestry for proof-ID
+     lookup; allocator/RSS statistics account for the latter payloads. */
+  return sizeof(struct topform) + c->compressed_size;
+}
+
 static void print_new_demodulator(Topform c, int type,
                                   const char *ownership)
 {
@@ -6460,11 +6551,92 @@ static Topform store_rewrite_only_clone(Topform c, int type)
   return clone;
 }
 
+static Topform store_rewrite_only_shell(Topform c, int type)
+{
+  Topform shell = copy_clause_ija(c);
+  shell->normal_vars = c->normal_vars;
+  shell->initial = c->initial;
+  shell->weight = c->weight;
+  shell->semantics = c->semantics;
+  shell->simplifier_epoch = c->simplifier_epoch;
+  if (compress_clause(shell) != CLAUSE_COMPRESS_OK) {
+    shell->id = 0;
+    delete_clause(shell);
+    fatal_error("store_rewrite_only_shell: body cannot be compressed");
+  }
+  if (!rewrite_only_store_insert(Rewrite_only_rules, shell, type,
+                                 rewrite_only_shell_bytes(shell))) {
+    shell->id = 0;
+    delete_clause(shell);
+    fatal_error("store_rewrite_only_shell: duplicate proof ID");
+  }
+  update_rewrite_only_stats();
+  return shell;
+}
+
 static Topform resolve_rewrite_only_demodulator(unsigned long long id,
                                                 void *context)
 {
   (void) context;
   return rewrite_only_store_find(Rewrite_only_rules, id, NULL, NULL);
+}
+
+struct compact_restore_rule {
+  Topform clause;
+  int type;
+  BOOL cold;
+};
+
+static int compact_restore_rule_compare(const void *left, const void *right)
+{
+  const struct compact_restore_rule *a = left;
+  const struct compact_restore_rule *b = right;
+  return a->clause->id < b->clause->id ? -1 :
+         a->clause->id > b->clause->id ? 1 : 0;
+}
+
+static void restore_compact_rewrite_bank(void)
+{
+  struct compact_restore_rule *rules;
+  size_t capacity = (size_t) Glob.demods->length + Glob.sos->length;
+  size_t count = 0, i;
+  Clist_pos p;
+
+  rules = capacity == 0 ? NULL :
+    safe_malloc(capacity * sizeof(*rules));
+  for (p = Glob.demods->first; p != NULL; p = p->next) {
+    int type = demodulator_type(p->c, parm(Opt->lex_dep_demod_lim),
+                                flag(Opt->lex_dep_demod_sane));
+    if (type == NOT_DEMODULATOR)
+      fatal_error("resume: active compact demodulator changed type");
+    rules[count].clause = p->c;
+    rules[count].type = type;
+    rules[count++].cold = FALSE;
+  }
+  for (p = Glob.sos->first; p != NULL; p = p->next) {
+    int type = demodulator_type(p->c, parm(Opt->lex_dep_demod_lim),
+                                flag(Opt->lex_dep_demod_sane));
+    if (type != NOT_DEMODULATOR) {
+      rules[count].clause = p->c;
+      rules[count].type = type;
+      rules[count++].cold = TRUE;
+    }
+  }
+  if (count > 1)
+    qsort(rules, count, sizeof(*rules), compact_restore_rule_compare);
+  compact_rewrite_restore_counters(
+    Compact_rewrite_rules, Stats.compact_rewrite_rules_peak,
+    Stats.compact_rewrite_rules_retired, Stats.compact_rewrite_attempts,
+    Stats.compact_rewrite_rewrites);
+  for (i = 0; i < count; i++) {
+    if (!compact_rewrite_add(Compact_rewrite_rules, rules[i].clause,
+                             rules[i].type))
+      fatal_error("resume: duplicate compact rewrite proof ID");
+    if (rules[i].cold)
+      store_rewrite_only_shell(rules[i].clause, rules[i].type);
+  }
+  safe_free(rules);
+  update_rewrite_only_stats();
 }
 
 static void admit_rewrite_only_demodulator(Topform c, int type)
@@ -6481,6 +6653,22 @@ static void admit_rewrite_only_demodulator(Topform c, int type)
     Simplifier_epoch++;
 }
 
+static void admit_compact_rewrite_demodulator(Topform c, int type)
+{
+  if (!compact_rewrite_add(Compact_rewrite_rules, c, type))
+    fatal_error("admit_compact_rewrite_demodulator: duplicate proof ID");
+  store_rewrite_only_shell(c, type);
+  Stats.rewrite_only_demodulators_admitted++;
+  Stats.new_demodulators++;
+  if (type != ORIENTED)
+    Stats.new_lex_demods++;
+  print_new_demodulator(c, type, "compact rewrite-only ");
+  back_demod_hints(c, type, flag(Opt->lex_order_vars));
+  if (Simplifier_epoch != UINT_MAX)
+    Simplifier_epoch++;
+  update_rewrite_only_stats();
+}
+
 static
 void cl_process_new_demod(Topform c, BOOL rewrite_transition)
 {
@@ -6490,7 +6678,7 @@ void cl_process_new_demod(Topform c, BOOL rewrite_transition)
      this mode removes.  Restricted denials are placed directly in Usable and
      retain their historical treatment. */
   if (discount_mode() && !c->was_given && !restricted_denial(c) &&
-      !eager_legacy_demod_mode())
+      !maximum_discount_demod_mode())
     return;
 
   // If the clause should be a demodulator, make it so.
@@ -6499,14 +6687,22 @@ void cl_process_new_demod(Topform c, BOOL rewrite_transition)
 				parm(Opt->lex_dep_demod_lim),
 				flag(Opt->lex_dep_demod_sane));
     if (type != NOT_DEMODULATOR) {
-      if (eager_legacy_demod_mode() && !c->was_given &&
+      if (maximum_discount_demod_mode() && !c->was_given &&
           !restricted_denial(c)) {
-        admit_rewrite_only_demodulator(c, type);
+        if (eager_interreduced_demod_mode())
+          admit_compact_rewrite_demodulator(c, type);
+        else
+          admit_rewrite_only_demodulator(c, type);
         return;
       }
       print_new_demodulator(c, type, "");
       clist_append(c, Glob.demods);
-      index_demodulator(c, type, INSERT, Clocks.index);
+      if (eager_interreduced_demod_mode()) {
+        if (!compact_rewrite_add(Compact_rewrite_rules, c, type))
+          fatal_error("cl_process_new_demod: compact rule already present");
+      }
+      else
+        index_demodulator(c, type, INSERT, Clocks.index);
       if (!rewrite_transition) {
         Stats.new_demodulators++;
         if (type != ORIENTED)
@@ -7025,16 +7221,27 @@ void limbo_process(BOOL pre_search)
       }
       c->initial = pre_search ? TRUE : FALSE;
       prepare_discount_passive(c, TRUE);
-      if (eager_legacy_demod_mode() && c->delayed_demodulator) {
+      if (maximum_discount_demod_mode() && c->delayed_demodulator) {
         int type;
-        Topform clone = rewrite_only_store_find(Rewrite_only_rules, c->id,
+        Topform owner = rewrite_only_store_find(Rewrite_only_rules, c->id,
                                                 &type, NULL);
-        if (clone == NULL)
+        if (owner == NULL)
           fatal_error("limbo_process: eager rewrite rule is missing");
         if (flag(Opt->print_kept))
           printf("%s    starting rewrite-only back demodulation with %llu.\n",
                  TPTP_PFX, c->id);
-        back_demod(clone);
+        if (eager_interreduced_demod_mode()) {
+          /* prepare_discount_passive() has already packed the body for the
+             dense archive.  Materialize it only across the active back-demod
+             query; the proof shell intentionally cannot supply match terms. */
+          if (!materialize_clause(c))
+            fatal_error("limbo_process: cannot materialize compact demodulator");
+          back_demod(c);
+          if (!recompress_clause(c))
+            fatal_error("limbo_process: cannot repack compact demodulator");
+        }
+        else
+          back_demod(owner);
       }
       insert_into_sos2(c, Glob.sos);
       continue;
@@ -8521,7 +8728,7 @@ void make_inferences(void)
     if (discount_mode()) {
       unsigned long long given_id = given_clause->id;
       BOOL rewrite_transition =
-        eager_legacy_demod_mode() && given_clause->delayed_demodulator;
+        maximum_discount_demod_mode() && given_clause->delayed_demodulator;
       Topform activated;
 
       /* The selector owns passive clauses without active indexes.  Reuse the
@@ -9064,7 +9271,7 @@ void index_and_process_initial_clauses(void)
 	     configured_hint_fpa_depth(),
 	     packed_hint_bank_mode(),
 	     better_packed_hint_mode(),
-	     demodulate_clause);
+	     current_demodulate_clause);
   set_hint_match_stats(flag(Opt->hint_match_stats));
   set_hint_match_once(flag(Opt->hint_match_once));
   init_semantics(Glob.interps, Clocks.semantics,
@@ -9174,7 +9381,13 @@ void index_and_process_initial_clauses(void)
 	  else
 	    fatal_error("input demoulator not allowed");
 	}
-	index_demodulator(c, type, INSERT, Clocks.index);
+	if (eager_interreduced_demod_mode()) {
+	  if (!compact_rewrite_add(Compact_rewrite_rules, c, type))
+	    fatal_error("index_and_process_initial_clauses: duplicate compact demodulator");
+	  update_rewrite_only_stats();
+	}
+	else
+	  index_demodulator(c, type, INSERT, Clocks.index);
       }
     }
   }
@@ -9774,6 +9987,8 @@ void write_checkpoint_hashes(const char *dir)
   fprintf(fp, "demods_ids %llu\n",    hash_clist_ids(Glob.demods));
   fprintf(fp, "rewrite_only_ids %llu\n",
           rewrite_only_store_identity_hash(Rewrite_only_rules));
+  fprintf(fp, "compact_rewrite_ids %llu\n",
+          compact_rewrite_identity_hash(Compact_rewrite_rules));
   fprintf(fp, "hints_ids %llu\n",     hash_clist_ids(Glob.hints));
   fprintf(fp, "limbo_ids %llu\n",     hash_clist_ids(Glob.limbo));
   fprintf(fp, "disabled_ids %llu\n",  hash_clause_store_ids(Glob.disabled));
@@ -9791,6 +10006,11 @@ void write_checkpoint_hashes(const char *dir)
   fprintf(fp, "demods_count %d\n",    Glob.demods->length);
   fprintf(fp, "rewrite_only_count %llu\n",
           rewrite_only_store_count(Rewrite_only_rules));
+  {
+    struct compact_rewrite_stats compact;
+    compact_rewrite_get_stats(Compact_rewrite_rules, &compact);
+    fprintf(fp, "compact_rewrite_count %llu\n", compact.rules_current);
+  }
   fprintf(fp, "hints_count %d\n",     Glob.hints->length);
   fprintf(fp, "limbo_count %d\n",     Glob.limbo->length);
   fprintf(fp, "disabled_count %llu\n",
@@ -9828,6 +10048,8 @@ void verify_checkpoint_hashes(const char *dir)
       actual = hash_clist_ids(Glob.demods);
     else if (strcmp(key, "rewrite_only_ids") == 0)
       actual = rewrite_only_store_identity_hash(Rewrite_only_rules);
+    else if (strcmp(key, "compact_rewrite_ids") == 0)
+      actual = compact_rewrite_identity_hash(Compact_rewrite_rules);
     else if (strcmp(key, "hints_ids") == 0)
       actual = hash_clist_ids(Glob.hints);
     else if (strcmp(key, "limbo_ids") == 0)
@@ -9856,6 +10078,11 @@ void verify_checkpoint_hashes(const char *dir)
       actual = (unsigned long long) Glob.demods->length;
     else if (strcmp(key, "rewrite_only_count") == 0)
       actual = rewrite_only_store_count(Rewrite_only_rules);
+    else if (strcmp(key, "compact_rewrite_count") == 0) {
+      struct compact_rewrite_stats compact;
+      compact_rewrite_get_stats(Compact_rewrite_rules, &compact);
+      actual = compact.rules_current;
+    }
     else if (strcmp(key, "hints_count") == 0)
       actual = (unsigned long long) Glob.hints->length;
     else if (strcmp(key, "limbo_count") == 0)
@@ -11535,6 +11762,16 @@ void write_checkpoint(void)
     fprintf(fp, "rewrite_bank_bytes %llu\n", Stats.rewrite_bank_bytes);
     fprintf(fp, "rewrite_bank_peak_bytes %llu\n",
             Stats.rewrite_bank_peak_bytes);
+    fprintf(fp, "compact_rewrite_rules_current %llu\n",
+            Stats.compact_rewrite_rules_current);
+    fprintf(fp, "compact_rewrite_rules_peak %llu\n",
+            Stats.compact_rewrite_rules_peak);
+    fprintf(fp, "compact_rewrite_rules_retired %llu\n",
+            Stats.compact_rewrite_rules_retired);
+    fprintf(fp, "compact_rewrite_attempts %llu\n",
+            Stats.compact_rewrite_attempts);
+    fprintf(fp, "compact_rewrite_rewrites %llu\n",
+            Stats.compact_rewrite_rewrites);
     fprintf(fp, "passive_refresh_checks %llu\n",
             Stats.passive_refresh_checks);
     fprintf(fp, "passive_refresh_requeued %llu\n",
@@ -12421,6 +12658,18 @@ void resume_load_clauses(const char *dir)
     fp, "rewrite_bank_bytes", &Stats.rewrite_bank_bytes);
   rewind(fp); (void) read_metadata_ull_if_present(
     fp, "rewrite_bank_peak_bytes", &Stats.rewrite_bank_peak_bytes);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "compact_rewrite_rules_current",
+    &Stats.compact_rewrite_rules_current);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "compact_rewrite_rules_peak", &Stats.compact_rewrite_rules_peak);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "compact_rewrite_rules_retired",
+    &Stats.compact_rewrite_rules_retired);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "compact_rewrite_attempts", &Stats.compact_rewrite_attempts);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "compact_rewrite_rewrites", &Stats.compact_rewrite_rewrites);
   rewind(fp); Stats.passive_refresh_checks =
     read_metadata_ull(fp, "passive_refresh_checks");
   rewind(fp); Stats.passive_refresh_requeued =
@@ -13232,7 +13481,7 @@ void load_checkpoint_into_loop(void)
              configured_hint_fpa_depth(),
              packed_hint_bank_mode(),
              better_packed_hint_mode(),
-             demodulate_clause);
+             current_demodulate_clause);
   set_hint_match_stats(flag(Opt->hint_match_stats));
   set_hint_match_once(flag(Opt->hint_match_once));
   init_semantics(Glob.interps, Clocks.semantics,
@@ -13460,11 +13709,13 @@ void load_checkpoint_into_loop(void)
     safe_free(is_usable);
     safe_free(all_clauses);
 
-    /* Recreate full rewrite-only owners while SOS bodies are still resident.
-       They remain unregistered until dense bulk archival transfers each
-       proof ID, but the demod-index resolver below already targets the clone
-       rather than the temporary checkpoint Topform. */
-    if (eager_legacy_demod_mode()) {
+    /* Recreate rewrite-only proof owners while SOS bodies are resident.  The
+       compact bank is rebuilt in global clause-ID order so first-match rule
+       ordering is identical to uninterrupted admission order.  Owners remain
+       unregistered until dense bulk archival transfers each proof ID. */
+    if (eager_interreduced_demod_mode())
+      restore_compact_rewrite_bank();
+    else if (eager_legacy_demod_mode()) {
       for (p = Glob.sos->first; p != NULL; p = p->next) {
         int type = demodulator_type(p->c,
                                     parm(Opt->lex_dep_demod_lim),
@@ -13483,10 +13734,11 @@ void load_checkpoint_into_loop(void)
     /* Restore DISCRIM index leaf orderings from serialized data.
        This preserves the exact leaf-list order from the original run,
        which determines forward demodulation and subsumption behavior. */
-    restore_demod_index(Resume_dir, Clocks.index,
-                        eager_legacy_demod_mode() ?
-                          resolve_rewrite_only_demodulator : NULL,
-                        NULL);
+    if (!eager_interreduced_demod_mode())
+      restore_demod_index(Resume_dir, Clocks.index,
+                          eager_legacy_demod_mode() ?
+                            resolve_rewrite_only_demodulator : NULL,
+                          NULL);
     restore_unit_discrim_index(Resume_dir);
 
     if (flag(Opt->eval_rewrite))
@@ -13713,16 +13965,20 @@ Prover_results search(Prover_input p)
     if (!str_ident(stringparm1(Opt->discount_demodulation), "selected") &&
         !discount_mode())
       fatal_error("eager DISCOUNT demodulation requires search_loop=discount");
-    if (eager_legacy_demod_mode()) {
+    if (maximum_discount_demod_mode()) {
       if (!dense_passive_mode())
-        fatal_error("discount_demodulation=eager_legacy requires passive_store=dense");
+        fatal_error(eager_legacy_demod_mode() ?
+          "discount_demodulation=eager_legacy requires passive_store=dense" :
+          "discount_demodulation=eager_interreduced requires passive_store=dense");
       if (!flag(Opt->back_demod))
-        fatal_error("discount_demodulation=eager_legacy requires set(back_demod)");
+        fatal_error(eager_legacy_demod_mode() ?
+          "discount_demodulation=eager_legacy requires set(back_demod)" :
+          "discount_demodulation=eager_interreduced requires set(back_demod)");
       if (flag(Opt->eval_rewrite))
-        fatal_error("discount_demodulation=eager_legacy is incompatible with eval_rewrite");
+        fatal_error(eager_legacy_demod_mode() ?
+          "discount_demodulation=eager_legacy is incompatible with eval_rewrite" :
+          "discount_demodulation=eager_interreduced is incompatible with eval_rewrite");
     }
-    if (eager_interreduced_demod_mode())
-      fatal_error("discount_demodulation=eager_interreduced is reserved for the compact rewrite bank");
     if (str_ident(stringparm1(Opt->inference_frontier), "collective")) {
       if (!discount_mode())
 	fatal_error("inference_frontier=collective requires search_loop=discount");
@@ -13832,8 +14088,12 @@ Prover_results search(Prover_input p)
     Glob.disabled = new_disabled_store();
     if (Rewrite_only_rules != NULL)
       fatal_error("search: previous rewrite-only store was not released");
-    Rewrite_only_rules = eager_legacy_demod_mode() ?
+    Rewrite_only_rules = maximum_discount_demod_mode() ?
       rewrite_only_store_init() : NULL;
+    if (Compact_rewrite_rules != NULL)
+      fatal_error("search: previous compact rewrite bank was not released");
+    Compact_rewrite_rules = eager_interreduced_demod_mode() ?
+      compact_rewrite_init() : NULL;
     Glob.empties  = NULL;
     cold_passive_store_free(Dense_body_store);
     Dense_body_store = NULL;

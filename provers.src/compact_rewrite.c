@@ -371,8 +371,8 @@ BOOL compact_rewrite_add(Compact_rewrite_bank bank, Topform clause, int type)
   return TRUE;
 }
 
-BOOL compact_rewrite_remove(Compact_rewrite_bank bank,
-                            unsigned long long proof_id)
+static BOOL remove_rule(Compact_rewrite_bank bank,
+                        unsigned long long proof_id, BOOL retirement)
 {
   uint32_t index = lookup_rule(bank, proof_id);
   size_t at;
@@ -385,14 +385,57 @@ BOOL compact_rewrite_remove(Compact_rewrite_bank bank,
   bank->hash_count--;
   bank->hash_tombstones++;
   bank->active_rules--;
-  bank->retired_rules++;
+  if (retirement)
+    bank->retired_rules++;
   return TRUE;
+}
+
+BOOL compact_rewrite_remove(Compact_rewrite_bank bank,
+                            unsigned long long proof_id)
+{
+  return remove_rule(bank, proof_id, TRUE);
+}
+
+BOOL compact_rewrite_suspend(Compact_rewrite_bank bank,
+                             unsigned long long proof_id)
+{
+  return remove_rule(bank, proof_id, FALSE);
 }
 
 BOOL compact_rewrite_contains(Compact_rewrite_bank bank,
                               unsigned long long proof_id)
 {
   return lookup_rule(bank, proof_id) != CR_NONE;
+}
+
+unsigned long long compact_rewrite_identity_hash(Compact_rewrite_bank bank)
+{
+  uint64_t hash = 0;
+  size_t i;
+  if (bank == NULL)
+    return 0;
+  /* Commutative across pool growth and tombstone placement.  Checkpoint
+     identity is the live set of stable proof IDs and rule directions. */
+  for (i = 1; i < bank->rule_count; i++)
+    if (bank->rules[i].active)
+      hash ^= hash_id(bank->rules[i].proof_id ^
+                      ((uint64_t) bank->rules[i].type << 56));
+  return hash;
+}
+
+void compact_rewrite_restore_counters(Compact_rewrite_bank bank,
+                                      unsigned long long rules_peak,
+                                      unsigned long long rules_retired,
+                                      unsigned long long attempts,
+                                      unsigned long long rewrites)
+{
+  if (bank == NULL)
+    return;
+  if (rules_peak > bank->peak_rules)
+    bank->peak_rules = rules_peak;
+  bank->retired_rules = rules_retired;
+  bank->attempts = attempts;
+  bank->rewrites = rewrites;
 }
 
 static void flatten_query_rec(Term term, struct cr_query_term **items,

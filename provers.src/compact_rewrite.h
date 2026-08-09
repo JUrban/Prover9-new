@@ -27,8 +27,21 @@ BOOL compact_rewrite_add(Compact_rewrite_bank bank, Topform clause, int type);
 BOOL compact_rewrite_remove(Compact_rewrite_bank bank,
                             unsigned long long proof_id);
 
+/* Deactivate a cold rule for selected-clause materialization without
+   charging a semantic retirement; selection may immediately reinsert it. */
+BOOL compact_rewrite_suspend(Compact_rewrite_bank bank,
+                             unsigned long long proof_id);
+
 BOOL compact_rewrite_contains(Compact_rewrite_bank bank,
                               unsigned long long proof_id);
+
+unsigned long long compact_rewrite_identity_hash(Compact_rewrite_bank bank);
+
+void compact_rewrite_restore_counters(Compact_rewrite_bank bank,
+                                      unsigned long long rules_peak,
+                                      unsigned long long rules_retired,
+                                      unsigned long long attempts,
+                                      unsigned long long rewrites);
 
 void compact_rewrite_clause(Compact_rewrite_bank bank, Topform clause,
                             int step_limit, int increase_limit,
