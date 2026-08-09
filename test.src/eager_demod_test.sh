@@ -175,6 +175,18 @@ grep -q 'THEOREM PROVED' "$test_tmp/drain-liveness.out"
   > "$test_tmp/drain-liveness-proof.out"
 grep -q 'end of proof' "$test_tmp/drain-liveness-proof.out"
 
+# A composed replacement is installed and back-demodulates hints, but it
+# cannot recursively launch another rule-only composition wave.  This is the
+# bound that prevents Osborn's one-out/one-in dirty-debt cascade.
+"$repo_dir/bin/prover9" < "$repo_dir/test.src/rewrite_cascade_bound.in" \
+  > "$test_tmp/cascade-bound.out" 2> "$test_tmp/cascade-bound.err" || true
+grep -Eq 'Rewrite_interreduce: rule_turns=1, rule_changed=1, .*overlap_visits=1, dirty_marks=1, cascade_suppressed=[1-9][0-9]*,' \
+  "$test_tmp/cascade-bound.out"
+grep -q 'THEOREM PROVED' "$test_tmp/cascade-bound.out"
+"$repo_dir/bin/prooftrans" parents_only < "$test_tmp/cascade-bound.out" \
+  > "$test_tmp/cascade-bound-proof.out"
+grep -q 'end of proof' "$test_tmp/cascade-bound-proof.out"
+
 # Save immediately before the bounded repair work.  Compact-bank counters,
 # the logical next-record cursor IDs, and all semantic drain outcomes must
 # survive dense-store reconstruction.  The physical scanned-record count is

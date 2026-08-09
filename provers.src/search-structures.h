@@ -383,6 +383,7 @@ struct prover_stats {
     rewrite_interreduce_collapsed,
     rewrite_overlap_visits,
     rewrite_overlap_dirty_marks,
+    rewrite_cascade_suppressed,
     rewrite_debt_current,
     rewrite_debt_peak,
     rewrite_drain_entries,

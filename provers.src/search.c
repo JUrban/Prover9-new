@@ -71,6 +71,7 @@ static unsigned Rewrite_interreduce_streak = 0;
 static unsigned Rewrite_refresh_inference_streak = 0;
 static BOOL Rewrite_drain_mode = FALSE;
 static unsigned Rewrite_drain_streak = 0;
+static unsigned Rewrite_repair_depth = 0;
 static BOOL Resume_rewrite_cursor_ids = FALSE;
 static unsigned long long Resume_rewrite_hot_cursor_id = 0;
 static unsigned long long Resume_rewrite_general_cursor_id = 0;
@@ -2752,7 +2753,8 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
       fprintf(fp,
               "Rewrite_interreduce: rule_turns=%s, rule_changed=%s, "
               "rule_unchanged=%s, rule_collapsed=%s, debt=%s, "
-              "overlap_visits=%s, dirty_marks=%s, debt_peak=%s, drain=%d, "
+              "overlap_visits=%s, dirty_marks=%s, cascade_suppressed=%s, "
+              "debt_peak=%s, drain=%d, "
               "drain_entries=%s, drain_exits=%s, drain_turns=%s, "
               "drain_burst=%d, drain_streak=%u, drain_yields=%s, "
               "inference_turns=%s.\n",
@@ -2763,6 +2765,7 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
               comma_num(s.rewrite_debt_current),
               comma_num(s.rewrite_overlap_visits),
               comma_num(s.rewrite_overlap_dirty_marks),
+              comma_num(s.rewrite_cascade_suppressed),
               comma_num(s.rewrite_debt_peak), Rewrite_drain_mode,
               comma_num(s.rewrite_drain_entries),
               comma_num(s.rewrite_drain_exits),
@@ -6800,7 +6803,21 @@ static void admit_compact_rewrite_demodulator(Topform c, int type)
 {
   if (!compact_rewrite_add(Compact_rewrite_rules, c, type))
     fatal_error("admit_compact_rewrite_demodulator: duplicate proof ID");
-  mark_compact_interreduction_candidates(c);
+  /* A primary inference starts one exact backward-composition wave.  A rule
+     produced by that wave is already normalized against the current bank;
+     installing it makes the stronger rule immediately available to every
+     clause and hint consumer.  Do not recursively start another rule-only
+     wave from the replacement.  Osborn showed that transitive replacement
+     propagation can replenish one dirty rule per repair forever, creating
+     proof-only clauses and mmap ancestry without advancing inference.
+
+     This bound does not defer forward demodulation: the replacement is in
+     the bank before cl_process continues, hints are still back-demodulated
+     below, and stale passives are normalized on repair or selection. */
+  if (Rewrite_repair_depth == 0)
+    mark_compact_interreduction_candidates(c);
+  else
+    Stats.rewrite_cascade_suppressed++;
   store_rewrite_only_shell(c, type);
   Stats.rewrite_only_demodulators_admitted++;
   Stats.new_demodulators++;
@@ -8627,6 +8644,8 @@ BOOL discount_refresh_selected(Topform c)
   cl_process_simplify(copy);
 
   if (copy->justification->next != NULL) {
+    BOOL repairing_rule = eager_interreduced_demod_mode() &&
+                          c->delayed_demodulator;
     copy->justification->u.id = c->id;
     if (eager_interreduced_demod_mode() && c->delayed_demodulator) {
       compact_rewrite_note_suspended_retirement(Compact_rewrite_rules);
@@ -8637,8 +8656,12 @@ BOOL discount_refresh_selected(Topform c)
     }
     retain_disabled_clause(c);
     Stats.passive_refresh_requeued++;
+    if (repairing_rule)
+      Rewrite_repair_depth++;
     cl_process(copy);
     limbo_process(FALSE);
+    if (repairing_rule)
+      Rewrite_repair_depth--;
     return FALSE;
   }
 
@@ -12183,6 +12206,8 @@ void write_checkpoint(void)
             Stats.rewrite_overlap_visits);
     fprintf(fp, "rewrite_overlap_dirty_marks %llu\n",
             Stats.rewrite_overlap_dirty_marks);
+    fprintf(fp, "rewrite_cascade_suppressed %llu\n",
+            Stats.rewrite_cascade_suppressed);
     fprintf(fp, "rewrite_debt_peak %llu\n", Stats.rewrite_debt_peak);
     fprintf(fp, "rewrite_drain_entries %llu\n", Stats.rewrite_drain_entries);
     fprintf(fp, "rewrite_drain_exits %llu\n", Stats.rewrite_drain_exits);
@@ -13170,6 +13195,8 @@ void resume_load_clauses(const char *dir)
     fp, "rewrite_overlap_visits", &Stats.rewrite_overlap_visits);
   rewind(fp); (void) read_metadata_ull_if_present(
     fp, "rewrite_overlap_dirty_marks", &Stats.rewrite_overlap_dirty_marks);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "rewrite_cascade_suppressed", &Stats.rewrite_cascade_suppressed);
   rewind(fp); (void) read_metadata_ull_if_present(
     fp, "rewrite_debt_peak", &Stats.rewrite_debt_peak);
   rewind(fp); (void) read_metadata_ull_if_present(
@@ -14571,6 +14598,7 @@ Prover_results search(Prover_input p)
     Rewrite_refresh_inference_streak = 0;
     Rewrite_drain_mode = FALSE;
     Rewrite_drain_streak = 0;
+    Rewrite_repair_depth = 0;
     Resume_rewrite_cursor_ids = FALSE;
     Resume_rewrite_hot_cursor_id = 0;
     Resume_rewrite_general_cursor_id = 0;
