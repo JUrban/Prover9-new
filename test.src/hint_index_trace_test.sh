@@ -46,15 +46,17 @@ grep -q 'THEOREM PROVED' "$test_tmp/packed-legacy.out"
 for hint_op in equivalence match flipped_match back_demod; do
   grep -q "^Packed_hint_operation: op=$hint_op," "$test_tmp/packed.out"
 done
-# Ordinary matching is deliberately bounded to the two rarest structural
-# postings.  Exact subsumption remains the final decision, so this is a CPU
-# invariant rather than a semantic shortcut.
+# Ordinary matching scans only the rarest exact structural posting.  A
+# conservative per-hint fingerprint filters the remaining query features,
+# and exact subsumption remains the final decision.
 match_line=$(grep '^Packed_hint_operation: op=match,' "$test_tmp/packed.out")
 match_queries=$(printf '%s\n' "$match_line" | \
   sed 's/.*queries=\([0-9][0-9]*\),.*/\1/')
 match_postings=$(printf '%s\n' "$match_line" | \
   sed 's/.*posting_lists=\([0-9][0-9]*\),.*/\1/')
-test "$match_postings" -le $((match_queries * 2))
+test "$match_postings" -le "$match_queries"
+grep -Eq '^Better_packed_postings: .*fingerprint_bytes=[1-9][0-9]*,' \
+  "$test_tmp/packed.out"
 grep -q '^Better_packed_postings:' "$test_tmp/hybrid.out"
 grep -q '^Better_packed_postings:' "$test_tmp/packed.out"
 

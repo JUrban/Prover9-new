@@ -79,6 +79,7 @@ static struct better_equivalence_reference *Better_equivalence_references = NULL
 static unsigned Better_equivalence_reference_count = 0;
 static unsigned Better_equivalence_reference_capacity = 0;
 static unsigned *Better_hint_feature_count = NULL;
+static unsigned long long *Better_hint_match_fingerprint = NULL;
 static unsigned short *Better_hint_positive_count = NULL;
 static unsigned short *Better_hint_negative_count = NULL;
 static unsigned *Better_intersection_member = NULL;
@@ -139,6 +140,7 @@ struct packed_hint_operation_stats {
   unsigned long long rewrites;
   unsigned long long reindexes;
   unsigned long long stale_skips;
+  unsigned long long fingerprint_rejects;
   unsigned long long candidate_max;
   unsigned long long candidate_buckets[PACKED_HINT_CANDIDATE_BUCKETS];
   Clock clock;
@@ -238,6 +240,9 @@ static void packed_reserve_hints(unsigned id)
     if (Better_packed_index) {
       Better_hint_feature_count = safe_realloc(
         Better_hint_feature_count, (size_t) cap * sizeof(unsigned));
+      Better_hint_match_fingerprint = safe_realloc(
+        Better_hint_match_fingerprint,
+        (size_t) cap * sizeof(unsigned long long));
       Better_hint_positive_count = safe_realloc(
         Better_hint_positive_count,
         (size_t) cap * sizeof(unsigned short));
@@ -278,6 +283,8 @@ static void packed_reserve_hints(unsigned id)
     if (Better_packed_index) {
       memset(Better_hint_feature_count + old, 0,
              (size_t) (cap - old) * sizeof(unsigned));
+      memset(Better_hint_match_fingerprint + old, 0,
+             (size_t) (cap - old) * sizeof(unsigned long long));
       memset(Better_hint_positive_count + old, 0,
              (size_t) (cap - old) * sizeof(unsigned short));
       memset(Better_hint_negative_count + old, 0,
@@ -499,6 +506,32 @@ static unsigned long long better_feature_key(unsigned kind, unsigned path,
   return ((unsigned long long) kind << 56) |
          ((unsigned long long) (path & 0x00ffffffU) << 32) |
          (unsigned) symbol;
+}
+
+/* A second, independent conservative signature complements the original
+   packed path mask.  Every exact shallow match feature contributes one bit;
+   collisions admit extra candidates only.  This lets ordinary matching scan
+   one rare posting and test all remaining query features in O(1), instead of
+   traversing a second broad posting for every query. */
+static unsigned long long better_match_fingerprint(void)
+{
+  unsigned i;
+  unsigned long long fingerprint = 0;
+  for (i = 0; i < Better_key_scratch_count; i++) {
+    unsigned long long key = Better_key_scratch[i];
+    unsigned kind = (unsigned) (key >> 56);
+    if (kind == BETTER_FEATURE_MATCH_POS ||
+        kind == BETTER_FEATURE_MATCH_NEG) {
+      unsigned long long x = key;
+      x ^= x >> 30;
+      x *= 0xbf58476d1ce4e5b9ULL;
+      x ^= x >> 27;
+      x *= 0x94d049bb133111ebULL;
+      x ^= x >> 31;
+      fingerprint |= 1ULL << (x >> 58);
+    }
+  }
+  return fingerprint;
 }
 
 /* Correlate a descendant with the root of the same possible rewrite
@@ -747,6 +780,7 @@ static void better_collect_hint_features(Topform h, BOOL anyconst)
     fatal_error("better_collect_hint_features: too many literals");
   Better_hint_positive_count[h->id] = (unsigned short) positive;
   Better_hint_negative_count[h->id] = (unsigned short) negative;
+  Better_hint_match_fingerprint[h->id] = better_match_fingerprint();
 }
 
 static void better_rebuild_postings(void)
@@ -758,6 +792,7 @@ static void better_rebuild_postings(void)
   for (id = 1; id < Packed_hint_capacity; id++) {
     Topform h = Packed_hint_by_id[id];
     Better_hint_feature_count[id] = 0;
+    Better_hint_match_fingerprint[id] = 0;
     Better_hint_positive_count[id] = 0;
     Better_hint_negative_count[id] = 0;
     if (Packed_hint_active[id] && h != NULL) {
@@ -822,6 +857,7 @@ static void better_deactivate_hint(unsigned id)
     fatal_error("better_deactivate_hint: equivalence count underflow");
   Better_equivalence_live_count -= better_equivalence_memberships(id);
   Better_hint_feature_count[id] = 0;
+  Better_hint_match_fingerprint[id] = 0;
   Better_hint_positive_count[id] = 0;
   Better_hint_negative_count[id] = 0;
   better_maybe_rebuild_postings();
@@ -852,19 +888,19 @@ static void better_intersect_scratch_candidates(
 {
   unsigned i, j;
   unsigned keys_to_scan;
+  unsigned long long required_fingerprint;
   if (Better_key_scratch_count == 0)
     return;
 
-  /* Ordinary matching uses a bounded two-rarest-key seed and then applies
-     the cheap per-hint profile/feature masks plus the authoritative
-     subsumption test.  One key alone leaves too many expensive bodies to
-     materialize; scanning every key is also wrong because a full posting is
-     traversed even after the intersection has become tiny.  Back-demodulation
-     still asks for a true correlated-feature intersection.  On chat_test the
-     previous unbounded loop turned about four final candidates per query into
-     tens of thousands of posting visits for each of 31,000 queries. */
+  /* Ordinary matching uses the rarest exact posting as its seed, then tests
+     the conservative per-hint match fingerprint plus the original packed
+     profile/path masks before authoritative subsumption.  The fingerprint
+     preserves the selectivity of a second exact key without scanning that
+     often-broad posting.  Back-demodulation still asks for a true
+     correlated-feature intersection. */
   keys_to_scan = all_features ? Better_key_scratch_count :
-                 (Better_key_scratch_count < 2 ? Better_key_scratch_count : 2);
+                 1;
+  required_fingerprint = all_features ? 0 : better_match_fingerprint();
 
   /* Put posting keys in increasing raw-count order.  Stale entries can only
      make a posting appear less selective; they cannot remove an answer. */
@@ -913,6 +949,12 @@ static void better_intersect_scratch_candidates(
           !Packed_hint_active[id] ||
           (exclude_anyconst && Packed_hint_anyconst[id])) {
         Packed_operation_stats[op].stale_skips++;
+        continue;
+      }
+      if (!all_features &&
+          (Better_hint_match_fingerprint[id] & required_fingerprint) !=
+            required_fingerprint) {
+        Packed_operation_stats[op].fingerprint_rejects++;
         continue;
       }
       if (i == 0) {
@@ -1098,6 +1140,8 @@ void done_with_hints(void)
   if (Preview_candidate_mark) safe_free(Preview_candidate_mark);
   if (Preview_candidates) safe_free(Preview_candidates);
   if (Better_hint_feature_count) safe_free(Better_hint_feature_count);
+  if (Better_hint_match_fingerprint)
+    safe_free(Better_hint_match_fingerprint);
   if (Better_hint_positive_count) safe_free(Better_hint_positive_count);
   if (Better_hint_negative_count) safe_free(Better_hint_negative_count);
   if (Better_intersection_member) safe_free(Better_intersection_member);
@@ -1127,6 +1171,7 @@ void done_with_hints(void)
   Better_equivalence_reference_count = 0;
   Better_equivalence_reference_capacity = 0;
   Better_hint_feature_count = NULL;
+  Better_hint_match_fingerprint = NULL;
   Better_hint_positive_count = Better_hint_negative_count = NULL;
   Better_intersection_member = Better_intersection_match = NULL;
   Better_intersection_ids = NULL;
@@ -2136,7 +2181,8 @@ void packed_hint_index_stats(unsigned long long *node_bytes,
       (unsigned long long) Better_equivalence_reference_capacity *
         sizeof(struct better_equivalence_reference);
     *table_bytes += (unsigned long long) Packed_hint_capacity *
-      (3 * sizeof(unsigned) + 2 * sizeof(unsigned short)) +
+      (3 * sizeof(unsigned) + sizeof(unsigned long long) +
+       2 * sizeof(unsigned short)) +
       (unsigned long long) Better_key_scratch_capacity *
         sizeof(unsigned long long) +
       (unsigned long long) Better_intersection_capacity * sizeof(unsigned) +
@@ -2162,7 +2208,7 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             "posting_lists=%llu, posting_candidates=%llu, "
             "unique_candidates=%llu, mean=%.2f, "
             "max=%llu, materialized=%llu, exact_positive=%llu, rewrites=%llu, "
-            "reindexes=%llu, stale_skips=%llu, "
+            "reindexes=%llu, stale_skips=%llu, fingerprint_rejects=%llu, "
             "buckets=0:%llu/1:%llu/2-7:%llu/8-31:%llu/32-127:%llu/"
             "128-1023:%llu/1024-16383:%llu/16384+:%llu.\n",
             Packed_operation_names[i], clock_seconds(s->clock), s->queries,
@@ -2171,6 +2217,7 @@ void fprint_packed_hint_operation_stats(FILE *fp)
               (double) s->unique_candidates / (double) s->queries,
             s->candidate_max, s->materializations, s->exact_positives,
             s->rewrites, s->reindexes, s->stale_skips,
+            s->fingerprint_rejects,
             s->candidate_buckets[0], s->candidate_buckets[1],
             s->candidate_buckets[2], s->candidate_buckets[3],
             s->candidate_buckets[4], s->candidate_buckets[5],
@@ -2197,7 +2244,8 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             "live_features=%llu, stale_features=%llu, max_posting=%llu, "
             "equivalence_buckets=%u, equivalence_references=%u, "
             "equivalence_live=%llu, equivalence_stale=%llu, "
-            "table_bytes=%llu, reference_bytes=%llu, rebuilds=%llu, "
+            "table_bytes=%llu, reference_bytes=%llu, fingerprint_bytes=%llu, "
+            "rebuilds=%llu, "
             "rebuilt_references=%llu, rebuild_materializations=%llu.\n",
             s.keys, s.references, Better_feature_live_count,
             s.references - Better_feature_live_count,
@@ -2205,6 +2253,8 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             Better_equivalence_reference_count,
             Better_equivalence_live_count,
             equivalence_stale, table_bytes, reference_bytes,
+            (unsigned long long) Packed_hint_capacity *
+              sizeof(unsigned long long),
             Better_posting_rebuilds, Better_posting_rebuild_refs,
             Better_posting_rebuild_materializations);
   }
