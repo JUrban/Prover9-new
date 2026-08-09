@@ -62,6 +62,11 @@ static Cold_passive_store Dense_body_store = NULL;
 static unsigned long long Dense_arena_bytes_reclaimed = 0;
 static Rewrite_only_store Rewrite_only_rules = NULL;
 static Compact_rewrite_bank Compact_rewrite_rules = NULL;
+static unsigned Rewrite_epoch = 1;    /* compact rewrite state seen by SOS */
+static size_t Rewrite_refresh_hot_cursor = 0;
+static size_t Rewrite_refresh_general_cursor = 0;
+static unsigned Rewrite_refresh_hot_streak = 0;
+static BOOL Rewrite_refresh_lane_turn = TRUE;
 
 static void update_rewrite_only_stats(void);
 static void current_demodulate_clause(Topform, int, int, BOOL, BOOL);
@@ -110,6 +115,15 @@ static BOOL eager_interreduced_demod_mode(void)
 static BOOL maximum_discount_demod_mode(void)
 {
   return eager_legacy_demod_mode() || eager_interreduced_demod_mode();
+}
+
+static void advance_rewrite_epoch(void)
+{
+  unsigned long long stale = dense_passive_size();
+  if (Rewrite_epoch != UINT_MAX)
+    Rewrite_epoch++;
+  if (stale > Stats.rewrite_refresh_stale_peak)
+    Stats.rewrite_refresh_stale_peak = stale;
 }
 
 static BOOL demodulation_rules_available(void);
@@ -1955,6 +1969,10 @@ Prover_options init_prover_options(void)
   p->hint_sweep_interval = init_parm("hint_sweep_interval", 1000,     1,INT_MAX);
   p->hint_expiry_min =    init_parm("hint_expiry_min",       1,      1,INT_MAX);
   p->hints_fpa_depth =    init_parm("hints_fpa_depth",      10,      1,    100);
+  p->rewrite_refresh_hot_ratio =
+    init_parm("rewrite_refresh_hot_ratio", 7, 0, INT_MAX);
+  p->rewrite_refresh_raw_budget =
+    init_parm("rewrite_refresh_raw_budget", 64, 1, INT_MAX);
   p->fpa_hash_threshold = init_parm("fpa_hash_threshold",   4,      0,   1000);
   p->discrim_hash_threshold = init_parm("discrim_hash_threshold", -1,  -1,  1000);
 
@@ -2547,6 +2565,7 @@ static
 void update_stats(void)
 {
   struct compact_rewrite_stats compact;
+  unsigned long long rewrite_lag = 0;
   update_rewrite_only_stats();
   compact_rewrite_get_stats(Compact_rewrite_rules, &compact);
   Stats.demod_attempts = demod_attempts() + fdemod_attempts() +
@@ -2569,6 +2588,14 @@ void update_stats(void)
   Stats.active_indexed_clauses = Stats.usable_size;
   Stats.passive_indexed_clauses = discount_mode() ? 0 : Stats.sos_size;
   Stats.delayed_demodulators = delayed_demodulator_count();
+  Stats.rewrite_refresh_stale_current = eager_interreduced_demod_mode() ?
+    dense_passive_stale_count(Rewrite_epoch, &rewrite_lag) : 0;
+  if (rewrite_lag > Stats.rewrite_refresh_lag_max)
+    Stats.rewrite_refresh_lag_max = rewrite_lag;
+  if (Stats.rewrite_refresh_stale_current >
+      Stats.rewrite_refresh_stale_peak)
+    Stats.rewrite_refresh_stale_peak =
+      Stats.rewrite_refresh_stale_current;
   Stats.collective_batches_pending = Collective_batch_count;
   collective_descriptor_stats(&Stats.collective_pending_paramod,
                               &Stats.collective_pending_pos_hyper,
@@ -2677,6 +2704,22 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             comma_num(s.passive_refresh_checks),
             comma_num(s.passive_refresh_requeued),
             comma_num(s.passive_refresh_subsumed));
+    if (eager_interreduced_demod_mode())
+      fprintf(fp,
+              "Rewrite_refresh: epoch=%u, stale=%s, stale_peak=%s, "
+              "lag_max=%s, scanned=%s, materialized=%s, rewritten=%s, "
+              "unchanged=%s, subsumed=%s, hot_turns=%s, general_turns=%s.\n",
+              Rewrite_epoch,
+              comma_num(s.rewrite_refresh_stale_current),
+              comma_num(s.rewrite_refresh_stale_peak),
+              comma_num(s.rewrite_refresh_lag_max),
+              comma_num(s.rewrite_refresh_scanned),
+              comma_num(s.rewrite_refresh_materialized),
+              comma_num(s.rewrite_refresh_rewritten),
+              comma_num(s.rewrite_refresh_unchanged),
+              comma_num(s.rewrite_refresh_subsumed),
+              comma_num(s.rewrite_refresh_hot_turns),
+              comma_num(s.rewrite_refresh_general_turns));
   }
   if (collective_frontier_mode()) {
     fprintf(fp,
@@ -5152,9 +5195,10 @@ static size_t archive_dense_passive(Topform c)
   return position;
 }  /* archive_dense_passive */
 
-static Topform activate_dense_passive(size_t position,
-                                      unsigned long long id,
-                                      unsigned long long hint_id)
+static Topform activate_dense_passive_internal(size_t position,
+                                               unsigned long long id,
+                                               unsigned long long hint_id,
+                                               BOOL selection)
 {
   int rewrite_type = NOT_DEMODULATOR;
   Topform rewrite_clone = take_rewrite_only_rule(id, &rewrite_type);
@@ -5165,10 +5209,18 @@ static Topform activate_dense_passive(size_t position,
   if (rewrite_clone != NULL) {
     c->used = c->used || rewrite_clone->used;
     delete_clause(rewrite_clone);
-    Stats.rewrite_only_demodulators_selected++;
+    if (selection)
+      Stats.rewrite_only_demodulators_selected++;
   }
   c->matching_hint = hint_by_id(hint_id);
   return c;
+}  /* activate_dense_passive_internal */
+
+static Topform activate_dense_passive(size_t position,
+                                      unsigned long long id,
+                                      unsigned long long hint_id)
+{
+  return activate_dense_passive_internal(position, id, hint_id, TRUE);
 }  /* activate_dense_passive */
 
 /* Decode a dense passive without changing its archived ID-table entry.
@@ -5186,6 +5238,7 @@ static Topform materialize_dense_passive(
   c->weight = view->weight;
   c->semantics = view->semantics;
   c->simplifier_epoch = view->simplifier_epoch;
+  c->rewrite_epoch = view->rewrite_epoch;
   c->delayed_demodulator = view->delayed_demodulator;
   {
     Topform clone = rewrite_only_store_find(Rewrite_only_rules, view->id,
@@ -6541,6 +6594,7 @@ static Topform store_rewrite_only_clone(Topform c, int type)
   clone->weight = c->weight;
   clone->semantics = c->semantics;
   clone->simplifier_epoch = c->simplifier_epoch;
+  clone->rewrite_epoch = c->rewrite_epoch;
   if (!rewrite_only_store_insert(Rewrite_only_rules, clone, type,
                                  rewrite_only_clone_bytes(clone))) {
     clone->id = 0;
@@ -6559,6 +6613,7 @@ static Topform store_rewrite_only_shell(Topform c, int type)
   shell->weight = c->weight;
   shell->semantics = c->semantics;
   shell->simplifier_epoch = c->simplifier_epoch;
+  shell->rewrite_epoch = c->rewrite_epoch;
   if (compress_clause(shell) != CLAUSE_COMPRESS_OK) {
     shell->id = 0;
     delete_clause(shell);
@@ -6614,8 +6669,9 @@ static void restore_compact_rewrite_bank(void)
     rules[count++].cold = FALSE;
   }
   for (p = Glob.sos->first; p != NULL; p = p->next) {
-    int type = demodulator_type(p->c, parm(Opt->lex_dep_demod_lim),
-                                flag(Opt->lex_dep_demod_sane));
+    int type = p->c->delayed_demodulator ?
+      demodulator_type(p->c, parm(Opt->lex_dep_demod_lim),
+                       flag(Opt->lex_dep_demod_sane)) : NOT_DEMODULATOR;
     if (type != NOT_DEMODULATOR) {
       rules[count].clause = p->c;
       rules[count].type = type;
@@ -6651,6 +6707,7 @@ static void admit_rewrite_only_demodulator(Topform c, int type)
   back_demod_hints(clone, type, flag(Opt->lex_order_vars));
   if (Simplifier_epoch != UINT_MAX)
     Simplifier_epoch++;
+  advance_rewrite_epoch();
 }
 
 static void admit_compact_rewrite_demodulator(Topform c, int type)
@@ -6666,6 +6723,7 @@ static void admit_compact_rewrite_demodulator(Topform c, int type)
   back_demod_hints(c, type, flag(Opt->lex_order_vars));
   if (Simplifier_epoch != UINT_MAX)
     Simplifier_epoch++;
+  advance_rewrite_epoch();
   update_rewrite_only_stats();
 }
 
@@ -6722,7 +6780,11 @@ void prepare_discount_passive(Topform c, BOOL stamp_epoch)
 
   if (stamp_epoch)
     c->simplifier_epoch = Simplifier_epoch;
-  if (flag(Opt->back_demod))
+  if (stamp_epoch)
+    c->rewrite_epoch = Rewrite_epoch;
+  if (flag(Opt->back_demod) &&
+      !(eager_interreduced_demod_mode() && !stamp_epoch &&
+        !c->delayed_demodulator))
     type = demodulator_type(c,
 			    parm(Opt->lex_dep_demod_lim),
 			    flag(Opt->lex_dep_demod_sane));
@@ -8464,7 +8526,8 @@ BOOL discount_refresh_selected(Topform c)
   Topform copy;
   Topform subsumer;
 
-  if (c->simplifier_epoch == Simplifier_epoch)
+  if (c->simplifier_epoch == Simplifier_epoch &&
+      c->rewrite_epoch == Rewrite_epoch)
     return TRUE;
 
   Stats.passive_refresh_checks++;
@@ -8505,8 +8568,121 @@ BOOL discount_refresh_selected(Topform c)
   }
 
   c->simplifier_epoch = Simplifier_epoch;
+  c->rewrite_epoch = Rewrite_epoch;
   return TRUE;
 }  /* discount_refresh_selected */
+
+static void restore_unchanged_dense_passive(
+  Topform c, const struct dense_passive_view *view)
+{
+  Topform shell = NULL;
+  if (view->delayed_demodulator) {
+    int type = demodulator_type(c, parm(Opt->lex_dep_demod_lim),
+                                flag(Opt->lex_dep_demod_sane));
+    if (type == NOT_DEMODULATOR ||
+        !compact_rewrite_add(Compact_rewrite_rules, c, type))
+      fatal_error("rewrite refresh: cannot restore compact demodulator");
+    shell = store_rewrite_only_shell(c, type);
+    c->delayed_demodulator = TRUE;
+  }
+  else
+    c->delayed_demodulator = FALSE;
+
+  if (shell != NULL) {
+    if (!detach_clause_id(c))
+      fatal_error("rewrite refresh: materialized clause does not own proof ID");
+    register_clause_with_id(shell);
+  }
+  else if (!detach_clause_id(c))
+    fatal_error("rewrite refresh: ordinary clause does not own proof ID");
+  c->id = 0;
+  delete_clause(c);
+  if (!dense_passive_reactivate_id(view->id, Simplifier_epoch,
+                                   Rewrite_epoch,
+                                   view->delayed_demodulator))
+    fatal_error("rewrite refresh: cannot reactivate dense record");
+  update_rewrite_only_stats();
+}
+
+/* Spend one bounded, pointer-free repair turn.  Hinted passives receive the
+   configured burst share, while a mandatory general turn advances an
+   independent wraparound cursor.  A lane toggle guarantees that repair and
+   inference each make progress while rewrite debt remains finite. */
+static BOOL rewrite_refresh_turn(void)
+{
+  struct dense_passive_view view;
+  unsigned scanned = 0;
+  unsigned budget;
+  unsigned hot_ratio;
+  BOOL hot = FALSE;
+  Topform c;
+  unsigned long long requeued_before, subsumed_before;
+
+  if (!eager_interreduced_demod_mode())
+    return FALSE;
+  if (!Rewrite_refresh_lane_turn) {
+    Rewrite_refresh_lane_turn = TRUE;
+    return FALSE;
+  }
+  memset(&view, 0, sizeof(view));
+  budget = (unsigned) parm(Opt->rewrite_refresh_raw_budget);
+  hot_ratio = (unsigned) parm(Opt->rewrite_refresh_hot_ratio);
+  if (hot_ratio != 0 && Rewrite_refresh_hot_streak < hot_ratio) {
+    scanned = dense_passive_scan_stale(&Rewrite_refresh_hot_cursor,
+                                       Rewrite_epoch, TRUE, budget, &view);
+    hot = view.id != 0;
+  }
+  if (view.id == 0) {
+    unsigned general_scanned = dense_passive_scan_stale(
+      &Rewrite_refresh_general_cursor, Rewrite_epoch, FALSE, budget, &view);
+    scanned += general_scanned;
+    hot = FALSE;
+  }
+  Stats.rewrite_refresh_scanned += scanned;
+  if (view.id == 0)
+    return FALSE;
+
+  if (!dense_passive_deactivate_id(view.id, NULL))
+    fatal_error("rewrite refresh: stale record disappeared");
+  c = activate_dense_passive_internal(view.store_position, view.id,
+                                      view.hint_id, FALSE);
+  if (c == NULL)
+    fatal_error("rewrite refresh: cannot materialize dense passive");
+  c->weight = view.weight;
+  c->semantics = view.semantics;
+  c->simplifier_epoch = view.simplifier_epoch;
+  c->rewrite_epoch = view.rewrite_epoch;
+  c->delayed_demodulator = view.delayed_demodulator;
+  Stats.rewrite_refresh_materialized++;
+  if (hot) {
+    Stats.rewrite_refresh_hot_turns++;
+    Rewrite_refresh_hot_streak++;
+  }
+  else {
+    Stats.rewrite_refresh_general_turns++;
+    Rewrite_refresh_hot_streak = 0;
+  }
+
+  requeued_before = Stats.passive_refresh_requeued;
+  subsumed_before = Stats.passive_refresh_subsumed;
+  if (discount_refresh_selected(c)) {
+    restore_unchanged_dense_passive(c, &view);
+    Stats.rewrite_refresh_unchanged++;
+  }
+  else {
+    if (view.delayed_demodulator) {
+      compact_rewrite_note_suspended_retirement(Compact_rewrite_rules);
+      Stats.rewrite_only_demodulators_retired++;
+      update_rewrite_only_stats();
+    }
+    if (Stats.passive_refresh_requeued != requeued_before)
+      Stats.rewrite_refresh_rewritten++;
+    else if (Stats.passive_refresh_subsumed != subsumed_before)
+      Stats.rewrite_refresh_subsumed++;
+  }
+  Rewrite_refresh_lane_turn = FALSE;
+  return TRUE;
+}
 
 /*************
  *
@@ -8554,6 +8730,9 @@ void make_inferences(void)
   BOOL collective_space = !collective_frontier_mode() ||
     collective_candidate_occupancy() <
       (unsigned long long) parm(Opt->collective_candidate_cache);
+
+  if (rewrite_refresh_turn())
+    return;
 
   if (collective_balanced_mode() &&
       Collective_candidate_heap_count != 0) {
@@ -9740,6 +9919,10 @@ BOOL write_bare_clause(FILE *clause_fp, FILE *data_fp, Topform c,
     fprintf(data_fp, " was_given");
   if (c->simplifier_epoch > 0)
     fprintf(data_fp, " simplifier_epoch %u", c->simplifier_epoch);
+  if (c->rewrite_epoch > 0)
+    fprintf(data_fp, " rewrite_epoch %u", c->rewrite_epoch);
+  if (c->delayed_demodulator)
+    fprintf(data_fp, " delayed_demodulator");
   if (c->last_matched_given > 0)
     fprintf(data_fp, " last_matched %llu", c->last_matched_given);
   if (strcmp(list_name, "hints") == 0 && hint_is_redundant(c))
@@ -11772,6 +11955,24 @@ void write_checkpoint(void)
             Stats.compact_rewrite_attempts);
     fprintf(fp, "compact_rewrite_rewrites %llu\n",
             Stats.compact_rewrite_rewrites);
+    fprintf(fp, "rewrite_refresh_scanned %llu\n",
+            Stats.rewrite_refresh_scanned);
+    fprintf(fp, "rewrite_refresh_materialized %llu\n",
+            Stats.rewrite_refresh_materialized);
+    fprintf(fp, "rewrite_refresh_rewritten %llu\n",
+            Stats.rewrite_refresh_rewritten);
+    fprintf(fp, "rewrite_refresh_unchanged %llu\n",
+            Stats.rewrite_refresh_unchanged);
+    fprintf(fp, "rewrite_refresh_subsumed %llu\n",
+            Stats.rewrite_refresh_subsumed);
+    fprintf(fp, "rewrite_refresh_hot_turns %llu\n",
+            Stats.rewrite_refresh_hot_turns);
+    fprintf(fp, "rewrite_refresh_general_turns %llu\n",
+            Stats.rewrite_refresh_general_turns);
+    fprintf(fp, "rewrite_refresh_stale_peak %llu\n",
+            Stats.rewrite_refresh_stale_peak);
+    fprintf(fp, "rewrite_refresh_lag_max %llu\n",
+            Stats.rewrite_refresh_lag_max);
     fprintf(fp, "passive_refresh_checks %llu\n",
             Stats.passive_refresh_checks);
     fprintf(fp, "passive_refresh_requeued %llu\n",
@@ -11945,6 +12146,15 @@ void write_checkpoint(void)
     fprintf(fp, "collective_discovery_cap_stalls %llu\n",
             Stats.collective_discovery_cap_stalls);
     fprintf(fp, "simplifier_epoch %u\n", Simplifier_epoch);
+    fprintf(fp, "rewrite_epoch %u\n", Rewrite_epoch);
+    fprintf(fp, "rewrite_refresh_hot_cursor %llu\n",
+            (unsigned long long) Rewrite_refresh_hot_cursor);
+    fprintf(fp, "rewrite_refresh_general_cursor %llu\n",
+            (unsigned long long) Rewrite_refresh_general_cursor);
+    fprintf(fp, "rewrite_refresh_hot_streak %u\n",
+            Rewrite_refresh_hot_streak);
+    fprintf(fp, "rewrite_refresh_lane_turn %u\n",
+            Rewrite_refresh_lane_turn ? 1U : 0U);
     fprintf(fp, "hint_state_epoch %llu\n", hint_state_epoch());
     fprintf(fp, "user_seconds %.2f\n", user_seconds());
     /* Save Low selector cycle state for deterministic resume */
@@ -12321,6 +12531,8 @@ struct clause_meta {
   int used;       /* c->used flag */
   int was_given;  /* c->was_given flag */
   unsigned simplifier_epoch; /* DISCOUNT active-state generation */
+  unsigned rewrite_epoch; /* DISCOUNT rewrite-bank generation */
+  int delayed_demodulator; /* live rewrite-only membership */
   unsigned long long last_matched; /* hint last_matched_given (for expiry) */
   int redundant_hint; /* hint was in Redundant_hints at checkpoint time */
   unsigned aflags[10]; /* atom private_flags per literal (max 10 lits) */
@@ -12350,6 +12562,8 @@ int load_clause_data(const char *dir, struct clause_meta **out)
     m->used = 0;
     m->was_given = 0;
     m->simplifier_epoch = 0;
+    m->rewrite_epoch = 0;
+    m->delayed_demodulator = 0;
     m->last_matched = 0;
     m->redundant_hint = 0;
     m->aflags_count = 0;
@@ -12368,6 +12582,11 @@ int load_clause_data(const char *dir, struct clause_meta **out)
       p = strstr(line, "simplifier_epoch");
       if (p != NULL)
         sscanf(p, "simplifier_epoch %u", &m->simplifier_epoch);
+      p = strstr(line, "rewrite_epoch");
+      if (p != NULL)
+        sscanf(p, "rewrite_epoch %u", &m->rewrite_epoch);
+      if (strstr(line, "delayed_demodulator") != NULL)
+        m->delayed_demodulator = 1;
       p = strstr(line, "last_matched");
       if (p != NULL)
         sscanf(p, "last_matched %llu", &m->last_matched);
@@ -12447,6 +12666,8 @@ Clist load_clauses_from_file(const char *dir, const char *filename,
         c->used = meta[meta_pos].used;
         c->was_given = meta[meta_pos].was_given;
         c->simplifier_epoch = meta[meta_pos].simplifier_epoch;
+        c->rewrite_epoch = meta[meta_pos].rewrite_epoch;
+        c->delayed_demodulator = meta[meta_pos].delayed_demodulator;
         c->last_matched_given = meta[meta_pos].last_matched;
         if (!skip_register)
           register_clause_with_id(c);
@@ -12464,6 +12685,8 @@ Clist load_clauses_from_file(const char *dir, const char *filename,
             c->used = meta[j].used;
             c->was_given = meta[j].was_given;
             c->simplifier_epoch = meta[j].simplifier_epoch;
+            c->rewrite_epoch = meta[j].rewrite_epoch;
+            c->delayed_demodulator = meta[j].delayed_demodulator;
             c->last_matched_given = meta[j].last_matched;
             if (!skip_register)
               register_clause_with_id(c);
@@ -12670,6 +12893,24 @@ void resume_load_clauses(const char *dir)
     fp, "compact_rewrite_attempts", &Stats.compact_rewrite_attempts);
   rewind(fp); (void) read_metadata_ull_if_present(
     fp, "compact_rewrite_rewrites", &Stats.compact_rewrite_rewrites);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "rewrite_refresh_scanned", &Stats.rewrite_refresh_scanned);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "rewrite_refresh_materialized", &Stats.rewrite_refresh_materialized);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "rewrite_refresh_rewritten", &Stats.rewrite_refresh_rewritten);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "rewrite_refresh_unchanged", &Stats.rewrite_refresh_unchanged);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "rewrite_refresh_subsumed", &Stats.rewrite_refresh_subsumed);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "rewrite_refresh_hot_turns", &Stats.rewrite_refresh_hot_turns);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "rewrite_refresh_general_turns", &Stats.rewrite_refresh_general_turns);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "rewrite_refresh_stale_peak", &Stats.rewrite_refresh_stale_peak);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "rewrite_refresh_lag_max", &Stats.rewrite_refresh_lag_max);
   rewind(fp); Stats.passive_refresh_checks =
     read_metadata_ull(fp, "passive_refresh_checks");
   rewind(fp); Stats.passive_refresh_requeued =
@@ -12983,6 +13224,36 @@ void resume_load_clauses(const char *dir)
     (unsigned) read_metadata_ull(fp, "simplifier_epoch");
   if (Simplifier_epoch == 0)
     Simplifier_epoch = 1;
+  {
+    unsigned long long value = 0;
+    rewind(fp);
+    if (read_metadata_ull_if_present(fp, "rewrite_epoch", &value) &&
+        value != 0)
+      Rewrite_epoch = value > UINT_MAX ? UINT_MAX : (unsigned) value;
+    else
+      Rewrite_epoch = Simplifier_epoch;
+    value = 0;
+    rewind(fp);
+    if (read_metadata_ull_if_present(fp, "rewrite_refresh_hot_cursor",
+                                     &value))
+      Rewrite_refresh_hot_cursor = (size_t) value;
+    value = 0;
+    rewind(fp);
+    if (read_metadata_ull_if_present(fp, "rewrite_refresh_general_cursor",
+                                     &value))
+      Rewrite_refresh_general_cursor = (size_t) value;
+    value = 0;
+    rewind(fp);
+    if (read_metadata_ull_if_present(fp, "rewrite_refresh_hot_streak",
+                                     &value))
+      Rewrite_refresh_hot_streak = value > UINT_MAX ? UINT_MAX :
+                                   (unsigned) value;
+    value = 1;
+    rewind(fp);
+    if (read_metadata_ull_if_present(fp, "rewrite_refresh_lane_turn",
+                                     &value))
+      Rewrite_refresh_lane_turn = value != 0;
+  }
   rewind(fp); Resume_hint_epoch = read_metadata_ull(fp, "hint_state_epoch");
   if (Resume_hint_epoch == 0)
     Resume_hint_epoch = 1;
@@ -13956,6 +14227,12 @@ Prover_results search(Prover_input p)
     Opt = p->options;          // put options into a global variable
     Current_inference_source = INFER_SOURCE_OTHER;
     collective_reset_state();
+    Simplifier_epoch = 1;
+    Rewrite_epoch = 1;
+    Rewrite_refresh_hot_cursor = 0;
+    Rewrite_refresh_general_cursor = 0;
+    Rewrite_refresh_hot_streak = 0;
+    Rewrite_refresh_lane_turn = TRUE;
     if (flag(Opt->collective_promising_scheduler) &&
         !str_ident(stringparm1(Opt->inference_frontier), "collective"))
       fatal_error("collective_promising_scheduler requires inference_frontier=collective");

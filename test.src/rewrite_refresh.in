@@ -1,0 +1,34 @@
+clear(auto).
+clear(print_initial_clauses).
+clear(print_given).
+
+assign(search_loop,discount).
+assign(passive_store,dense).
+assign(discount_demodulation,eager_interreduced).
+assign(hint_index,packed).
+assign(ancestor_store,memory).
+assign(sos_limit,-1).
+assign(max_given,6).
+assign(max_seconds,10).
+assign(stats,all).
+
+set(binary_resolution).
+set(back_demod_hints).
+set(hint_match_stats).
+
+formulas(hints).
+p(a).
+end_of_list.
+
+formulas(usable).
+-q | f(x) = x.
+end_of_list.
+
+% q is selected before the ordinary cold clauses.  Its binary conclusion
+% installs f(x)=x, after which bounded general repair must turn p(f(a)) into
+% the hint matcher p(a) without selecting the old passive first.
+formulas(sos).
+q.
+p(f(a)).
+r(a).
+end_of_list.

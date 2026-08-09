@@ -402,6 +402,12 @@ BOOL compact_rewrite_suspend(Compact_rewrite_bank bank,
   return remove_rule(bank, proof_id, FALSE);
 }
 
+void compact_rewrite_note_suspended_retirement(Compact_rewrite_bank bank)
+{
+  if (bank != NULL)
+    bank->retired_rules++;
+}
+
 BOOL compact_rewrite_contains(Compact_rewrite_bank bank,
                               unsigned long long proof_id)
 {

@@ -254,6 +254,8 @@ struct prover_options {
     hint_sweep_interval,   // sweep for expired hints every N given clauses
     hint_expiry_min,       // min match count before hint is eligible for expiry
     hints_fpa_depth,       // FPA index depth for hints (default 10)
+    rewrite_refresh_hot_ratio, // hinted refresh turns per fair general turn
+    rewrite_refresh_raw_budget, // dense records inspected per refresh turn
     fpa_hash_threshold,    // FPA trie hash table threshold (default 16, 0=off)
     discrim_hash_threshold; // discrim tree hash table threshold (default 16, 0=off)
 
@@ -360,6 +362,16 @@ struct prover_stats {
     compact_rewrite_rule_bytes,
     compact_rewrite_term_bytes,
     compact_rewrite_hash_bytes,
+    rewrite_refresh_scanned,
+    rewrite_refresh_materialized,
+    rewrite_refresh_rewritten,
+    rewrite_refresh_unchanged,
+    rewrite_refresh_subsumed,
+    rewrite_refresh_hot_turns,
+    rewrite_refresh_general_turns,
+    rewrite_refresh_stale_current,
+    rewrite_refresh_stale_peak,
+    rewrite_refresh_lag_max,
     passive_refresh_checks,
     passive_refresh_requeued,
     passive_refresh_subsumed,

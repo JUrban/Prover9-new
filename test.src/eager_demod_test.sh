@@ -130,6 +130,24 @@ grep -Eq 'Collective_frontier: batches_created=[1-9][0-9]*, completed=[1-9][0-9]
   > "$test_tmp/compact-balanced-proof.out"
 grep -q 'end of proof' "$test_tmp/compact-balanced-proof.out"
 
+# Fair background repair must expose a hint matcher that exists only after a
+# later rewrite rule, without selecting the stale body first.
+"$repo_dir/bin/prover9" < "$repo_dir/test.src/rewrite_refresh.in" \
+  > "$test_tmp/refresh.out" 2> "$test_tmp/refresh.err" || true
+grep -Eq 'Rewrite_refresh: .*materialized=[1-9][0-9]*, rewritten=[1-9][0-9]*' \
+  "$test_tmp/refresh.out"
+grep -Eq 'Hint match stats:|matched=[1-9][0-9]*' "$test_tmp/refresh.out"
+grep -Eq 'matched=[1-9][0-9]*' "$test_tmp/refresh.out"
+
+# An unaffected stale simplifier exercises the reversible extraction path:
+# compact rule suspension, proof-ID transfer, and selector reactivation.
+"$repo_dir/bin/prover9" < "$repo_dir/test.src/rewrite_refresh_unchanged.in" \
+  > "$test_tmp/refresh-unchanged.out" 2> "$test_tmp/refresh-unchanged.err" || true
+grep -Eq 'Rewrite_refresh: .*materialized=[1-9][0-9]*, rewritten=0, unchanged=[1-9][0-9]*' \
+  "$test_tmp/refresh-unchanged.out"
+grep -Eq 'Compact_rewrite: current=[1-9][0-9]*, .*retired=0' \
+  "$test_tmp/refresh-unchanged.out"
+
 # Eager operation is intentionally tied to dense ownership.  Reject a label
 # that cannot provide the independent clone/archive lifecycle.
 sed 's/assign(passive_store,dense)\./assign(passive_store,compressed)./' \

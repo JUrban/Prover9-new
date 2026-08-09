@@ -76,6 +76,7 @@ struct topform {
 
   int   semantics;        /* evaluation in interpretations */
   unsigned simplifier_epoch; /* active state seen by a DISCOUNT passive */
+  unsigned rewrite_epoch;    /* rewrite bank seen by a DISCOUNT passive */
 
   /* These flags used to occupy fourteen bytes. */
   unsigned is_formula          : 1; /* is this really a formula? */

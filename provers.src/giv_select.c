@@ -57,6 +57,7 @@ struct dense_passive_record {
   size_t store_position;
   double weight;
   unsigned simplifier_epoch;
+  unsigned rewrite_epoch;
   int semantics;
   unsigned flags;
 };
@@ -175,6 +176,20 @@ BOOL dense_passive_contains_id(unsigned long long id)
          (Dense_records[lo].flags & DENSE_PASSIVE_ACTIVE) != 0;
 }  /* dense_passive_contains_id */
 
+static size_t dense_find_record(unsigned long long id)
+{
+  size_t lo = 0, hi = Dense_record_count;
+  while (lo < hi) {
+    size_t mid = lo + (hi - lo) / 2;
+    if (Dense_records[mid].id < id)
+      lo = mid + 1;
+    else
+      hi = mid;
+  }
+  return lo < Dense_record_count && Dense_records[lo].id == id ? lo :
+         SIZE_MAX;
+}
+
 /* PUBLIC */
 void dense_passive_foreach(Dense_passive_visit_fn visit, void *context)
 {
@@ -190,6 +205,7 @@ void dense_passive_foreach(Dense_passive_visit_fn visit, void *context)
       view.store_position = r->store_position;
       view.weight = r->weight;
       view.simplifier_epoch = r->simplifier_epoch;
+      view.rewrite_epoch = r->rewrite_epoch;
       view.semantics = r->semantics;
       view.delayed_demodulator =
         (r->flags & DENSE_PASSIVE_DELAYED) != 0;
@@ -197,6 +213,64 @@ void dense_passive_foreach(Dense_passive_visit_fn visit, void *context)
     }
   }
 }  /* dense_passive_foreach */
+
+/* PUBLIC */
+unsigned dense_passive_scan_stale(size_t *cursor, unsigned rewrite_epoch,
+                                  BOOL hot_only, unsigned scan_limit,
+                                  struct dense_passive_view *view)
+{
+  unsigned scanned = 0;
+  size_t at;
+  if (!Dense_passive || cursor == NULL || view == NULL ||
+      Dense_record_count == 0 || scan_limit == 0)
+    return 0;
+  at = *cursor < Dense_record_count ? *cursor : 0;
+  while (scanned < scan_limit && scanned < Dense_record_count) {
+    struct dense_passive_record *r = &Dense_records[at];
+    scanned++;
+    at++;
+    if (at == Dense_record_count)
+      at = 0;
+    if ((r->flags & DENSE_PASSIVE_ACTIVE) != 0 &&
+        r->rewrite_epoch < rewrite_epoch &&
+        (!hot_only || r->hint_id != 0)) {
+      view->id = r->id;
+      view->hint_id = r->hint_id;
+      view->store_position = r->store_position;
+      view->weight = r->weight;
+      view->simplifier_epoch = r->simplifier_epoch;
+      view->rewrite_epoch = r->rewrite_epoch;
+      view->semantics = r->semantics;
+      view->delayed_demodulator =
+        (r->flags & DENSE_PASSIVE_DELAYED) != 0;
+      *cursor = at;
+      return scanned;
+    }
+  }
+  *cursor = at;
+  return scanned;
+}
+
+/* PUBLIC */
+unsigned long long dense_passive_stale_count(unsigned rewrite_epoch,
+                                             unsigned long long *max_lag)
+{
+  unsigned long long count = 0, lag = 0;
+  size_t i;
+  for (i = 0; i < Dense_record_count; i++) {
+    struct dense_passive_record *r = &Dense_records[i];
+    if ((r->flags & DENSE_PASSIVE_ACTIVE) != 0 &&
+        r->rewrite_epoch < rewrite_epoch) {
+      unsigned long long current_lag = rewrite_epoch - r->rewrite_epoch;
+      count++;
+      if (current_lag > lag)
+        lag = current_lag;
+    }
+  }
+  if (max_lag != NULL)
+    *max_lag = lag;
+  return count;
+}
 
 /* PUBLIC */
 void dense_passive_memory(unsigned long long *record_bytes,
@@ -710,6 +784,7 @@ static void dense_insert_passive(Topform c)
   r.selector_mask = dense_selector_mask(c);
   r.weight = c->weight;
   r.simplifier_epoch = c->simplifier_epoch;
+  r.rewrite_epoch = c->rewrite_epoch;
   r.semantics = c->semantics;
   r.flags = DENSE_PASSIVE_ACTIVE |
             (c->delayed_demodulator ? DENSE_PASSIVE_DELAYED : 0);
@@ -767,6 +842,80 @@ static void dense_deactivate_record(uint32_t record)
     }
   }
   Sos_size--;
+}
+
+static void dense_reactivate_record(uint32_t record)
+{
+  struct dense_passive_record *r = &Dense_records[record];
+  Plist p;
+  if ((r->flags & DENSE_PASSIVE_ACTIVE) != 0)
+    fatal_error("dense_reactivate_record: active record");
+  r->flags |= DENSE_PASSIVE_ACTIVE;
+  Dense_active_count++;
+  for (p = High.selectors; p != NULL; p = p->next) {
+    Giv_select gs = p->v;
+    if ((r->selector_mask & (1ULL << gs->dense_bit)) != 0) {
+      /* Deactivation is lazy: the original heap entry is still present and
+         the unchanged selector key remains valid. */
+      gs->dense_active++;
+      High.occurrences++;
+    }
+  }
+  for (p = Low.selectors; p != NULL; p = p->next) {
+    Giv_select gs = p->v;
+    if ((r->selector_mask & (1ULL << gs->dense_bit)) != 0) {
+      gs->dense_active++;
+      Low.occurrences++;
+    }
+  }
+  Sos_size++;
+}
+
+/* PUBLIC */
+BOOL dense_passive_deactivate_id(unsigned long long id,
+                                 struct dense_passive_view *view)
+{
+  size_t at = dense_find_record(id);
+  struct dense_passive_record *r;
+  if (at == SIZE_MAX ||
+      (Dense_records[at].flags & DENSE_PASSIVE_ACTIVE) == 0)
+    return FALSE;
+  r = &Dense_records[at];
+  if (view != NULL) {
+    view->id = r->id;
+    view->hint_id = r->hint_id;
+    view->store_position = r->store_position;
+    view->weight = r->weight;
+    view->simplifier_epoch = r->simplifier_epoch;
+    view->rewrite_epoch = r->rewrite_epoch;
+    view->semantics = r->semantics;
+    view->delayed_demodulator =
+      (r->flags & DENSE_PASSIVE_DELAYED) != 0;
+  }
+  dense_deactivate_record((uint32_t) at);
+  return TRUE;
+}
+
+/* PUBLIC */
+BOOL dense_passive_reactivate_id(unsigned long long id,
+                                 unsigned simplifier_epoch,
+                                 unsigned rewrite_epoch,
+                                 BOOL delayed_demodulator)
+{
+  size_t at = dense_find_record(id);
+  struct dense_passive_record *r;
+  if (at == SIZE_MAX ||
+      (Dense_records[at].flags & DENSE_PASSIVE_ACTIVE) != 0)
+    return FALSE;
+  r = &Dense_records[at];
+  r->simplifier_epoch = simplifier_epoch;
+  r->rewrite_epoch = rewrite_epoch;
+  if (delayed_demodulator)
+    r->flags |= DENSE_PASSIVE_DELAYED;
+  else
+    r->flags &= ~DENSE_PASSIVE_DELAYED;
+  dense_reactivate_record((uint32_t) at);
+  return TRUE;
 }
 
 /*************
@@ -1007,6 +1156,7 @@ Topform get_given_clause2(Clist sos, int num_given,
     giv->weight = r.weight;
     giv->semantics = r.semantics;
     giv->simplifier_epoch = r.simplifier_epoch;
+    giv->rewrite_epoch = r.rewrite_epoch;
     giv->delayed_demodulator =
       (r.flags & DENSE_PASSIVE_DELAYED) != 0;
     *type = gs->name;

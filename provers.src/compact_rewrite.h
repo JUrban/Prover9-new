@@ -32,6 +32,8 @@ BOOL compact_rewrite_remove(Compact_rewrite_bank bank,
 BOOL compact_rewrite_suspend(Compact_rewrite_bank bank,
                              unsigned long long proof_id);
 
+void compact_rewrite_note_suspended_retirement(Compact_rewrite_bank bank);
+
 BOOL compact_rewrite_contains(Compact_rewrite_bank bank,
                               unsigned long long proof_id);
 
