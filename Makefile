@@ -84,6 +84,10 @@ discount-tests: all
 	./test.src/dense_passive_test.sh
 	cd test.src && $(MAKE) checkpoint-tests
 
+compact-frontier-tests: all
+	./test.src/compact_otter_audit_test.sh
+	cd test.src && $(MAKE) cold-passive-store-test compact-rewrite-test
+
 clean:
 	cd ladr             && $(MAKE) realclean
 	cd apps.src         && $(MAKE) realclean

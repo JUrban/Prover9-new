@@ -86,6 +86,7 @@ struct prover_options {
     hint_match_stats,        // print hint match count stats at end of search
     hint_match_once,         // unindex hint immediately after first match
     hint_trace,              // exact committed-candidate hint tuple
+    compact_otter_audit,     // dual-run legacy/compact OTTER demodulation
     collective_trace,        // one line per collective batch expansion
     collective_hint_probes,  // one bounded early expansion for hinted givens
     collective_promising_candidates, // raw-weight order within inference set
@@ -371,6 +372,8 @@ struct prover_stats {
     compact_rewrite_rule_bytes,
     compact_rewrite_term_bytes,
     compact_rewrite_hash_bytes,
+    compact_otter_audit_queries,
+    compact_otter_audit_failures,
     rewrite_refresh_scanned,
     rewrite_refresh_materialized,
     rewrite_refresh_rewritten,

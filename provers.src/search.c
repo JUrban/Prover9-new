@@ -121,6 +121,14 @@ static BOOL eager_interreduced_demod_mode(void)
               "eager_interreduced");
 }
 
+/* Stage-2 Phase-5 oracle: keep the legacy OTTER demodulation index
+   authoritative while maintaining and querying the compact bank in lockstep.
+   A mismatch stops immediately instead of perturbing the reference run. */
+static BOOL compact_otter_audit_mode(void)
+{
+  return Opt != NULL && flag(Opt->compact_otter_audit);
+}
+
 static BOOL maximum_discount_demod_mode(void)
 {
   return eager_legacy_demod_mode() || eager_interreduced_demod_mode();
@@ -495,6 +503,38 @@ static void current_demodulate_clause(Topform c, int step_limit,
     (void) print;
     compact_rewrite_clause(Compact_rewrite_rules, c, step_limit,
                            increase_limit, lex_order_vars, TRUE);
+  }
+  else if (compact_otter_audit_mode()) {
+    Topform compact = copy_clause_ija(c);
+    char *legacy_just = NULL, *compact_just = NULL;
+    unsigned legacy_size = 0, compact_size = 0;
+    BOOL same;
+
+    compact_rewrite_clause(Compact_rewrite_rules, compact, step_limit,
+                           increase_limit, lex_order_vars, TRUE);
+    demodulate_clause(c, step_limit, increase_limit, print, lex_order_vars);
+    same = clause_ident(c->literals, compact->literals) &&
+      encode_justification(c->justification, &legacy_just, &legacy_size) &&
+      encode_justification(compact->justification,
+                           &compact_just, &compact_size) &&
+      legacy_size == compact_size &&
+      memcmp(legacy_just, compact_just, legacy_size) == 0;
+    Stats.compact_otter_audit_queries++;
+    if (!same) {
+      Stats.compact_otter_audit_failures++;
+      fprintf(stderr,
+              "compact_otter_audit: demodulation mismatch before clause ID %llu\n",
+              c->id);
+      fprintf(stderr, "legacy: ");
+      fwrite_clause(stderr, c, CL_FORM_STD);
+      fprintf(stderr, "compact: ");
+      fwrite_clause(stderr, compact, CL_FORM_STD);
+    }
+    safe_free(legacy_just);
+    safe_free(compact_just);
+    delete_clause(compact);
+    if (!same)
+      fatal_error("compact OTTER demodulation audit failed");
   }
   else
     demodulate_clause(c, step_limit, increase_limit, print, lex_order_vars);
@@ -1793,6 +1833,7 @@ Prover_options init_prover_options(void)
   p->hint_match_stats       = init_flag("hint_match_stats",       FALSE);
   p->hint_match_once        = init_flag("hint_match_once",        FALSE);
   p->hint_trace             = init_flag("hint_trace",             FALSE);
+  p->compact_otter_audit    = init_flag("compact_otter_audit",    FALSE);
   p->collective_trace       = init_flag("collective_trace",       FALSE);
   p->collective_hint_probes = init_flag("collective_hint_probes",  FALSE);
   p->collective_promising_candidates =
@@ -2772,6 +2813,20 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
               comma_num(s.rewrite_drain_yields),
               comma_num(s.rewrite_inference_turns));
     }
+  }
+  if (compact_otter_audit_mode()) {
+    fprintf(fp,
+            "Compact_otter_audit: queries=%s, failures=%s, current_rules=%s, "
+            "peak_rules=%s, physical_rules=%s, attempts=%s, rewrites=%s, "
+            "bytes=%s.\n",
+            comma_num(s.compact_otter_audit_queries),
+            comma_num(s.compact_otter_audit_failures),
+            comma_num(s.compact_rewrite_rules_current),
+            comma_num(s.compact_rewrite_rules_peak),
+            comma_num(s.compact_rewrite_rules_physical),
+            comma_num(s.compact_rewrite_attempts),
+            comma_num(s.compact_rewrite_rewrites),
+            comma_num(s.rewrite_bank_bytes));
   }
   if (collective_frontier_mode()) {
     fprintf(fp,
@@ -5450,11 +5505,19 @@ void disable_clause(Topform c)
         compact_rewrite_compact(Compact_rewrite_rules);
       update_rewrite_only_stats();
     }
-    else
+    else {
+      if (compact_otter_audit_mode()) {
+        if (!compact_rewrite_remove(Compact_rewrite_rules, c->id))
+          fatal_error("disable_clause: audited compact demodulator is missing");
+        if (compact_rewrite_compaction_needed(Compact_rewrite_rules))
+          compact_rewrite_compact(Compact_rewrite_rules);
+        update_rewrite_only_stats();
+      }
       index_demodulator(c, demodulator_type(c,
 					    parm(Opt->lex_dep_demod_lim),
 					    flag(Opt->lex_dep_demod_sane)),
 			DELETE, Clocks.index);
+    }
     clist_remove(c, Glob.demods);
   }
 
@@ -5518,11 +5581,15 @@ void free_search_memory(void)
       if (!compact_rewrite_remove(Compact_rewrite_rules, c->id))
         fatal_error("free_search_memory: compact demodulator is missing");
     }
-    else
+    else {
+      if (compact_otter_audit_mode() &&
+          !compact_rewrite_remove(Compact_rewrite_rules, c->id))
+        fatal_error("free_search_memory: audited compact demodulator is missing");
       index_demodulator(c, demodulator_type(c,
 					    parm(Opt->lex_dep_demod_lim),
 					    flag(Opt->lex_dep_demod_sane)),
 			DELETE, Clocks.index);
+    }
     clist_remove(c, Glob.demods);
     if (c->containers == NULL && !c->disabled)
       delete_clause(c);
@@ -6886,8 +6953,14 @@ void cl_process_new_demod(Topform c, BOOL rewrite_transition)
           compact_rewrite_compact(Compact_rewrite_rules);
         update_rewrite_only_stats();
       }
-      else
+      else {
+        if (compact_otter_audit_mode()) {
+          if (!compact_rewrite_add(Compact_rewrite_rules, c, type))
+            fatal_error("cl_process_new_demod: audited compact rule already present");
+          update_rewrite_only_stats();
+        }
         index_demodulator(c, type, INSERT, Clocks.index);
+      }
       if (!rewrite_transition) {
         Stats.new_demodulators++;
         if (type != ORIENTED)
@@ -9799,8 +9872,14 @@ void index_and_process_initial_clauses(void)
 	    fatal_error("index_and_process_initial_clauses: duplicate compact demodulator");
 	  update_rewrite_only_stats();
 	}
-	else
+	else {
+	  if (compact_otter_audit_mode()) {
+	    if (!compact_rewrite_add(Compact_rewrite_rules, c, type))
+	      fatal_error("index_and_process_initial_clauses: duplicate audited compact demodulator");
+	    update_rewrite_only_stats();
+	  }
 	  index_demodulator(c, type, INSERT, Clocks.index);
+	}
       }
     }
   }
@@ -14632,6 +14711,16 @@ Prover_results search(Prover_input p)
     if (!str_ident(stringparm1(Opt->discount_demodulation), "selected") &&
         !discount_mode())
       fatal_error("eager DISCOUNT demodulation requires search_loop=discount");
+    if (compact_otter_audit_mode()) {
+      if (discount_mode())
+        fatal_error("compact_otter_audit requires search_loop=otter");
+      if (flag(Opt->eval_rewrite))
+        fatal_error("compact_otter_audit is incompatible with eval_rewrite");
+      if (!str_ident(stringparm1(Opt->inference_frontier), "clauses"))
+        fatal_error("compact_otter_audit requires inference_frontier=clauses");
+      if (p->resume_dir != NULL)
+        fatal_error("compact_otter_audit does not yet support checkpoint resume");
+    }
     if (maximum_discount_demod_mode()) {
       if (!dense_passive_mode())
         fatal_error(eager_legacy_demod_mode() ?
@@ -14763,7 +14852,8 @@ Prover_results search(Prover_input p)
       rewrite_only_store_init() : NULL;
     if (Compact_rewrite_rules != NULL)
       fatal_error("search: previous compact rewrite bank was not released");
-    Compact_rewrite_rules = eager_interreduced_demod_mode() ?
+    Compact_rewrite_rules =
+      (eager_interreduced_demod_mode() || compact_otter_audit_mode()) ?
       compact_rewrite_init() : NULL;
     Glob.empties  = NULL;
     cold_passive_store_free(Dense_body_store);
