@@ -90,5 +90,7 @@ diff -u "$test_tmp/anyconst-compact.trace" \
 diff -u "$test_tmp/anyconst-compact.trace" "$test_tmp/anyconst-hybrid.trace"
 diff -u "$test_tmp/anyconst-compact.trace" \
   "$test_tmp/anyconst-packed_legacy.trace"
+grep -Eq '^Better_packed_postings: .*anyconst_references=[1-9][0-9]*,' \
+  "$test_tmp/anyconst-packed_fast.out"
 
 echo 'hint_index_trace_test: PASS'

@@ -70,6 +70,10 @@ static unsigned Preview_candidates_capacity = 0;
 static Hint_postings Better_postings = NULL;
 static unsigned long long Better_feature_live_count = 0;
 static unsigned long long Better_equivalence_live_count = 0;
+static unsigned *Better_anyconst_references = NULL;
+static unsigned Better_anyconst_reference_count = 0;
+static unsigned Better_anyconst_reference_capacity = 0;
+static unsigned long long Better_anyconst_live_count = 0;
 struct better_equivalence_reference {
   unsigned id;
   unsigned next;
@@ -547,12 +551,25 @@ static void packed_finish_candidates(BOOL include_anyconst,
 {
   unsigned id;
   if (include_anyconst) {
-    for (id = 1; id < Packed_hint_capacity; id++) {
-      if (Packed_hint_anyconst[id]) {
+    if (Better_packed_index) {
+      unsigned i;
+      for (i = 0; i < Better_anyconst_reference_count; i++) {
+        id = Better_anyconst_references[i];
         Packed_operation_stats[op].posting_candidates++;
-        if (!Packed_hint_active[id])
+        if (id == 0 || id >= Packed_hint_capacity ||
+            !Packed_hint_active[id] || !Packed_hint_anyconst[id])
           Packed_operation_stats[op].stale_skips++;
         packed_add_candidate(id);
+      }
+    }
+    else {
+      for (id = 1; id < Packed_hint_capacity; id++) {
+        if (Packed_hint_anyconst[id]) {
+          Packed_operation_stats[op].posting_candidates++;
+          if (!Packed_hint_active[id])
+            Packed_operation_stats[op].stale_skips++;
+          packed_add_candidate(id);
+        }
       }
     }
   }
@@ -725,6 +742,20 @@ static void better_equivalence_add(unsigned id)
     better_equivalence_append(id);
 }
 
+static void better_anyconst_add(unsigned id)
+{
+  if (Better_anyconst_reference_count == Better_anyconst_reference_capacity) {
+    unsigned old = Better_anyconst_reference_capacity;
+    unsigned capacity = old == 0 ? 64 : old + (old + 1) / 2;
+    if (capacity <= old)
+      fatal_error("better_anyconst_add: capacity overflow");
+    Better_anyconst_references = safe_realloc(
+      Better_anyconst_references, (size_t) capacity * sizeof(unsigned));
+    Better_anyconst_reference_capacity = capacity;
+  }
+  Better_anyconst_references[Better_anyconst_reference_count++] = id;
+}
+
 static void better_scratch_clear(void)
 {
   Better_key_scratch_count = 0;
@@ -850,7 +881,9 @@ static void better_rebuild_postings(void)
   Hint_postings postings = hint_postings_init();
   unsigned long long live = 0;
   unsigned long long equivalence_live = 0;
+  unsigned long long anyconst_live = 0;
   unsigned id;
+  Better_anyconst_reference_count = 0;
   for (id = 1; id < Packed_hint_capacity; id++) {
     Topform h = Packed_hint_by_id[id];
     Better_hint_feature_count[id] = 0;
@@ -871,6 +904,10 @@ static void better_rebuild_postings(void)
       for (i = 0; i < Better_key_scratch_count; i++)
         hint_postings_add(postings, Better_key_scratch[i], id);
       equivalence_live += better_equivalence_memberships(id);
+      if (Packed_hint_anyconst[id]) {
+        better_anyconst_add(id);
+        anyconst_live++;
+      }
       if (was_compressed && !recompress_clause(h))
         fatal_error("better_rebuild_postings: cannot recompress hint");
       if (!Packed_hint_active[id]) {
@@ -889,6 +926,7 @@ static void better_rebuild_postings(void)
   }
   Better_feature_live_count = live;
   Better_equivalence_live_count = equivalence_live;
+  Better_anyconst_live_count = anyconst_live;
   better_equivalence_rebuild(Better_equivalence_bucket_capacity);
   Better_posting_rebuilds++;
   Better_posting_rebuild_refs += live + equivalence_live;
@@ -923,6 +961,11 @@ static void better_deactivate_hint(unsigned id)
   if (better_equivalence_memberships(id) > Better_equivalence_live_count)
     fatal_error("better_deactivate_hint: equivalence count underflow");
   Better_equivalence_live_count -= better_equivalence_memberships(id);
+  if (Packed_hint_anyconst[id]) {
+    if (Better_anyconst_live_count == 0)
+      fatal_error("better_deactivate_hint: AnyConst count underflow");
+    Better_anyconst_live_count--;
+  }
   Better_hint_feature_count[id] = 0;
   Better_hint_match_fingerprint[id] = 0;
   Better_hint_positive_count[id] = 0;
@@ -951,6 +994,10 @@ static void better_index_hint_terms(Topform h, BOOL anyconst)
       Fast_cache_anyconst_generation = 1;
   }
   Better_equivalence_live_count += better_equivalence_memberships(id);
+  if (anyconst) {
+    Better_anyconst_live_count++;
+    better_anyconst_add(id);
+  }
   better_equivalence_add(id);
   better_maybe_rebuild_postings();
 }
@@ -1498,6 +1545,7 @@ void done_with_hints(void)
   hint_postings_destroy(Better_postings);
   if (Better_equivalence_buckets) safe_free(Better_equivalence_buckets);
   if (Better_equivalence_references) safe_free(Better_equivalence_references);
+  if (Better_anyconst_references) safe_free(Better_anyconst_references);
   Packed_hint_by_id = NULL; Packed_hint_active = NULL;
   Packed_hint_anyconst = NULL; Packed_candidate_mark = NULL;
   Packed_hint_rewrite_symbols = NULL;
@@ -1510,9 +1558,12 @@ void done_with_hints(void)
   Better_postings = NULL;
   Better_equivalence_buckets = NULL;
   Better_equivalence_references = NULL;
+  Better_anyconst_references = NULL;
   Better_equivalence_bucket_capacity = 0;
   Better_equivalence_reference_count = 0;
   Better_equivalence_reference_capacity = 0;
+  Better_anyconst_reference_count = 0;
+  Better_anyconst_reference_capacity = 0;
   Better_hint_feature_count = NULL;
   Better_hint_match_fingerprint = NULL;
   Better_hint_positive_count = Better_hint_negative_count = NULL;
@@ -1525,6 +1576,7 @@ void done_with_hints(void)
   Fast_match_cache = NULL;
   Better_feature_live_count = 0;
   Better_equivalence_live_count = 0;
+  Better_anyconst_live_count = 0;
   Better_intersection_serial = Better_match_serial = 1;
   Better_intersection_count = Better_intersection_capacity = 0;
   Better_key_scratch_count = Better_key_scratch_capacity = 0;
@@ -1751,10 +1803,12 @@ static void better_collect_clause_candidates(
   /* AnyConst can stand on either side of match_hints.  A query containing it
      can therefore match any active hint; otherwise all AnyConst hints must be
      admitted even though their concrete structural keys are unknown. */
-  for (i = 1; i < Packed_hint_capacity; i++) {
-    if (!equivalence && Packed_hint_active[i] && query_anyconst) {
-      Packed_operation_stats[op].posting_candidates++;
-      packed_add_candidate(i);
+  if (!equivalence && query_anyconst) {
+    for (i = 1; i < Packed_hint_capacity; i++) {
+      if (Packed_hint_active[i]) {
+        Packed_operation_stats[op].posting_candidates++;
+        packed_add_candidate(i);
+      }
     }
   }
   packed_finish_candidates(!equivalence && !query_anyconst &&
@@ -2626,6 +2680,8 @@ void packed_hint_index_stats(unsigned long long *node_bytes,
       (unsigned long long) Preview_key_scratch_capacity *
         sizeof(unsigned long long) +
       (unsigned long long) Better_equivalence_bucket_capacity *
+        sizeof(unsigned) +
+      (unsigned long long) Better_anyconst_reference_capacity *
         sizeof(unsigned);
   }
   if (Fast_packed_index)
@@ -2677,6 +2733,8 @@ void fprint_packed_hint_operation_stats(FILE *fp)
                         Better_equivalence_live_count;
     table_bytes = s.table_bytes +
       (unsigned long long) Better_equivalence_bucket_capacity *
+        sizeof(unsigned) +
+      (unsigned long long) Better_anyconst_reference_capacity *
         sizeof(unsigned);
     reference_bytes = s.reference_bytes +
       (unsigned long long) Better_equivalence_reference_capacity *
@@ -2686,6 +2744,7 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             "live_features=%llu, stale_features=%llu, max_posting=%llu, "
             "equivalence_buckets=%u, equivalence_references=%u, "
             "equivalence_live=%llu, equivalence_stale=%llu, "
+            "anyconst_references=%u, anyconst_live=%llu, "
             "table_bytes=%llu, reference_bytes=%llu, fingerprint_bytes=%llu, "
             "dense_keys=%llu, dense_bit_bytes=%llu, "
             "dense_summary_bytes=%llu, "
@@ -2696,7 +2755,9 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             s.maximum_posting, Better_equivalence_bucket_capacity,
             Better_equivalence_reference_count,
             Better_equivalence_live_count,
-            equivalence_stale, table_bytes, reference_bytes,
+            equivalence_stale,
+            Better_anyconst_reference_count, Better_anyconst_live_count,
+            table_bytes, reference_bytes,
             (unsigned long long) Packed_hint_capacity *
               sizeof(unsigned long long),
             s.dense_keys, s.dense_bit_bytes, s.dense_summary_bytes,

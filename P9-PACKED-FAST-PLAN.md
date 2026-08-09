@@ -298,6 +298,37 @@ threshold regressed versus 512.  The next decision must come from the
 1,000-given scaling gate and ultimately the proof run, not another small
 constant tweak.
 
+### Capacity-scan removal and 1,000-given gate
+
+Function-level profiling exposed an orthogonal legacy cost: ordinary queries
+looped over all 131,072 allocated hint-ID slots once to handle a query-side
+`AnyConst` branch that was almost always false, then again to discover
+hint-side `AnyConst` clauses.  These loops appeared as 50.1% self time in
+candidate collection and 21.2% in candidate finishing.  The fix hoists the
+rare query-side branch and maintains a compact, stable-ID list of actual
+`AnyConst` hints for the other direction.  Rewrites may leave stale list IDs,
+but active/`AnyConst` sidecars and candidate deduplication filter them; posting
+rebuilds compact the list.  The measured workload has zero such active hints,
+so its common path performs no capacity scan at all.
+
+The exact 300-given result becomes 10.23 user seconds at 90,496 KiB, versus
+27.72 seconds/151,056 KiB for FPA and 50.02 seconds/90,636 KiB for packed.
+The 15,039-record trace remains byte-identical with the same SHA256.
+
+At the exact Given #1000 trajectory boundary:
+
+| Index | User CPU | Wall | Peak RSS | ordinary + flipped hint clock |
+| --- | ---: | ---: | ---: | ---: |
+| historical packed report | 420.12 s | 436 s | 90,516 KiB | 353.586 s |
+| `packed_fast` | 49.78 s | 68 s | 90,492 KiB | 7.406 s |
+
+The historical report interrupted Given #1000 with 92 limbo clauses, whereas
+the new terminal completed it; nevertheless both select exactly clause 103726
+with the same text and parents.  The comparison is therefore conservative:
+total user CPU is at least 8.4 times faster and ordinary/flipped hint time is
+47.7 times faster, far beyond the four-times gate, with unchanged peak RSS.
+The next required gate is the proof-producing full run.
+
 ## Acceptance gates
 
 ### Correctness
