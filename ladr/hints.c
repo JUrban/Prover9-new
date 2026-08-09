@@ -131,6 +131,7 @@ enum packed_hint_operation {
 
 struct packed_hint_operation_stats {
   unsigned long long queries;
+  unsigned long long posting_lists;
   unsigned long long posting_candidates;
   unsigned long long unique_candidates;
   unsigned long long materializations;
@@ -850,12 +851,24 @@ static void better_intersect_scratch_candidates(
   enum packed_hint_operation op, BOOL exclude_anyconst, BOOL all_features)
 {
   unsigned i, j;
+  unsigned keys_to_scan;
   if (Better_key_scratch_count == 0)
     return;
 
+  /* Ordinary matching uses a bounded two-rarest-key seed and then applies
+     the cheap per-hint profile/feature masks plus the authoritative
+     subsumption test.  One key alone leaves too many expensive bodies to
+     materialize; scanning every key is also wrong because a full posting is
+     traversed even after the intersection has become tiny.  Back-demodulation
+     still asks for a true correlated-feature intersection.  On chat_test the
+     previous unbounded loop turned about four final candidates per query into
+     tens of thousands of posting visits for each of 31,000 queries. */
+  keys_to_scan = all_features ? Better_key_scratch_count :
+                 (Better_key_scratch_count < 2 ? Better_key_scratch_count : 2);
+
   /* Put posting keys in increasing raw-count order.  Stale entries can only
      make a posting appear less selective; they cannot remove an answer. */
-  for (i = 0; i < (all_features ? Better_key_scratch_count : 1); i++) {
+  for (i = 0; i < keys_to_scan; i++) {
     unsigned best = i;
     unsigned best_count = UINT_MAX;
     for (j = i; j < Better_key_scratch_count; j++) {
@@ -882,10 +895,11 @@ static void better_intersect_scratch_candidates(
     Better_intersection_serial = 1;
   }
   Better_intersection_count = 0;
-  for (i = 0; i < Better_key_scratch_count; i++) {
+  for (i = 0; i < keys_to_scan; i++) {
     unsigned count;
-    const unsigned *ids = hint_postings_get(
-      Better_postings, Better_key_scratch[i], &count);
+    const unsigned *ids;
+    Packed_operation_stats[op].posting_lists++;
+    ids = hint_postings_get(Better_postings, Better_key_scratch[i], &count);
     Better_match_serial++;
     if (Better_match_serial == 0) {
       memset(Better_intersection_match, 0,
@@ -2145,13 +2159,14 @@ void fprint_packed_hint_operation_stats(FILE *fp)
     struct packed_hint_operation_stats *s = Packed_operation_stats + i;
     fprintf(fp,
             "Packed_hint_operation: op=%s, seconds=%.3f, queries=%llu, "
-            "posting_candidates=%llu, unique_candidates=%llu, mean=%.2f, "
+            "posting_lists=%llu, posting_candidates=%llu, "
+            "unique_candidates=%llu, mean=%.2f, "
             "max=%llu, materialized=%llu, exact_positive=%llu, rewrites=%llu, "
             "reindexes=%llu, stale_skips=%llu, "
             "buckets=0:%llu/1:%llu/2-7:%llu/8-31:%llu/32-127:%llu/"
             "128-1023:%llu/1024-16383:%llu/16384+:%llu.\n",
             Packed_operation_names[i], clock_seconds(s->clock), s->queries,
-            s->posting_candidates, s->unique_candidates,
+            s->posting_lists, s->posting_candidates, s->unique_candidates,
             s->queries == 0 ? 0.0 :
               (double) s->unique_candidates / (double) s->queries,
             s->candidate_max, s->materializations, s->exact_positives,
