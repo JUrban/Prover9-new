@@ -219,6 +219,31 @@ Commits should contain detailed bodies explaining representation ownership,
 correctness invariants, measured tradeoffs, rejected alternatives, and test
 evidence.
 
+## Phase 0/1 checkpoint: epoch-scoped profile cache
+
+The first `packed_fast` prototype adds a fixed 32,768-entry, direct-mapped
+cache of final structural candidate vectors.  A key contains the complete
+canonical shallow-feature profile, literal-polarity counts, first-literal
+mask, and hint-state epoch; hash equality alone is never trusted.  Hits still
+run the authoritative exact matcher in the established candidate order.
+Vectors longer than eight IDs are deliberately not cached, which bounds the
+table at 5 MiB and avoids an unaccounted variable-size arena.
+
+On the exact selected-DISCOUNT 300-given boundary it preserved all search and
+hint counters and changed the measurements as follows:
+
+| Index | User CPU | Peak RSS | Ordinary + flipped posting IDs |
+| --- | ---: | ---: | ---: |
+| `packed` | 50.02 s | 90,636 KiB | 152,591,234 |
+| `packed_fast` cache | 41.54 s | 90,624 KiB | 111,284,483 |
+
+The cache hit 15,841 of 48,568 eligible queries (32.62%) and avoided
+41,306,751 posting-ID visits.  This is a real 16.9% total-CPU improvement at
+no observed RSS increase, but it misses the 32-second gate.  Epoch changes
+and 3,723 candidate-vector overflows bound its reach.  It is therefore a
+useful bounded first layer, not the primary Phase 1 solution; exact adaptive
+feature-set intersection remains necessary for cache misses.
+
 ## Acceptance gates
 
 ### Correctness

@@ -68,6 +68,7 @@ grep -Eq '^Better_packed_postings: .*fingerprint_bytes=[1-9][0-9]*,' \
   "$test_tmp/packed.out"
 grep -q '^Better_packed_postings:' "$test_tmp/hybrid.out"
 grep -q '^Better_packed_postings:' "$test_tmp/packed.out"
+grep -q '^Packed_fast_cache:' "$test_tmp/packed-fast.out"
 
 "$repo_dir/bin/prover9" -f "$repo_dir/test.src/hint_anyconst.in" \
   > "$test_tmp/anyconst-compact.out" 2> "$test_tmp/anyconst-compact.err"
