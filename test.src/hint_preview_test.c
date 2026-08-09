@@ -9,7 +9,7 @@ static int Failures;
   }                                                                    \
 } while (0)
 
-static void run_case(BOOL packed, BOOL better, int bsub)
+static void run_case(BOOL packed, BOOL better, BOOL fast, int bsub)
 {
   Topform hint = parse_clause_from_string("p(f(a)).");
   Topform candidate = parse_clause_from_string("p(f(a)).");
@@ -21,7 +21,8 @@ static void run_case(BOOL packed, BOOL better, int bsub)
   Attribute candidate_attributes = candidate->attributes;
 
   hint->attributes = set_int_attribute(hint->attributes, bsub, 7);
-  init_hints(ORDINARY_UNIF, bsub, FALSE, FALSE, 2, packed, better, NULL);
+  init_hints(ORDINARY_UNIF, bsub, FALSE, FALSE, 2, packed, better, fast,
+             NULL);
   index_hint(hint);
   epoch_before = hint_state_epoch();
   packed_hint_index_stats(&nb, &rb, &tb, &checks_before);
@@ -66,9 +67,10 @@ int main(void)
   init_standard_ladr();
   (void) register_attribute("label", STRING_ATTRIBUTE);
   int bsub = register_attribute("preview_bsub_wt", INT_ATTRIBUTE);
-  run_case(FALSE, FALSE, bsub);
-  run_case(TRUE, FALSE, bsub);
-  run_case(TRUE, TRUE, bsub);
+  run_case(FALSE, FALSE, FALSE, bsub);
+  run_case(TRUE, FALSE, FALSE, bsub);
+  run_case(TRUE, TRUE, FALSE, bsub);
+  run_case(TRUE, TRUE, TRUE, bsub);
   if (Failures != 0) {
     fprintf(stderr, "hint_preview_test: %d failure(s)\n", Failures);
     return 1;

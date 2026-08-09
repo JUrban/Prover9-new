@@ -18,6 +18,11 @@ sed '/assign(hint_index,compact)./a assign(hint_index,packed).\
 set(hint_trace).' "$repo_dir/test.src/discount_loop.in" |
   "$repo_dir/bin/prover9" > "$test_tmp/packed.out" 2> "$test_tmp/packed.err"
 
+sed '/assign(hint_index,compact)./a assign(hint_index,packed_fast).\
+set(hint_trace).' "$repo_dir/test.src/discount_loop.in" |
+  "$repo_dir/bin/prover9" > "$test_tmp/packed-fast.out" \
+                           2> "$test_tmp/packed-fast.err"
+
 sed '/assign(hint_index,compact)./a assign(hint_index,hybrid).\
 set(hint_trace).' "$repo_dir/test.src/discount_loop.in" |
   "$repo_dir/bin/prover9" > "$test_tmp/hybrid.out" 2> "$test_tmp/hybrid.err"
@@ -30,17 +35,21 @@ set(hint_trace).' "$repo_dir/test.src/discount_loop.in" |
 grep '^HINT_TRACE ' "$test_tmp/compact.out" > "$test_tmp/compact.trace"
 grep '^HINT_TRACE ' "$test_tmp/fpa.out" > "$test_tmp/fpa.trace"
 grep '^HINT_TRACE ' "$test_tmp/packed.out" > "$test_tmp/packed.trace"
+grep '^HINT_TRACE ' "$test_tmp/packed-fast.out" \
+  > "$test_tmp/packed-fast.trace"
 grep '^HINT_TRACE ' "$test_tmp/hybrid.out" > "$test_tmp/hybrid.trace"
 grep '^HINT_TRACE ' "$test_tmp/packed-legacy.out" \
   > "$test_tmp/packed-legacy.trace"
 test -s "$test_tmp/compact.trace"
 diff -u "$test_tmp/fpa.trace" "$test_tmp/compact.trace"
 diff -u "$test_tmp/fpa.trace" "$test_tmp/packed.trace"
+diff -u "$test_tmp/fpa.trace" "$test_tmp/packed-fast.trace"
 diff -u "$test_tmp/fpa.trace" "$test_tmp/hybrid.trace"
 diff -u "$test_tmp/fpa.trace" "$test_tmp/packed-legacy.trace"
 grep -q 'THEOREM PROVED' "$test_tmp/compact.out"
 grep -q 'THEOREM PROVED' "$test_tmp/fpa.out"
 grep -q 'THEOREM PROVED' "$test_tmp/packed.out"
+grep -q 'THEOREM PROVED' "$test_tmp/packed-fast.out"
 grep -q 'THEOREM PROVED' "$test_tmp/hybrid.out"
 grep -q 'THEOREM PROVED' "$test_tmp/packed-legacy.out"
 for hint_op in equivalence match flipped_match back_demod; do
@@ -62,7 +71,7 @@ grep -q '^Better_packed_postings:' "$test_tmp/packed.out"
 
 "$repo_dir/bin/prover9" -f "$repo_dir/test.src/hint_anyconst.in" \
   > "$test_tmp/anyconst-compact.out" 2> "$test_tmp/anyconst-compact.err"
-for hint_mode in packed hybrid packed_legacy; do
+for hint_mode in packed packed_fast hybrid packed_legacy; do
   sed "/assign(hint_index,compact)./a assign(hint_index,$hint_mode)." \
     "$repo_dir/test.src/hint_anyconst.in" |
     "$repo_dir/bin/prover9" > "$test_tmp/anyconst-$hint_mode.out" \
@@ -75,6 +84,8 @@ grep '^HINT_TRACE ' "$test_tmp/anyconst-compact.out" \
   > "$test_tmp/anyconst-compact.trace"
 test -s "$test_tmp/anyconst-compact.trace"
 diff -u "$test_tmp/anyconst-compact.trace" "$test_tmp/anyconst-packed.trace"
+diff -u "$test_tmp/anyconst-compact.trace" \
+  "$test_tmp/anyconst-packed_fast.trace"
 diff -u "$test_tmp/anyconst-compact.trace" "$test_tmp/anyconst-hybrid.trace"
 diff -u "$test_tmp/anyconst-compact.trace" \
   "$test_tmp/anyconst-packed_legacy.trace"

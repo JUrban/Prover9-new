@@ -38,6 +38,7 @@ static BOOL Collect_labels;
 
 static BOOL Packed_index = FALSE;
 static BOOL Better_packed_index = FALSE;
+static BOOL Fast_packed_index = FALSE;
 static unsigned Packed_feature_counts[2][64];
 static unsigned long long *Packed_feature_bitsets = NULL;
 static unsigned Packed_feature_words = 0;
@@ -1080,6 +1081,7 @@ void init_hints(Uniftype utype,
 		int fpa_depth,
 		BOOL packed_index,
 		BOOL better_packed_index,
+		BOOL fast_packed_index,
 		void (*demod_proc) (Topform, int, int, BOOL, BOOL))
 {
   Bsub_wt_attr = bsub_wt_attr;
@@ -1087,9 +1089,12 @@ void init_hints(Uniftype utype,
   Back_demod_hints = back_demod_hints;
   Packed_index = packed_index;
   Better_packed_index = better_packed_index;
+  Fast_packed_index = fast_packed_index;
   Demod_proc = demod_proc;
   if (Better_packed_index && !Packed_index)
     fatal_error("init_hints: better packed index requires packed hint bank");
+  if (Fast_packed_index && !Better_packed_index)
+    fatal_error("init_hints: fast packed index requires better packed index");
   if (Better_packed_index)
     Better_postings = hint_postings_init();
   if (packed_index) {
@@ -1205,6 +1210,7 @@ void done_with_hints(void)
   }
   Packed_index = FALSE;
   Better_packed_index = FALSE;
+  Fast_packed_index = FALSE;
 }  /* done_with_hints */
 
 /*************

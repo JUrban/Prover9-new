@@ -161,6 +161,7 @@ static BOOL packed_hint_bank_mode(void)
 {
   return Opt != NULL &&
     (str_ident(stringparm1(Opt->hint_index), "packed") ||
+     str_ident(stringparm1(Opt->hint_index), "packed_fast") ||
      str_ident(stringparm1(Opt->hint_index), "hybrid") ||
      str_ident(stringparm1(Opt->hint_index), "packed_legacy"));
 }
@@ -169,7 +170,14 @@ static BOOL better_packed_hint_mode(void)
 {
   return Opt != NULL &&
     (str_ident(stringparm1(Opt->hint_index), "packed") ||
+     str_ident(stringparm1(Opt->hint_index), "packed_fast") ||
      str_ident(stringparm1(Opt->hint_index), "hybrid"));
+}
+
+static BOOL fast_packed_hint_mode(void)
+{
+  return Opt != NULL &&
+    str_ident(stringparm1(Opt->hint_index), "packed_fast");
 }
 
 static BOOL live_clash_index_needed(void)
@@ -2043,11 +2051,12 @@ Prover_options init_prover_options(void)
 			"eager_legacy",
 			"eager_interreduced");
 
-  p->hint_index = init_stringparm("hint_index", 6,
+  p->hint_index = init_stringparm("hint_index", 7,
 				  "fpa",
 				  "compact",
 				  "shallow",
 				  "packed",
+				  "packed_fast",
 				  "hybrid",
 				  "packed_legacy");
 
@@ -9644,6 +9653,7 @@ void index_and_process_initial_clauses(void)
 	     configured_hint_fpa_depth(),
 	     packed_hint_bank_mode(),
 	     better_packed_hint_mode(),
+	     fast_packed_hint_mode(),
 	     current_demodulate_clause);
   set_hint_match_stats(flag(Opt->hint_match_stats));
   set_hint_match_once(flag(Opt->hint_match_once));
@@ -14082,6 +14092,7 @@ void load_checkpoint_into_loop(void)
              configured_hint_fpa_depth(),
              packed_hint_bank_mode(),
              better_packed_hint_mode(),
+             fast_packed_hint_mode(),
              current_demodulate_clause);
   set_hint_match_stats(flag(Opt->hint_match_stats));
   set_hint_match_once(flag(Opt->hint_match_once));
