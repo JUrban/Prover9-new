@@ -136,6 +136,9 @@ Keys (in order as written):
   rewrite_interreduce_changed <ull>
   rewrite_interreduce_unchanged <ull>
   rewrite_interreduce_collapsed <ull>
+  rewrite_overlap_visits <ull> Exact reverse-occurrence matches considered
+  rewrite_overlap_dirty_marks <ull>
+                              Newly coalesced rule-interreduction records
   rewrite_debt_peak <ull>     Peak stale delayed-demodulator count
   rewrite_drain_entries <ull>
   rewrite_drain_exits <ull>
@@ -187,6 +190,9 @@ Keys (in order as written):
   rewrite_refresh_hot_streak <ull>
   rewrite_interreduce_streak <ull>
   rewrite_refresh_lane_turn <ull>
+                              Legacy Boolean repair/inference phase
+  rewrite_refresh_inference_streak <ull>
+                              Inference turns since background repair
   rewrite_drain_mode <ull>   Rewrite scheduler phase and hysteresis state
   hint_state_epoch <ull>     Packed/exact hint-state epoch
   user_seconds <float>       User CPU time at checkpoint (%.2f format)
@@ -385,7 +391,7 @@ appear in their respective .clauses files.
 
 Format:
 
-  <list_name> <position> <id> <weight> <initial>\n
+  <list_name> <position> <id> <weight> <initial> [optional fields...]\n
 
 Fields:
   list_name   String: "sos", "usable", "demodulators", "hints",
@@ -395,6 +401,13 @@ Fields:
   weight      Clause weight (double, %.6f format, e.g. "20.000000")
   initial     1 if the clause is from the original input, 0 otherwise
               (maps to Topform.initial flag)
+
+For compact eager DISCOUNT checkpoints, an SOS line can contain the marker
+`rewrite_rule_dirty`.  It means that the delayed demodulator was selected by
+the exact reverse-occurrence filter and still owes an interreduction turn.
+The dense selector reconstructs the marker and its O(1) debt count before
+search resumes.  Older checkpoints omit it and therefore restore no pending
+targeted rule debt.
 
 The entries are grouped by list in this order: sos, usable,
 demodulators, hints (if present), limbo (if present), disabled

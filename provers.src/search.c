@@ -68,7 +68,7 @@ static size_t Rewrite_refresh_general_cursor = 0;
 static size_t Rewrite_interreduce_cursor = 0;
 static unsigned Rewrite_refresh_hot_streak = 0;
 static unsigned Rewrite_interreduce_streak = 0;
-static BOOL Rewrite_refresh_lane_turn = TRUE;
+static unsigned Rewrite_refresh_inference_streak = 0;
 static BOOL Rewrite_drain_mode = FALSE;
 static BOOL Resume_rewrite_cursor_ids = FALSE;
 static unsigned long long Resume_rewrite_hot_cursor_id = 0;
@@ -1981,6 +1981,8 @@ Prover_options init_prover_options(void)
     init_parm("rewrite_refresh_hot_ratio", 7, 0, INT_MAX);
   p->rewrite_refresh_raw_budget =
     init_parm("rewrite_refresh_raw_budget", 64, 1, INT_MAX);
+  p->rewrite_refresh_inference_ratio =
+    init_parm("rewrite_refresh_inference_ratio", 8, 1, INT_MAX);
   p->rewrite_refresh_high_water =
     init_parm("rewrite_refresh_high_water", 4096, 1, INT_MAX);
   p->rewrite_refresh_low_water =
@@ -2702,7 +2704,8 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
       fprintf(fp,
               "Compact_rewrite: current=%s, peak=%s, retired=%s, "
               "physical=%s, compactions=%s, reclaimed=%s, attempts=%s, "
-              "rewrites=%s, nodes=%s, postings=%s, rules=%s, terms=%s, "
+              "rewrites=%s, nodes=%s, postings=%s, occurrences=%s, "
+              "rules=%s, terms=%s, "
               "hash=%s.\n",
               comma_num(s.compact_rewrite_rules_current),
               comma_num(s.compact_rewrite_rules_peak),
@@ -2714,6 +2717,7 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
               comma_num(s.compact_rewrite_rewrites),
               comma_num(s.compact_rewrite_node_bytes),
               comma_num(s.compact_rewrite_posting_bytes),
+              comma_num(s.compact_rewrite_occurrence_bytes),
               comma_num(s.compact_rewrite_rule_bytes),
               comma_num(s.compact_rewrite_term_bytes),
               comma_num(s.compact_rewrite_hash_bytes));
@@ -2727,10 +2731,11 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             comma_num(s.passive_refresh_subsumed));
     if (eager_interreduced_demod_mode()) {
       fprintf(fp,
-              "Rewrite_refresh: epoch=%u, stale=%s, stale_peak=%s, "
+              "Rewrite_refresh: epoch=%u, inference_ratio=%d, stale=%s, stale_peak=%s, "
               "lag_max=%s, scanned=%s, materialized=%s, rewritten=%s, "
               "unchanged=%s, subsumed=%s, hot_turns=%s, general_turns=%s.\n",
               Rewrite_epoch,
+              parm(Opt->rewrite_refresh_inference_ratio),
               comma_num(s.rewrite_refresh_stale_current),
               comma_num(s.rewrite_refresh_stale_peak),
               comma_num(s.rewrite_refresh_lag_max),
@@ -2744,13 +2749,16 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
       fprintf(fp,
               "Rewrite_interreduce: rule_turns=%s, rule_changed=%s, "
               "rule_unchanged=%s, rule_collapsed=%s, debt=%s, "
-              "debt_peak=%s, drain=%d, drain_entries=%s, drain_exits=%s, "
-              "drain_turns=%s, inference_turns=%s.\n",
+              "overlap_visits=%s, dirty_marks=%s, debt_peak=%s, drain=%d, "
+              "drain_entries=%s, drain_exits=%s, drain_turns=%s, "
+              "inference_turns=%s.\n",
               comma_num(s.rewrite_interreduce_turns),
               comma_num(s.rewrite_interreduce_changed),
               comma_num(s.rewrite_interreduce_unchanged),
               comma_num(s.rewrite_interreduce_collapsed),
               comma_num(s.rewrite_debt_current),
+              comma_num(s.rewrite_overlap_visits),
+              comma_num(s.rewrite_overlap_dirty_marks),
               comma_num(s.rewrite_debt_peak), Rewrite_drain_mode,
               comma_num(s.rewrite_drain_entries),
               comma_num(s.rewrite_drain_exits),
@@ -5190,6 +5198,7 @@ static void update_rewrite_only_stats(void)
   Stats.compact_rewrite_rewrites = compact.rewrites;
   Stats.compact_rewrite_node_bytes = compact.node_bytes;
   Stats.compact_rewrite_posting_bytes = compact.posting_bytes;
+  Stats.compact_rewrite_occurrence_bytes = compact.occurrence_bytes;
   Stats.compact_rewrite_rule_bytes = compact.rule_bytes;
   Stats.compact_rewrite_term_bytes = compact.term_bytes;
   Stats.compact_rewrite_hash_bytes = compact.hash_bytes;
@@ -5292,6 +5301,7 @@ static Topform materialize_dense_passive(
   c->simplifier_epoch = view->simplifier_epoch;
   c->rewrite_epoch = view->rewrite_epoch;
   c->delayed_demodulator = view->delayed_demodulator;
+  c->rewrite_rule_dirty = view->rewrite_rule_dirty;
   {
     Topform clone = rewrite_only_store_find(Rewrite_only_rules, view->id,
                                              NULL, NULL);
@@ -6765,10 +6775,25 @@ static void admit_rewrite_only_demodulator(Topform c, int type)
   advance_rewrite_epoch();
 }
 
+static void mark_compact_overlap(unsigned long long proof_id, void *context)
+{
+  (void) context;
+  Stats.rewrite_overlap_visits++;
+  if (dense_passive_mark_rule_dirty(proof_id))
+    Stats.rewrite_overlap_dirty_marks++;
+}
+
+static void mark_compact_interreduction_candidates(Topform new_rule)
+{
+  compact_rewrite_visit_overlaps(Compact_rewrite_rules, new_rule->id,
+                                 mark_compact_overlap, NULL);
+}
+
 static void admit_compact_rewrite_demodulator(Topform c, int type)
 {
   if (!compact_rewrite_add(Compact_rewrite_rules, c, type))
     fatal_error("admit_compact_rewrite_demodulator: duplicate proof ID");
+  mark_compact_interreduction_candidates(c);
   store_rewrite_only_shell(c, type);
   Stats.rewrite_only_demodulators_admitted++;
   Stats.new_demodulators++;
@@ -6813,6 +6838,8 @@ void cl_process_new_demod(Topform c, BOOL rewrite_transition)
       if (eager_interreduced_demod_mode()) {
         if (!compact_rewrite_add(Compact_rewrite_rules, c, type))
           fatal_error("cl_process_new_demod: compact rule already present");
+        if (!rewrite_transition)
+          mark_compact_interreduction_candidates(c);
         if (compact_rewrite_compaction_needed(Compact_rewrite_rules))
           compact_rewrite_compact(Compact_rewrite_rules);
         update_rewrite_only_stats();
@@ -8671,7 +8698,7 @@ static void restore_unchanged_dense_passive(
   delete_clause(c);
   if (!dense_passive_reactivate_id(view->id, Simplifier_epoch,
                                    Rewrite_epoch,
-                                   view->delayed_demodulator))
+                                   view->delayed_demodulator, FALSE))
     fatal_error("rewrite refresh: cannot reactivate dense record");
   update_rewrite_only_stats();
 }
@@ -8691,21 +8718,22 @@ static BOOL update_rewrite_drain_mode(void)
   else if (Rewrite_drain_mode && debt <= low) {
     Rewrite_drain_mode = FALSE;
     Stats.rewrite_drain_exits++;
-    Rewrite_refresh_lane_turn = FALSE;
+    Rewrite_refresh_inference_streak = 0;
   }
   return Rewrite_drain_mode;
 }
 
 /* Spend one bounded, pointer-free repair turn.  Hinted passives receive the
    configured burst share, while a mandatory general turn advances an
-   independent wraparound cursor.  A lane toggle guarantees that repair and
-   inference each make progress while rewrite debt remains finite. */
+   independent wraparound cursor.  Outside urgent debt drain, an inference
+   ratio guarantees that both repair and inference make progress. */
 static BOOL rewrite_refresh_turn(void)
 {
   struct dense_passive_view view;
   unsigned scanned = 0;
   unsigned budget;
   unsigned hot_ratio;
+  unsigned inference_ratio;
   BOOL hot = FALSE;
   BOOL rule_lane = FALSE;
   BOOL drain;
@@ -8715,10 +8743,10 @@ static BOOL rewrite_refresh_turn(void)
   if (!eager_interreduced_demod_mode())
     return FALSE;
   drain = update_rewrite_drain_mode();
-  if (!drain && !Rewrite_refresh_lane_turn) {
-    Rewrite_refresh_lane_turn = TRUE;
+  inference_ratio = (unsigned) parm(Opt->rewrite_refresh_inference_ratio);
+  if (!drain && dense_passive_rewrite_debt() == 0 &&
+      Rewrite_refresh_inference_streak < inference_ratio)
     return FALSE;
-  }
   memset(&view, 0, sizeof(view));
   budget = (unsigned) parm(Opt->rewrite_refresh_raw_budget);
   hot_ratio = (unsigned) parm(Opt->rewrite_refresh_hot_ratio);
@@ -8752,6 +8780,7 @@ static BOOL rewrite_refresh_turn(void)
       Stats.rewrite_drain_turns++;
       return TRUE;
     }
+    Rewrite_refresh_inference_streak = 0;
     return FALSE;
   }
   if (view.rewrite_epoch < Rewrite_epoch) {
@@ -8771,6 +8800,7 @@ static BOOL rewrite_refresh_turn(void)
   c->simplifier_epoch = view.simplifier_epoch;
   c->rewrite_epoch = view.rewrite_epoch;
   c->delayed_demodulator = view.delayed_demodulator;
+  c->rewrite_rule_dirty = view.rewrite_rule_dirty;
   Stats.rewrite_refresh_materialized++;
   if (rule_lane)
     Rewrite_interreduce_streak++;
@@ -8816,7 +8846,7 @@ static BOOL rewrite_refresh_turn(void)
     update_rewrite_drain_mode();
   }
   else
-    Rewrite_refresh_lane_turn = FALSE;
+    Rewrite_refresh_inference_streak = 0;
   return TRUE;
 }
 
@@ -8871,6 +8901,9 @@ void make_inferences(void)
     return;
   if (eager_interreduced_demod_mode())
     Stats.rewrite_inference_turns++;
+  if (eager_interreduced_demod_mode() &&
+      Rewrite_refresh_inference_streak != UINT_MAX)
+    Rewrite_refresh_inference_streak++;
 
   if (collective_balanced_mode() &&
       Collective_candidate_heap_count != 0) {
@@ -10061,6 +10094,8 @@ BOOL write_bare_clause(FILE *clause_fp, FILE *data_fp, Topform c,
     fprintf(data_fp, " rewrite_epoch %u", c->rewrite_epoch);
   if (c->delayed_demodulator)
     fprintf(data_fp, " delayed_demodulator");
+  if (c->rewrite_rule_dirty)
+    fprintf(data_fp, " rewrite_rule_dirty");
   if (c->last_matched_given > 0)
     fprintf(data_fp, " last_matched %llu", c->last_matched_given);
   if (strcmp(list_name, "hints") == 0 && hint_is_redundant(c))
@@ -12123,6 +12158,10 @@ void write_checkpoint(void)
             Stats.rewrite_interreduce_unchanged);
     fprintf(fp, "rewrite_interreduce_collapsed %llu\n",
             Stats.rewrite_interreduce_collapsed);
+    fprintf(fp, "rewrite_overlap_visits %llu\n",
+            Stats.rewrite_overlap_visits);
+    fprintf(fp, "rewrite_overlap_dirty_marks %llu\n",
+            Stats.rewrite_overlap_dirty_marks);
     fprintf(fp, "rewrite_debt_peak %llu\n", Stats.rewrite_debt_peak);
     fprintf(fp, "rewrite_drain_entries %llu\n", Stats.rewrite_drain_entries);
     fprintf(fp, "rewrite_drain_exits %llu\n", Stats.rewrite_drain_exits);
@@ -12324,7 +12363,11 @@ void write_checkpoint(void)
     fprintf(fp, "rewrite_interreduce_streak %u\n",
             Rewrite_interreduce_streak);
     fprintf(fp, "rewrite_refresh_lane_turn %u\n",
-            Rewrite_refresh_lane_turn ? 1U : 0U);
+            Rewrite_refresh_inference_streak >=
+              (unsigned) parm(Opt->rewrite_refresh_inference_ratio) ?
+              1U : 0U);
+    fprintf(fp, "rewrite_refresh_inference_streak %u\n",
+            Rewrite_refresh_inference_streak);
     fprintf(fp, "rewrite_drain_mode %u\n", Rewrite_drain_mode ? 1U : 0U);
     fprintf(fp, "hint_state_epoch %llu\n", hint_state_epoch());
     fprintf(fp, "user_seconds %.2f\n", user_seconds());
@@ -12704,6 +12747,7 @@ struct clause_meta {
   unsigned simplifier_epoch; /* DISCOUNT active-state generation */
   unsigned rewrite_epoch; /* DISCOUNT rewrite-bank generation */
   int delayed_demodulator; /* live rewrite-only membership */
+  int rewrite_rule_dirty; /* targeted compact interreduction debt */
   unsigned long long last_matched; /* hint last_matched_given (for expiry) */
   int redundant_hint; /* hint was in Redundant_hints at checkpoint time */
   unsigned aflags[10]; /* atom private_flags per literal (max 10 lits) */
@@ -12735,6 +12779,7 @@ int load_clause_data(const char *dir, struct clause_meta **out)
     m->simplifier_epoch = 0;
     m->rewrite_epoch = 0;
     m->delayed_demodulator = 0;
+    m->rewrite_rule_dirty = 0;
     m->last_matched = 0;
     m->redundant_hint = 0;
     m->aflags_count = 0;
@@ -12758,6 +12803,8 @@ int load_clause_data(const char *dir, struct clause_meta **out)
         sscanf(p, "rewrite_epoch %u", &m->rewrite_epoch);
       if (strstr(line, "delayed_demodulator") != NULL)
         m->delayed_demodulator = 1;
+      if (strstr(line, "rewrite_rule_dirty") != NULL)
+        m->rewrite_rule_dirty = 1;
       p = strstr(line, "last_matched");
       if (p != NULL)
         sscanf(p, "last_matched %llu", &m->last_matched);
@@ -12839,6 +12886,7 @@ Clist load_clauses_from_file(const char *dir, const char *filename,
         c->simplifier_epoch = meta[meta_pos].simplifier_epoch;
         c->rewrite_epoch = meta[meta_pos].rewrite_epoch;
         c->delayed_demodulator = meta[meta_pos].delayed_demodulator;
+        c->rewrite_rule_dirty = meta[meta_pos].rewrite_rule_dirty;
         c->last_matched_given = meta[meta_pos].last_matched;
         if (!skip_register)
           register_clause_with_id(c);
@@ -12858,6 +12906,7 @@ Clist load_clauses_from_file(const char *dir, const char *filename,
             c->simplifier_epoch = meta[j].simplifier_epoch;
             c->rewrite_epoch = meta[j].rewrite_epoch;
             c->delayed_demodulator = meta[j].delayed_demodulator;
+            c->rewrite_rule_dirty = meta[j].rewrite_rule_dirty;
             c->last_matched_given = meta[j].last_matched;
             if (!skip_register)
               register_clause_with_id(c);
@@ -13094,6 +13143,10 @@ void resume_load_clauses(const char *dir)
   rewind(fp); (void) read_metadata_ull_if_present(
     fp, "rewrite_interreduce_collapsed",
     &Stats.rewrite_interreduce_collapsed);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "rewrite_overlap_visits", &Stats.rewrite_overlap_visits);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "rewrite_overlap_dirty_marks", &Stats.rewrite_overlap_dirty_marks);
   rewind(fp); (void) read_metadata_ull_if_present(
     fp, "rewrite_debt_peak", &Stats.rewrite_debt_peak);
   rewind(fp); (void) read_metadata_ull_if_present(
@@ -13476,11 +13529,21 @@ void resume_load_clauses(const char *dir)
                                      &value))
       Rewrite_interreduce_streak = value > UINT_MAX ? UINT_MAX :
                                    (unsigned) value;
-    value = 1;
+    value = 0;
     rewind(fp);
-    if (read_metadata_ull_if_present(fp, "rewrite_refresh_lane_turn",
+    if (read_metadata_ull_if_present(fp,
+                                     "rewrite_refresh_inference_streak",
                                      &value))
-      Rewrite_refresh_lane_turn = value != 0;
+      Rewrite_refresh_inference_streak = value > UINT_MAX ? UINT_MAX :
+                                          (unsigned) value;
+    else {
+      value = 0;
+      rewind(fp);
+      if (read_metadata_ull_if_present(fp, "rewrite_refresh_lane_turn",
+                                       &value))
+        Rewrite_refresh_inference_streak = value != 0 ?
+          (unsigned) parm(Opt->rewrite_refresh_inference_ratio) : 0;
+    }
     value = 0;
     rewind(fp);
     if (read_metadata_ull_if_present(fp, "rewrite_drain_mode", &value))
@@ -14476,7 +14539,7 @@ Prover_results search(Prover_input p)
     Rewrite_interreduce_cursor = 0;
     Rewrite_refresh_hot_streak = 0;
     Rewrite_interreduce_streak = 0;
-    Rewrite_refresh_lane_turn = TRUE;
+    Rewrite_refresh_inference_streak = 0;
     Rewrite_drain_mode = FALSE;
     Resume_rewrite_cursor_ids = FALSE;
     Resume_rewrite_hot_cursor_id = 0;

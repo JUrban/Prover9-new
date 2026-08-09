@@ -46,6 +46,7 @@ struct dense_passive_view {
   unsigned rewrite_epoch;
   int semantics;
   BOOL delayed_demodulator;
+  BOOL rewrite_rule_dirty;
 };
 
 typedef void (*Dense_passive_visit_fn)(
@@ -87,7 +88,12 @@ BOOL dense_passive_deactivate_id(unsigned long long id,
 BOOL dense_passive_reactivate_id(unsigned long long id,
                                  unsigned simplifier_epoch,
                                  unsigned rewrite_epoch,
-                                 BOOL delayed_demodulator);
+                                 BOOL delayed_demodulator,
+                                 BOOL rewrite_rule_dirty);
+
+/* Mark a live cold rewrite rule for exact interreduction.  Returns TRUE only
+   on the clean-to-dirty transition, so repeated overlap postings coalesce. */
+BOOL dense_passive_mark_rule_dirty(unsigned long long id);
 
 unsigned long long dense_passive_stale_count(unsigned rewrite_epoch,
                                              unsigned long long *max_lag);

@@ -181,6 +181,7 @@ interreduce_checkpoint_dir=$(find "$interreduce_checkpoint_case" \
 test -n "$interreduce_checkpoint_dir"
 grep -Eq '^rewrite_interreduce_cursor_id [1-9][0-9]*$' \
   "$interreduce_checkpoint_dir/metadata.txt"
+grep -q 'rewrite_rule_dirty' "$interreduce_checkpoint_dir/clause_data.txt"
 "$repo_dir/bin/prover9" -r "$interreduce_checkpoint_dir" < /dev/null \
   > "$test_tmp/interreduce-resumed.out" \
   2> "$test_tmp/interreduce-resumed.err" || true

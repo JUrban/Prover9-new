@@ -7,12 +7,26 @@
 static int Failures;
 static Clock Index_clock;
 
+struct overlap_result {
+  unsigned count;
+  unsigned long long expected;
+  BOOL found;
+};
+
 #define CHECK(test, message) do {                                      \
   if (!(test)) {                                                       \
     fprintf(stderr, "FAIL: %s (line %d)\n", (message), __LINE__);   \
     Failures++;                                                        \
   }                                                                    \
 } while (0)
+
+static void note_overlap(unsigned long long proof_id, void *context)
+{
+  struct overlap_result *result = context;
+  result->count++;
+  if (proof_id == result->expected)
+    result->found = TRUE;
+}
 
 static Topform make_rule(char *text, unsigned long long id, int type,
                          Compact_rewrite_bank bank)
@@ -56,8 +70,8 @@ static void compare_case(Compact_rewrite_bank bank, char *text)
 int main(void)
 {
   Compact_rewrite_bank bank;
-  Topform rules[5];
-  int types[5];
+  Topform rules[6];
+  int types[6];
   int i;
   struct compact_rewrite_stats stats;
 
@@ -76,6 +90,17 @@ int main(void)
   rules[3] = make_rule("k(x,x) = m(x).", 104, types[3], bank);
   types[4] = LEX_DEP_BOTH;
   rules[4] = make_rule("u(x) = v(x).", 105, types[4], bank);
+  types[5] = ORIENTED;
+  rules[5] = make_rule("z(f(x)) = x.", 106, types[5], bank);
+
+  {
+    struct overlap_result overlap;
+    memset(&overlap, 0, sizeof(overlap));
+    overlap.expected = 106;
+    compact_rewrite_visit_overlaps(bank, 101, note_overlap, &overlap);
+    CHECK(overlap.count == 1 && overlap.found,
+          "reverse occurrence index finds only root-compatible old rule");
+  }
 
   compare_case(bank, "p(f(a)).");
   compare_case(bank, "p(g(f(a),f(a))).");
@@ -85,10 +110,11 @@ int main(void)
   compare_case(bank, "g(f(a),f(a)) = k(f(b),f(b)).");
 
   compact_rewrite_get_stats(bank, &stats);
-  CHECK(stats.rules_current == 5, "compact rule count");
+  CHECK(stats.rules_current == 6, "compact rule count");
   CHECK(stats.attempts > 0 && stats.rewrites > 0,
         "compact rewrite accounting");
   CHECK(stats.node_bytes > 0 && stats.posting_bytes > 0 &&
+        stats.occurrence_bytes > 0 &&
         stats.rule_bytes > 0 && stats.term_bytes > 0 &&
         stats.hash_bytes > 0 && stats.total_bytes > 0,
         "compact byte attribution");
@@ -130,7 +156,7 @@ int main(void)
           "compact bank detects tombstone pressure");
     compact_rewrite_compact(bank);
     compact_rewrite_get_stats(bank, &stats);
-    CHECK(stats.compactions == 1 && stats.rules_physical == 5,
+    CHECK(stats.compactions == 1 && stats.rules_physical == 6,
           "compact bank rebuild keeps only live rules");
     CHECK(stats.total_bytes < bloated_bytes && stats.bytes_reclaimed > 0,
           "compact bank rebuild reclaims physical pools");
@@ -144,7 +170,7 @@ int main(void)
   index_demodulator(rules[1], types[1], DELETE, Index_clock);
   compare_case(bank, "p(g(a,a)).");
 
-  for (i = 0; i < 5; i++) {
+  for (i = 0; i < 6; i++) {
     if (i != 1)
       index_demodulator(rules[i], types[i], DELETE, Index_clock);
     delete_clause(rules[i]);

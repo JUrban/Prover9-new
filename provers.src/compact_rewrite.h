@@ -16,12 +16,16 @@ struct compact_rewrite_stats {
   unsigned long long rewrites;
   unsigned long long node_bytes;
   unsigned long long posting_bytes;
+  unsigned long long occurrence_bytes;
   unsigned long long rule_bytes;
   unsigned long long term_bytes;
   unsigned long long hash_bytes;
   unsigned long long total_bytes;
   unsigned long long peak_bytes;
 };
+
+typedef void (*Compact_rewrite_overlap_fn)(unsigned long long proof_id,
+                                           void *context);
 
 Compact_rewrite_bank compact_rewrite_init(void);
 
@@ -39,6 +43,14 @@ void compact_rewrite_note_suspended_retirement(Compact_rewrite_bank bank);
 
 BOOL compact_rewrite_contains(Compact_rewrite_bank bank,
                               unsigned long long proof_id);
+
+/* Visit live rules whose rewrite source side contains a root symbol used by
+   the newly admitted rule.  This is a conservative redex filter: callers
+   perform the exact normalization, and may coalesce duplicate visits. */
+void compact_rewrite_visit_overlaps(Compact_rewrite_bank bank,
+                                    unsigned long long new_proof_id,
+                                    Compact_rewrite_overlap_fn visit,
+                                    void *context);
 
 unsigned long long compact_rewrite_identity_hash(Compact_rewrite_bank bank);
 

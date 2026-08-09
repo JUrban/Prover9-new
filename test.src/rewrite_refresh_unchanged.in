@@ -11,6 +11,7 @@ assign(sos_limit,-1).
 assign(max_given,3).
 assign(max_seconds,10).
 assign(stats,all).
+assign(rewrite_refresh_inference_ratio,1).
 
 set(binary_resolution).
 set(back_demod_hints).

@@ -92,6 +92,7 @@ struct topform {
   unsigned archive_materialized: 1; /* decoded from an ancestor record */
   unsigned cac_candidate       : 1; /* pending insertion in CAC trigger set */
   unsigned delayed_demodulator : 1; /* activate as demodulator when selected */
+  unsigned rewrite_rule_dirty  : 1; /* targeted compact interreduction debt */
   unsigned packed_justification: 1; /* cold payload also owns justification */
   unsigned collective_history : 1; /* body is referenced by collective history */
 
