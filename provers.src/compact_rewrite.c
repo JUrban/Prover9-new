@@ -60,6 +60,8 @@ struct compact_rewrite_bank {
   size_t hash_capacity;
   size_t hash_count;
   size_t hash_tombstones;
+  struct cr_query_term *query;
+  size_t query_capacity;
   unsigned long long active_rules;
   unsigned long long peak_rules;
   unsigned long long retired_rules;
@@ -114,7 +116,8 @@ static unsigned long long bank_bytes(Compact_rewrite_bank bank)
     bank->rule_capacity * sizeof(*bank->rules) +
     bank->token_capacity * sizeof(*bank->tokens) +
     bank->hash_capacity *
-      (sizeof(*bank->hash_keys) + sizeof(*bank->hash_values));
+      (sizeof(*bank->hash_keys) + sizeof(*bank->hash_values)) +
+    bank->query_capacity * sizeof(*bank->query);
 }
 
 static void update_peak(Compact_rewrite_bank bank)
@@ -571,6 +574,7 @@ void compact_rewrite_compact(Compact_rewrite_bank bank)
   safe_free(old.tokens);
   safe_free(old.hash_keys);
   safe_free(old.hash_values);
+  safe_free(old.query);
   bank->attempts = attempts;
   bank->rewrites = rewrites;
   bank->retired_rules = retired;
@@ -814,23 +818,25 @@ void compact_rewrite_restore_counters(Compact_rewrite_bank bank,
   bank->bytes_reclaimed = bytes_reclaimed;
 }
 
-static void flatten_query_rec(Term term, struct cr_query_term **items,
-                              size_t *count, size_t *capacity)
+static void flatten_query_rec(Compact_rewrite_bank bank, Term term,
+                              size_t *count)
 {
   size_t at;
   int i;
-  if (*count == *capacity) {
-    *capacity = grow_capacity(*capacity, sizeof(**items),
-                              "compact_rewrite: query overflow");
-    *items = safe_realloc(*items, *capacity * sizeof(**items));
+  if (*count == bank->query_capacity) {
+    bank->query_capacity = grow_capacity(
+      bank->query_capacity, sizeof(*bank->query),
+      "compact_rewrite: query overflow");
+    bank->query = safe_realloc(
+      bank->query, bank->query_capacity * sizeof(*bank->query));
   }
   at = (*count)++;
-  (*items)[at].term = term;
+  bank->query[at].term = term;
   for (i = 0; i < ARITY(term); i++)
-    flatten_query_rec(ARG(term, i), items, count, capacity);
+    flatten_query_rec(bank, ARG(term, i), count);
   if (*count > UINT32_MAX)
     fatal_error("compact_rewrite: query offsets exceed 32 bits");
-  (*items)[at].end = (uint32_t) *count;
+  bank->query[at].end = (uint32_t) *count;
 }
 
 static Term build_contractum(Compact_rewrite_bank bank, uint32_t *position,
@@ -937,16 +943,14 @@ static struct cr_match_result find_rewrite(Compact_rewrite_bank bank,
                                            BOOL lex_order_vars)
 {
   struct cr_match_result result;
-  struct cr_query_term *query = NULL;
-  size_t count = 0, capacity = 0;
+  size_t count = 0;
   Term bindings[MAX_VARS];
   memset(&result, 0, sizeof(result));
   memset(bindings, 0, sizeof(bindings));
-  flatten_query_rec(target, &query, &count, &capacity);
+  flatten_query_rec(bank, target, &count);
   if (count > 0)
-    retrieve_rec(bank, 0, query, 0, (uint32_t) count, bindings, target,
+    retrieve_rec(bank, 0, bank->query, 0, (uint32_t) count, bindings, target,
                  lex_order_vars, &result);
-  safe_free(query);
   return result;
 }
 
@@ -1059,5 +1063,6 @@ void compact_rewrite_free(Compact_rewrite_bank bank)
   safe_free(bank->tokens);
   safe_free(bank->hash_keys);
   safe_free(bank->hash_values);
+  safe_free(bank->query);
   safe_free(bank);
 }
