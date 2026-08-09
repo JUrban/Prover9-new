@@ -28,15 +28,24 @@ static Lindex  Unit_discrim_idx;      /* unit fsub, unit del */
 static Di_tree Nonunit_features_idx;  /* nonunit fsub, nonunit bsub */
 
 static BOOL Compact_unit_subsumption_audit;
+static BOOL Compact_unit_authoritative;
 static Compact_unit_index Compact_units;
 static unsigned long long Compact_unit_audit_failures;
 
-void configure_compact_unit_subsumption_audit(BOOL enabled)
+void configure_compact_unit_index(BOOL audit, BOOL authoritative)
 {
   if (Compact_units != NULL)
-    fatal_error("configure_compact_unit_subsumption_audit: index is live");
-  Compact_unit_subsumption_audit = enabled;
+    fatal_error("configure_compact_unit_index: index is live");
+  if (audit && authoritative)
+    fatal_error("configure_compact_unit_index: audit and authoritative modes conflict");
+  Compact_unit_subsumption_audit = audit;
+  Compact_unit_authoritative = authoritative;
   Compact_unit_audit_failures = 0;
+}
+
+static BOOL compact_unit_index_mode(void)
+{
+  return Compact_unit_subsumption_audit || Compact_unit_authoritative;
 }
 
 unsigned long long compact_unit_subsumption_audit_failures(void)
@@ -44,18 +53,19 @@ unsigned long long compact_unit_subsumption_audit_failures(void)
   return Compact_unit_audit_failures;
 }
 
-void fprint_compact_unit_subsumption_audit(FILE *fp)
+void fprint_compact_unit_index(FILE *fp)
 {
   struct compact_unit_index_stats stats;
-  if (!Compact_unit_subsumption_audit)
+  if (!compact_unit_index_mode())
     return;
   compact_unit_index_get_stats(Compact_units, &stats);
   fprintf(fp,
-          "Compact_unit_subsumption_audit: failures=%llu, active=%llu, "
+          "Compact_unit_index: mode=%s, failures=%llu, active=%llu, "
           "peak=%llu, retired=%llu, physical=%llu, forward_queries=%llu, "
           "back_queries=%llu, back_exact_tests=%llu, conflict_queries=%llu, "
           "conflict_exact_tests=%llu, bytes=%llu, "
           "peak_bytes=%llu.\n",
+          Compact_unit_authoritative ? "authoritative" : "audit",
           Compact_unit_audit_failures, stats.active, stats.peak,
           stats.retired, stats.physical, stats.generalization_queries,
           stats.instance_queries, stats.instance_exact_tests,
@@ -292,17 +302,18 @@ void index_literals_features_only(Topform c, Indexop op, Clock clock)
 /* PUBLIC */
 void init_literals_index(int depth)
 {
-  Unit_fpa_idx     = lindex_init(FPA, ORDINARY_UNIF, depth,
-				 FPA, ORDINARY_UNIF, depth);
+  Unit_fpa_idx = Compact_unit_authoritative ? NULL :
+    lindex_init(FPA, ORDINARY_UNIF, depth, FPA, ORDINARY_UNIF, depth);
 
   Nonunit_fpa_idx  = lindex_init(FPA, ORDINARY_UNIF, depth,
 				 FPA, ORDINARY_UNIF, depth);
 
-  Unit_discrim_idx = lindex_init(DISCRIM_BIND, ORDINARY_UNIF, depth,
-				 DISCRIM_BIND, ORDINARY_UNIF, depth);
+  Unit_discrim_idx = Compact_unit_authoritative ? NULL :
+    lindex_init(DISCRIM_BIND, ORDINARY_UNIF, depth,
+                DISCRIM_BIND, ORDINARY_UNIF, depth);
 
   Nonunit_features_idx = init_di_tree();
-  Compact_units = Compact_unit_subsumption_audit ?
+  Compact_units = compact_unit_index_mode() ?
     compact_unit_index_init() : NULL;
 }  /* init_lits_index */
 
@@ -318,9 +329,13 @@ void init_literals_index(int depth)
 /* PUBLIC */
 void destroy_literals_index(void)
 {
-  lindex_destroy(Unit_fpa_idx);       Unit_fpa_idx = NULL;
+  if (Unit_fpa_idx != NULL)
+    lindex_destroy(Unit_fpa_idx);
+  Unit_fpa_idx = NULL;
   lindex_destroy(Nonunit_fpa_idx);    Nonunit_fpa_idx = NULL;
-  lindex_destroy(Unit_discrim_idx);   Unit_discrim_idx = NULL;
+  if (Unit_discrim_idx != NULL)
+    lindex_destroy(Unit_discrim_idx);
+  Unit_discrim_idx = NULL;
   zap_di_tree(Nonunit_features_idx,
 	      feature_length());      Nonunit_features_idx = NULL;
   compact_unit_index_free(Compact_units); Compact_units = NULL;
@@ -340,7 +355,7 @@ void index_literals(Topform c, Indexop op, Clock clock, BOOL no_fapl)
 {
   BOOL unit = (number_of_literals(c->literals) == 1);
   clock_start(clock);
-  if (unit && Compact_unit_subsumption_audit) {
+  if (unit && compact_unit_index_mode()) {
     BOOL ok = op == INSERT ? compact_unit_index_add(Compact_units, c) :
                              compact_unit_index_remove(Compact_units, c->id);
     if (!ok)
@@ -348,11 +363,14 @@ void index_literals(Topform c, Indexop op, Clock clock, BOOL no_fapl)
         "index_literals: duplicate compact unit" :
         "index_literals: missing compact unit");
   }
-  if (!no_fapl || !positive_clause(c->literals))
+  if ((!unit || !Compact_unit_authoritative) &&
+      (!no_fapl || !positive_clause(c->literals)))
     lindex_update(unit ? Unit_fpa_idx : Nonunit_fpa_idx, c, op);
 
-  if (unit)
-    lindex_update(Unit_discrim_idx, c, op);
+  if (unit) {
+    if (!Compact_unit_authoritative)
+      lindex_update(Unit_discrim_idx, c, op);
+  }
   else {
     int *f = features(c->literals);
     int flen = feature_length();
@@ -378,7 +396,7 @@ void index_denial(Topform c, Indexop op, Clock clock)
 {
   BOOL unit = (number_of_literals(c->literals) == 1);
   clock_start(clock);
-  if (unit && Compact_unit_subsumption_audit) {
+  if (unit && compact_unit_index_mode()) {
     BOOL ok = op == INSERT ? compact_unit_index_add(Compact_units, c) :
                              compact_unit_index_remove(Compact_units, c->id);
     if (!ok)
@@ -386,7 +404,8 @@ void index_denial(Topform c, Indexop op, Clock clock)
         "index_denial: duplicate compact unit" :
         "index_denial: missing compact unit");
   }
-  lindex_update(unit ? Unit_fpa_idx : Nonunit_fpa_idx, c, op);
+  if (!unit || !Compact_unit_authoritative)
+    lindex_update(unit ? Unit_fpa_idx : Nonunit_fpa_idx, c, op);
   clock_stop(clock);
 }  /* index_denial */
 
@@ -434,7 +453,41 @@ void unit_conflict(Topform c, void (*empty_proc) (Topform))
     safe_free(direct);
     safe_free(flipped);
   }
-  unit_conflict_by_index(c, Unit_fpa_idx, empty_proc);
+  if (Compact_unit_authoritative && number_of_literals(c->literals) == 1) {
+    Literals literal = c->literals;
+    unsigned long long *direct, *flipped = NULL;
+    size_t direct_count = 0, flipped_count = 0, i;
+    direct = compact_unit_unifier_ids(
+      Compact_units, literal->atom, !literal->sign, c->id, &direct_count);
+    if (eq_term(literal->atom) && !renamable_flip_eq(literal->atom)) {
+      Term flip = top_flip(literal->atom);
+      flipped = compact_unit_unifier_ids(
+        Compact_units, flip, !literal->sign, c->id, &flipped_count);
+      zap_top_flip(flip);
+    }
+    if (direct_count + flipped_count != 0) {
+      if (c->id == 0)
+        assign_clause_id(c);
+      c->used = TRUE;
+    }
+    for (i = 0; i < direct_count + flipped_count; i++) {
+      BOOL flip = i >= direct_count;
+      unsigned long long id = flip ? flipped[i - direct_count] : direct[i];
+      Topform candidate = find_clause_by_id(id);
+      Topform empty;
+      if (candidate == NULL)
+        fatal_error("unit_conflict: compact candidate is not resident");
+      empty = flip ? try_unit_conflict_flipped(c, candidate) :
+                     try_unit_conflict(c, candidate);
+      if (empty == NULL)
+        fatal_error("unit_conflict: compact candidate no longer unifies");
+      (*empty_proc)(empty);
+    }
+    safe_free(direct);
+    safe_free(flipped);
+  }
+  else
+    unit_conflict_by_index(c, Unit_fpa_idx, empty_proc);
 }  /* unit_conflict */
 
 /*************
@@ -449,6 +502,8 @@ void unit_conflict(Topform c, void (*empty_proc) (Topform))
 /* PUBLIC */
 void unit_deletion(Topform c)
 {
+  if (Compact_unit_authoritative)
+    fatal_error("unit_deletion: authoritative compact unit index does not yet support unit deletion");
   unit_delete(c, Unit_discrim_idx);
 }  /* unit_deletion */
 
@@ -481,7 +536,22 @@ Plist back_unit_deletable(Topform c)
 /* PUBLIC */
 Topform forward_subsumption(Topform d)
 {
-  Topform subsumer = forward_subsume(d, Unit_discrim_idx);
+  Topform subsumer = NULL;
+  if (Compact_unit_authoritative) {
+    Literals literal;
+    unsigned long long compact = 0;
+    for (literal = d->literals; literal != NULL && compact == 0;
+         literal = literal->next)
+      compact = compact_unit_generalization_first(
+        Compact_units, literal->atom, literal->sign, 0);
+    if (compact != 0) {
+      subsumer = find_clause_by_id(compact);
+      if (subsumer == NULL)
+        fatal_error("forward_subsumption: compact subsumer is not resident");
+    }
+  }
+  else
+    subsumer = forward_subsume(d, Unit_discrim_idx);
   if (Compact_unit_subsumption_audit) {
     Literals literal;
     unsigned long long compact = 0;
@@ -518,7 +588,7 @@ Topform forward_subsumption_filter(Topform d,
                                                      void *arg),
                                    void *cb_arg)
 {
-  if (Compact_unit_subsumption_audit)
+  if (compact_unit_index_mode())
     fatal_error("compact unit subsumption audit does not support ancestor_subsume");
   Topform subsumer = forward_subsume_filter(d, Unit_discrim_idx,
                                             accept_cb, cb_arg);
@@ -540,7 +610,31 @@ Return the list of clauses that can ar back subsumed by the given clause.
 /* PUBLIC */
 Plist back_subsumption(Topform c)
 {
-  Plist p1 = back_subsume(c, Unit_fpa_idx);
+  Plist p1 = NULL;
+  if (Compact_unit_authoritative && number_of_literals(c->literals) == 1) {
+    unsigned long long *ids;
+    size_t count = 0, i;
+    Plist tail = NULL;
+    ids = compact_unit_instance_ids(
+      Compact_units, c->literals->atom, c->literals->sign, c->id, &count);
+    for (i = 0; i < count; i++) {
+      Topform candidate = find_clause_by_id(ids[i]);
+      Plist cell;
+      if (candidate == NULL)
+        fatal_error("back_subsumption: compact subsumee is not resident");
+      cell = get_plist();
+      cell->v = candidate;
+      cell->next = NULL;
+      if (tail == NULL)
+        p1 = cell;
+      else
+        tail->next = cell;
+      tail = cell;
+    }
+    safe_free(ids);
+  }
+  else if (!Compact_unit_authoritative)
+    p1 = back_subsume(c, Unit_fpa_idx);
   if (Compact_unit_subsumption_audit) {
     unsigned long long *compact = NULL;
     size_t compact_count = 0, at = 0;
@@ -580,10 +674,14 @@ Plist back_subsumption(Topform c)
 /* PUBLIC */
 void lits_idx_report(void)
 {
-  printf("Pos unit lits index: ");
-  p_fpa_density(Unit_fpa_idx->pos->fpa);
-  printf("Neg unit lits index: ");
-  p_fpa_density(Unit_fpa_idx->neg->fpa);
+  if (Compact_unit_authoritative)
+    fprint_compact_unit_index(stdout);
+  else {
+    printf("Pos unit lits index: ");
+    p_fpa_density(Unit_fpa_idx->pos->fpa);
+    printf("Neg unit lits index: ");
+    p_fpa_density(Unit_fpa_idx->neg->fpa);
+  }
   printf("Pos nonunit lits index: ");
   p_fpa_density(Nonunit_fpa_idx->pos->fpa);
   printf("Neg nonunit lits index: ");
@@ -604,6 +702,8 @@ void write_fpa_lits_index(const char *dir)
   char path[600];
   FILE *fp;
 
+  if (Compact_unit_authoritative)
+    fatal_error("write_fpa_lits_index: compact unit checkpoint is not implemented");
   snprintf(path, sizeof(path), "%s/fpa_lits_index.txt", dir);
   fp = fopen(path, "w");
   if (!fp) return;

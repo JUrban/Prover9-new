@@ -68,6 +68,8 @@ Plist unit_conflict_candidates_by_index(Topform c, Lindex idx);
 
 Topform try_unit_conflict(Topform a, Topform b);
 
+Topform try_unit_conflict_flipped(Topform a, Topform b);
+
 void unit_delete(Topform c, Lindex idx);
 
 Plist back_unit_del_by_index(Topform unit, Lindex idx);

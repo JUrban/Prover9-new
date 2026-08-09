@@ -1851,6 +1851,7 @@ Prover_options init_prover_options(void)
     init_flag("compact_otter_demodulation", FALSE);
   p->compact_unit_subsumption_audit =
     init_flag("compact_unit_subsumption_audit", FALSE);
+  p->compact_otter_unit_index = init_flag("compact_otter_unit_index", FALSE);
   p->collective_trace       = init_flag("collective_trace",       FALSE);
   p->collective_hint_probes = init_flag("collective_hint_probes",  FALSE);
   p->collective_promising_candidates =
@@ -2860,8 +2861,9 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             comma_num(s.rewrite_bank_bytes),
             comma_num(s.rewrite_bank_peak_bytes));
   }
-  if (flag(Opt->compact_unit_subsumption_audit))
-    fprint_compact_unit_subsumption_audit(fp);
+  if (flag(Opt->compact_unit_subsumption_audit) ||
+      flag(Opt->compact_otter_unit_index))
+    fprint_compact_unit_index(fp);
   if (collective_frontier_mode()) {
     fprintf(fp,
             "Collective_scheduler: policy=%s, drain=%d, high=%d, low=%d, "
@@ -9775,8 +9777,9 @@ void index_and_process_initial_clauses(void)
   set_discrim_hash_threshold(parm(Opt->discrim_hash_threshold));
 
   int fpa_depth = parm(Opt->fpa_depth);
-  configure_compact_unit_subsumption_audit(
-    flag(Opt->compact_unit_subsumption_audit));
+  configure_compact_unit_index(
+    flag(Opt->compact_unit_subsumption_audit),
+    flag(Opt->compact_otter_unit_index));
   init_literals_index(fpa_depth);  // fsub, bsub, fudel, budel, ucon
 
   init_demodulator_index(DISCRIM_BIND, ORDINARY_UNIF, 0);
@@ -14778,6 +14781,20 @@ Prover_results search(Prover_input p)
         fatal_error("compact_unit_subsumption_audit does not yet support ancestor_subsume");
       if (p->resume_dir != NULL)
         fatal_error("compact_unit_subsumption_audit does not support checkpoint resume");
+    }
+    if (flag(Opt->compact_otter_unit_index)) {
+      if (discount_mode())
+        fatal_error("compact_otter_unit_index requires search_loop=otter");
+      if (!str_ident(stringparm1(Opt->inference_frontier), "clauses"))
+        fatal_error("compact_otter_unit_index requires inference_frontier=clauses");
+      if (flag(Opt->ancestor_subsume))
+        fatal_error("compact_otter_unit_index does not yet support ancestor_subsume");
+      if (flag(Opt->unit_deletion))
+        fatal_error("compact_otter_unit_index does not yet support unit_deletion");
+      if (p->resume_dir != NULL)
+        fatal_error("compact_otter_unit_index does not support checkpoint resume");
+      if (flag(Opt->compact_unit_subsumption_audit))
+        fatal_error("compact_otter_unit_index and its audit are mutually exclusive");
     }
     if (maximum_discount_demod_mode()) {
       if (!dense_passive_mode())

@@ -675,6 +675,32 @@ Topform try_unit_conflict(Topform a, Topform b)
   return empty;
 }  /* try_unit_conflict */
 
+/* PUBLIC */
+Topform try_unit_conflict_flipped(Topform a, Topform b)
+{
+  Context c1 = get_context();
+  Context c2 = get_context();
+  Trail tr = NULL;
+  Topform empty = NULL;
+  if (unit_clause(a->literals) && unit_clause(b->literals) &&
+      a->literals->sign != b->literals->sign &&
+      eq_term(a->literals->atom)) {
+    Term flip = top_flip(a->literals->atom);
+    if (unify(flip, c1, b->literals->atom, c2, &tr)) {
+      empty = get_topform();
+      /* Match atom_conflict(TRUE): the flip marker belongs to the indexed
+         conflictor's literal in the binary-resolution justification. */
+      empty->justification = binary_res_just(a, 1, b, -1);
+      inherit_attributes(a, c1, b, c2, empty);
+      undo_subst(tr);
+    }
+    zap_top_flip(flip);
+  }
+  free_context(c1);
+  free_context(c2);
+  return empty;
+}
+
 /*************
  *
  *   unit_delete()
