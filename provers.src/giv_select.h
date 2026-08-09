@@ -74,6 +74,13 @@ unsigned dense_passive_scan_stale(size_t *cursor, unsigned rewrite_epoch,
                                   int filter, unsigned scan_limit,
                                   struct dense_passive_view *view);
 
+/* Convert a physical scan cursor to/from the ID of its next active record.
+   Checkpoints use this stable form because inactive records are omitted when
+   the dense store is rebuilt.  ID 0 denotes an empty store. */
+unsigned long long dense_passive_cursor_id(size_t cursor);
+
+size_t dense_passive_cursor_from_id(unsigned long long id);
+
 BOOL dense_passive_deactivate_id(unsigned long long id,
                                  struct dense_passive_view *view);
 
@@ -84,6 +91,10 @@ BOOL dense_passive_reactivate_id(unsigned long long id,
 
 unsigned long long dense_passive_stale_count(unsigned rewrite_epoch,
                                              unsigned long long *max_lag);
+
+void dense_passive_set_rewrite_epoch(unsigned rewrite_epoch);
+
+unsigned long long dense_passive_rewrite_debt(void);
 
 void dense_passive_memory(unsigned long long *record_bytes,
                           unsigned long long *heap_bytes,

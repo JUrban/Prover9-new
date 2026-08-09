@@ -69,6 +69,11 @@ static size_t Rewrite_interreduce_cursor = 0;
 static unsigned Rewrite_refresh_hot_streak = 0;
 static unsigned Rewrite_interreduce_streak = 0;
 static BOOL Rewrite_refresh_lane_turn = TRUE;
+static BOOL Rewrite_drain_mode = FALSE;
+static BOOL Resume_rewrite_cursor_ids = FALSE;
+static unsigned long long Resume_rewrite_hot_cursor_id = 0;
+static unsigned long long Resume_rewrite_general_cursor_id = 0;
+static unsigned long long Resume_rewrite_interreduce_cursor_id = 0;
 
 static void update_rewrite_only_stats(void);
 static void current_demodulate_clause(Topform, int, int, BOOL, BOOL);
@@ -124,6 +129,7 @@ static void advance_rewrite_epoch(void)
   unsigned long long stale = dense_passive_size();
   if (Rewrite_epoch != UINT_MAX)
     Rewrite_epoch++;
+  dense_passive_set_rewrite_epoch(Rewrite_epoch);
   if (stale > Stats.rewrite_refresh_stale_peak)
     Stats.rewrite_refresh_stale_peak = stale;
 }
@@ -1975,6 +1981,10 @@ Prover_options init_prover_options(void)
     init_parm("rewrite_refresh_hot_ratio", 7, 0, INT_MAX);
   p->rewrite_refresh_raw_budget =
     init_parm("rewrite_refresh_raw_budget", 64, 1, INT_MAX);
+  p->rewrite_refresh_high_water =
+    init_parm("rewrite_refresh_high_water", 4096, 1, INT_MAX);
+  p->rewrite_refresh_low_water =
+    init_parm("rewrite_refresh_low_water", 3072, 0, INT_MAX);
   p->fpa_hash_threshold = init_parm("fpa_hash_threshold",   4,      0,   1000);
   p->discrim_hash_threshold = init_parm("discrim_hash_threshold", -1,  -1,  1000);
 
@@ -2590,6 +2600,10 @@ void update_stats(void)
   Stats.active_indexed_clauses = Stats.usable_size;
   Stats.passive_indexed_clauses = discount_mode() ? 0 : Stats.sos_size;
   Stats.delayed_demodulators = delayed_demodulator_count();
+  Stats.rewrite_debt_current = eager_interreduced_demod_mode() ?
+    dense_passive_rewrite_debt() : 0;
+  if (Stats.rewrite_debt_current > Stats.rewrite_debt_peak)
+    Stats.rewrite_debt_peak = Stats.rewrite_debt_current;
   Stats.rewrite_refresh_stale_current = eager_interreduced_demod_mode() ?
     dense_passive_stale_count(Rewrite_epoch, &rewrite_lag) : 0;
   if (rewrite_lag > Stats.rewrite_refresh_lag_max)
@@ -2684,7 +2698,7 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             comma_num(s.rewrite_only_demodulators_peak),
             comma_num(s.rewrite_bank_bytes),
             comma_num(s.rewrite_bank_peak_bytes));
-    if (eager_interreduced_demod_mode())
+    if (eager_interreduced_demod_mode()) {
       fprintf(fp,
               "Compact_rewrite: current=%s, peak=%s, retired=%s, "
               "physical=%s, compactions=%s, reclaimed=%s, attempts=%s, "
@@ -2703,6 +2717,7 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
               comma_num(s.compact_rewrite_rule_bytes),
               comma_num(s.compact_rewrite_term_bytes),
               comma_num(s.compact_rewrite_hash_bytes));
+    }
     fprintf(fp,
             "Passive_refresh: epoch=%u, checks=%s, requeued=%s, "
             "subsumed=%s.\n",
@@ -2710,13 +2725,11 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             comma_num(s.passive_refresh_checks),
             comma_num(s.passive_refresh_requeued),
             comma_num(s.passive_refresh_subsumed));
-    if (eager_interreduced_demod_mode())
+    if (eager_interreduced_demod_mode()) {
       fprintf(fp,
               "Rewrite_refresh: epoch=%u, stale=%s, stale_peak=%s, "
               "lag_max=%s, scanned=%s, materialized=%s, rewritten=%s, "
-              "unchanged=%s, subsumed=%s, hot_turns=%s, general_turns=%s, "
-              "rule_turns=%s, rule_changed=%s, rule_unchanged=%s, "
-              "rule_collapsed=%s.\n",
+              "unchanged=%s, subsumed=%s, hot_turns=%s, general_turns=%s.\n",
               Rewrite_epoch,
               comma_num(s.rewrite_refresh_stale_current),
               comma_num(s.rewrite_refresh_stale_peak),
@@ -2727,11 +2740,23 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
               comma_num(s.rewrite_refresh_unchanged),
               comma_num(s.rewrite_refresh_subsumed),
               comma_num(s.rewrite_refresh_hot_turns),
-              comma_num(s.rewrite_refresh_general_turns),
+              comma_num(s.rewrite_refresh_general_turns));
+      fprintf(fp,
+              "Rewrite_interreduce: rule_turns=%s, rule_changed=%s, "
+              "rule_unchanged=%s, rule_collapsed=%s, debt=%s, "
+              "debt_peak=%s, drain=%d, drain_entries=%s, drain_exits=%s, "
+              "drain_turns=%s, inference_turns=%s.\n",
               comma_num(s.rewrite_interreduce_turns),
               comma_num(s.rewrite_interreduce_changed),
               comma_num(s.rewrite_interreduce_unchanged),
-              comma_num(s.rewrite_interreduce_collapsed));
+              comma_num(s.rewrite_interreduce_collapsed),
+              comma_num(s.rewrite_debt_current),
+              comma_num(s.rewrite_debt_peak), Rewrite_drain_mode,
+              comma_num(s.rewrite_drain_entries),
+              comma_num(s.rewrite_drain_exits),
+              comma_num(s.rewrite_drain_turns),
+              comma_num(s.rewrite_inference_turns));
+    }
   }
   if (collective_frontier_mode()) {
     fprintf(fp,
@@ -5119,6 +5144,12 @@ static void compact_dense_passive_store(void)
 {
   Cold_passive_store old_store = Dense_body_store;
   Cold_passive_store new_store = new_dense_body_store();
+  unsigned long long hot_cursor_id =
+    dense_passive_cursor_id(Rewrite_refresh_hot_cursor);
+  unsigned long long general_cursor_id =
+    dense_passive_cursor_id(Rewrite_refresh_general_cursor);
+  unsigned long long interreduce_cursor_id =
+    dense_passive_cursor_id(Rewrite_interreduce_cursor);
   struct cold_passive_store_stats old_stats =
     cold_passive_store_get_stats(old_store);
   struct cold_passive_store_stats new_stats;
@@ -5126,6 +5157,12 @@ static void compact_dense_passive_store(void)
   ctx.source = old_store;
   ctx.destination = new_store;
   dense_passive_compact(relocate_dense_passive, &ctx);
+  Rewrite_refresh_hot_cursor =
+    dense_passive_cursor_from_id(hot_cursor_id);
+  Rewrite_refresh_general_cursor =
+    dense_passive_cursor_from_id(general_cursor_id);
+  Rewrite_interreduce_cursor =
+    dense_passive_cursor_from_id(interreduce_cursor_id);
   cold_passive_store_inherit_counters(new_store, old_store);
   new_stats = cold_passive_store_get_stats(new_store);
   if (old_stats.record_bytes >= new_stats.record_bytes)
@@ -8557,6 +8594,13 @@ BOOL discount_refresh_selected(Topform c)
 
   if (copy->justification->next != NULL) {
     copy->justification->u.id = c->id;
+    if (eager_interreduced_demod_mode() && c->delayed_demodulator) {
+      compact_rewrite_note_suspended_retirement(Compact_rewrite_rules);
+      Stats.rewrite_only_demodulators_retired++;
+      if (compact_rewrite_compaction_needed(Compact_rewrite_rules))
+        compact_rewrite_compact(Compact_rewrite_rules);
+      update_rewrite_only_stats();
+    }
     retain_disabled_clause(c);
     Stats.passive_refresh_requeued++;
     cl_process(copy);
@@ -8584,6 +8628,13 @@ BOOL discount_refresh_selected(Topform c)
              TPTP_PFX, c->id, subsumer->id);
     Stats.subsumed++;
     Stats.passive_refresh_subsumed++;
+    if (eager_interreduced_demod_mode() && c->delayed_demodulator) {
+      compact_rewrite_note_suspended_retirement(Compact_rewrite_rules);
+      Stats.rewrite_only_demodulators_retired++;
+      if (compact_rewrite_compaction_needed(Compact_rewrite_rules))
+        compact_rewrite_compact(Compact_rewrite_rules);
+      update_rewrite_only_stats();
+    }
     retain_disabled_clause(c);
     return FALSE;
   }
@@ -8625,6 +8676,26 @@ static void restore_unchanged_dense_passive(
   update_rewrite_only_stats();
 }
 
+static BOOL update_rewrite_drain_mode(void)
+{
+  unsigned long long debt = dense_passive_rewrite_debt();
+  unsigned high = (unsigned) parm(Opt->rewrite_refresh_high_water);
+  unsigned low = (unsigned) parm(Opt->rewrite_refresh_low_water);
+  Stats.rewrite_debt_current = debt;
+  if (debt > Stats.rewrite_debt_peak)
+    Stats.rewrite_debt_peak = debt;
+  if (!Rewrite_drain_mode && debt >= high) {
+    Rewrite_drain_mode = TRUE;
+    Stats.rewrite_drain_entries++;
+  }
+  else if (Rewrite_drain_mode && debt <= low) {
+    Rewrite_drain_mode = FALSE;
+    Stats.rewrite_drain_exits++;
+    Rewrite_refresh_lane_turn = FALSE;
+  }
+  return Rewrite_drain_mode;
+}
+
 /* Spend one bounded, pointer-free repair turn.  Hinted passives receive the
    configured burst share, while a mandatory general turn advances an
    independent wraparound cursor.  A lane toggle guarantees that repair and
@@ -8637,26 +8708,29 @@ static BOOL rewrite_refresh_turn(void)
   unsigned hot_ratio;
   BOOL hot = FALSE;
   BOOL rule_lane = FALSE;
+  BOOL drain;
   Topform c;
   unsigned long long requeued_before, subsumed_before, kept_before;
 
   if (!eager_interreduced_demod_mode())
     return FALSE;
-  if (!Rewrite_refresh_lane_turn) {
+  drain = update_rewrite_drain_mode();
+  if (!drain && !Rewrite_refresh_lane_turn) {
     Rewrite_refresh_lane_turn = TRUE;
     return FALSE;
   }
   memset(&view, 0, sizeof(view));
   budget = (unsigned) parm(Opt->rewrite_refresh_raw_budget);
   hot_ratio = (unsigned) parm(Opt->rewrite_refresh_hot_ratio);
-  if (hot_ratio != 0 && Rewrite_interreduce_streak < hot_ratio) {
+  if (drain ||
+      (hot_ratio != 0 && Rewrite_interreduce_streak < hot_ratio)) {
     scanned = dense_passive_scan_stale(&Rewrite_interreduce_cursor,
                                        Rewrite_epoch,
                                        DENSE_STALE_REWRITE,
                                        budget, &view);
     rule_lane = view.id != 0;
   }
-  if (view.id == 0 &&
+  if (!drain && view.id == 0 &&
       hot_ratio != 0 && Rewrite_refresh_hot_streak < hot_ratio &&
       Rewrite_interreduce_streak < hot_ratio) {
     scanned += dense_passive_scan_stale(&Rewrite_refresh_hot_cursor,
@@ -8664,7 +8738,7 @@ static BOOL rewrite_refresh_turn(void)
                                         budget, &view);
     hot = view.id != 0;
   }
-  if (view.id == 0) {
+  if (!drain && view.id == 0) {
     unsigned general_scanned = dense_passive_scan_stale(
       &Rewrite_refresh_general_cursor, Rewrite_epoch, DENSE_STALE_GENERAL,
       budget, &view);
@@ -8673,8 +8747,18 @@ static BOOL rewrite_refresh_turn(void)
     Rewrite_interreduce_streak = 0;
   }
   Stats.rewrite_refresh_scanned += scanned;
-  if (view.id == 0)
+  if (view.id == 0) {
+    if (drain) {
+      Stats.rewrite_drain_turns++;
+      return TRUE;
+    }
     return FALSE;
+  }
+  if (view.rewrite_epoch < Rewrite_epoch) {
+    unsigned long long lag = Rewrite_epoch - view.rewrite_epoch;
+    if (lag > Stats.rewrite_refresh_lag_max)
+      Stats.rewrite_refresh_lag_max = lag;
+  }
 
   if (!dense_passive_deactivate_id(view.id, NULL))
     fatal_error("rewrite refresh: stale record disappeared");
@@ -8711,11 +8795,6 @@ static BOOL rewrite_refresh_turn(void)
       Stats.rewrite_interreduce_unchanged++;
   }
   else {
-    if (view.delayed_demodulator) {
-      compact_rewrite_note_suspended_retirement(Compact_rewrite_rules);
-      Stats.rewrite_only_demodulators_retired++;
-      update_rewrite_only_stats();
-    }
     if (Stats.passive_refresh_requeued != requeued_before)
       Stats.rewrite_refresh_rewritten++;
     else if (Stats.passive_refresh_subsumed != subsumed_before)
@@ -8732,7 +8811,12 @@ static BOOL rewrite_refresh_turn(void)
     compact_rewrite_compact(Compact_rewrite_rules);
     update_rewrite_only_stats();
   }
-  Rewrite_refresh_lane_turn = FALSE;
+  if (drain) {
+    Stats.rewrite_drain_turns++;
+    update_rewrite_drain_mode();
+  }
+  else
+    Rewrite_refresh_lane_turn = FALSE;
   return TRUE;
 }
 
@@ -8785,6 +8869,8 @@ void make_inferences(void)
 
   if (rewrite_refresh_turn())
     return;
+  if (eager_interreduced_demod_mode())
+    Stats.rewrite_inference_turns++;
 
   if (collective_balanced_mode() &&
       Collective_candidate_heap_count != 0) {
@@ -11917,6 +12003,10 @@ void write_checkpoint(void)
   FILE *fp;
   int n;
 
+  /* Compact rewrite attempts happen in the hot demodulation callback, so
+     synchronize its private counters before serializing Stats. */
+  if (eager_interreduced_demod_mode())
+    update_rewrite_only_stats();
   if (!clause_store_sync(Glob.disabled))
     fatal_error("write_checkpoint: cannot synchronize ancestor store");
   if (!cold_passive_store_sync(Dense_body_store))
@@ -12033,6 +12123,12 @@ void write_checkpoint(void)
             Stats.rewrite_interreduce_unchanged);
     fprintf(fp, "rewrite_interreduce_collapsed %llu\n",
             Stats.rewrite_interreduce_collapsed);
+    fprintf(fp, "rewrite_debt_peak %llu\n", Stats.rewrite_debt_peak);
+    fprintf(fp, "rewrite_drain_entries %llu\n", Stats.rewrite_drain_entries);
+    fprintf(fp, "rewrite_drain_exits %llu\n", Stats.rewrite_drain_exits);
+    fprintf(fp, "rewrite_drain_turns %llu\n", Stats.rewrite_drain_turns);
+    fprintf(fp, "rewrite_inference_turns %llu\n",
+            Stats.rewrite_inference_turns);
     fprintf(fp, "rewrite_refresh_stale_peak %llu\n",
             Stats.rewrite_refresh_stale_peak);
     fprintf(fp, "rewrite_refresh_lag_max %llu\n",
@@ -12217,12 +12313,19 @@ void write_checkpoint(void)
             (unsigned long long) Rewrite_refresh_general_cursor);
     fprintf(fp, "rewrite_interreduce_cursor %llu\n",
             (unsigned long long) Rewrite_interreduce_cursor);
+    fprintf(fp, "rewrite_refresh_hot_cursor_id %llu\n",
+            dense_passive_cursor_id(Rewrite_refresh_hot_cursor));
+    fprintf(fp, "rewrite_refresh_general_cursor_id %llu\n",
+            dense_passive_cursor_id(Rewrite_refresh_general_cursor));
+    fprintf(fp, "rewrite_interreduce_cursor_id %llu\n",
+            dense_passive_cursor_id(Rewrite_interreduce_cursor));
     fprintf(fp, "rewrite_refresh_hot_streak %u\n",
             Rewrite_refresh_hot_streak);
     fprintf(fp, "rewrite_interreduce_streak %u\n",
             Rewrite_interreduce_streak);
     fprintf(fp, "rewrite_refresh_lane_turn %u\n",
             Rewrite_refresh_lane_turn ? 1U : 0U);
+    fprintf(fp, "rewrite_drain_mode %u\n", Rewrite_drain_mode ? 1U : 0U);
     fprintf(fp, "hint_state_epoch %llu\n", hint_state_epoch());
     fprintf(fp, "user_seconds %.2f\n", user_seconds());
     /* Save Low selector cycle state for deterministic resume */
@@ -12992,6 +13095,16 @@ void resume_load_clauses(const char *dir)
     fp, "rewrite_interreduce_collapsed",
     &Stats.rewrite_interreduce_collapsed);
   rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "rewrite_debt_peak", &Stats.rewrite_debt_peak);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "rewrite_drain_entries", &Stats.rewrite_drain_entries);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "rewrite_drain_exits", &Stats.rewrite_drain_exits);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "rewrite_drain_turns", &Stats.rewrite_drain_turns);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "rewrite_inference_turns", &Stats.rewrite_inference_turns);
+  rewind(fp); (void) read_metadata_ull_if_present(
     fp, "rewrite_refresh_stale_peak", &Stats.rewrite_refresh_stale_peak);
   rewind(fp); (void) read_metadata_ull_if_present(
     fp, "rewrite_refresh_lag_max", &Stats.rewrite_refresh_lag_max);
@@ -13316,6 +13429,7 @@ void resume_load_clauses(const char *dir)
       Rewrite_epoch = value > UINT_MAX ? UINT_MAX : (unsigned) value;
     else
       Rewrite_epoch = Simplifier_epoch;
+    dense_passive_set_rewrite_epoch(Rewrite_epoch);
     value = 0;
     rewind(fp);
     if (read_metadata_ull_if_present(fp, "rewrite_refresh_hot_cursor",
@@ -13331,6 +13445,25 @@ void resume_load_clauses(const char *dir)
     if (read_metadata_ull_if_present(fp, "rewrite_interreduce_cursor",
                                      &value))
       Rewrite_interreduce_cursor = (size_t) value;
+    Resume_rewrite_cursor_ids = FALSE;
+    Resume_rewrite_hot_cursor_id = 0;
+    Resume_rewrite_general_cursor_id = 0;
+    Resume_rewrite_interreduce_cursor_id = 0;
+    value = 0;
+    rewind(fp);
+    if (read_metadata_ull_if_present(fp, "rewrite_refresh_hot_cursor_id",
+                                     &value)) {
+      Resume_rewrite_cursor_ids = TRUE;
+      Resume_rewrite_hot_cursor_id = value;
+      rewind(fp);
+      (void) read_metadata_ull_if_present(
+        fp, "rewrite_refresh_general_cursor_id",
+        &Resume_rewrite_general_cursor_id);
+      rewind(fp);
+      (void) read_metadata_ull_if_present(
+        fp, "rewrite_interreduce_cursor_id",
+        &Resume_rewrite_interreduce_cursor_id);
+    }
     value = 0;
     rewind(fp);
     if (read_metadata_ull_if_present(fp, "rewrite_refresh_hot_streak",
@@ -13348,6 +13481,10 @@ void resume_load_clauses(const char *dir)
     if (read_metadata_ull_if_present(fp, "rewrite_refresh_lane_turn",
                                      &value))
       Rewrite_refresh_lane_turn = value != 0;
+    value = 0;
+    rewind(fp);
+    if (read_metadata_ull_if_present(fp, "rewrite_drain_mode", &value))
+      Rewrite_drain_mode = value != 0;
   }
   rewind(fp); Resume_hint_epoch = read_metadata_ull(fp, "hint_state_epoch");
   if (Resume_hint_epoch == 0)
@@ -14223,6 +14360,15 @@ void load_checkpoint_into_loop(void)
           prepare_discount_passive(p->c, FALSE);
       }
       bulk_insert_into_sos2(Glob.sos);
+      if (Resume_rewrite_cursor_ids) {
+        Rewrite_refresh_hot_cursor = dense_passive_cursor_from_id(
+          Resume_rewrite_hot_cursor_id);
+        Rewrite_refresh_general_cursor = dense_passive_cursor_from_id(
+          Resume_rewrite_general_cursor_id);
+        Rewrite_interreduce_cursor = dense_passive_cursor_from_id(
+          Resume_rewrite_interreduce_cursor_id);
+        Resume_rewrite_cursor_ids = FALSE;
+      }
       if (discount_mode() && !dense_passive_mode()) {
         for (p = Glob.sos->first; p != NULL; p = p->next)
           prepare_discount_passive(p->c, FALSE);
@@ -14324,12 +14470,18 @@ Prover_results search(Prover_input p)
     collective_reset_state();
     Simplifier_epoch = 1;
     Rewrite_epoch = 1;
+    dense_passive_set_rewrite_epoch(Rewrite_epoch);
     Rewrite_refresh_hot_cursor = 0;
     Rewrite_refresh_general_cursor = 0;
     Rewrite_interreduce_cursor = 0;
     Rewrite_refresh_hot_streak = 0;
     Rewrite_interreduce_streak = 0;
     Rewrite_refresh_lane_turn = TRUE;
+    Rewrite_drain_mode = FALSE;
+    Resume_rewrite_cursor_ids = FALSE;
+    Resume_rewrite_hot_cursor_id = 0;
+    Resume_rewrite_general_cursor_id = 0;
+    Resume_rewrite_interreduce_cursor_id = 0;
     if (flag(Opt->collective_promising_scheduler) &&
         !str_ident(stringparm1(Opt->inference_frontier), "collective"))
       fatal_error("collective_promising_scheduler requires inference_frontier=collective");
@@ -14352,6 +14504,10 @@ Prover_results search(Prover_input p)
         fatal_error(eager_legacy_demod_mode() ?
           "discount_demodulation=eager_legacy is incompatible with eval_rewrite" :
           "discount_demodulation=eager_interreduced is incompatible with eval_rewrite");
+      if (eager_interreduced_demod_mode() &&
+          parm(Opt->rewrite_refresh_low_water) >=
+            parm(Opt->rewrite_refresh_high_water))
+        fatal_error("rewrite_refresh_low_water must be below high_water");
     }
     if (str_ident(stringparm1(Opt->inference_frontier), "collective")) {
       if (!discount_mode())

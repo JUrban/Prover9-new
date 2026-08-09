@@ -256,6 +256,8 @@ struct prover_options {
     hints_fpa_depth,       // FPA index depth for hints (default 10)
     rewrite_refresh_hot_ratio, // hinted refresh turns per fair general turn
     rewrite_refresh_raw_budget, // dense records inspected per refresh turn
+    rewrite_refresh_high_water, // stale rewrite rules entering drain mode
+    rewrite_refresh_low_water,  // stale rewrite rules leaving drain mode
     fpa_hash_threshold,    // FPA trie hash table threshold (default 16, 0=off)
     discrim_hash_threshold; // discrim tree hash table threshold (default 16, 0=off)
 
@@ -376,6 +378,12 @@ struct prover_stats {
     rewrite_interreduce_changed,
     rewrite_interreduce_unchanged,
     rewrite_interreduce_collapsed,
+    rewrite_debt_current,
+    rewrite_debt_peak,
+    rewrite_drain_entries,
+    rewrite_drain_exits,
+    rewrite_drain_turns,
+    rewrite_inference_turns,
     rewrite_refresh_stale_current,
     rewrite_refresh_stale_peak,
     rewrite_refresh_lag_max,

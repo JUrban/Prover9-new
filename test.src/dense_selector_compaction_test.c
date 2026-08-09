@@ -49,6 +49,8 @@ int main(void)
   Clist sos;
   int i;
   unsigned long long compactions, reclaimed;
+  unsigned long long cursor_id;
+  size_t restored_cursor;
 
   init_standard_ladr();
   configure_dense_passive(TRUE, archive_clause, activate_clause);
@@ -72,7 +74,14 @@ int main(void)
   }
   if (!dense_passive_compaction_needed())
     fail("expected compaction threshold was not reached");
+  cursor_id = dense_passive_cursor_id(700);
+  if (cursor_id != 701)
+    fail("physical cursor did not resolve to expected active ID");
   dense_passive_compact(retain_position, NULL);
+  restored_cursor = dense_passive_cursor_from_id(cursor_id);
+  if (restored_cursor != 100 ||
+      dense_passive_cursor_id(restored_cursor) != cursor_id)
+    fail("stable cursor ID did not survive dense compaction");
   dense_passive_compaction_stats(&compactions, &reclaimed);
   if (compactions != 1 || reclaimed != SELECT_BEFORE_COMPACT)
     fail("incorrect compaction accounting");

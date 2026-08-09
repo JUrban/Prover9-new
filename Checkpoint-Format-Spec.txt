@@ -125,6 +125,23 @@ Keys (in order as written):
                               Refreshed passives whose selector keys changed
   passive_refresh_subsumed <ull>
                               Passives removed during lazy refresh
+  rewrite_refresh_scanned <ull>
+  rewrite_refresh_materialized <ull>
+  rewrite_refresh_rewritten <ull>
+  rewrite_refresh_unchanged <ull>
+  rewrite_refresh_subsumed <ull>
+  rewrite_refresh_hot_turns <ull>
+  rewrite_refresh_general_turns <ull>
+  rewrite_interreduce_turns <ull>
+  rewrite_interreduce_changed <ull>
+  rewrite_interreduce_unchanged <ull>
+  rewrite_interreduce_collapsed <ull>
+  rewrite_debt_peak <ull>     Peak stale delayed-demodulator count
+  rewrite_drain_entries <ull>
+  rewrite_drain_exits <ull>
+  rewrite_drain_turns <ull>
+  rewrite_inference_turns <ull>
+                              Compact rewrite repair/scheduler counters
   collective_batches_created <ull>
   collective_batches_completed <ull>
   collective_pair_expansions <ull>
@@ -157,6 +174,20 @@ Keys (in order as written):
   collective_batches_peak <ull>
                               Collective frontier cumulative/capacity state
   simplifier_epoch <ull>     Historical active/simplifier epoch
+  rewrite_epoch <ull>        Compact rewrite epoch seen by dense passives
+  rewrite_refresh_hot_cursor <ull>
+  rewrite_refresh_general_cursor <ull>
+  rewrite_interreduce_cursor <ull>
+                              Legacy physical dense-record cursors
+  rewrite_refresh_hot_cursor_id <ull>
+  rewrite_refresh_general_cursor_id <ull>
+  rewrite_interreduce_cursor_id <ull>
+                              Stable IDs of the next active records; current
+                              readers prefer these over physical cursors
+  rewrite_refresh_hot_streak <ull>
+  rewrite_interreduce_streak <ull>
+  rewrite_refresh_lane_turn <ull>
+  rewrite_drain_mode <ull>   Rewrite scheduler phase and hysteresis state
   hint_state_epoch <ull>     Packed/exact hint-state epoch
   user_seconds <float>       User CPU time at checkpoint (%.2f format)
   low_selector <string>      Given-clause selection cycle state: current

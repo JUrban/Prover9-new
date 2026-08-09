@@ -93,6 +93,11 @@ static size_t Dense_active_count = 0;
 static unsigned Dense_selector_count = 0;
 static unsigned long long Dense_compactions = 0;
 static unsigned long long Dense_records_reclaimed = 0;
+static unsigned Dense_rewrite_epoch = 1;
+static unsigned long long Dense_rewrite_fresh = 0;
+static unsigned long long Dense_rewrite_stale = 0;
+static unsigned long long Dense_rule_fresh = 0;
+static unsigned long long Dense_rule_stale = 0;
 
 static size_t dense_grow_capacity(size_t current, size_t element_size,
                                   char *where)
@@ -255,6 +260,46 @@ unsigned dense_passive_scan_stale(size_t *cursor, unsigned rewrite_epoch,
 }
 
 /* PUBLIC */
+unsigned long long dense_passive_cursor_id(size_t cursor)
+{
+  size_t scanned = 0;
+  size_t at;
+  if (!Dense_passive || Dense_record_count == 0)
+    return 0;
+  at = cursor < Dense_record_count ? cursor : 0;
+  while (scanned++ < Dense_record_count) {
+    struct dense_passive_record *r = &Dense_records[at];
+    if ((r->flags & DENSE_PASSIVE_ACTIVE) != 0)
+      return r->id;
+    if (++at == Dense_record_count)
+      at = 0;
+  }
+  return 0;
+}  /* dense_passive_cursor_id */
+
+/* PUBLIC */
+size_t dense_passive_cursor_from_id(unsigned long long id)
+{
+  size_t lo = 0, hi = Dense_record_count, i;
+  if (!Dense_passive || Dense_record_count == 0 || id == 0)
+    return 0;
+  while (lo < hi) {
+    size_t mid = lo + (hi - lo) / 2;
+    if (Dense_records[mid].id < id)
+      lo = mid + 1;
+    else
+      hi = mid;
+  }
+  for (i = lo; i < Dense_record_count; i++)
+    if ((Dense_records[i].flags & DENSE_PASSIVE_ACTIVE) != 0)
+      return i;
+  for (i = 0; i < lo; i++)
+    if ((Dense_records[i].flags & DENSE_PASSIVE_ACTIVE) != 0)
+      return i;
+  return 0;
+}  /* dense_passive_cursor_from_id */
+
+/* PUBLIC */
 unsigned long long dense_passive_stale_count(unsigned rewrite_epoch,
                                              unsigned long long *max_lag)
 {
@@ -273,6 +318,34 @@ unsigned long long dense_passive_stale_count(unsigned rewrite_epoch,
   if (max_lag != NULL)
     *max_lag = lag;
   return count;
+}
+
+/* PUBLIC */
+void dense_passive_set_rewrite_epoch(unsigned rewrite_epoch)
+{
+  if (rewrite_epoch == 0)
+    rewrite_epoch = 1;
+  if (rewrite_epoch > Dense_rewrite_epoch) {
+    Dense_rewrite_stale += Dense_rewrite_fresh;
+    Dense_rewrite_fresh = 0;
+    Dense_rule_stale += Dense_rule_fresh;
+    Dense_rule_fresh = 0;
+  }
+  else if (rewrite_epoch < Dense_rewrite_epoch) {
+    if (Dense_active_count != 0)
+      fatal_error("dense_passive_set_rewrite_epoch: cannot rewind live store");
+    Dense_rewrite_fresh = 0;
+    Dense_rewrite_stale = 0;
+    Dense_rule_fresh = 0;
+    Dense_rule_stale = 0;
+  }
+  Dense_rewrite_epoch = rewrite_epoch;
+}
+
+/* PUBLIC */
+unsigned long long dense_passive_rewrite_debt(void)
+{
+  return Dense_rule_stale;
 }
 
 /* PUBLIC */
@@ -549,6 +622,11 @@ void reset_selector_indexes(void)
   Dense_record_count = 0;
   Dense_record_capacity = 0;
   Dense_active_count = 0;
+  Dense_rewrite_epoch = 1;
+  Dense_rewrite_fresh = 0;
+  Dense_rewrite_stale = 0;
+  Dense_rule_fresh = 0;
+  Dense_rule_stale = 0;
   Dense_compactions = 0;
   Dense_records_reclaimed = 0;
   Sos_size = 0;
@@ -805,6 +883,16 @@ static void dense_insert_passive(Topform c)
   record = (uint32_t) Dense_record_count;
   Dense_records[Dense_record_count++] = r;
   Dense_active_count++;
+  if (r.rewrite_epoch == Dense_rewrite_epoch) {
+    Dense_rewrite_fresh++;
+    if ((r.flags & DENSE_PASSIVE_DELAYED) != 0)
+      Dense_rule_fresh++;
+  }
+  else {
+    Dense_rewrite_stale++;
+    if ((r.flags & DENSE_PASSIVE_DELAYED) != 0)
+      Dense_rule_stale++;
+  }
   for (p = High.selectors; p != NULL; p = p->next) {
     Giv_select gs = p->v;
     if ((r.selector_mask & (1ULL << gs->dense_bit)) != 0) {
@@ -828,6 +916,16 @@ static void dense_deactivate_record(uint32_t record)
   Plist p;
   if ((r->flags & DENSE_PASSIVE_ACTIVE) == 0)
     fatal_error("dense_deactivate_record: inactive record");
+  if (r->rewrite_epoch == Dense_rewrite_epoch) {
+    Dense_rewrite_fresh--;
+    if ((r->flags & DENSE_PASSIVE_DELAYED) != 0)
+      Dense_rule_fresh--;
+  }
+  else {
+    Dense_rewrite_stale--;
+    if ((r->flags & DENSE_PASSIVE_DELAYED) != 0)
+      Dense_rule_stale--;
+  }
   r->flags &= ~DENSE_PASSIVE_ACTIVE;
   Dense_active_count--;
   for (p = High.selectors; p != NULL; p = p->next) {
@@ -855,6 +953,16 @@ static void dense_reactivate_record(uint32_t record)
     fatal_error("dense_reactivate_record: active record");
   r->flags |= DENSE_PASSIVE_ACTIVE;
   Dense_active_count++;
+  if (r->rewrite_epoch == Dense_rewrite_epoch) {
+    Dense_rewrite_fresh++;
+    if ((r->flags & DENSE_PASSIVE_DELAYED) != 0)
+      Dense_rule_fresh++;
+  }
+  else {
+    Dense_rewrite_stale++;
+    if ((r->flags & DENSE_PASSIVE_DELAYED) != 0)
+      Dense_rule_stale++;
+  }
   for (p = High.selectors; p != NULL; p = p->next) {
     Giv_select gs = p->v;
     if ((r->selector_mask & (1ULL << gs->dense_bit)) != 0) {
@@ -1405,6 +1513,11 @@ void zap_given_selectors(void)
   Dense_record_count = 0;
   Dense_record_capacity = 0;
   Dense_active_count = 0;
+  Dense_rewrite_epoch = 1;
+  Dense_rewrite_fresh = 0;
+  Dense_rewrite_stale = 0;
+  Dense_rule_fresh = 0;
+  Dense_rule_stale = 0;
 }  /* zap_given_selectors */
 
 /*************

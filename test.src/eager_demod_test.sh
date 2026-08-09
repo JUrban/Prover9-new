@@ -154,18 +154,53 @@ grep -Eq 'Compact_rewrite: current=[1-9][0-9]*, .*retired=0' \
   > "$test_tmp/interreduce.out" 2> "$test_tmp/interreduce.err" || true
 grep -Eq 'Discount_demodulation: policy=eager_interreduced, .*retired=[1-9][0-9]*' \
   "$test_tmp/interreduce.out"
-grep -Eq 'Rewrite_refresh: .*rule_turns=[1-9][0-9]*, rule_changed=[1-9][0-9]*' \
+grep -Eq 'Rewrite_interreduce: rule_turns=[1-9][0-9]*, rule_changed=[1-9][0-9]*' \
+  "$test_tmp/interreduce.out"
+grep -Eq 'Rewrite_interreduce: .*debt_peak=[1-9][0-9]*, .*drain_entries=[1-9][0-9]*, drain_exits=[1-9][0-9]*, drain_turns=[1-9][0-9]*' \
   "$test_tmp/interreduce.out"
 grep -q 'THEOREM PROVED' "$test_tmp/interreduce.out"
 "$repo_dir/bin/prooftrans" parents_only < "$test_tmp/interreduce.out" \
   > "$test_tmp/interreduce-proof.out"
 grep -q 'end of proof' "$test_tmp/interreduce-proof.out"
 
+# Save immediately before the bounded repair work.  Compact-bank counters,
+# the logical next-record cursor IDs, and all semantic drain outcomes must
+# survive dense-store reconstruction.  The physical scanned-record count is
+# deliberately excluded: checkpoint reconstruction discards tombstones.
+interreduce_checkpoint_case="$test_tmp/interreduce-checkpoint-case"
+mkdir "$interreduce_checkpoint_case"
+(
+  cd "$interreduce_checkpoint_case"
+  sed '1i assign(checkpoint_given,1).\
+set(checkpoint_exit).\
+set(checkpoint_verify).' "$repo_dir/test.src/rewrite_interreduce.in" | \
+    "$repo_dir/bin/prover9" > before.out 2> before.err || true
+)
+interreduce_checkpoint_dir=$(find "$interreduce_checkpoint_case" \
+  -maxdepth 1 -type d -name 'prover9_*_ckpt_1' -print)
+test -n "$interreduce_checkpoint_dir"
+grep -Eq '^rewrite_interreduce_cursor_id [1-9][0-9]*$' \
+  "$interreduce_checkpoint_dir/metadata.txt"
+"$repo_dir/bin/prover9" -r "$interreduce_checkpoint_dir" < /dev/null \
+  > "$test_tmp/interreduce-resumed.out" \
+  2> "$test_tmp/interreduce-resumed.err" || true
+grep -Eq '^%   Verification: [0-9]+ passed, 0 failed\.$' \
+  "$test_tmp/interreduce-resumed.out"
+grep -q 'THEOREM PROVED' "$test_tmp/interreduce-resumed.out"
+grep -E '^(Given=|Discount_demodulation:|Compact_rewrite:|Rewrite_interreduce:|New_demodulators=)' \
+  "$test_tmp/interreduce.out" | tail -5 \
+  > "$test_tmp/interreduce-control.stats"
+grep -E '^(Given=|Discount_demodulation:|Compact_rewrite:|Rewrite_interreduce:|New_demodulators=)' \
+  "$test_tmp/interreduce-resumed.out" | tail -5 \
+  > "$test_tmp/interreduce-resumed.stats"
+diff -u "$test_tmp/interreduce-control.stats" \
+  "$test_tmp/interreduce-resumed.stats"
+
 "$repo_dir/bin/prover9" < "$repo_dir/test.src/rewrite_collapse.in" \
   > "$test_tmp/collapse.out" 2> "$test_tmp/collapse.err" || true
 grep -Eq 'Compact_rewrite: current=[1-9][0-9]*, .*retired=[1-9][0-9]*' \
   "$test_tmp/collapse.out"
-grep -Eq 'Rewrite_refresh: .*rule_turns=[1-9][0-9]*, .*rule_collapsed=[1-9][0-9]*' \
+grep -Eq 'Rewrite_interreduce: rule_turns=[1-9][0-9]*, .*rule_collapsed=[1-9][0-9]*' \
   "$test_tmp/collapse.out"
 
 # Eager operation is intentionally tied to dense ownership.  Reject a label
@@ -183,5 +218,15 @@ sed 's/assign(discount_demodulation,eager_legacy)\./assign(discount_demodulation
   2> "$test_tmp/compact-invalid.err" || true
 grep -q 'discount_demodulation=eager_interreduced requires passive_store=dense' \
   "$test_tmp/compact-invalid.err"
+
+# Hysteresis must have a nonempty band, otherwise drain mode can chatter at a
+# single debt value.
+sed '/assign(rewrite_refresh_low_water,0)\./c\
+assign(rewrite_refresh_low_water,1).' \
+  "$repo_dir/test.src/rewrite_interreduce.in" | \
+  "$repo_dir/bin/prover9" > "$test_tmp/watermark-invalid.out" \
+  2> "$test_tmp/watermark-invalid.err" || true
+grep -q 'rewrite_refresh_low_water must be below high_water' \
+  "$test_tmp/watermark-invalid.err"
 
 echo 'eager_demod_test: PASS'
