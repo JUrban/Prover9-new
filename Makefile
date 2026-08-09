@@ -86,7 +86,7 @@ discount-tests: all
 
 compact-frontier-tests: all
 	./test.src/compact_otter_audit_test.sh
-	cd test.src && $(MAKE) cold-passive-store-test compact-rewrite-test compact-unit-index-test
+	cd test.src && $(MAKE) cold-passive-store-test compact-rewrite-test compact-unit-index-test compact-back-demod-test
 
 clean:
 	cd ladr             && $(MAKE) realclean

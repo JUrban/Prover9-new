@@ -1,0 +1,81 @@
+#include "../provers.src/compact_back_demod.h"
+
+static int Failures;
+
+#define CHECK(test, message) do {                                    \
+  if (!(test)) {                                                     \
+    fprintf(stderr, "FAIL: %s (line %d)\n", (message), __LINE__);  \
+    Failures++;                                                      \
+  }                                                                 \
+} while (0)
+
+static Topform indexed_clause(const char *text)
+{
+  Topform clause = parse_clause_from_string((char *) text);
+  assign_clause_id(clause);
+  return clause;
+}
+
+int main(void)
+{
+  Compact_back_demod_index index;
+  struct compact_back_demod_stats stats;
+  Topform first, second, irrelevant, demod, bidirectional;
+  unsigned long long *ids;
+  size_t count;
+
+  init_standard_ladr();
+  index = compact_back_demod_init();
+  first = indexed_clause("p(f(a),g(b)).");
+  second = indexed_clause("q(h(f(c))).");
+  irrelevant = indexed_clause("r(k(d)).");
+  CHECK(compact_back_demod_add(index, first), "add first clause");
+  CHECK(compact_back_demod_add(index, second), "add second clause");
+  CHECK(compact_back_demod_add(index, irrelevant), "add irrelevant clause");
+  CHECK(!compact_back_demod_add(index, first), "reject duplicate proof ID");
+
+  demod = indexed_clause("f(x) = x.");
+  ids = compact_back_demod_candidate_ids(index, demod, ORIENTED, &count);
+  CHECK(count == 2, "root-symbol posting finds both possible redex clauses");
+  CHECK(ids != NULL && ids[0] == second->id && ids[1] == first->id,
+        "candidate IDs are in decreasing proof-ID order");
+  safe_free(ids);
+
+  bidirectional = indexed_clause("k(x) = g(x).");
+  ids = compact_back_demod_candidate_ids(index, bidirectional,
+                                         LEX_DEP_BOTH, &count);
+  CHECK(count == 2, "bidirectional query merges both source symbols");
+  CHECK(ids != NULL && ids[0] == irrelevant->id && ids[1] == first->id,
+        "merged candidates remain unique and decreasing");
+  safe_free(ids);
+
+  CHECK(compact_back_demod_remove(index, second->id), "remove live clause");
+  CHECK(!compact_back_demod_remove(index, second->id), "reject double remove");
+  ids = compact_back_demod_candidate_ids(index, demod, ORIENTED, &count);
+  CHECK(count == 1 && ids[0] == first->id,
+        "retired postings are ignored");
+  safe_free(ids);
+
+  compact_back_demod_note_exact_tests(index, 3);
+  compact_back_demod_get_stats(index, &stats);
+  CHECK(stats.active == 2 && stats.retired == 1 && stats.physical == 3,
+        "lifecycle counters are exact");
+  CHECK(stats.queries == 3 && stats.exact_tests == 3,
+        "query accounting is exact");
+  CHECK(stats.total_bytes > 0 && stats.peak_bytes >= stats.total_bytes,
+        "resident byte accounting is present");
+
+  compact_back_demod_free(index);
+  delete_clause(first);
+  delete_clause(second);
+  delete_clause(irrelevant);
+  delete_clause(demod);
+  delete_clause(bidirectional);
+
+  if (Failures != 0) {
+    fprintf(stderr, "compact_back_demod_test: %d failure(s)\n", Failures);
+    return 1;
+  }
+  printf("compact_back_demod_test: PASS\n");
+  return 0;
+}

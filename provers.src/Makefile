@@ -105,6 +105,7 @@ PRVR_OBJ = index_lits.o forward_subsume.o demodulate.o\
 	   rewrite_only_store.o\
 	   compact_rewrite.o\
 	   compact_unit_index.o\
+	   compact_back_demod.o\
 	   search.o\
 	   utilities.o\
 	   provers.o\
