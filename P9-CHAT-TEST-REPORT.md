@@ -1,0 +1,329 @@
+# `chat_test.in` compatibility and radical-memory evaluation
+
+## Scope and reproducibility
+
+This report evaluates old Prover9 compatibility, the packed hint index,
+DISCOUNT clause-frontier policies, the balanced collective frontier, and the
+new eager-interreduced demodulation path on the same proof-producing input.
+The objective is not merely to lower resident memory: a useful mode must keep
+the hint semantics, remain scheduler-live, and either reproduce the old proof
+or provide an accurately characterized alternative trajectory.
+
+The input is `/project/bob/chat_test.in`:
+
+```text
+size:   7,638,308 bytes
+SHA256: 9781ee07691bc62e01f67534208620ca0be3f026f55248a227e9161f1ed17e6c
+hints:  88,494 total records
+```
+
+`LADR-2026-6A` commit `b36df4c` is the pre-project old-P9 baseline.  Its
+benchmark binary has SHA256
+`bcdf6bafbf608fde463fd43ef541891813f5c49a2d5153711c54925e98d76bcc`.
+The two-posting packed predecessor used below has SHA256
+`a7b93205fb3185344adc55b4b1cf68e0e23e37f509798962ca8ff0bbe18585f9`.
+The structural-fingerprint build at commit `11f7226` has SHA256
+`47fcaf7254ce6cced64688ca01436742e85e391dfe48bce3fe01b9d6c0fa6cf1`.
+The mmap-statistics fix at commit `edd4ff0` has SHA256
+`cc53da43c1affc80706575b9def34be967a25ff1fd00a8cd81277ce71b210717`.
+The current build at commit `3a0dd66`, including the dense-record packing
+follow-up, has SHA256
+`b19e48d224f6d5c3deb9f1a0182168deb051aa4d0cf0f561c197a9ae7689bd15`.
+
+Runs use `/usr/bin/time -v`, an internal Prover9 limit, an external `timeout`,
+and one explicitly pinned CPU per process.  The machine has 23 GiB RAM; three
+cases were run concurrently on distinct physical CPUs.  CPU seconds are more
+portable than wall time, but even CPU measurements contain normal contention
+and frequency noise.  Search counters are the semantic comparison authority.
+
+The reproducible harness is `test.src/chat_test_matrix.sh`.  For example:
+
+```sh
+CHAT_CASES='old_otter new_otter_fpa' CHAT_CPU=0 \
+  ./test.src/chat_test_matrix.sh /project/bob/chat_test.in \
+  /project/chat-test-results/full-baseline 10000 900 2048 960
+
+CHAT_CASES='new_otter_packed' CHAT_CPU=1 \
+  ./test.src/chat_test_matrix.sh /project/bob/chat_test.in \
+  /project/chat-test-results/full-packed 10000 900 2048 960
+```
+
+Harness status `0` means normal proof termination, `4` means `max_seconds`,
+and `5` means `max_given`.  A periodic report can interrupt an inference
+batch; only terminal equal-given states support exact trajectory comparison.
+
+## Exact old and compatibility proof baseline
+
+| Mode | Result | Given | Generated | Kept | User CPU | Wall | Peak RSS |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Old P9 OTTER/FPA | proof | 2,945 | 8,248,034 | 272,789 | 765.69 s | 14:16 | 550,400 KiB |
+| Current OTTER/FPA | proof | 2,945 | 8,248,034 | 272,789 | 778.16 s | 14:28 | 445,576 KiB |
+
+The old proof has length 7,051 and uses 3,231 new hints.  `prooftrans
+parents_only` reconstructs both proofs.  Apart from the timing comment, the
+old and current proof sections are identical.  `directproof` is not applicable
+to this proof because that utility requires all paramodulations to be unit;
+the failure is a documented utility-domain limitation, not a bad proof.
+
+Current compatibility mode saves 104,824 KiB, or **19.0%**, at the exact same
+proof boundary.  CPU is essentially flat on this machine: current P9 is 1.6%
+slower in the complete run, within the mixture of allocator wins and changed
+low-level costs.  This is a useful compatibility improvement but not the
+radical 80--90% memory target.
+
+## Full-hint guarded policy runs before the fingerprint optimization
+
+These runs use the same full input but stop on time, so they characterize
+throughput and memory only at the reported prefix.  They must not be read as
+proof-boundary RAM values.
+
+| Mode | Limit | Last reported Given | Matched hints | User CPU | Peak RSS |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Packed OTTER | 900 s | 1,475 | 467 | 864.16 s | 170,852 KiB |
+| DISCOUNT clauses, selected demodulation | 900 s | 1,427 | 2,369 | 870.24 s | 98,632 KiB |
+| DISCOUNT clauses, eager-interreduced | 900 s | 1,379 | 428 | 869.81 s | 99,592 KiB |
+| Collective balanced, selected | 600 s | 667 | 1,515 | 587.01 s | 90,656 KiB |
+| Collective balanced, eager-interreduced | 600 s | 665 | 269 | 587.54 s | 90,528 KiB |
+
+Important conclusions:
+
+- Packed hint storage is already a major memory improvement, but ordinary
+  matching dominates CPU.
+- Dense clause-frontier storage reaches roughly 99 MiB at these prefixes,
+  about 82% below the old proof RSS even though the search boundary differs.
+- Selected demodulation follows the strongest hint trajectory on this input.
+  Eager demodulation contracts more aggressively but removes or changes many
+  clauses that would match the supplied historical hint chain.
+- Balanced collective scheduling is bounded and memory-efficient, but it
+  advances this proof substantially more slowly than the clause frontier.
+- Eager-interreduced DISCOUNT crossed the Osborn rewrite-debt threshold twice.
+  Both drains exited, ordinary inference continued, and 52 bounded drain
+  yields were observed.  The prior permanent-drain liveness bug is fixed.
+
+At the 840-second eager report, dense passive storage held 57,636 compressed
+records in 4.66 MB of logical bodies and justifications; its arena backing was
+9.08 MB.  The compact rewrite bank and packed hints account for much of the
+remaining roughly 99 MB RSS.  This confirms that millions of ordinary full
+passive clause objects are no longer the memory growth law.
+
+## Packed matcher diagnosis and correction
+
+At the 1,475-given packed prefix, ordinary matching reported:
+
+```text
+queries=825,031
+posting_candidates=4,643,264,315
+unique_candidates=870,886
+materialized=839,323
+match clock=531.197 seconds
+```
+
+The prior fix bounded matching to the two rarest exact posting lists, but the
+second list was still broad.  Most CPU scanned IDs that could be rejected by
+the remaining exact shallow query features.
+
+Commit `11f7226` stores a conservative 64-bit structural fingerprint for each
+hint.  Ordinary matching now scans only the rarest exact posting, then tests
+all query features against the fingerprint in O(1).  Collisions admit extra
+candidates only.  Profile/path masks and authoritative exact subsumption
+remain unchanged, and back-demodulation continues to intersect every safe
+correlated feature.
+
+### Equal-300-given performance
+
+| Mode | Two postings | Fingerprint | CPU change | Fingerprint RSS |
+| --- | ---: | ---: | ---: | ---: |
+| Packed OTTER | 48.02 s | 42.17 s | -12.2% | 90,504 KiB |
+| DISCOUNT selected | 55.24 s | 49.55 s | -10.3% | 90,636 KiB |
+| DISCOUNT eager-interreduced | 52.83 s | 44.23 s | -16.3% | 90,632 KiB |
+| Collective balanced selected | 126.92 s | 114.76 s | -9.6% | 90,652 KiB |
+| Collective balanced eager | 105.83 s | 100.20 s | -5.3% | 90,652 KiB |
+
+For packed OTTER, ordinary posting visits fall from 220.9 million to 82.6
+million and its match clock falls from 22.65 to 17.32 seconds.  The fingerprint
+rejects 75.7 million seed IDs.  The extra fingerprint capacity is 1 MiB in
+this run and does not measurably increase peak RSS.
+
+Every available exact terminal comparison agrees before and after the change:
+generated and kept clauses, hint results, compact-rewrite outcomes, collective
+frontier state, preview calls/results, discovery promotions, and final
+selection statistics.  The full packed/DISCOUNT regression suite, AnyConst
+cases, hint checkpoint/restore, dense passive tests, and focused proof tests
+also pass.
+
+### FPA as a DISCOUNT middle ground
+
+Packed hints minimize the resident hint bank, but they are not required by
+the dense passive store.  A fresh equal-300-given comparison at commit
+`edd4ff0` measured the following selected-demodulation configurations:
+
+| Hint index | Given | Generated | Kept | User CPU | Peak RSS |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| FPA | 301 | 122,541 | 15,039 | 27.72 s | 151,056 KiB |
+| Packed | 301 | 122,541 | 15,039 | 50.03 s | 90,636 KiB |
+
+Thus FPA is 44.6% faster at this prefix, while packed saves 60,420 KiB
+(40.0% of FPA's resident set).  A second pair with `hint_trace` enabled
+produced 15,039 byte-identical committed-candidate records with the same
+SHA256, `505085c14b0576018a363cdad16beafddbf04aa9a03b6d2c0cf8f1cd2deda60c`.
+Packed marks one additional hint redundant during initial duplicate
+detection (25,689 rather than 25,688), but this does not alter any committed
+candidate through the tested prefix.  FPA+dense is therefore a useful
+throughput/RAM middle ground when the extra roughly 60 MiB is acceptable.
+
+### Follow-up matcher prototypes not promoted
+
+The remaining packed CPU cost was investigated rather than hidden.  Three
+prototypes were measured and deliberately left out of the branch:
+
+- Literal-local composite postings cut ordinary posting visits at 300 givens
+  from 82.6 million to 8.19 million, but materialized candidates fell only
+  from 135,410 to 130,218.  Index construction and lookup raised total CPU
+  from 42.17 to 45.80 seconds.
+- A bounds-checked matcher over serialized unit bodies cut materializations
+  to 13,815.  Three simultaneous predecessor/new pairs had medians of 44.12
+  and 43.84 seconds, only a 0.6% change, with identical RSS.  All 5,737
+  committed `HINT_TRACE` records were byte-identical, but the codec complexity
+  did not earn its keep.
+- Increasing exact match-feature depth from two to three raised the same
+  bounded run to 50.58 seconds.  More broad/stale memberships and a more
+  saturated 64-bit fingerprint outweighed the extra structural information.
+
+These results narrow the next CPU project: another shallow posting tweak or
+bounded decoded cache is unlikely to close a 2.72-times gap.  A worthwhile
+design needs either a compact discrimination structure that answers actual
+one-way matching constraints, or an exact matcher that operates directly on
+the serialized representation substantially faster than materialize/match/
+recompress.  It must be judged against current FPA, not merely against the
+former packed implementation.
+
+## Final post-fingerprint long runs
+
+Three 2,400-CPU-second guarded runs use commit `11f7226` and the exact same
+full input.  The external times below are from `/usr/bin/time`; status 4 is
+the normal Prover9 `max_seconds` exit.
+
+| Mode | Result | Given | Generated | Kept | User CPU | Wall | Peak RSS |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Packed OTTER | proof | 2,945 | 8,248,034 | 272,789 | 2,119.65 s | 37:11 | 444,080 KiB |
+| DISCOUNT clauses, selected | CPU limit | 2,529 | 6,748,855 | 451,706 | 2,310.14 s | 40:03 | 153,088 KiB |
+| DISCOUNT clauses, eager-interreduced | CPU limit | 2,467 | 6,351,482 | 234,066 | 2,325.17 s | 40:03 | 204,960 KiB |
+
+Packed OTTER terminates at exactly the old/current-FPA boundary.  Its proof
+has the same 7,051 clauses in the same order; only the timing comment differs,
+and `prooftrans parents_only` succeeds.  It saves 19.3% from old P9 but just
+0.3% from current FPA.  Its 2,119.65 user seconds are 2.72 times current
+FPA's 778.16 seconds.  Packed storage is therefore semantically compatible,
+but it is not a competitive compatibility default on this input yet.
+
+Selected DISCOUNT is the best measured radical mode: its peak is 72.2% below
+old P9's proof RSS while retaining 448,838 dense passives at termination.
+It does not prove within the guard.  Eager interreduction retains only 179,527
+dense passives, but its repeated rule-repair work and transient materialized
+state produce a higher 204,960-KiB peak.  It enters and exits rewrite drain
+eight times, yields 926 times, and ends live with ordinary inference still
+advancing; this is contraction overhead, not the former permanent-drain bug.
+
+The terminal `Hint match stats: ... matched=` value is a snapshot over hints
+that remain active, not a cumulative count of historical matches.  It is 452
+for the packed proof (whose proof itself records 3,231 new hints), 3,666 for
+selected, and 680 for eager.  This is why crossing an old run's displayed
+`matched` number neither implies the same proof path nor guarantees a proof.
+
+### A report-driven mmap residency bug
+
+The selected terminal report shows 56,511,278 bytes of serialized passive
+records in a 68,952,417-byte mmap arena.  Before commit `edd4ff0`, every
+periodic statistics report visited every active dense passive and verified
+the CRC over its entire archived body merely to recompute three payload
+totals.  This faulted the nominally cold mapping back into the process and
+made reporting frequency determine RSS.  The effect scales with all active
+passive bodies and is therefore material for week-long searches.
+
+Commit `edd4ff0` records body, justification, and logical-body sizes in the
+dense selector metadata and maintains checked active totals on insertion,
+deactivation, reactivation, reset, and compaction.  Reports now obtain the
+same values in O(1) without reading the mmap body arena.  The cost is 16 bytes
+per allocated selector record: at the 300-given differential point, selector
+storage grows from 1,045,128 to 1,343,736 bytes, while all search counters,
+final hint state, and reported payload bytes are exact.  The full regression
+suite passes.  Long report/no-report results for this build are recorded
+below after both guarded processes terminate.
+
+An intentionally aggressive `report=1` check emitted 51 full statistics
+blocks through the same 300-given boundary.  It preserved Generated=122,541,
+Kept=15,039 and the final hint state, and peaked at 90,500 KiB versus 90,636
+KiB for `report=30`.  Statistics frequency no longer controls passive mmap
+residency.  Formatting and writing the extra reports did raise user CPU from
+50.03 to 55.21 seconds, so this is a memory regression check rather than a
+recommended reporting interval.
+
+Commit `3a0dd66` then packs the four-valued dense-passive `semantics` field
+into two unused flag bits.  This reduces the selector record from 72 to 64
+bytes and halves the reporting fix's metadata surcharge from 16 to 8 bytes
+per allocated record.  At 300 givens, selector storage falls from 1,343,736
+to 1,194,432 bytes.  Generated/kept counters and final hint state remain
+exact; a regression cycles all four semantics values through direct
+deactivation/reactivation, selection, and compaction, and the full
+DISCOUNT test suite passes.
+
+## Current operational recommendation
+
+For compatibility-sensitive `chat_test` work, use current FPA OTTER.  It has
+the same search/proof, essentially the same proof-boundary RSS as packed, and
+is 2.72 times faster here:
+
+```text
+assign(search_loop,otter).
+assign(passive_store,full).
+assign(hint_index,fpa).
+assign(inference_frontier,clauses).
+assign(ancestor_store,off).
+```
+
+Use packed OTTER only when a larger hint bank demonstrably dominates FPA RAM;
+run a bounded prefix first because `chat_test` shows its remaining CPU cost.
+
+FPA can also be combined with dense DISCOUNT if packed matching is the
+bottleneck and roughly 60 MiB of additional RAM is affordable on this hint
+bank:
+
+```text
+assign(search_loop,discount).
+assign(passive_store,dense).
+assign(discount_demodulation,selected).
+assign(hint_index,fpa).
+assign(inference_frontier,clauses).
+assign(ancestor_store,mmap).
+assign(sos_limit,-1).
+```
+
+For the best radical-memory/hint balance measured so far on `chat_test`, use
+clause-frontier DISCOUNT with selected demodulation:
+
+```text
+assign(search_loop,discount).
+assign(passive_store,dense).
+assign(discount_demodulation,selected).
+assign(hint_index,packed).
+assign(inference_frontier,clauses).
+assign(ancestor_store,mmap).
+assign(sos_limit,-1).
+```
+
+Use eager-interreduced demodulation when contraction is more important than
+replaying a historical hint chain:
+
+```text
+assign(discount_demodulation,eager_interreduced).
+assign(rewrite_refresh_high_water,4096).
+assign(rewrite_refresh_low_water,3072).
+assign(rewrite_refresh_drain_burst,64).
+assign(rewrite_refresh_hot_ratio,7).
+assign(rewrite_refresh_raw_budget,64).
+assign(rewrite_refresh_inference_ratio,8).
+```
+
+For long mmap-backed runs, place `TMPDIR` on a filesystem with sufficient
+space.  Measure anonymous and file-backed RSS through `/proc/<pid>/smaps` or a
+cgroup; Prover9's historical `Megabytes` counter does not include every mmap.
