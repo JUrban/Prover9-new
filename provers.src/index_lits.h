@@ -70,4 +70,10 @@ void write_fpa_lits_index(const char *dir);
 
 BOOL restore_fpa_lits_index(const char *dir);
 
+void configure_compact_unit_subsumption_audit(BOOL enabled);
+
+unsigned long long compact_unit_subsumption_audit_failures(void);
+
+void fprint_compact_unit_subsumption_audit(FILE *fp);
+
 #endif  /* conditional compilation of whole file */

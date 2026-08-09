@@ -88,6 +88,7 @@ struct prover_options {
     hint_trace,              // exact committed-candidate hint tuple
     compact_otter_audit,     // dual-run legacy/compact OTTER demodulation
     compact_otter_demodulation, // compact bank is authoritative in OTTER
+    compact_unit_subsumption_audit, // compare stable-ID/legacy unit answers
     collective_trace,        // one line per collective batch expansion
     collective_hint_probes,  // one bounded early expansion for hinted givens
     collective_promising_candidates, // raw-weight order within inference set

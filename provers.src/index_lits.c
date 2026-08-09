@@ -17,6 +17,7 @@
 */
 
 #include "index_lits.h"
+#include "compact_unit_index.h"
 
 /* Private definitions and types */
 
@@ -25,6 +26,54 @@ static Lindex  Nonunit_fpa_idx;       /* back unit del */
 
 static Lindex  Unit_discrim_idx;      /* unit fsub, unit del */
 static Di_tree Nonunit_features_idx;  /* nonunit fsub, nonunit bsub */
+
+static BOOL Compact_unit_subsumption_audit;
+static Compact_unit_index Compact_units;
+static unsigned long long Compact_unit_audit_failures;
+
+void configure_compact_unit_subsumption_audit(BOOL enabled)
+{
+  if (Compact_units != NULL)
+    fatal_error("configure_compact_unit_subsumption_audit: index is live");
+  Compact_unit_subsumption_audit = enabled;
+  Compact_unit_audit_failures = 0;
+}
+
+unsigned long long compact_unit_subsumption_audit_failures(void)
+{
+  return Compact_unit_audit_failures;
+}
+
+void fprint_compact_unit_subsumption_audit(FILE *fp)
+{
+  struct compact_unit_index_stats stats;
+  if (!Compact_unit_subsumption_audit)
+    return;
+  compact_unit_index_get_stats(Compact_units, &stats);
+  fprintf(fp,
+          "Compact_unit_subsumption_audit: failures=%llu, active=%llu, "
+          "peak=%llu, retired=%llu, physical=%llu, forward_queries=%llu, "
+          "back_queries=%llu, back_exact_tests=%llu, bytes=%llu, "
+          "peak_bytes=%llu.\n",
+          Compact_unit_audit_failures, stats.active, stats.peak,
+          stats.retired, stats.physical, stats.generalization_queries,
+          stats.instance_queries, stats.instance_exact_tests,
+          stats.total_bytes, stats.peak_bytes);
+}
+
+static void compact_unit_audit_mismatch(const char *operation, Topform query,
+                                        unsigned long long legacy,
+                                        unsigned long long compact)
+{
+  Compact_unit_audit_failures++;
+  fprintf(stderr,
+          "compact_unit_subsumption_audit: %s mismatch for query %llu "
+          "(legacy=%llu, compact=%llu)\n",
+          operation, query == NULL ? 0 : query->id, legacy, compact);
+  if (query != NULL)
+    fwrite_clause(stderr, query, CL_FORM_STD);
+  fatal_error("compact unit subsumption audit failed");
+}
 
 
 
@@ -251,6 +300,8 @@ void init_literals_index(int depth)
 				 DISCRIM_BIND, ORDINARY_UNIF, depth);
 
   Nonunit_features_idx = init_di_tree();
+  Compact_units = Compact_unit_subsumption_audit ?
+    compact_unit_index_init() : NULL;
 }  /* init_lits_index */
 
 /*************
@@ -270,6 +321,7 @@ void destroy_literals_index(void)
   lindex_destroy(Unit_discrim_idx);   Unit_discrim_idx = NULL;
   zap_di_tree(Nonunit_features_idx,
 	      feature_length());      Nonunit_features_idx = NULL;
+  compact_unit_index_free(Compact_units); Compact_units = NULL;
 }  /* lits_destroy_index */
 
 /*************
@@ -286,6 +338,14 @@ void index_literals(Topform c, Indexop op, Clock clock, BOOL no_fapl)
 {
   BOOL unit = (number_of_literals(c->literals) == 1);
   clock_start(clock);
+  if (unit && Compact_unit_subsumption_audit) {
+    BOOL ok = op == INSERT ? compact_unit_index_add(Compact_units, c) :
+                             compact_unit_index_remove(Compact_units, c->id);
+    if (!ok)
+      fatal_error(op == INSERT ?
+        "index_literals: duplicate compact unit" :
+        "index_literals: missing compact unit");
+  }
   if (!no_fapl || !positive_clause(c->literals))
     lindex_update(unit ? Unit_fpa_idx : Nonunit_fpa_idx, c, op);
 
@@ -316,6 +376,14 @@ void index_denial(Topform c, Indexop op, Clock clock)
 {
   BOOL unit = (number_of_literals(c->literals) == 1);
   clock_start(clock);
+  if (unit && Compact_unit_subsumption_audit) {
+    BOOL ok = op == INSERT ? compact_unit_index_add(Compact_units, c) :
+                             compact_unit_index_remove(Compact_units, c->id);
+    if (!ok)
+      fatal_error(op == INSERT ?
+        "index_denial: duplicate compact unit" :
+        "index_denial: missing compact unit");
+  }
   lindex_update(unit ? Unit_fpa_idx : Nonunit_fpa_idx, c, op);
   clock_stop(clock);
 }  /* index_denial */
@@ -381,6 +449,18 @@ Plist back_unit_deletable(Topform c)
 Topform forward_subsumption(Topform d)
 {
   Topform subsumer = forward_subsume(d, Unit_discrim_idx);
+  if (Compact_unit_subsumption_audit) {
+    Literals literal;
+    unsigned long long compact = 0;
+    for (literal = d->literals; literal != NULL && compact == 0;
+         literal = literal->next)
+      compact = compact_unit_generalization_first(
+        Compact_units, literal->atom, literal->sign, 0);
+    if ((subsumer == NULL ? 0 : subsumer->id) != compact)
+      compact_unit_audit_mismatch("forward", d,
+                                  subsumer == NULL ? 0 : subsumer->id,
+                                  compact);
+  }
   if (!subsumer)
     subsumer = forward_feature_subsume(d, Nonunit_features_idx);
   return subsumer;
@@ -405,6 +485,8 @@ Topform forward_subsumption_filter(Topform d,
                                                      void *arg),
                                    void *cb_arg)
 {
+  if (Compact_unit_subsumption_audit)
+    fatal_error("compact unit subsumption audit does not support ancestor_subsume");
   Topform subsumer = forward_subsume_filter(d, Unit_discrim_idx,
                                             accept_cb, cb_arg);
   if (!subsumer)
@@ -426,6 +508,23 @@ Return the list of clauses that can ar back subsumed by the given clause.
 Plist back_subsumption(Topform c)
 {
   Plist p1 = back_subsume(c, Unit_fpa_idx);
+  if (Compact_unit_subsumption_audit) {
+    unsigned long long *compact = NULL;
+    size_t compact_count = 0, at = 0;
+    Plist p;
+    if (number_of_literals(c->literals) == 1)
+      compact = compact_unit_instance_ids(
+        Compact_units, c->literals->atom, c->literals->sign, c->id,
+        &compact_count);
+    for (p = p1; p != NULL; p = p->next, at++)
+      if (at >= compact_count || ((Topform) p->v)->id != compact[at])
+        compact_unit_audit_mismatch(
+          "back", c, ((Topform) p->v)->id,
+          at < compact_count ? compact[at] : 0);
+    if (at != compact_count)
+      compact_unit_audit_mismatch("back", c, 0, compact[at]);
+    safe_free(compact);
+  }
 #if 0
   Plist p2 = back_subsume(c, Nonunit_fpa_idx);
 #else
