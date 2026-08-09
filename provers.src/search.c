@@ -70,6 +70,7 @@ static unsigned Rewrite_refresh_hot_streak = 0;
 static unsigned Rewrite_interreduce_streak = 0;
 static unsigned Rewrite_refresh_inference_streak = 0;
 static BOOL Rewrite_drain_mode = FALSE;
+static unsigned Rewrite_drain_streak = 0;
 static BOOL Resume_rewrite_cursor_ids = FALSE;
 static unsigned long long Resume_rewrite_hot_cursor_id = 0;
 static unsigned long long Resume_rewrite_general_cursor_id = 0;
@@ -1987,6 +1988,8 @@ Prover_options init_prover_options(void)
     init_parm("rewrite_refresh_high_water", 4096, 1, INT_MAX);
   p->rewrite_refresh_low_water =
     init_parm("rewrite_refresh_low_water", 3072, 0, INT_MAX);
+  p->rewrite_refresh_drain_burst =
+    init_parm("rewrite_refresh_drain_burst", 64, 1, INT_MAX);
   p->fpa_hash_threshold = init_parm("fpa_hash_threshold",   4,      0,   1000);
   p->discrim_hash_threshold = init_parm("discrim_hash_threshold", -1,  -1,  1000);
 
@@ -2751,6 +2754,7 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
               "rule_unchanged=%s, rule_collapsed=%s, debt=%s, "
               "overlap_visits=%s, dirty_marks=%s, debt_peak=%s, drain=%d, "
               "drain_entries=%s, drain_exits=%s, drain_turns=%s, "
+              "drain_burst=%d, drain_streak=%u, drain_yields=%s, "
               "inference_turns=%s.\n",
               comma_num(s.rewrite_interreduce_turns),
               comma_num(s.rewrite_interreduce_changed),
@@ -2763,6 +2767,9 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
               comma_num(s.rewrite_drain_entries),
               comma_num(s.rewrite_drain_exits),
               comma_num(s.rewrite_drain_turns),
+              parm(Opt->rewrite_refresh_drain_burst),
+              Rewrite_drain_streak,
+              comma_num(s.rewrite_drain_yields),
               comma_num(s.rewrite_inference_turns));
     }
   }
@@ -8717,6 +8724,7 @@ static BOOL update_rewrite_drain_mode(void)
   }
   else if (Rewrite_drain_mode && debt <= low) {
     Rewrite_drain_mode = FALSE;
+    Rewrite_drain_streak = 0;
     Stats.rewrite_drain_exits++;
     Rewrite_refresh_inference_streak = 0;
   }
@@ -8744,6 +8752,18 @@ static BOOL rewrite_refresh_turn(void)
     return FALSE;
   drain = update_rewrite_drain_mode();
   inference_ratio = (unsigned) parm(Opt->rewrite_refresh_inference_ratio);
+  /* A high-water mark raises repair priority; it must never become an
+     unbounded exclusive loop.  Interreduction can legitimately replenish
+     its own exact debt when a composed replacement overlaps another rule.
+     Yield one ordinary scheduler turn after every bounded urgent burst so
+     givens and collective descriptors remain fair even when debt does not
+     converge. */
+  if (drain && Rewrite_drain_streak >=
+                 (unsigned) parm(Opt->rewrite_refresh_drain_burst)) {
+    Rewrite_drain_streak = 0;
+    Stats.rewrite_drain_yields++;
+    return FALSE;
+  }
   if (!drain && Rewrite_refresh_inference_streak < inference_ratio)
     return FALSE;
   memset(&view, 0, sizeof(view));
@@ -8777,6 +8797,7 @@ static BOOL rewrite_refresh_turn(void)
   if (view.id == 0) {
     if (drain) {
       Stats.rewrite_drain_turns++;
+      Rewrite_drain_streak++;
       return TRUE;
     }
     Rewrite_refresh_inference_streak = 0;
@@ -8842,6 +8863,7 @@ static BOOL rewrite_refresh_turn(void)
   }
   if (drain) {
     Stats.rewrite_drain_turns++;
+    Rewrite_drain_streak++;
     update_rewrite_drain_mode();
   }
   else
@@ -12165,6 +12187,7 @@ void write_checkpoint(void)
     fprintf(fp, "rewrite_drain_entries %llu\n", Stats.rewrite_drain_entries);
     fprintf(fp, "rewrite_drain_exits %llu\n", Stats.rewrite_drain_exits);
     fprintf(fp, "rewrite_drain_turns %llu\n", Stats.rewrite_drain_turns);
+    fprintf(fp, "rewrite_drain_yields %llu\n", Stats.rewrite_drain_yields);
     fprintf(fp, "rewrite_inference_turns %llu\n",
             Stats.rewrite_inference_turns);
     fprintf(fp, "rewrite_refresh_stale_peak %llu\n",
@@ -12368,6 +12391,7 @@ void write_checkpoint(void)
     fprintf(fp, "rewrite_refresh_inference_streak %u\n",
             Rewrite_refresh_inference_streak);
     fprintf(fp, "rewrite_drain_mode %u\n", Rewrite_drain_mode ? 1U : 0U);
+    fprintf(fp, "rewrite_drain_streak %u\n", Rewrite_drain_streak);
     fprintf(fp, "hint_state_epoch %llu\n", hint_state_epoch());
     fprintf(fp, "user_seconds %.2f\n", user_seconds());
     /* Save Low selector cycle state for deterministic resume */
@@ -13155,6 +13179,8 @@ void resume_load_clauses(const char *dir)
   rewind(fp); (void) read_metadata_ull_if_present(
     fp, "rewrite_drain_turns", &Stats.rewrite_drain_turns);
   rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "rewrite_drain_yields", &Stats.rewrite_drain_yields);
+  rewind(fp); (void) read_metadata_ull_if_present(
     fp, "rewrite_inference_turns", &Stats.rewrite_inference_turns);
   rewind(fp); (void) read_metadata_ull_if_present(
     fp, "rewrite_refresh_stale_peak", &Stats.rewrite_refresh_stale_peak);
@@ -13547,6 +13573,10 @@ void resume_load_clauses(const char *dir)
     rewind(fp);
     if (read_metadata_ull_if_present(fp, "rewrite_drain_mode", &value))
       Rewrite_drain_mode = value != 0;
+    value = 0;
+    rewind(fp);
+    if (read_metadata_ull_if_present(fp, "rewrite_drain_streak", &value))
+      Rewrite_drain_streak = value > UINT_MAX ? UINT_MAX : (unsigned) value;
   }
   rewind(fp); Resume_hint_epoch = read_metadata_ull(fp, "hint_state_epoch");
   if (Resume_hint_epoch == 0)
@@ -14540,6 +14570,7 @@ Prover_results search(Prover_input p)
     Rewrite_interreduce_streak = 0;
     Rewrite_refresh_inference_streak = 0;
     Rewrite_drain_mode = FALSE;
+    Rewrite_drain_streak = 0;
     Resume_rewrite_cursor_ids = FALSE;
     Resume_rewrite_hot_cursor_id = 0;
     Resume_rewrite_general_cursor_id = 0;

@@ -163,6 +163,18 @@ grep -q 'THEOREM PROVED' "$test_tmp/interreduce.out"
   > "$test_tmp/interreduce-proof.out"
 grep -q 'end of proof' "$test_tmp/interreduce-proof.out"
 
+# High-water drain is a priority boost, never an exclusive phase.  With two
+# dirty rules and a one-turn burst, the theorem requires a forced scheduler
+# yield before all rewrite debt has been repaired.
+"$repo_dir/bin/prover9" < "$repo_dir/test.src/rewrite_drain_liveness.in" \
+  > "$test_tmp/drain-liveness.out" 2> "$test_tmp/drain-liveness.err" || true
+grep -Eq 'Rewrite_interreduce: .*debt_peak=2, .*drain_burst=1, .*drain_yields=[1-9][0-9]*' \
+  "$test_tmp/drain-liveness.out"
+grep -q 'THEOREM PROVED' "$test_tmp/drain-liveness.out"
+"$repo_dir/bin/prooftrans" parents_only < "$test_tmp/drain-liveness.out" \
+  > "$test_tmp/drain-liveness-proof.out"
+grep -q 'end of proof' "$test_tmp/drain-liveness-proof.out"
+
 # Save immediately before the bounded repair work.  Compact-bank counters,
 # the logical next-record cursor IDs, and all semantic drain outcomes must
 # survive dense-store reconstruction.  The physical scanned-record count is

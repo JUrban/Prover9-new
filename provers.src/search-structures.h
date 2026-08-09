@@ -259,6 +259,7 @@ struct prover_options {
     rewrite_refresh_inference_ratio, // inference turns per background repair
     rewrite_refresh_high_water, // stale rewrite rules entering drain mode
     rewrite_refresh_low_water,  // stale rewrite rules leaving drain mode
+    rewrite_refresh_drain_burst, // maximum consecutive urgent repair turns
     fpa_hash_threshold,    // FPA trie hash table threshold (default 16, 0=off)
     discrim_hash_threshold; // discrim tree hash table threshold (default 16, 0=off)
 
@@ -387,6 +388,7 @@ struct prover_stats {
     rewrite_drain_entries,
     rewrite_drain_exits,
     rewrite_drain_turns,
+    rewrite_drain_yields,
     rewrite_inference_turns,
     rewrite_refresh_stale_current,
     rewrite_refresh_stale_peak,
