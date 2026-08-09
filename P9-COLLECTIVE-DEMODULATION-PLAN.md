@@ -230,10 +230,14 @@ When a new rule is admitted, the scheduler performs in order:
 4. spend a bounded quota on hot passive repair; and
 5. resume descriptor and given scheduling.
 
-Bursts of rules enter drain mode before the rewrite-work high-water mark can
-be exceeded and leave it only below a lower watermark.  Mandatory ordinary
-passive repair prevents an endless stream of hinted rules from starving stale
-nonhint passives.  Rewrite debt and inference debt are reported independently.
+Bursts of rules enter urgent mode at the rewrite-work high-water mark and
+leave it below a lower watermark.  Urgent mode has a hard consecutive-turn
+bound and then yields to the ordinary scheduler; a self-replenishing rule
+queue must never become an exclusive phase.  Primary rules seed exact overlap
+repair, while replacements enter the live bank without recursively seeding a
+second urgent wave.  Mandatory ordinary passive repair prevents an endless
+stream of hinted rules from starving stale nonhint passives.  Rewrite debt and
+inference debt are reported independently.
 
 ## Options and controls
 
@@ -246,6 +250,7 @@ assign(discount_demodulation,eager_interreduced).% production target
 
 assign(rewrite_refresh_high_water,4096).
 assign(rewrite_refresh_low_water,3072).
+assign(rewrite_refresh_drain_burst,64).
 assign(rewrite_refresh_hot_ratio,7).
 assign(rewrite_refresh_raw_budget,64).
 assign(rewrite_refresh_inference_ratio,8).

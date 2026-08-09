@@ -51,6 +51,7 @@ set(back_demod_hints).
 
 assign(rewrite_refresh_high_water,4096).
 assign(rewrite_refresh_low_water,3072).
+assign(rewrite_refresh_drain_burst,64).
 assign(rewrite_refresh_hot_ratio,7).
 assign(rewrite_refresh_raw_budget,64).
 assign(rewrite_refresh_inference_ratio,8).
@@ -139,10 +140,21 @@ repair turn per eight inference turns.  Within repair work, the default
 `rewrite_refresh_hot_ratio=7` gives short bursts to rule/hinted work and then
 forces a general turn, so a finite ordinary stale set is eventually visited.
 
-If exact dirty-rule debt reaches `rewrite_refresh_high_water`, inference
-pauses and the scheduler drains only dirty rules until debt is at or below the
-low watermark.  The nonempty high/low band prevents chattering.  Selection
-itself always normalizes a stale clause, independently of background lag.
+If exact dirty-rule debt reaches `rewrite_refresh_high_water`, the scheduler
+raises dirty rules to urgent priority.  Urgent work is limited to
+`rewrite_refresh_drain_burst` consecutive turns and then yields one ordinary
+search turn even if debt has not fallen.  The nonempty high/low band prevents
+chattering, while the burst bound prevents a self-replenishing composition
+queue from starving givens and collective descriptors.  Selection itself
+always normalizes a stale clause, independently of background lag.
+
+A primary inferred demodulator starts one exact backward-composition wave.
+A composed replacement is installed immediately, back-demodulates hints, and
+advances the rewrite epoch, but it does not recursively start another urgent
+rule-only wave.  Further rule normalization proceeds through the bounded fair
+background/general lane.  This preserves current-bank forward rewriting and
+hint behavior without requiring transitive composition closure before search
+can continue.
 
 A changed cold passive is copied with a rewrite justification and returned to
 the authoritative clause pipeline.  Hint matching, selector weights,
@@ -171,7 +183,8 @@ The important new report lines are:
 Discount_demodulation: ... admitted=..., retired=..., selected=..., bytes=...
 Compact_rewrite: ... physical=..., compactions=..., occurrences=..., ...
 Rewrite_refresh: epoch=..., inference_ratio=..., stale=..., lag_max=..., ...
-Rewrite_interreduce: ... overlap_visits=..., dirty_marks=..., debt=..., ...
+Rewrite_interreduce: ... overlap_visits=..., dirty_marks=...,
+  cascade_suppressed=..., debt=..., drain_burst=..., drain_yields=..., ...
 ```
 
 Interpretation:
@@ -179,11 +192,18 @@ Interpretation:
 - `current` under `Discount_demodulation` is the number of cold proof shells;
 - `Compact_rewrite current` includes cold and selected/active live rules;
 - `dirty_marks` counts exact, coalesced rule candidates;
+- `cascade_suppressed` counts demodulators admitted while repairing a rule;
+  they enter the live bank and rewrite hints but do not recursively seed an
+  urgent rule-only wave;
 - `debt` is the current dirty cold-rule count, not all stale passives;
 - `stale` is all passives not normalized at the latest rewrite epoch;
 - `lag_max` can be large with ratio 8; selection remains exact;
+- `drain_yields` proves the ordinary scheduler was allowed to run while debt
+  remained urgent; a long run with a fixed `Given` count and increasing drain
+  turns is a liveness failure;
 - repeated nonzero `drain_entries` with little useful composition suggests
-  lowering rule generation or retuning the watermarks;
+  lowering rule generation or retuning the watermarks, but can no longer
+  block all inference;
 - `physical` far above `current` should be temporary because compact rebuilds
   reclaim tombstones.
 
@@ -202,6 +222,54 @@ TMPDIR=/local/p9-tmp /usr/bin/time -v /path/to/prover9 < osborn.in \
 
 Do not rely on Prover9's `max_megs` alone as an external resident-memory cap;
 also sample `/proc/<pid>/smaps_rollup` or use an appropriate cgroup limit.
+
+## Osborn drain incident and correction
+
+The six-hour full-hint run
+`bob/rr_osbe.out2-unl-rad-coll-bal1-demod1.gz` exposed a failure that the
+bounded prefixes did not reach.  Once exact rule debt reached the default
+high-water mark, every repaired rule admitted a replacement that dirtied one
+other rule.  Debt remained at 4,095 and the exclusive drain never exited.
+
+From the two-hour report through the six-hour report:
+
+- `Given` remained exactly 974;
+- rewrite inference turns remained exactly 3,184,094;
+- matched hints remained exactly 610;
+- new demodulators rose from 200,829 to 683,729;
+- ancestor-store payload rose from 2.36 GB to 14.52 GB;
+- RSS rose from 2.65 GB to 14.53 GB.
+
+The rising `Generated` and `Kept` counters were replacement clauses, not
+search progress.  Packed hint back-demodulation amplified the cost: it kept
+querying for every replacement after its successful rewrite count had stopped
+changing.
+
+Commits `ce12a97` and `2abf74c` correct the two independent causes:
+
+1. urgent drain yields after a configurable bounded burst; and
+2. a composed replacement cannot recursively seed another urgent rule wave.
+
+The regression suite now includes a live-debt proof that requires a drain
+yield and a two-stage composition case that would previously propagate the
+replacement cascade.  A 500-given Osborn stress run used deliberately low
+32/16 watermarks and an eight-turn burst.  At the 120-second report it had
+advanced to 365 givens and 359,221 inference turns, all six drain entries had
+exited, debt was 8, ancestor data was 0.60 MB, and RSS was 47.7 MB.  The
+180-second capped process peaked at 54.3 MB RSS.  This is bounded-prefix
+evidence, not a forecast that the full week-long search will remain at that
+absolute size.
+
+Do not use a binary ending at commit `e3e9e6a` for a full
+`eager_interreduced` run.  Use `2abf74c` or later and leave the new burst at
+its default initially:
+
+```text
+assign(rewrite_refresh_high_water,4096).
+assign(rewrite_refresh_low_water,3072).
+assign(rewrite_refresh_drain_burst,64).
+assign(rewrite_refresh_inference_ratio,8).
+```
 
 ## Bounded acceptance results
 

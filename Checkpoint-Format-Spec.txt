@@ -139,10 +139,15 @@ Keys (in order as written):
   rewrite_overlap_visits <ull> Exact reverse-occurrence matches considered
   rewrite_overlap_dirty_marks <ull>
                               Newly coalesced rule-interreduction records
+  rewrite_cascade_suppressed <ull>
+                              Replacement admissions that did not seed a
+                              recursive urgent rule-only wave
   rewrite_debt_peak <ull>     Peak stale delayed-demodulator count
   rewrite_drain_entries <ull>
   rewrite_drain_exits <ull>
   rewrite_drain_turns <ull>
+  rewrite_drain_yields <ull>  Ordinary scheduler turns forced between
+                              bounded urgent rewrite bursts
   rewrite_inference_turns <ull>
                               Compact rewrite repair/scheduler counters
   collective_batches_created <ull>
@@ -194,6 +199,8 @@ Keys (in order as written):
   rewrite_refresh_inference_streak <ull>
                               Inference turns since background repair
   rewrite_drain_mode <ull>   Rewrite scheduler phase and hysteresis state
+  rewrite_drain_streak <ull> Consecutive turns used in the current bounded
+                              urgent rewrite burst
   hint_state_epoch <ull>     Packed/exact hint-state epoch
   user_seconds <float>       User CPU time at checkpoint (%.2f format)
   low_selector <string>      Given-clause selection cycle state: current
