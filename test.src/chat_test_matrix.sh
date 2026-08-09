@@ -9,6 +9,7 @@ max_seconds=${4:-120}
 max_megs=${5:-2048}
 wall_seconds=${6:-$((max_seconds + 60))}
 report_seconds=${CHAT_REPORT_SECONDS:-30}
+cpu=${CHAT_CPU:-0}
 new_prover=${CHAT_NEW_PROVER:-"$repo_dir/bin/prover9"}
 old_prover=${CHAT_OLD_PROVER:-/project/Prover9-old-LADR-2026-6A/bin/prover9}
 all_cases='old_otter new_otter_fpa new_otter_packed discount_clauses_selected discount_clauses_eager collective_balanced_selected collective_balanced_legacy collective_balanced_eager'
@@ -35,6 +36,7 @@ sha256sum "$input" "$new_prover" "$old_prover" > "$output_dir/hashes.txt"
   echo "max_megs=$max_megs"
   echo "wall_seconds=$wall_seconds"
   echo "report_seconds=$report_seconds"
+  echo "cpu=$cpu"
   echo "cases=$selected_cases"
   echo "new_prover=$new_prover"
   echo "old_prover=$old_prover"
@@ -167,7 +169,7 @@ run_case()
   status=0
   if TMPDIR="$output_dir/tmp" /usr/bin/time -v -o "$output_dir/$name.time" \
        timeout --signal=TERM --kill-after=10 "$wall_seconds" \
-       taskset -c 0 "$prover" < "$output_dir/$name.in" \
+       taskset -c "$cpu" "$prover" < "$output_dir/$name.in" \
        > "$output_dir/$name.out" 2> "$output_dir/$name.err"; then
     status=0
   else
