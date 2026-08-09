@@ -92,6 +92,7 @@ int main(void)
   for (i = 0; i < CLAUSES; i++) {
     Topform c = get_topform();
     c->id = (unsigned long long) i + 1;
+    c->semantics = i % 4;
     insert_into_sos2(c, sos);
   }
   check_payload(1, CLAUSES, "payload totals after insertion");
@@ -100,6 +101,8 @@ int main(void)
     unsigned long long total = range_sum(1, CLAUSES);
     if (!dense_passive_deactivate_id(CLAUSES, &view))
       fail("payload test deactivation failed");
+    if (view.semantics != (CLAUSES - 1) % 4)
+      fail("packed semantics changed during direct deactivation");
     check_payload_value(total - CLAUSES,
                         "payload totals after direct deactivation");
     if (!dense_passive_reactivate_id(
@@ -112,7 +115,7 @@ int main(void)
     char *type = NULL;
     Topform c = get_given_clause2(sos, i, NULL, &type);
     if (c == NULL || c->id != (unsigned long long) i + 1 ||
-        strcmp(type, "A") != 0)
+        c->semantics != i % 4 || strcmp(type, "A") != 0)
       fail("age order changed before compaction");
   }
   check_payload(SELECT_BEFORE_COMPACT + 1, CLAUSES,
@@ -139,7 +142,7 @@ int main(void)
     char *type = NULL;
     Topform c = get_given_clause2(sos, i, NULL, &type);
     if (c == NULL || c->id != (unsigned long long) i + 1 ||
-        strcmp(type, "A") != 0)
+        c->semantics != i % 4 || strcmp(type, "A") != 0)
       fail("age order changed after compaction");
   }
   if (givens_available() || dense_passive_size() != 0)
