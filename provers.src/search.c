@@ -8744,8 +8744,7 @@ static BOOL rewrite_refresh_turn(void)
     return FALSE;
   drain = update_rewrite_drain_mode();
   inference_ratio = (unsigned) parm(Opt->rewrite_refresh_inference_ratio);
-  if (!drain && dense_passive_rewrite_debt() == 0 &&
-      Rewrite_refresh_inference_streak < inference_ratio)
+  if (!drain && Rewrite_refresh_inference_streak < inference_ratio)
     return FALSE;
   memset(&view, 0, sizeof(view));
   budget = (unsigned) parm(Opt->rewrite_refresh_raw_budget);

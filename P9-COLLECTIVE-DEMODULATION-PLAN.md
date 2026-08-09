@@ -5,6 +5,13 @@ Date: 2026-08-09 (Europe/Berlin)
 Implementation branch: `new-demod` (to be cut from the plan commit on
 `better-collective-scheduler`)
 
+Implementation status: Phases 0–4 are implemented on `new-demod`.  Phase 5's
+stronger permanent `no_inferences` classifications remain deliberately off
+pending a calculus-level redundancy audit.  Phase 6 has completed the bounded
+100/250-given tests; full Osborn/AIM acceptance belongs on the user's larger
+host.  See `P9-NEW-DEMOD-REPORT.md` for usage, measurements, and the revised
+RAM forecast.
+
 ## Objective
 
 Recover the demodulation strength needed by AIM/Osborn equational searches
@@ -241,6 +248,7 @@ assign(rewrite_refresh_high_water,4096).
 assign(rewrite_refresh_low_water,3072).
 assign(rewrite_refresh_hot_ratio,7).
 assign(rewrite_refresh_raw_budget,64).
+assign(rewrite_refresh_inference_ratio,8).
 ```
 
 The compatibility defaults remain unchanged.  `eager_legacy` is explicitly
