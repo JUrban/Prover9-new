@@ -37,7 +37,7 @@ sed 's/assign(discount_demodulation,eager_legacy)\./assign(discount_demodulation
 grep -q 'THEOREM PROVED' "$test_tmp/compact.out"
 grep -Eq 'Discount_demodulation: policy=eager_interreduced, .*rewrite_only_admitted=[1-9][0-9]*, .*selected=[1-9][0-9]*' \
   "$test_tmp/compact.out"
-grep -Eq 'Compact_rewrite: current=[1-9][0-9]*, peak=[1-9][0-9]*, retired=0, attempts=[1-9][0-9]*, rewrites=[1-9][0-9]*' \
+grep -Eq 'Compact_rewrite: current=[1-9][0-9]*, peak=[1-9][0-9]*, retired=0, .*attempts=[1-9][0-9]*, rewrites=[1-9][0-9]*' \
   "$test_tmp/compact.out"
 grep -Eq 'Packed_hint_operation: op=back_demod, .*exact_positive=[1-9][0-9]*, rewrites=[1-9][0-9]*, reindexes=[1-9][0-9]*' \
   "$test_tmp/compact.out"
@@ -147,6 +147,26 @@ grep -Eq 'Rewrite_refresh: .*materialized=[1-9][0-9]*, rewritten=0, unchanged=[1
   "$test_tmp/refresh-unchanged.out"
 grep -Eq 'Compact_rewrite: current=[1-9][0-9]*, .*retired=0' \
   "$test_tmp/refresh-unchanged.out"
+
+# Sequential rule-first repair is the bounded interreduction pass.  Exercise
+# both composition into a replacement rule and collapse to a tautology.
+"$repo_dir/bin/prover9" < "$repo_dir/test.src/rewrite_interreduce.in" \
+  > "$test_tmp/interreduce.out" 2> "$test_tmp/interreduce.err" || true
+grep -Eq 'Discount_demodulation: policy=eager_interreduced, .*retired=[1-9][0-9]*' \
+  "$test_tmp/interreduce.out"
+grep -Eq 'Rewrite_refresh: .*rule_turns=[1-9][0-9]*, rule_changed=[1-9][0-9]*' \
+  "$test_tmp/interreduce.out"
+grep -q 'THEOREM PROVED' "$test_tmp/interreduce.out"
+"$repo_dir/bin/prooftrans" parents_only < "$test_tmp/interreduce.out" \
+  > "$test_tmp/interreduce-proof.out"
+grep -q 'end of proof' "$test_tmp/interreduce-proof.out"
+
+"$repo_dir/bin/prover9" < "$repo_dir/test.src/rewrite_collapse.in" \
+  > "$test_tmp/collapse.out" 2> "$test_tmp/collapse.err" || true
+grep -Eq 'Compact_rewrite: current=[1-9][0-9]*, .*retired=[1-9][0-9]*' \
+  "$test_tmp/collapse.out"
+grep -Eq 'Rewrite_refresh: .*rule_turns=[1-9][0-9]*, .*rule_collapsed=[1-9][0-9]*' \
+  "$test_tmp/collapse.out"
 
 # Eager operation is intentionally tied to dense ownership.  Reject a label
 # that cannot provide the independent clone/archive lifecycle.

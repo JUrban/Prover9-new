@@ -216,7 +216,7 @@ void dense_passive_foreach(Dense_passive_visit_fn visit, void *context)
 
 /* PUBLIC */
 unsigned dense_passive_scan_stale(size_t *cursor, unsigned rewrite_epoch,
-                                  BOOL hot_only, unsigned scan_limit,
+                                  int filter, unsigned scan_limit,
                                   struct dense_passive_view *view)
 {
   unsigned scanned = 0;
@@ -233,7 +233,10 @@ unsigned dense_passive_scan_stale(size_t *cursor, unsigned rewrite_epoch,
       at = 0;
     if ((r->flags & DENSE_PASSIVE_ACTIVE) != 0 &&
         r->rewrite_epoch < rewrite_epoch &&
-        (!hot_only || r->hint_id != 0)) {
+        (filter == DENSE_STALE_GENERAL ||
+         (filter == DENSE_STALE_HINTED && r->hint_id != 0) ||
+         (filter == DENSE_STALE_REWRITE &&
+          (r->flags & DENSE_PASSIVE_DELAYED) != 0))) {
       view->id = r->id;
       view->hint_id = r->hint_id;
       view->store_position = r->store_position;

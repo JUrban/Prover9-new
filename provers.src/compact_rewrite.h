@@ -9,6 +9,9 @@ struct compact_rewrite_stats {
   unsigned long long rules_current;
   unsigned long long rules_peak;
   unsigned long long rules_retired;
+  unsigned long long rules_physical;
+  unsigned long long compactions;
+  unsigned long long bytes_reclaimed;
   unsigned long long attempts;
   unsigned long long rewrites;
   unsigned long long node_bytes;
@@ -43,7 +46,9 @@ void compact_rewrite_restore_counters(Compact_rewrite_bank bank,
                                       unsigned long long rules_peak,
                                       unsigned long long rules_retired,
                                       unsigned long long attempts,
-                                      unsigned long long rewrites);
+                                      unsigned long long rewrites,
+                                      unsigned long long compactions,
+                                      unsigned long long bytes_reclaimed);
 
 void compact_rewrite_clause(Compact_rewrite_bank bank, Topform clause,
                             int step_limit, int increase_limit,
@@ -51,6 +56,10 @@ void compact_rewrite_clause(Compact_rewrite_bank bank, Topform clause,
 
 void compact_rewrite_get_stats(Compact_rewrite_bank bank,
                                struct compact_rewrite_stats *stats);
+
+BOOL compact_rewrite_compaction_needed(Compact_rewrite_bank bank);
+
+void compact_rewrite_compact(Compact_rewrite_bank bank);
 
 void compact_rewrite_free(Compact_rewrite_bank bank);
 

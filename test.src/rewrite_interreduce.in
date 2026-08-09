@@ -1,0 +1,35 @@
+clear(auto).
+clear(print_initial_clauses).
+clear(print_given).
+
+assign(search_loop,discount).
+assign(passive_store,dense).
+assign(discount_demodulation,eager_interreduced).
+assign(hint_index,packed).
+assign(ancestor_store,memory).
+assign(sos_limit,-1).
+assign(max_given,4).
+assign(max_seconds,10).
+assign(stats,all).
+
+set(binary_resolution).
+set(back_demod_hints).
+
+formulas(hints).
+q.
+end_of_list.
+
+formulas(usable).
+-q | f(x) = x.
+end_of_list.
+
+% The generated f rule makes the cold rule's left side reducible.  Rule-first
+% repair must retire g(f(x))=x and admit its composition g(x)=x.
+formulas(sos).
+q.
+g(f(x)) = x.
+end_of_list.
+
+formulas(goals).
+g(a) = a.
+end_of_list.

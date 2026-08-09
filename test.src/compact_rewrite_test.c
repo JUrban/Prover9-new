@@ -111,6 +111,34 @@ int main(void)
     compare_case(bank, "p(g(a,b)).");
   }
 
+  {
+    unsigned long long identity = compact_rewrite_identity_hash(bank);
+    unsigned long long bloated_bytes;
+    for (i = 0; i < 1100; i++) {
+      Topform transient = parse_clause_from_string("w(x) = x.");
+      transient->id = 1000 + (unsigned long long) i;
+      mark_oriented_eq(transient->literals->atom);
+      CHECK(compact_rewrite_add(bank, transient, ORIENTED),
+            "add transient compact rule");
+      CHECK(compact_rewrite_remove(bank, transient->id),
+            "retire transient compact rule");
+      delete_clause(transient);
+    }
+    compact_rewrite_get_stats(bank, &stats);
+    bloated_bytes = stats.total_bytes;
+    CHECK(compact_rewrite_compaction_needed(bank),
+          "compact bank detects tombstone pressure");
+    compact_rewrite_compact(bank);
+    compact_rewrite_get_stats(bank, &stats);
+    CHECK(stats.compactions == 1 && stats.rules_physical == 5,
+          "compact bank rebuild keeps only live rules");
+    CHECK(stats.total_bytes < bloated_bytes && stats.bytes_reclaimed > 0,
+          "compact bank rebuild reclaims physical pools");
+    CHECK(compact_rewrite_identity_hash(bank) == identity,
+          "compact bank rebuild preserves identity");
+    compare_case(bank, "p(g(f(a),f(b))).");
+  }
+
   CHECK(compact_rewrite_remove(bank, 102), "remove compact rule");
   CHECK(!compact_rewrite_contains(bank, 102), "removed rule is absent");
   index_demodulator(rules[1], types[1], DELETE, Index_clock);

@@ -65,7 +65,9 @@ static Compact_rewrite_bank Compact_rewrite_rules = NULL;
 static unsigned Rewrite_epoch = 1;    /* compact rewrite state seen by SOS */
 static size_t Rewrite_refresh_hot_cursor = 0;
 static size_t Rewrite_refresh_general_cursor = 0;
+static size_t Rewrite_interreduce_cursor = 0;
 static unsigned Rewrite_refresh_hot_streak = 0;
+static unsigned Rewrite_interreduce_streak = 0;
 static BOOL Rewrite_refresh_lane_turn = TRUE;
 
 static void update_rewrite_only_stats(void);
@@ -2685,11 +2687,15 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
     if (eager_interreduced_demod_mode())
       fprintf(fp,
               "Compact_rewrite: current=%s, peak=%s, retired=%s, "
-              "attempts=%s, rewrites=%s, nodes=%s, postings=%s, rules=%s, "
-              "terms=%s, hash=%s.\n",
+              "physical=%s, compactions=%s, reclaimed=%s, attempts=%s, "
+              "rewrites=%s, nodes=%s, postings=%s, rules=%s, terms=%s, "
+              "hash=%s.\n",
               comma_num(s.compact_rewrite_rules_current),
               comma_num(s.compact_rewrite_rules_peak),
               comma_num(s.compact_rewrite_rules_retired),
+              comma_num(s.compact_rewrite_rules_physical),
+              comma_num(s.compact_rewrite_compactions),
+              comma_num(s.compact_rewrite_bytes_reclaimed),
               comma_num(s.compact_rewrite_attempts),
               comma_num(s.compact_rewrite_rewrites),
               comma_num(s.compact_rewrite_node_bytes),
@@ -2708,7 +2714,9 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
       fprintf(fp,
               "Rewrite_refresh: epoch=%u, stale=%s, stale_peak=%s, "
               "lag_max=%s, scanned=%s, materialized=%s, rewritten=%s, "
-              "unchanged=%s, subsumed=%s, hot_turns=%s, general_turns=%s.\n",
+              "unchanged=%s, subsumed=%s, hot_turns=%s, general_turns=%s, "
+              "rule_turns=%s, rule_changed=%s, rule_unchanged=%s, "
+              "rule_collapsed=%s.\n",
               Rewrite_epoch,
               comma_num(s.rewrite_refresh_stale_current),
               comma_num(s.rewrite_refresh_stale_peak),
@@ -2719,7 +2727,11 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
               comma_num(s.rewrite_refresh_unchanged),
               comma_num(s.rewrite_refresh_subsumed),
               comma_num(s.rewrite_refresh_hot_turns),
-              comma_num(s.rewrite_refresh_general_turns));
+              comma_num(s.rewrite_refresh_general_turns),
+              comma_num(s.rewrite_interreduce_turns),
+              comma_num(s.rewrite_interreduce_changed),
+              comma_num(s.rewrite_interreduce_unchanged),
+              comma_num(s.rewrite_interreduce_collapsed));
   }
   if (collective_frontier_mode()) {
     fprintf(fp,
@@ -5134,6 +5146,9 @@ static void update_rewrite_only_stats(void)
   Stats.compact_rewrite_rules_current = compact.rules_current;
   Stats.compact_rewrite_rules_peak = compact.rules_peak;
   Stats.compact_rewrite_rules_retired = compact.rules_retired;
+  Stats.compact_rewrite_rules_physical = compact.rules_physical;
+  Stats.compact_rewrite_compactions = compact.compactions;
+  Stats.compact_rewrite_bytes_reclaimed = compact.bytes_reclaimed;
   Stats.compact_rewrite_attempts = compact.attempts;
   Stats.compact_rewrite_rewrites = compact.rewrites;
   Stats.compact_rewrite_node_bytes = compact.node_bytes;
@@ -5356,6 +5371,8 @@ void disable_clause(Topform c)
     if (eager_interreduced_demod_mode()) {
       if (!compact_rewrite_remove(Compact_rewrite_rules, c->id))
         fatal_error("disable_clause: compact demodulator is missing");
+      if (compact_rewrite_compaction_needed(Compact_rewrite_rules))
+        compact_rewrite_compact(Compact_rewrite_rules);
       update_rewrite_only_stats();
     }
     else
@@ -6683,7 +6700,8 @@ static void restore_compact_rewrite_bank(void)
   compact_rewrite_restore_counters(
     Compact_rewrite_rules, Stats.compact_rewrite_rules_peak,
     Stats.compact_rewrite_rules_retired, Stats.compact_rewrite_attempts,
-    Stats.compact_rewrite_rewrites);
+    Stats.compact_rewrite_rewrites, Stats.compact_rewrite_compactions,
+    Stats.compact_rewrite_bytes_reclaimed);
   for (i = 0; i < count; i++) {
     if (!compact_rewrite_add(Compact_rewrite_rules, rules[i].clause,
                              rules[i].type))
@@ -6758,6 +6776,9 @@ void cl_process_new_demod(Topform c, BOOL rewrite_transition)
       if (eager_interreduced_demod_mode()) {
         if (!compact_rewrite_add(Compact_rewrite_rules, c, type))
           fatal_error("cl_process_new_demod: compact rule already present");
+        if (compact_rewrite_compaction_needed(Compact_rewrite_rules))
+          compact_rewrite_compact(Compact_rewrite_rules);
+        update_rewrite_only_stats();
       }
       else
         index_demodulator(c, type, INSERT, Clocks.index);
@@ -8615,8 +8636,9 @@ static BOOL rewrite_refresh_turn(void)
   unsigned budget;
   unsigned hot_ratio;
   BOOL hot = FALSE;
+  BOOL rule_lane = FALSE;
   Topform c;
-  unsigned long long requeued_before, subsumed_before;
+  unsigned long long requeued_before, subsumed_before, kept_before;
 
   if (!eager_interreduced_demod_mode())
     return FALSE;
@@ -8627,16 +8649,28 @@ static BOOL rewrite_refresh_turn(void)
   memset(&view, 0, sizeof(view));
   budget = (unsigned) parm(Opt->rewrite_refresh_raw_budget);
   hot_ratio = (unsigned) parm(Opt->rewrite_refresh_hot_ratio);
-  if (hot_ratio != 0 && Rewrite_refresh_hot_streak < hot_ratio) {
-    scanned = dense_passive_scan_stale(&Rewrite_refresh_hot_cursor,
-                                       Rewrite_epoch, TRUE, budget, &view);
+  if (hot_ratio != 0 && Rewrite_interreduce_streak < hot_ratio) {
+    scanned = dense_passive_scan_stale(&Rewrite_interreduce_cursor,
+                                       Rewrite_epoch,
+                                       DENSE_STALE_REWRITE,
+                                       budget, &view);
+    rule_lane = view.id != 0;
+  }
+  if (view.id == 0 &&
+      hot_ratio != 0 && Rewrite_refresh_hot_streak < hot_ratio &&
+      Rewrite_interreduce_streak < hot_ratio) {
+    scanned += dense_passive_scan_stale(&Rewrite_refresh_hot_cursor,
+                                        Rewrite_epoch, DENSE_STALE_HINTED,
+                                        budget, &view);
     hot = view.id != 0;
   }
   if (view.id == 0) {
     unsigned general_scanned = dense_passive_scan_stale(
-      &Rewrite_refresh_general_cursor, Rewrite_epoch, FALSE, budget, &view);
+      &Rewrite_refresh_general_cursor, Rewrite_epoch, DENSE_STALE_GENERAL,
+      budget, &view);
     scanned += general_scanned;
     hot = FALSE;
+    Rewrite_interreduce_streak = 0;
   }
   Stats.rewrite_refresh_scanned += scanned;
   if (view.id == 0)
@@ -8654,7 +8688,9 @@ static BOOL rewrite_refresh_turn(void)
   c->rewrite_epoch = view.rewrite_epoch;
   c->delayed_demodulator = view.delayed_demodulator;
   Stats.rewrite_refresh_materialized++;
-  if (hot) {
+  if (rule_lane)
+    Rewrite_interreduce_streak++;
+  else if (hot) {
     Stats.rewrite_refresh_hot_turns++;
     Rewrite_refresh_hot_streak++;
   }
@@ -8665,9 +8701,14 @@ static BOOL rewrite_refresh_turn(void)
 
   requeued_before = Stats.passive_refresh_requeued;
   subsumed_before = Stats.passive_refresh_subsumed;
+  kept_before = Stats.kept;
+  if (view.delayed_demodulator)
+    Stats.rewrite_interreduce_turns++;
   if (discount_refresh_selected(c)) {
     restore_unchanged_dense_passive(c, &view);
     Stats.rewrite_refresh_unchanged++;
+    if (view.delayed_demodulator)
+      Stats.rewrite_interreduce_unchanged++;
   }
   else {
     if (view.delayed_demodulator) {
@@ -8679,6 +8720,17 @@ static BOOL rewrite_refresh_turn(void)
       Stats.rewrite_refresh_rewritten++;
     else if (Stats.passive_refresh_subsumed != subsumed_before)
       Stats.rewrite_refresh_subsumed++;
+    if (view.delayed_demodulator) {
+      if (Stats.passive_refresh_requeued != requeued_before &&
+          Stats.kept != kept_before)
+        Stats.rewrite_interreduce_changed++;
+      else
+        Stats.rewrite_interreduce_collapsed++;
+    }
+  }
+  if (compact_rewrite_compaction_needed(Compact_rewrite_rules)) {
+    compact_rewrite_compact(Compact_rewrite_rules);
+    update_rewrite_only_stats();
   }
   Rewrite_refresh_lane_turn = FALSE;
   return TRUE;
@@ -11955,6 +12007,10 @@ void write_checkpoint(void)
             Stats.compact_rewrite_attempts);
     fprintf(fp, "compact_rewrite_rewrites %llu\n",
             Stats.compact_rewrite_rewrites);
+    fprintf(fp, "compact_rewrite_compactions %llu\n",
+            Stats.compact_rewrite_compactions);
+    fprintf(fp, "compact_rewrite_bytes_reclaimed %llu\n",
+            Stats.compact_rewrite_bytes_reclaimed);
     fprintf(fp, "rewrite_refresh_scanned %llu\n",
             Stats.rewrite_refresh_scanned);
     fprintf(fp, "rewrite_refresh_materialized %llu\n",
@@ -11969,6 +12025,14 @@ void write_checkpoint(void)
             Stats.rewrite_refresh_hot_turns);
     fprintf(fp, "rewrite_refresh_general_turns %llu\n",
             Stats.rewrite_refresh_general_turns);
+    fprintf(fp, "rewrite_interreduce_turns %llu\n",
+            Stats.rewrite_interreduce_turns);
+    fprintf(fp, "rewrite_interreduce_changed %llu\n",
+            Stats.rewrite_interreduce_changed);
+    fprintf(fp, "rewrite_interreduce_unchanged %llu\n",
+            Stats.rewrite_interreduce_unchanged);
+    fprintf(fp, "rewrite_interreduce_collapsed %llu\n",
+            Stats.rewrite_interreduce_collapsed);
     fprintf(fp, "rewrite_refresh_stale_peak %llu\n",
             Stats.rewrite_refresh_stale_peak);
     fprintf(fp, "rewrite_refresh_lag_max %llu\n",
@@ -12151,8 +12215,12 @@ void write_checkpoint(void)
             (unsigned long long) Rewrite_refresh_hot_cursor);
     fprintf(fp, "rewrite_refresh_general_cursor %llu\n",
             (unsigned long long) Rewrite_refresh_general_cursor);
+    fprintf(fp, "rewrite_interreduce_cursor %llu\n",
+            (unsigned long long) Rewrite_interreduce_cursor);
     fprintf(fp, "rewrite_refresh_hot_streak %u\n",
             Rewrite_refresh_hot_streak);
+    fprintf(fp, "rewrite_interreduce_streak %u\n",
+            Rewrite_interreduce_streak);
     fprintf(fp, "rewrite_refresh_lane_turn %u\n",
             Rewrite_refresh_lane_turn ? 1U : 0U);
     fprintf(fp, "hint_state_epoch %llu\n", hint_state_epoch());
@@ -12894,6 +12962,12 @@ void resume_load_clauses(const char *dir)
   rewind(fp); (void) read_metadata_ull_if_present(
     fp, "compact_rewrite_rewrites", &Stats.compact_rewrite_rewrites);
   rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "compact_rewrite_compactions",
+    &Stats.compact_rewrite_compactions);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "compact_rewrite_bytes_reclaimed",
+    &Stats.compact_rewrite_bytes_reclaimed);
+  rewind(fp); (void) read_metadata_ull_if_present(
     fp, "rewrite_refresh_scanned", &Stats.rewrite_refresh_scanned);
   rewind(fp); (void) read_metadata_ull_if_present(
     fp, "rewrite_refresh_materialized", &Stats.rewrite_refresh_materialized);
@@ -12907,6 +12981,16 @@ void resume_load_clauses(const char *dir)
     fp, "rewrite_refresh_hot_turns", &Stats.rewrite_refresh_hot_turns);
   rewind(fp); (void) read_metadata_ull_if_present(
     fp, "rewrite_refresh_general_turns", &Stats.rewrite_refresh_general_turns);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "rewrite_interreduce_turns", &Stats.rewrite_interreduce_turns);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "rewrite_interreduce_changed", &Stats.rewrite_interreduce_changed);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "rewrite_interreduce_unchanged",
+    &Stats.rewrite_interreduce_unchanged);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "rewrite_interreduce_collapsed",
+    &Stats.rewrite_interreduce_collapsed);
   rewind(fp); (void) read_metadata_ull_if_present(
     fp, "rewrite_refresh_stale_peak", &Stats.rewrite_refresh_stale_peak);
   rewind(fp); (void) read_metadata_ull_if_present(
@@ -13244,9 +13328,20 @@ void resume_load_clauses(const char *dir)
       Rewrite_refresh_general_cursor = (size_t) value;
     value = 0;
     rewind(fp);
+    if (read_metadata_ull_if_present(fp, "rewrite_interreduce_cursor",
+                                     &value))
+      Rewrite_interreduce_cursor = (size_t) value;
+    value = 0;
+    rewind(fp);
     if (read_metadata_ull_if_present(fp, "rewrite_refresh_hot_streak",
                                      &value))
       Rewrite_refresh_hot_streak = value > UINT_MAX ? UINT_MAX :
+                                   (unsigned) value;
+    value = 1;
+    rewind(fp);
+    if (read_metadata_ull_if_present(fp, "rewrite_interreduce_streak",
+                                     &value))
+      Rewrite_interreduce_streak = value > UINT_MAX ? UINT_MAX :
                                    (unsigned) value;
     value = 1;
     rewind(fp);
@@ -14231,7 +14326,9 @@ Prover_results search(Prover_input p)
     Rewrite_epoch = 1;
     Rewrite_refresh_hot_cursor = 0;
     Rewrite_refresh_general_cursor = 0;
+    Rewrite_interreduce_cursor = 0;
     Rewrite_refresh_hot_streak = 0;
+    Rewrite_interreduce_streak = 0;
     Rewrite_refresh_lane_turn = TRUE;
     if (flag(Opt->collective_promising_scheduler) &&
         !str_ident(stringparm1(Opt->inference_frontier), "collective"))

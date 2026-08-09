@@ -55,6 +55,8 @@ struct compact_rewrite_bank {
   unsigned long long attempts;
   unsigned long long rewrites;
   unsigned long long peak_bytes;
+  unsigned long long compactions;
+  unsigned long long bytes_reclaimed;
 };
 
 struct cr_query_term {
@@ -371,6 +373,106 @@ BOOL compact_rewrite_add(Compact_rewrite_bank bank, Topform clause, int type)
   return TRUE;
 }
 
+static void copy_live_rule(Compact_rewrite_bank destination,
+                           Compact_rewrite_bank source,
+                           const struct cr_rule *old)
+{
+  struct cr_rule *rule;
+  uint32_t index;
+  size_t at;
+  size_t token_total = (size_t) old->left_length + old->right_length;
+  ensure_rules(destination);
+  if (destination->rule_count > UINT32_MAX)
+    fatal_error("compact_rewrite: compacted rule offsets exceed 32 bits");
+  index = (uint32_t) destination->rule_count++;
+  rule = &destination->rules[index];
+  memset(rule, 0, sizeof(*rule));
+  rule->proof_id = old->proof_id;
+  rule->type = old->type;
+  rule->active = TRUE;
+  ensure_tokens(destination, token_total);
+  rule->left_offset = (uint32_t) destination->token_count;
+  rule->left_length = old->left_length;
+  memcpy(destination->tokens + destination->token_count,
+         source->tokens + old->left_offset,
+         (size_t) old->left_length * sizeof(*destination->tokens));
+  destination->token_count += old->left_length;
+  rule->right_offset = (uint32_t) destination->token_count;
+  rule->right_length = old->right_length;
+  memcpy(destination->tokens + destination->token_count,
+         source->tokens + old->right_offset,
+         (size_t) old->right_length * sizeof(*destination->tokens));
+  destination->token_count += old->right_length;
+  if (rule->type == ORIENTED || rule->type == LEX_DEP_LR ||
+      rule->type == LEX_DEP_BOTH)
+    index_side(destination, index, rule->left_offset, rule->left_length, 1);
+  if (rule->type == LEX_DEP_RL || rule->type == LEX_DEP_BOTH)
+    index_side(destination, index, rule->right_offset, rule->right_length, 2);
+  ensure_hash(destination);
+  at = hash_slot(destination, rule->proof_id, TRUE);
+  destination->hash_keys[at] = rule->proof_id;
+  destination->hash_values[at] = index;
+  destination->hash_count++;
+  destination->active_rules++;
+  update_peak(destination);
+}
+
+BOOL compact_rewrite_compaction_needed(Compact_rewrite_bank bank)
+{
+  unsigned long long physical, stale, threshold;
+  if (bank == NULL || bank->rule_count <= 1)
+    return FALSE;
+  physical = bank->rule_count - 1;
+  stale = physical - bank->active_rules;
+  threshold = bank->active_rules / 4;
+  if (threshold < 1024)
+    threshold = 1024;
+  return stale >= threshold;
+}
+
+void compact_rewrite_compact(Compact_rewrite_bank bank)
+{
+  Compact_rewrite_bank replacement;
+  struct compact_rewrite_bank old;
+  unsigned long long old_bytes, old_peak, old_peak_rules;
+  unsigned long long attempts, rewrites, retired, compactions, reclaimed;
+  size_t i;
+  if (bank == NULL || !compact_rewrite_compaction_needed(bank))
+    return;
+  old_bytes = bank_bytes(bank);
+  old_peak = bank->peak_bytes;
+  old_peak_rules = bank->peak_rules;
+  attempts = bank->attempts;
+  rewrites = bank->rewrites;
+  retired = bank->retired_rules;
+  compactions = bank->compactions;
+  reclaimed = bank->bytes_reclaimed;
+  replacement = compact_rewrite_init();
+  for (i = 1; i < bank->rule_count; i++)
+    if (bank->rules[i].active)
+      copy_live_rule(replacement, bank, &bank->rules[i]);
+
+  old = *bank;
+  *bank = *replacement;
+  safe_free(replacement);
+  safe_free(old.nodes);
+  safe_free(old.postings);
+  safe_free(old.rules);
+  safe_free(old.tokens);
+  safe_free(old.hash_keys);
+  safe_free(old.hash_values);
+  bank->attempts = attempts;
+  bank->rewrites = rewrites;
+  bank->retired_rules = retired;
+  bank->compactions = compactions + 1;
+  bank->bytes_reclaimed = reclaimed +
+    (old_bytes > bank_bytes(bank) ? old_bytes - bank_bytes(bank) : 0);
+  if (old_peak > bank->peak_bytes)
+    bank->peak_bytes = old_peak;
+  if (old_peak_rules > bank->peak_rules)
+    bank->peak_rules = old_peak_rules;
+}
+
 static BOOL remove_rule(Compact_rewrite_bank bank,
                         unsigned long long proof_id, BOOL retirement)
 {
@@ -433,7 +535,9 @@ void compact_rewrite_restore_counters(Compact_rewrite_bank bank,
                                       unsigned long long rules_peak,
                                       unsigned long long rules_retired,
                                       unsigned long long attempts,
-                                      unsigned long long rewrites)
+                                      unsigned long long rewrites,
+                                      unsigned long long compactions,
+                                      unsigned long long bytes_reclaimed)
 {
   if (bank == NULL)
     return;
@@ -442,6 +546,8 @@ void compact_rewrite_restore_counters(Compact_rewrite_bank bank,
   bank->retired_rules = rules_retired;
   bank->attempts = attempts;
   bank->rewrites = rewrites;
+  bank->compactions = compactions;
+  bank->bytes_reclaimed = bytes_reclaimed;
 }
 
 static void flatten_query_rec(Term term, struct cr_query_term **items,
@@ -657,6 +763,9 @@ void compact_rewrite_get_stats(Compact_rewrite_bank bank,
   stats->rules_current = bank->active_rules;
   stats->rules_peak = bank->peak_rules;
   stats->rules_retired = bank->retired_rules;
+  stats->rules_physical = bank->rule_count - 1;
+  stats->compactions = bank->compactions;
+  stats->bytes_reclaimed = bank->bytes_reclaimed;
   stats->attempts = bank->attempts;
   stats->rewrites = bank->rewrites;
   stats->node_bytes = bank->node_capacity * sizeof(*bank->nodes);

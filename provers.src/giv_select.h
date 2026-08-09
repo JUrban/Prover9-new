@@ -66,8 +66,12 @@ BOOL dense_passive_contains_id(unsigned long long id);
 
 void dense_passive_foreach(Dense_passive_visit_fn visit, void *context);
 
+#define DENSE_STALE_GENERAL 0
+#define DENSE_STALE_HINTED  1
+#define DENSE_STALE_REWRITE 2
+
 unsigned dense_passive_scan_stale(size_t *cursor, unsigned rewrite_epoch,
-                                  BOOL hot_only, unsigned scan_limit,
+                                  int filter, unsigned scan_limit,
                                   struct dense_passive_view *view);
 
 BOOL dense_passive_deactivate_id(unsigned long long id,
