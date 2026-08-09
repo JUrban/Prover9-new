@@ -22,6 +22,7 @@ int main(void)
   struct compact_unit_index_stats stats;
   Topform general = NULL, exact = NULL, negative = NULL, repeated = NULL;
   Topform target = NULL, pattern = NULL;
+  Topform unifier = NULL, occurs = NULL;
   unsigned long long *ids;
   size_t count;
 
@@ -69,13 +70,31 @@ int main(void)
   safe_free(ids);
   delete_clause(pattern);
 
+  unifier = indexed_unit("r(f(x),x).");
+  occurs = indexed_unit("r(y,f(y)).");
+  CHECK(compact_unit_index_add(index, unifier), "add unification unit");
+  CHECK(compact_unit_index_add(index, occurs), "add occurs-check unit");
+  target = parse_clause_from_string("r(f(a),a).");
+  ids = compact_unit_unifier_ids(index, target->literals->atom, TRUE,
+                                 0, &count);
+  CHECK(count == 1 && ids[0] == unifier->id,
+        "token unification accepts a consistent binding and rejects occurs cycle");
+  safe_free(ids);
+  delete_clause(target);
+  target = parse_clause_from_string("r(x,x).");
+  ids = compact_unit_unifier_ids(index, target->literals->atom, TRUE,
+                                 0, &count);
+  CHECK(count == 0 && ids == NULL,
+        "cross-namespace unification applies the occurs check");
+  delete_clause(target);
+
   CHECK(compact_unit_index_contains(index, exact->id), "contains live ID");
   CHECK(compact_unit_index_remove(index, exact->id), "remove live ID");
   CHECK(!compact_unit_index_contains(index, exact->id), "removed ID absent");
   CHECK(!compact_unit_index_remove(index, exact->id), "reject double remove");
 
   compact_unit_index_get_stats(index, &stats);
-  CHECK(stats.active == 3 && stats.retired == 1 && stats.physical == 4,
+  CHECK(stats.active == 5 && stats.retired == 1 && stats.physical == 6,
         "lifecycle counters are exact");
   CHECK(stats.total_bytes > 0 && stats.peak_bytes >= stats.total_bytes,
         "resident byte accounting is present");
@@ -85,6 +104,8 @@ int main(void)
   delete_clause(exact);
   delete_clause(negative);
   delete_clause(repeated);
+  delete_clause(unifier);
+  delete_clause(occurs);
 
   if (Failures != 0) {
     fprintf(stderr, "compact_unit_index_test: %d failure(s)\n", Failures);

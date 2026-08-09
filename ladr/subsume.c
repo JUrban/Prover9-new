@@ -602,6 +602,50 @@ void unit_conflict_by_index(Topform c, Lindex idx, void (*empty_proc) (Topform))
   }
 }  /* unit_conflict_by_index */
 
+static void append_atom_conflict_candidates(BOOL sign, Term atom, Lindex idx,
+                                            Plist *head, Plist *tail)
+{
+  Context subst1 = get_context();
+  Context subst2 = get_context();
+  Mindex mdx = sign ? idx->neg : idx->pos;
+  Mindex_pos pos;
+  Term found = mindex_retrieve_first(atom, mdx, UNIFY,
+                                     subst1, subst2, FALSE, &pos);
+  while (found != NULL) {
+    Topform candidate = found->container;
+    if (number_of_literals(candidate->literals) == 1) {
+      Plist cell = get_plist();
+      cell->v = candidate;
+      cell->next = NULL;
+      if (*tail == NULL)
+        *head = cell;
+      else
+        (*tail)->next = cell;
+      *tail = cell;
+    }
+    found = mindex_retrieve_next(pos);
+  }
+  free_context(subst1);
+  free_context(subst2);
+}
+
+/* PUBLIC */
+Plist unit_conflict_candidates_by_index(Topform c, Lindex idx)
+{
+  Plist head = NULL, tail = NULL;
+  if (number_of_literals(c->literals) == 1) {
+    Literals literal = c->literals;
+    Term atom = literal->atom;
+    append_atom_conflict_candidates(literal->sign, atom, idx, &head, &tail);
+    if (eq_term(atom) && !renamable_flip_eq(atom)) {
+      Term flip = top_flip(atom);
+      append_atom_conflict_candidates(literal->sign, flip, idx, &head, &tail);
+      zap_top_flip(flip);
+    }
+  }
+  return head;
+}
+
 /*************
  *
  *   try_unit_conflict()

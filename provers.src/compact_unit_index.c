@@ -62,6 +62,8 @@ struct compact_unit_index {
   unsigned long long generalization_queries;
   unsigned long long instance_queries;
   unsigned long long instance_exact_tests;
+  unsigned long long unifier_queries;
+  unsigned long long unifier_exact_tests;
   unsigned long long peak_bytes;
 };
 
@@ -601,6 +603,228 @@ unsigned long long *compact_unit_instance_ids(
   }
 }
 
+struct cui_expr {
+  BOOL token;
+  union {
+    Term resident;
+    uint32_t position;
+  } value;
+  uint32_t token_end;
+};
+
+struct cui_unify_state {
+  Compact_unit_index index;
+  struct cui_expr resident_bindings[MAX_VARS];
+  struct cui_expr token_bindings[MAX_VARS];
+  BOOL resident_bound[MAX_VARS];
+  BOOL token_bound[MAX_VARS];
+};
+
+static BOOL expr_variable(struct cui_unify_state *state,
+                          struct cui_expr expr, unsigned *variable)
+{
+  if (expr.token) {
+    int32_t code;
+    if (expr.value.position >= expr.token_end)
+      return FALSE;
+    code = state->index->tokens[expr.value.position];
+    if (code >= 0)
+      return FALSE;
+    *variable = (unsigned) (-code - 1);
+    return TRUE;
+  }
+  if (!VARIABLE(expr.value.resident))
+    return FALSE;
+  *variable = (unsigned) VARNUM(expr.value.resident);
+  return TRUE;
+}
+
+static struct cui_expr dereference_expr(struct cui_unify_state *state,
+                                        struct cui_expr expr)
+{
+  unsigned variable;
+  unsigned guard = 0;
+  while (expr_variable(state, expr, &variable)) {
+    if (variable >= MAX_VARS)
+      return expr;
+    if (expr.token) {
+      if (!state->token_bound[variable])
+        return expr;
+      expr = state->token_bindings[variable];
+    }
+    else {
+      if (!state->resident_bound[variable])
+        return expr;
+      expr = state->resident_bindings[variable];
+    }
+    if (++guard > MAX_VARS * 2)
+      fatal_error("compact_unit_index: cyclic unification binding");
+  }
+  return expr;
+}
+
+static int expr_symbol(struct cui_unify_state *state, struct cui_expr expr)
+{
+  return expr.token ? state->index->tokens[expr.value.position] :
+                      SYMNUM(expr.value.resident);
+}
+
+static int expr_arity(struct cui_unify_state *state, struct cui_expr expr)
+{
+  return expr.token ? sn_to_arity(expr_symbol(state, expr)) :
+                      ARITY(expr.value.resident);
+}
+
+static struct cui_expr expr_child(struct cui_unify_state *state,
+                                  struct cui_expr expr, int child)
+{
+  if (!expr.token) {
+    expr.value.resident = ARG(expr.value.resident, child);
+    return expr;
+  }
+  else {
+    int i;
+    uint32_t position = expr.value.position + 1;
+    for (i = 0; i < child; i++)
+      position = token_term_end(state->index, position, expr.token_end);
+    expr.value.position = position;
+    return expr;
+  }
+}
+
+static BOOL expr_same_variable(struct cui_unify_state *state,
+                               struct cui_expr a, struct cui_expr b)
+{
+  unsigned av, bv;
+  return a.token == b.token && expr_variable(state, a, &av) &&
+    expr_variable(state, b, &bv) && av == bv;
+}
+
+static BOOL expr_occurs(struct cui_unify_state *state, BOOL token_variable,
+                        unsigned variable, struct cui_expr expr)
+{
+  unsigned other;
+  int i, arity;
+  expr = dereference_expr(state, expr);
+  if (expr_variable(state, expr, &other))
+    return expr.token == token_variable && other == variable;
+  arity = expr_arity(state, expr);
+  for (i = 0; i < arity; i++)
+    if (expr_occurs(state, token_variable, variable,
+                    expr_child(state, expr, i)))
+      return TRUE;
+  return FALSE;
+}
+
+static BOOL bind_expr_variable(struct cui_unify_state *state,
+                               struct cui_expr variable_expr,
+                               struct cui_expr value)
+{
+  unsigned variable;
+  if (!expr_variable(state, variable_expr, &variable) ||
+      variable >= MAX_VARS)
+    return FALSE;
+  if (expr_occurs(state, variable_expr.token, variable, value))
+    return FALSE;
+  if (variable_expr.token) {
+    state->token_bound[variable] = TRUE;
+    state->token_bindings[variable] = value;
+  }
+  else {
+    state->resident_bound[variable] = TRUE;
+    state->resident_bindings[variable] = value;
+  }
+  return TRUE;
+}
+
+static BOOL unify_exprs(struct cui_unify_state *state, struct cui_expr a,
+                        struct cui_expr b)
+{
+  unsigned variable;
+  int i, arity;
+  a = dereference_expr(state, a);
+  b = dereference_expr(state, b);
+  if (expr_same_variable(state, a, b))
+    return TRUE;
+  if (expr_variable(state, a, &variable))
+    return bind_expr_variable(state, a, b);
+  if (expr_variable(state, b, &variable))
+    return bind_expr_variable(state, b, a);
+  if (expr_symbol(state, a) != expr_symbol(state, b) ||
+      expr_arity(state, a) != expr_arity(state, b))
+    return FALSE;
+  arity = expr_arity(state, a);
+  for (i = 0; i < arity; i++)
+    if (!unify_exprs(state, expr_child(state, a, i),
+                     expr_child(state, b, i)))
+      return FALSE;
+  return TRUE;
+}
+
+static BOOL resident_unifies_record(Compact_unit_index index, Term query,
+                                    struct cui_record *record)
+{
+  struct cui_unify_state state;
+  struct cui_expr resident, token;
+  memset(&state, 0, sizeof(state));
+  state.index = index;
+  resident.token = FALSE;
+  resident.value.resident = query;
+  resident.token_end = 0;
+  token.token = TRUE;
+  token.value.position = record->token_offset;
+  token.token_end = record->token_offset + record->token_length;
+  return unify_exprs(&state, resident, token);
+}
+
+unsigned long long *compact_unit_unifier_ids(
+  Compact_unit_index index, Term query, BOOL sign,
+  unsigned long long exclude_id, size_t *count)
+{
+  size_t found = 0;
+  size_t i;
+  int query_root;
+  if (count == NULL)
+    return NULL;
+  *count = 0;
+  if (index == NULL || query == NULL || VARIABLE(query))
+    return NULL;
+  index->unifier_queries++;
+  query_root = SYMNUM(query);
+  for (i = 1; i < index->record_count; i++) {
+    struct cui_record *record = &index->records[i];
+    if (!record->active || record->sign != (unsigned char) sign ||
+        record->proof_id == exclude_id || record->token_length == 0 ||
+        index->tokens[record->token_offset] != query_root)
+      continue;
+    index->unifier_exact_tests++;
+    if (resident_unifies_record(index, query, record)) {
+      if (found == index->result_capacity) {
+        index->result_capacity = grow_capacity(
+          index->result_capacity, sizeof(*index->result_ids),
+          "compact_unit_index: result overflow");
+        index->result_ids = safe_realloc(
+          index->result_ids,
+          index->result_capacity * sizeof(*index->result_ids));
+      }
+      index->result_ids[found++] = record->proof_id;
+    }
+  }
+  if (found == 0) {
+    update_peak(index);
+    return NULL;
+  }
+  qsort(index->result_ids, found, sizeof(*index->result_ids),
+        descending_id_compare);
+  {
+    unsigned long long *result = safe_malloc(found * sizeof(*result));
+    memcpy(result, index->result_ids, found * sizeof(*result));
+    *count = found;
+    update_peak(index);
+    return result;
+  }
+}
+
 void compact_unit_index_get_stats(Compact_unit_index index,
                                   struct compact_unit_index_stats *stats)
 {
@@ -616,6 +840,8 @@ void compact_unit_index_get_stats(Compact_unit_index index,
   stats->generalization_queries = index->generalization_queries;
   stats->instance_queries = index->instance_queries;
   stats->instance_exact_tests = index->instance_exact_tests;
+  stats->unifier_queries = index->unifier_queries;
+  stats->unifier_exact_tests = index->unifier_exact_tests;
   stats->node_bytes = index->node_capacity * sizeof(*index->nodes);
   stats->posting_bytes = index->posting_capacity * sizeof(*index->postings);
   stats->record_bytes = index->record_capacity * sizeof(*index->records);

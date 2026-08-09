@@ -61,6 +61,11 @@ Topform back_subsume_one(Topform c, Lindex idx);
 
 void unit_conflict_by_index(Topform c, Lindex idx, void (*empty_proc) (Topform));
 
+/* Read-only unit-conflict candidate sequence, including the equality-flip
+   wave, in the same FPA retrieval order as unit_conflict_by_index().  The
+   returned Plist owns only its list cells. */
+Plist unit_conflict_candidates_by_index(Topform c, Lindex idx);
+
 Topform try_unit_conflict(Topform a, Topform b);
 
 void unit_delete(Topform c, Lindex idx);

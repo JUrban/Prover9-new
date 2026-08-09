@@ -53,11 +53,13 @@ void fprint_compact_unit_subsumption_audit(FILE *fp)
   fprintf(fp,
           "Compact_unit_subsumption_audit: failures=%llu, active=%llu, "
           "peak=%llu, retired=%llu, physical=%llu, forward_queries=%llu, "
-          "back_queries=%llu, back_exact_tests=%llu, bytes=%llu, "
+          "back_queries=%llu, back_exact_tests=%llu, conflict_queries=%llu, "
+          "conflict_exact_tests=%llu, bytes=%llu, "
           "peak_bytes=%llu.\n",
           Compact_unit_audit_failures, stats.active, stats.peak,
           stats.retired, stats.physical, stats.generalization_queries,
           stats.instance_queries, stats.instance_exact_tests,
+          stats.unifier_queries, stats.unifier_exact_tests,
           stats.total_bytes, stats.peak_bytes);
 }
 
@@ -401,6 +403,37 @@ Look for conflicting units.  Send any that are found to empty_proc().
 /* PUBLIC */
 void unit_conflict(Topform c, void (*empty_proc) (Topform))
 {
+  if (Compact_unit_subsumption_audit &&
+      number_of_literals(c->literals) == 1) {
+    Plist legacy = unit_conflict_candidates_by_index(c, Unit_fpa_idx);
+    Literals literal = c->literals;
+    unsigned long long *direct, *flipped = NULL;
+    size_t direct_count = 0, flipped_count = 0, at = 0;
+    Plist p;
+    direct = compact_unit_unifier_ids(
+      Compact_units, literal->atom, !literal->sign, c->id, &direct_count);
+    if (eq_term(literal->atom) && !renamable_flip_eq(literal->atom)) {
+      Term flip = top_flip(literal->atom);
+      flipped = compact_unit_unifier_ids(
+        Compact_units, flip, !literal->sign, c->id, &flipped_count);
+      zap_top_flip(flip);
+    }
+    for (p = legacy; p != NULL; p = p->next, at++) {
+      unsigned long long compact = at < direct_count ? direct[at] :
+        at < direct_count + flipped_count ? flipped[at - direct_count] : 0;
+      if (((Topform) p->v)->id != compact)
+        compact_unit_audit_mismatch(
+          "conflict", c, ((Topform) p->v)->id, compact);
+    }
+    if (at != direct_count + flipped_count) {
+      unsigned long long compact = at < direct_count ? direct[at] :
+        flipped[at - direct_count];
+      compact_unit_audit_mismatch("conflict", c, 0, compact);
+    }
+    zap_plist(legacy);
+    safe_free(direct);
+    safe_free(flipped);
+  }
   unit_conflict_by_index(c, Unit_fpa_idx, empty_proc);
 }  /* unit_conflict */
 

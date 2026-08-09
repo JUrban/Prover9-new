@@ -13,6 +13,8 @@ struct compact_unit_index_stats {
   unsigned long long generalization_queries;
   unsigned long long instance_queries;
   unsigned long long instance_exact_tests;
+  unsigned long long unifier_queries;
+  unsigned long long unifier_exact_tests;
   unsigned long long node_bytes;
   unsigned long long posting_bytes;
   unsigned long long record_bytes;
@@ -44,6 +46,12 @@ unsigned long long compact_unit_generalization_first(
    matching the public order of back_subsume(); EXCLUDE_ID may be zero. */
 unsigned long long *compact_unit_instance_ids(
   Compact_unit_index index, Term pattern, BOOL sign,
+  unsigned long long exclude_id, size_t *count);
+
+/* Return all live unit IDs whose atoms unify with QUERY and whose literals
+   have SIGN.  Results are in decreasing proof-ID/FPA order. */
+unsigned long long *compact_unit_unifier_ids(
+  Compact_unit_index index, Term query, BOOL sign,
   unsigned long long exclude_id, size_t *count);
 
 void compact_unit_index_get_stats(Compact_unit_index index,
