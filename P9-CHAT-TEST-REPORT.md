@@ -309,6 +309,40 @@ KiB.  It remains scheduler-live, with six completed rewrite drains and 862
 bounded yields, but it is not the radical-memory default for this hint
 trajectory.
 
+## Packed-fast follow-up
+
+Branch `packed-fast` adds `assign(hint_index,packed_fast)`.  Its final common
+path combines density-adaptive exact feature sets, a dependency-scoped query
+cache, allocation-free matching against compressed unit hints, and compact
+`AnyConst` references.  The last change removes two accidental scans over the
+entire allocated hint-ID capacity from every ordinary query.
+
+The exact selected-DISCOUNT boundaries are:
+
+| Index/run | Given | User CPU | Wall | Peak RSS | Result |
+| --- | ---: | ---: | ---: | ---: | --- |
+| FPA prefix | 301 | 27.72 s | 30 s | 151,056 KiB | bound |
+| packed prefix | 301 | 50.02 s | 54 s | 90,636 KiB | bound |
+| packed-fast prefix | 301 | 10.23 s | 14 s | 90,496 KiB | bound |
+| packed historical report | 1,001 | 420.12 s | 436 s | 90,516 KiB | mid-given |
+| packed-fast | 1,001 | 49.78 s | 68 s | 90,492 KiB | bound |
+| packed-fast guarded full | last report 4,111 | 672.59 s | 15:03 | 198,112 KiB | time limit |
+
+The 300-given packed-fast run reproduces all 15,039 FPA/packed `HINT_TRACE`
+records byte for byte (SHA256
+`505085c14b0576018a363cdad16beafddbf04aa9a03b6d2c0cf8f1cd2deda60c`).
+At Given #1000, packed-fast and the historical packed run select the same
+clause 103726 with the same parents.  Packed-fast ordinary plus flipped hint
+time is 7.406 seconds versus 353.586 seconds in the historical report.
+
+The guarded run does not prove `chat_test`: selected DISCOUNT has a different
+trajectory from OTTER.  At Given 2,916 it used 330.26 user seconds but already
+held 569,005 passives; by the guard it held 1,046,419.  File-backed passive
+pages became actively resident, raising peak RSS to 198,112 KiB.  This is
+64.0% below old P9's 550,400-KiB proof peak, but it is not the 80--90% stretch
+goal.  The remaining work is trajectory-preserving compact inference and
+colder passive-selector access, not hint matching.
+
 ## Current operational recommendation
 
 For compatibility-sensitive `chat_test` work, use current FPA OTTER.  It has
@@ -342,14 +376,14 @@ assign(sos_limit,-1).
 set(back_demod_hints).
 ```
 
-For the best radical-memory/hint balance measured so far on `chat_test`, use
+For the best radical-memory/hint throughput measured so far on `chat_test`, use
 clause-frontier DISCOUNT with selected demodulation:
 
 ```text
 assign(search_loop,discount).
 assign(passive_store,dense).
 assign(discount_demodulation,selected).
-assign(hint_index,packed).
+assign(hint_index,packed_fast).
 assign(inference_frontier,clauses).
 assign(ancestor_store,mmap).
 assign(sos_limit,-1).

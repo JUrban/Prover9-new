@@ -329,6 +329,31 @@ total user CPU is at least 8.4 times faster and ordinary/flipped hint time is
 47.7 times faster, far beyond the four-times gate, with unchanged peak RSS.
 The next required gate is the proof-producing full run.
 
+### Guarded full-run result
+
+The 900-CPU-second/512-MiB guarded selected-DISCOUNT run did not prove the
+problem.  It stopped normally at the time limit after 672.59 user seconds,
+229.62 system seconds, and 15:03 wall, with the last report at Given 4,111.
+It had generated 17,863,239 clauses, retained 1,051,557, and held 1,046,419
+dense passives.  Peak RSS was 198,112 KiB.
+
+At the old OTTER proof neighborhood, the new run's Given-2,916 report used
+330.26 user seconds and 445 seconds wall.  Its ordinary/flipped hint clocks
+were only 48.323 seconds, but it had 569,005 passive clauses and had not found
+the proof.  Thus packed-fast throughput is now substantially better than old
+P9's 765.69-second proof runtime, but selected DISCOUNT follows a different
+trajectory.  At that report the mmap-backed frontier had already peaked at
+157,496 KiB; by the guard it reached 198,112 KiB.  This is 64.0% below old
+P9's 550,400-KiB proof peak, but it misses the 125-MiB and 80--90% stretch
+targets because actively visited passive mmap pages become resident.
+
+The final proof gate is therefore not passed.  The remaining project is the
+plan's Phase 5 compact OTTER-compatible frontier (or an equivalently strong
+trajectory-preserving scheduler) plus colder selector access to passive
+records.  It is not more hint-index tuning: at the last report, 8.31 million
+ordinary queries consumed only 84.049 seconds, while preprocessing consumed
+499.15 seconds and demodulation 234.86 seconds.
+
 ## Acceptance gates
 
 ### Correctness
