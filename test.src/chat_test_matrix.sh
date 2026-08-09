@@ -8,6 +8,7 @@ max_given=${3:-300}
 max_seconds=${4:-120}
 max_megs=${5:-2048}
 wall_seconds=${6:-$((max_seconds + 60))}
+report_seconds=${CHAT_REPORT_SECONDS:-30}
 new_prover=${CHAT_NEW_PROVER:-"$repo_dir/bin/prover9"}
 old_prover=${CHAT_OLD_PROVER:-/project/Prover9-old-LADR-2026-6A/bin/prover9}
 all_cases='old_otter new_otter_fpa new_otter_packed discount_clauses_selected discount_clauses_eager collective_balanced_selected collective_balanced_legacy collective_balanced_eager'
@@ -33,6 +34,7 @@ sha256sum "$input" "$new_prover" "$old_prover" > "$output_dir/hashes.txt"
   echo "max_seconds=$max_seconds"
   echo "max_megs=$max_megs"
   echo "wall_seconds=$wall_seconds"
+  echo "report_seconds=$report_seconds"
   echo "cases=$selected_cases"
   echo "new_prover=$new_prover"
   echo "old_prover=$old_prover"
@@ -69,7 +71,7 @@ write_case()
     echo 'set(hint_match_stats).'
     echo 'set(back_demod_hints).'
     echo 'assign(stats,all).'
-    echo 'assign(report,60).'
+    echo "assign(report,$report_seconds)."
     echo "assign(max_given,$max_given)."
     echo "assign(max_seconds,$max_seconds)."
     echo "assign(max_megs,$max_megs)."
@@ -194,8 +196,8 @@ do
   status=$(cat "$output_dir/$name.status")
   if grep -q 'THEOREM PROVED' "$out"; then proved=yes; else proved=no; fi
   given=$(sed -n 's/^Given=\([0-9][0-9]*\).*/\1/p' "$out" | tail -1)
-  user_cpu=$(sed -n 's/^User_CPU=\([^,]*\).*/\1/p' "$out" | tail -1)
-  wall=$(sed -n 's/^User_CPU=[^,]*, System_CPU=[^,]*, Wall_clock=\([0-9][0-9]*\).*/\1/p' "$out" | tail -1)
+  user_cpu=$(sed -n 's/^[[:space:]]*User time (seconds):[[:space:]]*//p' "$time_file")
+  wall=$(sed -n 's/^[[:space:]]*Elapsed (wall clock) time (h:mm:ss or m:ss):[[:space:]]*//p' "$time_file")
   max_rss=$(sed -n 's/^[[:space:]]*Maximum resident set size (kbytes):[[:space:]]*//p' "$time_file")
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$name" "$status" "$proved" "${given:-NA}" "${user_cpu:-NA}" \
