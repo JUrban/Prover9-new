@@ -244,6 +244,25 @@ and 3,723 candidate-vector overflows bound its reach.  It is therefore a
 useful bounded first layer, not the primary Phase 1 solution; exact adaptive
 feature-set intersection remains necessary for cache misses.
 
+The next prototype lazily promotes only broad feature postings (at least
+1,024 references) to exact ID bitsets.  A small summary bitmap marks nonempty
+64-word blocks, and queries intersect summaries before touching data words.
+At 300 givens only 51 keys were promoted, costing 835,584 bytes of data bits
+and 13,056 bytes of summaries.  Ordinary/flipped posting-ID visits fell from
+111.3 million in the cache-only run to 3.15 million.  Dependency-scoped cache
+validity then allowed reuse across unrelated hint mutations: an entry is
+invalidated only if its rare required feature, the `AnyConst` population, or
+the complete posting index changes.  The resulting exact run used 36.04
+seconds and 90,492 KiB peak RSS.
+
+Thus Phase 1 currently saves 28.0% of total CPU versus `packed`, with slightly
+lower measured RSS, while preserving the exact 300-given state.  It still
+misses the 32-second gate.  The remaining ordinary-match clock is 18.55
+seconds despite only 2.96 million counted posting candidates, so subsequent
+work must separately attribute bitset planning/intersection, exact candidate
+decoding, and subsumption rather than assuming posting counts remain the sole
+bottleneck.
+
 ## Acceptance gates
 
 ### Correctness

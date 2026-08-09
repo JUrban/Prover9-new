@@ -118,9 +118,13 @@ static unsigned Preview_key_scratch_capacity = 0;
 #define FAST_MATCH_CACHE_CAPACITY 32768U
 #define FAST_MATCH_CACHE_KEYS 12U
 #define FAST_MATCH_CACHE_CANDIDATES 8U
+#define FAST_DENSE_MIN_POSTING 1024U
 
 struct fast_match_cache_entry {
-  unsigned long long epoch;
+  unsigned long long posting_serial;
+  unsigned long long seed_key;
+  unsigned long long seed_generation;
+  unsigned long long anyconst_generation;
   unsigned long long first_mask;
   unsigned long long keys[FAST_MATCH_CACHE_KEYS];
   unsigned long long source_posting_candidates;
@@ -141,6 +145,17 @@ static unsigned long long Fast_cache_stores = 0;
 static unsigned long long Fast_cache_key_overflow = 0;
 static unsigned long long Fast_cache_candidate_overflow = 0;
 static unsigned long long Fast_cache_posting_candidates_avoided = 0;
+static unsigned long long Fast_cache_posting_serial = 1;
+static unsigned long long Fast_cache_anyconst_generation = 1;
+static unsigned long long Fast_cache_dependency_misses = 0;
+static unsigned long long Fast_cache_profile_misses = 0;
+static unsigned long long Fast_dense_queries = 0;
+static unsigned long long Fast_dense_used = 0;
+static unsigned long long Fast_dense_small_fallbacks = 0;
+static unsigned long long Fast_dense_seed_ids_avoided = 0;
+static unsigned long long Fast_dense_summary_words = 0;
+static unsigned long long Fast_dense_data_words = 0;
+static unsigned long long Fast_dense_result_ids = 0;
 
 #define BETTER_FEATURE_BACK 1U
 #define BETTER_FEATURE_MATCH_POS 2U
@@ -855,6 +870,11 @@ static void better_rebuild_postings(void)
   }
   hint_postings_destroy(Better_postings);
   Better_postings = postings;
+  if (Fast_packed_index) {
+    Fast_cache_posting_serial++;
+    if (Fast_cache_posting_serial == 0)
+      Fast_cache_posting_serial = 1;
+  }
   Better_feature_live_count = live;
   Better_equivalence_live_count = equivalence_live;
   better_equivalence_rebuild(Better_equivalence_bucket_capacity);
@@ -913,6 +933,11 @@ static void better_index_hint_terms(Topform h, BOOL anyconst)
     hint_postings_add(Better_postings, key, id);
   }
   Better_feature_live_count += Better_key_scratch_count;
+  if (Fast_packed_index && anyconst) {
+    Fast_cache_anyconst_generation++;
+    if (Fast_cache_anyconst_generation == 0)
+      Fast_cache_anyconst_generation = 1;
+  }
   Better_equivalence_live_count += better_equivalence_memberships(id);
   better_equivalence_add(id);
   better_maybe_rebuild_postings();
@@ -1135,13 +1160,25 @@ static BOOL fast_cache_lookup(
     Fast_cache_queries++;
     Fast_cache_eligible++;
   }
-  if (!e->valid || e->epoch != Hint_state_epoch ||
-      e->first_mask != first_mask || e->positive != positive ||
+  if (!e->valid || e->first_mask != first_mask || e->positive != positive ||
       e->negative != negative || e->key_count != key_count ||
       memcmp(e->keys, keys,
              (size_t) key_count * sizeof(unsigned long long)) != 0) {
-    if (!Hint_preview_active)
+    if (!Hint_preview_active) {
       Fast_cache_misses++;
+      Fast_cache_profile_misses++;
+    }
+    return FALSE;
+  }
+  if (e->posting_serial != Fast_cache_posting_serial ||
+      e->anyconst_generation != Fast_cache_anyconst_generation ||
+      (key_count == 0 ? e->seed_generation != Hint_state_epoch :
+       e->seed_generation !=
+         hint_postings_generation(Better_postings, e->seed_key))) {
+    if (!Hint_preview_active) {
+      Fast_cache_misses++;
+      Fast_cache_dependency_misses++;
+    }
     return FALSE;
   }
   for (i = 0; i < e->candidate_count; i++)
@@ -1160,6 +1197,8 @@ static void fast_cache_store(
   unsigned long long source_posting_candidates)
 {
   struct fast_match_cache_entry *e;
+  unsigned seed_count = UINT_MAX;
+  unsigned i;
   if (Hint_preview_active)
     return;
   if (Packed_candidates_count > FAST_MATCH_CACHE_CANDIDATES) {
@@ -1168,7 +1207,22 @@ static void fast_cache_store(
   }
   e = fast_cache_slot(keys, key_count, first_mask, positive, negative);
   memset(e, 0, sizeof(*e));
-  e->epoch = Hint_state_epoch;
+  e->posting_serial = Fast_cache_posting_serial;
+  e->anyconst_generation = Fast_cache_anyconst_generation;
+  if (key_count == 0)
+    e->seed_generation = Hint_state_epoch;
+  else {
+    for (i = 0; i < key_count; i++) {
+      unsigned count;
+      hint_postings_get(Better_postings, keys[i], &count);
+      if (count < seed_count) {
+        seed_count = count;
+        e->seed_key = keys[i];
+      }
+    }
+    e->seed_generation =
+      hint_postings_generation(Better_postings, e->seed_key);
+  }
   e->first_mask = first_mask;
   memcpy(e->keys, keys, (size_t) key_count * sizeof(unsigned long long));
   memcpy(e->candidates, Packed_candidates,
@@ -1180,6 +1234,91 @@ static void fast_cache_store(
   e->candidate_count = (unsigned char) Packed_candidates_count;
   e->valid = 1;
   Fast_cache_stores++;
+}
+
+/* Intersect broad exact postings a machine word at a time.  Each posting has
+   a one-bit-per-data-word summary, so blocks that cannot contain a common ID
+   are skipped before any full bitset row is touched.  Posting bits may retain
+   stale IDs after rewrites, but they never lose a newly indexed feature;
+   activity and the authoritative matcher therefore preserve correctness. */
+static BOOL fast_dense_collect_candidates(
+  const unsigned long long *keys, unsigned key_count,
+  enum packed_hint_operation op, BOOL exclude_anyconst)
+{
+  struct hint_dense_view views[FAST_MATCH_CACHE_KEYS];
+  unsigned minimum = UINT_MAX;
+  unsigned i, summary_word;
+  BOOL create = !Hint_preview_active;
+  if (!Hint_preview_active)
+    Fast_dense_queries++;
+  if (key_count < 2)
+    return FALSE;
+  for (i = 0; i < key_count; i++) {
+    unsigned count;
+    hint_postings_get(Better_postings, keys[i], &count);
+    if (count == 0)
+      return TRUE;
+    if (count < minimum)
+      minimum = count;
+  }
+  if (minimum < FAST_DENSE_MIN_POSTING) {
+    if (!Hint_preview_active)
+      Fast_dense_small_fallbacks++;
+    return FALSE;
+  }
+  for (i = 0; i < key_count; i++) {
+    if (!hint_postings_dense_view(Better_postings, keys[i],
+                                  Packed_hint_capacity, create,
+                                  views + i)) {
+      return FALSE;
+    }
+  }
+  if (!Hint_preview_active) {
+    Fast_dense_used++;
+    Fast_dense_seed_ids_avoided += minimum;
+    Packed_operation_stats[op].posting_lists += key_count;
+  }
+  for (summary_word = 0;
+       summary_word < views[0].summary_words; summary_word++) {
+    unsigned long long common = views[0].summary[summary_word];
+    unsigned j;
+    for (j = 1; j < key_count && common != 0; j++)
+      common &= views[j].summary[summary_word];
+    if (!Hint_preview_active)
+      Fast_dense_summary_words++;
+    while (common != 0) {
+      unsigned summary_bit = (unsigned) __builtin_ctzll(common);
+      unsigned word = summary_word * 64 + summary_bit;
+      unsigned long long bits;
+      if (word >= views[0].words)
+        break;
+      bits = views[0].bits[word];
+      for (j = 1; j < key_count && bits != 0; j++)
+        bits &= views[j].bits[word];
+      if (!Hint_preview_active)
+        Fast_dense_data_words++;
+      while (bits != 0) {
+        unsigned bit = (unsigned) __builtin_ctzll(bits);
+        unsigned id = word * 64 + bit;
+        if (!Hint_preview_active)
+          Packed_operation_stats[op].posting_candidates++;
+        if (id == 0 || id >= Packed_hint_capacity ||
+            !Packed_hint_active[id] ||
+            (exclude_anyconst && Packed_hint_anyconst[id])) {
+          if (!Hint_preview_active)
+            Packed_operation_stats[op].stale_skips++;
+        }
+        else {
+          packed_add_candidate(id);
+          if (!Hint_preview_active)
+            Fast_dense_result_ids++;
+        }
+        bits &= bits - 1;
+      }
+      common &= common - 1;
+    }
+  }
+  return TRUE;
 }
 
 static void discard_packed_hint_proof(Topform c)
@@ -1349,6 +1488,12 @@ void done_with_hints(void)
   Fast_cache_hits = Fast_cache_misses = Fast_cache_stores = 0;
   Fast_cache_key_overflow = Fast_cache_candidate_overflow = 0;
   Fast_cache_posting_candidates_avoided = 0;
+  Fast_cache_dependency_misses = Fast_cache_profile_misses = 0;
+  Fast_cache_posting_serial = Fast_cache_anyconst_generation = 1;
+  Fast_dense_queries = Fast_dense_used = 0;
+  Fast_dense_small_fallbacks = 0;
+  Fast_dense_seed_ids_avoided = Fast_dense_summary_words = 0;
+  Fast_dense_data_words = Fast_dense_result_ids = 0;
   Packed_hint_capacity = 0;
   Packed_candidates_count = Packed_candidates_capacity = 0;
   Preview_candidate_serial = 1;
@@ -1545,7 +1690,10 @@ static void better_collect_clause_candidates(
         posting_candidates_before =
           Packed_operation_stats[op].posting_candidates;
     }
-    better_intersect_scratch_candidates(op, TRUE, FALSE);
+    if (!Fast_packed_index || !fast_eligible ||
+        !fast_dense_collect_candidates(
+          fast_keys, fast_key_count, op, TRUE))
+      better_intersect_scratch_candidates(op, TRUE, FALSE);
   }
 
   /* AnyConst can stand on either side of match_hints.  A query containing it
@@ -2364,6 +2512,7 @@ void packed_hint_index_stats(unsigned long long *node_bytes,
     hint_postings_get_stats(Better_postings, &posting_stats);
     *node_bytes += posting_stats.table_bytes;
     *reference_bytes += posting_stats.reference_bytes +
+      posting_stats.dense_bit_bytes + posting_stats.dense_summary_bytes +
       (unsigned long long) Better_equivalence_reference_capacity *
         sizeof(struct better_equivalence_reference);
     *table_bytes += (unsigned long long) Packed_hint_capacity *
@@ -2434,6 +2583,8 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             "equivalence_buckets=%u, equivalence_references=%u, "
             "equivalence_live=%llu, equivalence_stale=%llu, "
             "table_bytes=%llu, reference_bytes=%llu, fingerprint_bytes=%llu, "
+            "dense_keys=%llu, dense_bit_bytes=%llu, "
+            "dense_summary_bytes=%llu, "
             "rebuilds=%llu, "
             "rebuilt_references=%llu, rebuild_materializations=%llu.\n",
             s.keys, s.references, Better_feature_live_count,
@@ -2444,6 +2595,7 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             equivalence_stale, table_bytes, reference_bytes,
             (unsigned long long) Packed_hint_capacity *
               sizeof(unsigned long long),
+            s.dense_keys, s.dense_bit_bytes, s.dense_summary_bytes,
             Better_posting_rebuilds, Better_posting_rebuild_refs,
             Better_posting_rebuild_materializations);
   }
@@ -2452,7 +2604,8 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             "Packed_fast_cache: entries=%u, entry_bytes=%llu, "
             "table_bytes=%llu, queries=%llu, eligible=%llu, hits=%llu, "
             "misses=%llu, hit_rate=%.2f, stores=%llu, key_overflow=%llu, "
-            "candidate_overflow=%llu, posting_candidates_avoided=%llu.\n",
+            "candidate_overflow=%llu, dependency_misses=%llu, "
+            "profile_misses=%llu, posting_candidates_avoided=%llu.\n",
             FAST_MATCH_CACHE_CAPACITY,
             (unsigned long long) sizeof(struct fast_match_cache_entry),
             (unsigned long long) FAST_MATCH_CACHE_CAPACITY *
@@ -2464,7 +2617,17 @@ void fprint_packed_hint_operation_stats(FILE *fp)
                 (double) Fast_cache_eligible,
             Fast_cache_stores, Fast_cache_key_overflow,
             Fast_cache_candidate_overflow,
+            Fast_cache_dependency_misses, Fast_cache_profile_misses,
             Fast_cache_posting_candidates_avoided);
+    fprintf(fp,
+            "Packed_fast_dense: threshold=%u, queries=%llu, used=%llu, "
+            "small_fallbacks=%llu, "
+            "seed_ids_avoided=%llu, summary_words=%llu, data_words=%llu, "
+            "result_ids=%llu.\n",
+            FAST_DENSE_MIN_POSTING, Fast_dense_queries, Fast_dense_used,
+            Fast_dense_small_fallbacks,
+            Fast_dense_seed_ids_avoided, Fast_dense_summary_words,
+            Fast_dense_data_words, Fast_dense_result_ids);
   }
 }
 
