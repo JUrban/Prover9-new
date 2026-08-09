@@ -32,14 +32,4 @@ fi
 grep -q 'end of proof' "$test_tmp/parents.out"
 grep -q 'Directproof did' "$test_tmp/direct.out"
 
-# A recognized future policy must fail closed until it has an independently
-# owned rewrite store.  Quietly accepting the spelling while retaining
-# selected-only semantics would make experiment labels untrustworthy.
-sed '/assign(search_loop,discount)\./a\
-assign(discount_demodulation,eager_legacy).' \
-  "$repo_dir/test.src/discount_loop.in" | \
-  "$repo_dir/bin/prover9" > "$test_tmp/eager.out" 2> "$test_tmp/eager.err" || true
-grep -q 'discount_demodulation=eager_legacy is reserved until the separately owned rewrite store is initialized' \
-  "$test_tmp/eager.err"
-
 echo 'discount_loop_test: PASS'

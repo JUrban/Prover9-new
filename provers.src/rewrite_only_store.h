@@ -30,6 +30,8 @@ unsigned long long rewrite_only_store_allocated_bytes(
 unsigned long long rewrite_only_store_peak_allocated_bytes(
   Rewrite_only_store store);
 
+unsigned long long rewrite_only_store_identity_hash(Rewrite_only_store store);
+
 void rewrite_only_store_free(Rewrite_only_store store);
 
 #endif

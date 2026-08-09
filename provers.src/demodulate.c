@@ -207,7 +207,8 @@ void write_demod_index(const char *dir)
  *************/
 
 /* PUBLIC */
-void restore_demod_index(const char *dir, Clock clock)
+void restore_demod_index(const char *dir, Clock clock,
+                         Demodulator_resolver resolver, void *context)
 {
   char path[600];
   FILE *fp;
@@ -222,7 +223,13 @@ void restore_demod_index(const char *dir, Clock clock)
   {
     int count = 0;
     while (fscanf(fp, "%llu %d", &clause_id, &side) == 2) {
-      Topform c = find_clause_by_id(clause_id);
+      /* A rewrite-only clause can deliberately share an ID with a dense
+         passive body that will be destroyed during bulk archival.  Give the
+         owning rewrite store first refusal so the restored index never
+         captures the temporary passive Topform. */
+      Topform c = resolver == NULL ? NULL : resolver(clause_id, context);
+      if (c == NULL)
+        c = find_clause_by_id(clause_id);
       if (c != NULL && c->literals != NULL) {
         Term t = ARG(c->literals->atom, side);
         mindex_update(Demod_idx, t, INSERT);

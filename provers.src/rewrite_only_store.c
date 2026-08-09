@@ -207,6 +207,21 @@ unsigned long long rewrite_only_store_peak_allocated_bytes(
   return store == NULL ? 0 : store->peak_allocated_bytes;
 }
 
+unsigned long long rewrite_only_store_identity_hash(Rewrite_only_store store)
+{
+  uint64_t hash = 0;
+  size_t i;
+  if (store == NULL)
+    return 0;
+  /* Commutative across hash-table layouts; checkpoint identity is the set of
+     stable proof IDs and legacy rule types, not transient slot placement. */
+  for (i = 0; i < store->capacity; i++)
+    if (store->slots[i].clause != NULL)
+      hash ^= hash_id(store->slots[i].id ^
+                      ((uint64_t) (unsigned) store->slots[i].type << 56));
+  return hash;
+}
+
 void rewrite_only_store_free(Rewrite_only_store store)
 {
   if (store == NULL)

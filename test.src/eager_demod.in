@@ -1,0 +1,31 @@
+clear(auto).
+clear(print_initial_clauses).
+clear(print_given).
+assign(search_loop,discount).
+assign(passive_store,dense).
+assign(discount_demodulation,eager_legacy).
+assign(hint_index,packed).
+assign(ancestor_store,memory).
+assign(sos_limit,-1).
+assign(max_given,20).
+assign(max_seconds,20).
+assign(stats,all).
+set(paramodulation).
+set(back_demod_hints).
+set(hint_match_stats).
+
+formulas(hints).
+  g(f(a)) = c.
+end_of_list.
+
+formulas(usable).
+  g(f(a)) = c.
+end_of_list.
+
+formulas(sos).
+  f(x) = x.
+end_of_list.
+
+formulas(goals).
+  g(a) = c.
+end_of_list.

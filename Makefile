@@ -77,6 +77,7 @@ hint-postings-test: lib
 
 discount-tests: all
 	./test.src/discount_loop_test.sh
+	./test.src/eager_demod_test.sh
 	./test.src/collective_frontier_test.sh
 	./test.src/hint_index_trace_test.sh
 	./test.src/hint_checkpoint_test.sh

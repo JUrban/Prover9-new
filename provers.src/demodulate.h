@@ -40,7 +40,10 @@ void index_back_demod(Topform c, Indexop operation, Clock clock, BOOL enabled);
 
 void write_demod_index(const char *dir);
 
-void restore_demod_index(const char *dir, Clock clock);
+typedef Topform (*Demodulator_resolver)(unsigned long long id, void *context);
+
+void restore_demod_index(const char *dir, Clock clock,
+                         Demodulator_resolver resolver, void *context);
 
 void destroy_demodulation_index(void);
 

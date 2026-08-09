@@ -19,6 +19,7 @@
 #include "search.h"
 #include "provers.h"
 #include "cold_passive_store.h"
+#include "rewrite_only_store.h"
 #include "../ladr/ac_redun.h"
 #include "../ladr/std_options.h"
 #include "../ladr/memory.h"
@@ -58,6 +59,9 @@ static struct prover_stats Stats;        // Prover9 statistics
 static struct prover_clocks Clocks;      // Prover9 clocks
 static Cold_passive_store Dense_body_store = NULL;
 static unsigned long long Dense_arena_bytes_reclaimed = 0;
+static Rewrite_only_store Rewrite_only_rules = NULL;
+
+static void update_rewrite_only_stats(void);
 
 /* Progress callback for shared-memory IPC (set by -cores scheduler) */
 static Search_progress_fn Progress_callback = NULL;
@@ -99,6 +103,8 @@ static BOOL eager_interreduced_demod_mode(void)
     str_ident(stringparm1(Opt->discount_demodulation),
               "eager_interreduced");
 }
+
+static BOOL demodulation_rules_available(void);
 
 static BOOL collective_frontier_mode(void)
 {
@@ -427,6 +433,12 @@ static struct {
 
   int return_code;     // result of search
 } Glob;
+
+static BOOL demodulation_rules_available(void)
+{
+  return (Glob.demods != NULL && !clist_empty(Glob.demods)) ||
+    rewrite_only_store_count(Rewrite_only_rules) != 0;
+}
 
 /* The ordinary selector is the promising-candidate cache for collective
    search.  Count both committed passives and the current turn's limbo so a
@@ -2506,6 +2518,7 @@ void update_memory_stats(void)
 static
 void update_stats(void)
 {
+  update_rewrite_only_stats();
   Stats.demod_attempts = demod_attempts() + fdemod_attempts();
   Stats.demod_rewrites = demod_rewrites() + fdemod_rewrites();
   Stats.res_instance_prunes = res_instance_prunes();
@@ -5020,23 +5033,77 @@ static void compact_dense_passive_store(void)
   cold_passive_store_free(old_store);
 }  /* compact_dense_passive_store */
 
+static void update_rewrite_only_stats(void)
+{
+  Stats.rewrite_only_demodulators_current =
+    rewrite_only_store_count(Rewrite_only_rules);
+  Stats.rewrite_bank_bytes =
+    rewrite_only_store_allocated_bytes(Rewrite_only_rules);
+  if (Stats.rewrite_only_demodulators_current >
+      Stats.rewrite_only_demodulators_peak)
+    Stats.rewrite_only_demodulators_peak =
+      Stats.rewrite_only_demodulators_current;
+  if (rewrite_only_store_peak_allocated_bytes(Rewrite_only_rules) >
+      Stats.rewrite_bank_peak_bytes)
+    Stats.rewrite_bank_peak_bytes =
+      rewrite_only_store_peak_allocated_bytes(Rewrite_only_rules);
+}
+
+/* Remove the rewrite-only representation before a dense passive reclaims
+   its proof ID.  The caller keeps the returned full clone alive long enough
+   to transfer proof-facing state to the materialized clause. */
+static Topform take_rewrite_only_rule(unsigned long long id, int *type)
+{
+  Topform clone = rewrite_only_store_find(Rewrite_only_rules, id, type, NULL);
+  if (clone == NULL)
+    return NULL;
+  index_demodulator(clone, *type, DELETE, Clocks.index);
+  clone = rewrite_only_store_remove(Rewrite_only_rules, id, type, NULL);
+  if (clone == NULL)
+    fatal_error("take_rewrite_only_rule: store changed during removal");
+  if (!detach_clause_id(clone))
+    fatal_error("take_rewrite_only_rule: clone does not own proof ID");
+  update_rewrite_only_stats();
+  return clone;
+}
+
 static size_t archive_dense_passive(Topform c)
 {
+  unsigned long long id;
+  size_t position;
+  Topform clone;
   if (c == NULL || c->id == 0 || active_or_indexable_clause(c))
     fatal_error("archive_dense_passive: clause is not a detached passive");
+  id = c->id;
   if (dense_passive_compaction_needed())
     compact_dense_passive_store();
-  return cold_passive_store_archive(Dense_body_store, c);
+  position = cold_passive_store_archive(Dense_body_store, c);
+  if (position == SIZE_MAX)
+    return SIZE_MAX;
+  clone = rewrite_only_store_find(Rewrite_only_rules, id, NULL, NULL);
+  if (clone != NULL) {
+    if (find_clause_by_id(id) != NULL)
+      fatal_error("archive_dense_passive: proof ID was not detached");
+    register_clause_with_id(clone);
+  }
+  return position;
 }  /* archive_dense_passive */
 
 static Topform activate_dense_passive(size_t position,
                                       unsigned long long id,
                                       unsigned long long hint_id)
 {
+  int rewrite_type = NOT_DEMODULATOR;
+  Topform rewrite_clone = take_rewrite_only_rule(id, &rewrite_type);
   Topform c = cold_passive_store_materialize(Dense_body_store, position,
                                               id, TRUE);
   if (c == NULL)
     return NULL;
+  if (rewrite_clone != NULL) {
+    c->used = c->used || rewrite_clone->used;
+    delete_clause(rewrite_clone);
+    Stats.rewrite_only_demodulators_selected++;
+  }
   c->matching_hint = hint_by_id(hint_id);
   return c;
 }  /* activate_dense_passive */
@@ -5057,6 +5124,12 @@ static Topform materialize_dense_passive(
   c->semantics = view->semantics;
   c->simplifier_epoch = view->simplifier_epoch;
   c->delayed_demodulator = view->delayed_demodulator;
+  {
+    Topform clone = rewrite_only_store_find(Rewrite_only_rules, view->id,
+                                             NULL, NULL);
+    if (clone != NULL)
+      c->used = c->used || clone->used;
+  }
   return c;
 }  /* materialize_dense_passive */
 
@@ -5211,6 +5284,17 @@ This is intended for debugging only.
 /* PUBLIC */
 void free_search_memory(void)
 {
+  while (rewrite_only_store_count(Rewrite_only_rules) != 0) {
+    int type;
+    Topform c = rewrite_only_store_take_any(Rewrite_only_rules, &type, NULL);
+    if (c == NULL)
+      fatal_error("free_search_memory: corrupt rewrite-only store");
+    index_demodulator(c, type, DELETE, Clocks.index);
+    delete_clause(c);
+  }
+  rewrite_only_store_free(Rewrite_only_rules);
+  Rewrite_only_rules = NULL;
+
   // Demodulators
 
   while (Glob.demods->first) {
@@ -5683,7 +5767,7 @@ void cl_process_simplify(Topform c)
     }
     clock_stop(Clocks.demod);
   }
-  else if (!clist_empty(Glob.demods)) {
+  else if (demodulation_rules_available()) {
     if (flag(Opt->lex_order_vars)) {
       renumber_variables(c, MAX_VARS);
       c->normal_vars = FALSE;  // demodulation can make vars non-normal
@@ -5934,7 +6018,7 @@ static void collective_preview_normalize(Topform c)
 {
   if (flag(Opt->eval_rewrite))
     rewrite_with_eval(c);
-  else if (!clist_empty(Glob.demods)) {
+  else if (demodulation_rules_available()) {
     if (flag(Opt->lex_order_vars)) {
       renumber_variables(c, MAX_VARS);
       c->normal_vars = FALSE;
@@ -6332,15 +6416,81 @@ void cl_process_conflict(Topform c, BOOL denial)
   }
 }  // cl_process_conflict
 
+static unsigned long long rewrite_only_clone_bytes(Topform c)
+{
+  /* The legacy oracle intentionally owns a complete proof clone.  This
+     accounted figure includes its hash slot, Topform, and term/literal body;
+     allocator totals and RSS remain authoritative for copied justification
+     and attribute payloads that do not expose per-object byte walkers. */
+  return sizeof(struct topform) + clause_body_storage_bytes(c);
+}
+
+static void print_new_demodulator(Topform c, int type,
+                                  const char *ownership)
+{
+  if (flag(Opt->print_kept)) {
+    char *s;
+    switch(type) {
+    case ORIENTED:     s = ""; break;
+    case LEX_DEP_LR:   s = " (lex_dep_lr)"; break;
+    case LEX_DEP_RL:   s = " (lex_dep_rl)"; break;
+    case LEX_DEP_BOTH: s = " (lex_dep_both)"; break;
+    default:           s = " (?)";
+    }
+    printf("%s    new %sdemodulator%s: %llu.\n", TPTP_PFX,
+           ownership, s, c->id);
+  }
+}
+
+static Topform store_rewrite_only_clone(Topform c, int type)
+{
+  Topform clone = copy_clause_ija(c);
+  clone->normal_vars = c->normal_vars;
+  clone->initial = c->initial;
+  clone->weight = c->weight;
+  clone->semantics = c->semantics;
+  clone->simplifier_epoch = c->simplifier_epoch;
+  if (!rewrite_only_store_insert(Rewrite_only_rules, clone, type,
+                                 rewrite_only_clone_bytes(clone))) {
+    clone->id = 0;
+    delete_clause(clone);
+    fatal_error("store_rewrite_only_clone: duplicate proof ID");
+  }
+  update_rewrite_only_stats();
+  return clone;
+}
+
+static Topform resolve_rewrite_only_demodulator(unsigned long long id,
+                                                void *context)
+{
+  (void) context;
+  return rewrite_only_store_find(Rewrite_only_rules, id, NULL, NULL);
+}
+
+static void admit_rewrite_only_demodulator(Topform c, int type)
+{
+  Topform clone = store_rewrite_only_clone(c, type);
+  index_demodulator(clone, type, INSERT, Clocks.index);
+  Stats.rewrite_only_demodulators_admitted++;
+  Stats.new_demodulators++;
+  if (type != ORIENTED)
+    Stats.new_lex_demods++;
+  print_new_demodulator(c, type, "rewrite-only ");
+  back_demod_hints(clone, type, flag(Opt->lex_order_vars));
+  if (Simplifier_epoch != UINT_MAX)
+    Simplifier_epoch++;
+}
+
 static
-void cl_process_new_demod(Topform c)
+void cl_process_new_demod(Topform c, BOOL rewrite_transition)
 {
   /* In the DISCOUNT loop, an ordinary kept clause remains passive until it
      is selected.  Promoting it here would make the passive frontier part of
      the active rewrite system, which is precisely the ownership violation
      this mode removes.  Restricted denials are placed directly in Usable and
      retain their historical treatment. */
-  if (discount_mode() && !c->was_given && !restricted_denial(c))
+  if (discount_mode() && !c->was_given && !restricted_denial(c) &&
+      !eager_legacy_demod_mode())
     return;
 
   // If the clause should be a demodulator, make it so.
@@ -6349,24 +6499,23 @@ void cl_process_new_demod(Topform c)
 				parm(Opt->lex_dep_demod_lim),
 				flag(Opt->lex_dep_demod_sane));
     if (type != NOT_DEMODULATOR) {
-      if (flag(Opt->print_kept)) {
-	char *s;
-	switch(type) {
-	case ORIENTED:     s = ""; break;
-	case LEX_DEP_LR:   s = " (lex_dep_lr)"; break;
-	case LEX_DEP_RL:   s = " (lex_dep_rl)"; break;
-	case LEX_DEP_BOTH: s = " (lex_dep_both)"; break;
-	default:           s = " (?)";
-	}
-	printf("%s    new demodulator%s: %llu.\n", TPTP_PFX, s, c->id);
+      if (eager_legacy_demod_mode() && !c->was_given &&
+          !restricted_denial(c)) {
+        admit_rewrite_only_demodulator(c, type);
+        return;
       }
+      print_new_demodulator(c, type, "");
       clist_append(c, Glob.demods);
       index_demodulator(c, type, INSERT, Clocks.index);
-      Stats.new_demodulators++;
-      if (type != ORIENTED)
-	Stats.new_lex_demods++;
-      back_demod_hints(c, type, flag(Opt->lex_order_vars));
+      if (!rewrite_transition) {
+        Stats.new_demodulators++;
+        if (type != ORIENTED)
+          Stats.new_lex_demods++;
+        back_demod_hints(c, type, flag(Opt->lex_order_vars));
+      }
     }
+    else if (rewrite_transition)
+      fatal_error("cl_process_new_demod: selected rewrite rule changed type");
   }
 }  // cl_process_new_demod
 
@@ -6554,7 +6703,7 @@ void cl_process(Topform c)
         // Ordinary unit conflict.
         if (!flag(Opt->safe_unit_conflict))
 	  cl_process_conflict(c, FALSE);
-        cl_process_new_demod(c);
+        cl_process_new_demod(c, FALSE);
         // We insert c into the literal index now so that it will be
         // available for unit conflict and forward subsumption while
         // it's in limbo.  (It should not be back subsumed while in limbo.
@@ -6876,6 +7025,17 @@ void limbo_process(BOOL pre_search)
       }
       c->initial = pre_search ? TRUE : FALSE;
       prepare_discount_passive(c, TRUE);
+      if (eager_legacy_demod_mode() && c->delayed_demodulator) {
+        int type;
+        Topform clone = rewrite_only_store_find(Rewrite_only_rules, c->id,
+                                                &type, NULL);
+        if (clone == NULL)
+          fatal_error("limbo_process: eager rewrite rule is missing");
+        if (flag(Opt->print_kept))
+          printf("%s    starting rewrite-only back demodulation with %llu.\n",
+                 TPTP_PFX, c->id);
+        back_demod(clone);
+      }
       insert_into_sos2(c, Glob.sos);
       continue;
     }
@@ -8360,6 +8520,8 @@ void make_inferences(void)
 
     if (discount_mode()) {
       unsigned long long given_id = given_clause->id;
+      BOOL rewrite_transition =
+        eager_legacy_demod_mode() && given_clause->delayed_demodulator;
       Topform activated;
 
       /* The selector owns passive clauses without active indexes.  Reuse the
@@ -8375,7 +8537,7 @@ void make_inferences(void)
         Simplifier_epoch++;
       clist_append(given_clause, Glob.limbo);
       given_clause->delayed_demodulator = FALSE;
-      cl_process_new_demod(given_clause);
+      cl_process_new_demod(given_clause, rewrite_transition);
       index_literals(given_clause, INSERT, Clocks.index, FALSE);
       limbo_process(FALSE);
 
@@ -9610,6 +9772,8 @@ void write_checkpoint_hashes(const char *dir)
           hash_dense_ids() : hash_clist_ids(Glob.sos));
   fprintf(fp, "usable_ids %llu\n",    hash_clist_ids(Glob.usable));
   fprintf(fp, "demods_ids %llu\n",    hash_clist_ids(Glob.demods));
+  fprintf(fp, "rewrite_only_ids %llu\n",
+          rewrite_only_store_identity_hash(Rewrite_only_rules));
   fprintf(fp, "hints_ids %llu\n",     hash_clist_ids(Glob.hints));
   fprintf(fp, "limbo_ids %llu\n",     hash_clist_ids(Glob.limbo));
   fprintf(fp, "disabled_ids %llu\n",  hash_clause_store_ids(Glob.disabled));
@@ -9625,6 +9789,8 @@ void write_checkpoint_hashes(const char *dir)
           dense_passive_size() : Glob.sos->length);
   fprintf(fp, "usable_count %d\n",    Glob.usable->length);
   fprintf(fp, "demods_count %d\n",    Glob.demods->length);
+  fprintf(fp, "rewrite_only_count %llu\n",
+          rewrite_only_store_count(Rewrite_only_rules));
   fprintf(fp, "hints_count %d\n",     Glob.hints->length);
   fprintf(fp, "limbo_count %d\n",     Glob.limbo->length);
   fprintf(fp, "disabled_count %llu\n",
@@ -9660,6 +9826,8 @@ void verify_checkpoint_hashes(const char *dir)
       actual = hash_clist_ids(Glob.usable);
     else if (strcmp(key, "demods_ids") == 0)
       actual = hash_clist_ids(Glob.demods);
+    else if (strcmp(key, "rewrite_only_ids") == 0)
+      actual = rewrite_only_store_identity_hash(Rewrite_only_rules);
     else if (strcmp(key, "hints_ids") == 0)
       actual = hash_clist_ids(Glob.hints);
     else if (strcmp(key, "limbo_ids") == 0)
@@ -9686,6 +9854,8 @@ void verify_checkpoint_hashes(const char *dir)
       actual = (unsigned long long) Glob.usable->length;
     else if (strcmp(key, "demods_count") == 0)
       actual = (unsigned long long) Glob.demods->length;
+    else if (strcmp(key, "rewrite_only_count") == 0)
+      actual = rewrite_only_store_count(Rewrite_only_rules);
     else if (strcmp(key, "hints_count") == 0)
       actual = (unsigned long long) Glob.hints->length;
     else if (strcmp(key, "limbo_count") == 0)
@@ -13290,6 +13460,20 @@ void load_checkpoint_into_loop(void)
     safe_free(is_usable);
     safe_free(all_clauses);
 
+    /* Recreate full rewrite-only owners while SOS bodies are still resident.
+       They remain unregistered until dense bulk archival transfers each
+       proof ID, but the demod-index resolver below already targets the clone
+       rather than the temporary checkpoint Topform. */
+    if (eager_legacy_demod_mode()) {
+      for (p = Glob.sos->first; p != NULL; p = p->next) {
+        int type = demodulator_type(p->c,
+                                    parm(Opt->lex_dep_demod_lim),
+                                    flag(Opt->lex_dep_demod_sane));
+        if (type != NOT_DEMODULATOR)
+          store_rewrite_only_clone(p->c, type);
+      }
+    }
+
     /* Set up container links for demodulators (needed for demod index
        serialization which navigates term->clause).  Skip orient_equalities
        - atom flags restored from aflags in checkpoint metadata. */
@@ -13299,7 +13483,10 @@ void load_checkpoint_into_loop(void)
     /* Restore DISCRIM index leaf orderings from serialized data.
        This preserves the exact leaf-list order from the original run,
        which determines forward demodulation and subsumption behavior. */
-    restore_demod_index(Resume_dir, Clocks.index);
+    restore_demod_index(Resume_dir, Clocks.index,
+                        eager_legacy_demod_mode() ?
+                          resolve_rewrite_only_demodulator : NULL,
+                        NULL);
     restore_unit_discrim_index(Resume_dir);
 
     if (flag(Opt->eval_rewrite))
@@ -13526,8 +13713,14 @@ Prover_results search(Prover_input p)
     if (!str_ident(stringparm1(Opt->discount_demodulation), "selected") &&
         !discount_mode())
       fatal_error("eager DISCOUNT demodulation requires search_loop=discount");
-    if (eager_legacy_demod_mode())
-      fatal_error("discount_demodulation=eager_legacy is reserved until the separately owned rewrite store is initialized");
+    if (eager_legacy_demod_mode()) {
+      if (!dense_passive_mode())
+        fatal_error("discount_demodulation=eager_legacy requires passive_store=dense");
+      if (!flag(Opt->back_demod))
+        fatal_error("discount_demodulation=eager_legacy requires set(back_demod)");
+      if (flag(Opt->eval_rewrite))
+        fatal_error("discount_demodulation=eager_legacy is incompatible with eval_rewrite");
+    }
     if (eager_interreduced_demod_mode())
       fatal_error("discount_demodulation=eager_interreduced is reserved for the compact rewrite bank");
     if (str_ident(stringparm1(Opt->inference_frontier), "collective")) {
@@ -13637,6 +13830,10 @@ Prover_results search(Prover_input p)
 
     Glob.limbo    = clist_init("limbo");
     Glob.disabled = new_disabled_store();
+    if (Rewrite_only_rules != NULL)
+      fatal_error("search: previous rewrite-only store was not released");
+    Rewrite_only_rules = eager_legacy_demod_mode() ?
+      rewrite_only_store_init() : NULL;
     Glob.empties  = NULL;
     cold_passive_store_free(Dense_body_store);
     Dense_body_store = NULL;

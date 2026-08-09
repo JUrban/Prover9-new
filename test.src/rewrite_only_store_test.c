@@ -16,6 +16,7 @@ int main(void)
                                      100 + i % 31));
   }
   assert(rewrite_only_store_count(store) == 10000);
+  assert(rewrite_only_store_identity_hash(store) != 0);
   assert(rewrite_only_store_peak_allocated_bytes(store) >=
          rewrite_only_store_allocated_bytes(store));
 
@@ -30,6 +31,7 @@ int main(void)
     assert(rewrite_only_store_find(store, i, NULL, NULL) == NULL);
   }
   assert(rewrite_only_store_count(store) == 5000);
+  assert(rewrite_only_store_identity_hash(store) != 0);
 
   for (i = 10001; i <= 16000; i++) {
     Topform c = get_topform();
@@ -48,6 +50,7 @@ int main(void)
     assert(c != NULL);
     delete_clause(c);
   }
+  assert(rewrite_only_store_identity_hash(store) == 0);
   rewrite_only_store_free(store);
   printf("rewrite_only_store_test: PASS\n");
   return 0;
