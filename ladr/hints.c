@@ -108,17 +108,19 @@ static unsigned long long *Preview_key_scratch = NULL;
 static unsigned Preview_key_scratch_count = 0;
 static unsigned Preview_key_scratch_capacity = 0;
 
-/* packed_fast starts with an exact, epoch-scoped cache of the final
+/* packed_fast starts with an exact, dependency-scoped cache of the final
    structural candidate vector.  Generated equational clauses repeat shallow
-   feature profiles heavily; a hit avoids rescanning a broad posting while
-   preserving the existing exact matcher and decreasing-ID order.  Full
-   profile fields are compared, so the direct-mapped hash cannot turn a
-   collision into an unsafe omission. */
+   feature profiles heavily; a hit avoids rebuilding an intersection while
+   preserving the exact matcher and decreasing-ID order.  Full profile fields
+   are compared, and a rare required posting plus AnyConst/rebuild generations
+   invalidate possible additions, so neither hash collisions nor unrelated
+   hint mutations can cause an unsafe omission. */
 
 #define FAST_MATCH_CACHE_CAPACITY 32768U
 #define FAST_MATCH_CACHE_KEYS 12U
 #define FAST_MATCH_CACHE_CANDIDATES 8U
-#define FAST_DENSE_MIN_POSTING 1024U
+#define FAST_DENSE_MIN_POSTING 512U
+#define FAST_DENSE_MAX_KEYS 64U
 
 struct fast_match_cache_entry {
   unsigned long long posting_serial;
@@ -151,7 +153,10 @@ static unsigned long long Fast_cache_dependency_misses = 0;
 static unsigned long long Fast_cache_profile_misses = 0;
 static unsigned long long Fast_dense_queries = 0;
 static unsigned long long Fast_dense_used = 0;
-static unsigned long long Fast_dense_small_fallbacks = 0;
+static unsigned long long Fast_sparse_used = 0;
+static unsigned long long Fast_sparse_seed_ids = 0;
+static unsigned long long Fast_sparse_feature_tests = 0;
+static unsigned long long Fast_sparse_rejects = 0;
 static unsigned long long Fast_dense_seed_ids_avoided = 0;
 static unsigned long long Fast_dense_summary_words = 0;
 static unsigned long long Fast_dense_data_words = 0;
@@ -163,6 +168,7 @@ static unsigned long long Fast_dense_result_ids = 0;
 #define BETTER_FEATURE_BACK_CORRELATED 4U
 #define BETTER_BACK_FEATURE_DEPTH 2U
 #define BETTER_MATCH_FEATURE_DEPTH 2U
+#define FAST_MATCH_FEATURE_DEPTH 2U
 #define BETTER_REBUILD_STALE_MIN 65536ULL
 
 /* Attribute candidate selection and exact materialization cost to the four
@@ -191,6 +197,10 @@ struct packed_hint_operation_stats {
   unsigned long long reindexes;
   unsigned long long stale_skips;
   unsigned long long fingerprint_rejects;
+  unsigned long long direct_attempts;
+  unsigned long long direct_handled;
+  unsigned long long direct_matches;
+  unsigned long long direct_equivalences;
   unsigned long long candidate_max;
   unsigned long long candidate_buckets[PACKED_HINT_CANDIDATE_BUCKETS];
   Clock clock;
@@ -821,7 +831,9 @@ static void better_collect_hint_features(Topform h, BOOL anyconst)
       unsigned kind = lit->sign ? BETTER_FEATURE_MATCH_POS :
                                   BETTER_FEATURE_MATCH_NEG;
       better_collect_relative_features(lit->atom, kind, 0, 0,
-                                       BETTER_MATCH_FEATURE_DEPTH);
+                                       Fast_packed_index ?
+                                         FAST_MATCH_FEATURE_DEPTH :
+                                         BETTER_MATCH_FEATURE_DEPTH);
       for (i = 0; i < ARITY(lit->atom); i++)
         better_collect_back_occurrences(ARG(lit->atom,i));
     }
@@ -1143,10 +1155,10 @@ static struct fast_match_cache_entry *fast_cache_slot(
   const unsigned long long *keys, unsigned key_count,
   unsigned long long first_mask, unsigned positive, unsigned negative)
 {
-  unsigned long long h = fast_profile_hash(
+  unsigned long long hash = fast_profile_hash(
     keys, key_count, first_mask, positive, negative);
   return Fast_match_cache +
-    ((unsigned) h & (FAST_MATCH_CACHE_CAPACITY - 1));
+    ((unsigned) hash & (FAST_MATCH_CACHE_CAPACITY - 1));
 }
 
 static BOOL fast_cache_lookup(
@@ -1160,8 +1172,9 @@ static BOOL fast_cache_lookup(
     Fast_cache_queries++;
     Fast_cache_eligible++;
   }
-  if (!e->valid || e->first_mask != first_mask || e->positive != positive ||
-      e->negative != negative || e->key_count != key_count ||
+  if (!e->valid || e->first_mask != first_mask ||
+      e->positive != positive || e->negative != negative ||
+      e->key_count != key_count ||
       memcmp(e->keys, keys,
              (size_t) key_count * sizeof(unsigned long long)) != 0) {
     if (!Hint_preview_active) {
@@ -1245,26 +1258,24 @@ static BOOL fast_dense_collect_candidates(
   const unsigned long long *keys, unsigned key_count,
   enum packed_hint_operation op, BOOL exclude_anyconst)
 {
-  struct hint_dense_view views[FAST_MATCH_CACHE_KEYS];
+  struct hint_dense_view views[FAST_DENSE_MAX_KEYS];
   unsigned minimum = UINT_MAX;
+  unsigned seed = 0;
   unsigned i, summary_word;
   BOOL create = !Hint_preview_active;
   if (!Hint_preview_active)
     Fast_dense_queries++;
-  if (key_count < 2)
+  if (key_count < 2 || key_count > FAST_DENSE_MAX_KEYS)
     return FALSE;
   for (i = 0; i < key_count; i++) {
     unsigned count;
     hint_postings_get(Better_postings, keys[i], &count);
     if (count == 0)
       return TRUE;
-    if (count < minimum)
+    if (count < minimum) {
       minimum = count;
-  }
-  if (minimum < FAST_DENSE_MIN_POSTING) {
-    if (!Hint_preview_active)
-      Fast_dense_small_fallbacks++;
-    return FALSE;
+      seed = i;
+    }
   }
   for (i = 0; i < key_count; i++) {
     if (!hint_postings_dense_view(Better_postings, keys[i],
@@ -1272,6 +1283,44 @@ static BOOL fast_dense_collect_candidates(
                                   views + i)) {
       return FALSE;
     }
+  }
+  if (minimum < FAST_DENSE_MIN_POSTING) {
+    unsigned count, j;
+    const unsigned *ids = hint_postings_get(
+      Better_postings, keys[seed], &count);
+    if (!Hint_preview_active) {
+      Fast_sparse_used++;
+      Fast_sparse_seed_ids += count;
+      Packed_operation_stats[op].posting_lists += key_count;
+    }
+    for (j = 0; j < count; j++) {
+      unsigned id = ids[j];
+      BOOL keep = TRUE;
+      if (!Hint_preview_active)
+        Packed_operation_stats[op].posting_candidates++;
+      if (id == 0 || id >= Packed_hint_capacity ||
+          !Packed_hint_active[id] ||
+          (exclude_anyconst && Packed_hint_anyconst[id])) {
+        if (!Hint_preview_active)
+          Packed_operation_stats[op].stale_skips++;
+        continue;
+      }
+      for (i = 0; i < key_count && keep; i++) {
+        unsigned word;
+        if (i == seed)
+          continue;
+        word = id / 64;
+        if (!Hint_preview_active)
+          Fast_sparse_feature_tests++;
+        keep = word < views[i].words &&
+               (views[i].bits[word] & (1ULL << (id % 64))) != 0;
+      }
+      if (keep)
+        packed_add_candidate(id);
+      else if (!Hint_preview_active)
+        Fast_sparse_rejects++;
+    }
+    return TRUE;
   }
   if (!Hint_preview_active) {
     Fast_dense_used++;
@@ -1491,7 +1540,8 @@ void done_with_hints(void)
   Fast_cache_dependency_misses = Fast_cache_profile_misses = 0;
   Fast_cache_posting_serial = Fast_cache_anyconst_generation = 1;
   Fast_dense_queries = Fast_dense_used = 0;
-  Fast_dense_small_fallbacks = 0;
+  Fast_sparse_used = Fast_sparse_seed_ids = 0;
+  Fast_sparse_feature_tests = Fast_sparse_rejects = 0;
   Fast_dense_seed_ids_avoided = Fast_dense_summary_words = 0;
   Fast_dense_data_words = Fast_dense_result_ids = 0;
   Packed_hint_capacity = 0;
@@ -1673,6 +1723,8 @@ static void better_collect_clause_candidates(
                                     BETTER_FEATURE_MATCH_NEG;
     better_scratch_clear();
     better_collect_relative_features(first->atom, kind, 0, 0,
+                                     Fast_packed_index ?
+                                       FAST_MATCH_FEATURE_DEPTH :
                                        BETTER_MATCH_FEATURE_DEPTH);
     if (Fast_packed_index) {
       fast_eligible = positive <= USHRT_MAX && negative <= USHRT_MAX &&
@@ -1690,9 +1742,9 @@ static void better_collect_clause_candidates(
         posting_candidates_before =
           Packed_operation_stats[op].posting_candidates;
     }
-    if (!Fast_packed_index || !fast_eligible ||
+    if (!Fast_packed_index ||
         !fast_dense_collect_candidates(
-          fast_keys, fast_key_count, op, TRUE))
+          Better_key_scratch, Better_key_scratch_count, op, TRUE))
       better_intersect_scratch_candidates(op, TRUE, FALSE);
   }
 
@@ -1759,20 +1811,43 @@ static Topform packed_find_equivalent_hint(Topform c)
   for (i = 0; i < Packed_candidates_count; i++) {
     Topform h = Packed_hint_by_id[Packed_candidates[i]];
     BOOL was_compressed;
-    BOOL c_sub_h, h_sub_c;
+    BOOL c_sub_h = FALSE, h_sub_c = FALSE;
+    BOOL direct = FALSE;
     if (h == NULL || h == c)
       continue;
     was_compressed = h->compressed != NULL;
-    if (was_compressed) {
+    if (Fast_packed_index && was_compressed && nc == 1 &&
+        Better_hint_positive_count[h->id] +
+          Better_hint_negative_count[h->id] == 1 &&
+        !Packed_hint_anyconst[h->id] &&
+        !(MATCH_HINTS_ANYCONST && AnyConstsEnabled &&
+          hint_contains_anyconst(c))) {
+      Packed_operation_stats[op].direct_attempts++;
+      direct = compressed_unit_target_matches(c->literals, h, &c_sub_h);
+      if (direct && c_sub_h)
+        direct = compressed_unit_pattern_matches(h, c->literals, &h_sub_c);
+      if (direct) {
+        Packed_operation_stats[op].direct_handled++;
+        if (c_sub_h)
+          Packed_operation_stats[op].direct_matches++;
+        if (c_sub_h && h_sub_c)
+          Packed_operation_stats[op].direct_equivalences++;
+      }
+    }
+    if (!direct && was_compressed) {
       Packed_operation_stats[op].materializations++;
       if (!materialize_clause(h))
         fatal_error("packed_find_equivalent_hint: invalid packed hint");
     }
-    Packed_candidate_checks++;
-    c_sub_h = nc <= number_of_literals(h->literals) && subsumes(c, h);
-    h_sub_c = c_sub_h && subsumes(h, c);
-    if (was_compressed && !recompress_clause(h))
-      fatal_error("packed_find_equivalent_hint: cannot recompress hint");
+    if (!direct) {
+      Packed_candidate_checks++;
+      c_sub_h = nc <= number_of_literals(h->literals) && subsumes(c, h);
+      h_sub_c = c_sub_h && subsumes(h, c);
+      if (was_compressed && !recompress_clause(h))
+        fatal_error("packed_find_equivalent_hint: cannot recompress hint");
+    }
+    else
+      Packed_candidate_checks++;
     if (h_sub_c) {
       Packed_operation_stats[op].exact_positives++;
       packed_operation_end(op);
@@ -1798,23 +1873,48 @@ static Topform packed_find_matching_hint(Topform c, BOOL flipped)
   for (i = 0; i < Packed_candidates_count; i++) {
     Topform h = Packed_hint_by_id[Packed_candidates[i]];
     BOOL was_compressed;
-    BOOL c_sub_h, equivalent;
+    BOOL c_sub_h = FALSE, equivalent = FALSE;
+    BOOL direct = FALSE;
     if (h == NULL || h == c)
       continue;
     was_compressed = h->compressed != NULL;
-    if (was_compressed) {
+    if (Fast_packed_index && was_compressed && nc == 1 &&
+        Better_hint_positive_count[h->id] +
+          Better_hint_negative_count[h->id] == 1 &&
+        !Packed_hint_anyconst[h->id] &&
+        !(MATCH_HINTS_ANYCONST && AnyConstsEnabled &&
+          hint_contains_anyconst(c))) {
+      BOOL h_sub_c = FALSE;
+      Packed_operation_stats[op].direct_attempts++;
+      direct = compressed_unit_target_matches(c->literals, h, &c_sub_h);
+      if (direct && c_sub_h)
+        direct = compressed_unit_pattern_matches(h, c->literals, &h_sub_c);
+      if (direct) {
+        equivalent = c_sub_h && h_sub_c;
+        Packed_operation_stats[op].direct_handled++;
+        if (c_sub_h)
+          Packed_operation_stats[op].direct_matches++;
+        if (equivalent)
+          Packed_operation_stats[op].direct_equivalences++;
+      }
+    }
+    if (!direct && was_compressed) {
       Packed_operation_stats[op].materializations++;
       if (!materialize_clause(h))
         fatal_error("packed_find_matching_hint: invalid packed hint");
     }
-    Packed_candidate_checks++;
-    c_sub_h = nc <= number_of_literals(h->literals) && subsumes(c, h);
-    equivalent = c_sub_h && subsumes(h, c);
+    if (!direct) {
+      Packed_candidate_checks++;
+      c_sub_h = nc <= number_of_literals(h->literals) && subsumes(c, h);
+      equivalent = c_sub_h && subsumes(h, c);
+    }
+    else
+      Packed_candidate_checks++;
     if (c_sub_h) {
       Packed_operation_stats[op].exact_positives++;
       match_hint = h;
     }
-    if (was_compressed && !recompress_clause(h))
+    if (!direct && was_compressed && !recompress_clause(h))
       fatal_error("packed_find_matching_hint: cannot recompress hint");
     if (equivalent)
       break;
@@ -2547,6 +2647,8 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             "unique_candidates=%llu, mean=%.2f, "
             "max=%llu, materialized=%llu, exact_positive=%llu, rewrites=%llu, "
             "reindexes=%llu, stale_skips=%llu, fingerprint_rejects=%llu, "
+            "direct_attempts=%llu, direct_handled=%llu, "
+            "direct_matches=%llu, direct_equivalences=%llu, "
             "buckets=0:%llu/1:%llu/2-7:%llu/8-31:%llu/32-127:%llu/"
             "128-1023:%llu/1024-16383:%llu/16384+:%llu.\n",
             Packed_operation_names[i], clock_seconds(s->clock), s->queries,
@@ -2556,6 +2658,8 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             s->candidate_max, s->materializations, s->exact_positives,
             s->rewrites, s->reindexes, s->stale_skips,
             s->fingerprint_rejects,
+            s->direct_attempts, s->direct_handled,
+            s->direct_matches, s->direct_equivalences,
             s->candidate_buckets[0], s->candidate_buckets[1],
             s->candidate_buckets[2], s->candidate_buckets[3],
             s->candidate_buckets[4], s->candidate_buckets[5],
@@ -2621,11 +2725,13 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             Fast_cache_posting_candidates_avoided);
     fprintf(fp,
             "Packed_fast_dense: threshold=%u, queries=%llu, used=%llu, "
-            "small_fallbacks=%llu, "
+            "sparse_used=%llu, sparse_seed_ids=%llu, "
+            "sparse_feature_tests=%llu, sparse_rejects=%llu, "
             "seed_ids_avoided=%llu, summary_words=%llu, data_words=%llu, "
             "result_ids=%llu.\n",
             FAST_DENSE_MIN_POSTING, Fast_dense_queries, Fast_dense_used,
-            Fast_dense_small_fallbacks,
+            Fast_sparse_used, Fast_sparse_seed_ids,
+            Fast_sparse_feature_tests, Fast_sparse_rejects,
             Fast_dense_seed_ids_avoided, Fast_dense_summary_words,
             Fast_dense_data_words, Fast_dense_result_ids);
   }

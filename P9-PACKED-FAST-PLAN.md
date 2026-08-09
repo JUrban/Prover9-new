@@ -263,6 +263,41 @@ work must separately attribute bitset planning/intersection, exact candidate
 decoding, and subsumption rather than assuming posting counts remain the sole
 bottleneck.
 
+### Phase 1 completion candidate
+
+Two further changes close most of the remaining prefix gap:
+
+- Sparse profiles now scan their rarest posting but test every other required
+  feature by exact bit membership.  This removes the lossy fingerprint from
+  `packed_fast` ordinary/flipped misses while retaining the 512-reference
+  break-even threshold for wordwise intersection.
+- Unit clauses are matched directly against the bounds-checked version-2
+  compressed stream in both subsumption directions.  Repeated variables,
+  target variables, polarity, and private-flag semantics are handled exactly;
+  unsupported/nonunit/`AnyConst` cases retain materialize-and-`subsumes`.
+
+At the exact 300-given selected-DISCOUNT boundary the best run is now:
+
+| Index | User CPU | Peak RSS | Ordinary materializations |
+| --- | ---: | ---: | ---: |
+| `packed` | 50.02 s | 90,636 KiB | 522,181 |
+| `packed_fast` Phase 1 | 32.61 s | 90,492 KiB | 4,313 |
+
+This is a 34.8% total-CPU reduction versus packed and only 17.6% slower than
+the 27.72-second FPA result, with no measured RAM regression.  It misses the
+aggressive 32-second target by 0.61 seconds but satisfies the more important
+"comparable CPU" interpretation at this prefix.  A trace-enabled rerun emitted
+15,039 records byte-identical to FPA and packed, SHA256
+`505085c14b0576018a363cdad16beafddbf04aa9a03b6d2c0cf8f1cd2deda60c`.
+
+Measured rejects were removed rather than accumulated: feature depth three
+increased candidate/bitset work; a four-way 65,536-entry cache spent about
+6 MiB for only 59 additional hits; eager clearing across every promoted row
+saved too few candidates for its mutation cost; and a 256-reference dense
+threshold regressed versus 512.  The next decision must come from the
+1,000-given scaling gate and ultimately the proof run, not another small
+constant tweak.
+
 ## Acceptance gates
 
 ### Correctness

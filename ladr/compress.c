@@ -125,6 +125,238 @@ BOOL read_uvarint(const unsigned char *data, unsigned size,
   return FALSE;
 }  /* read_uvarint */
 
+/* Read one preorder node from the versioned body stream, deliberately
+   ignoring private_flags because term_ident()/match_hints() do not include
+   them in term identity. */
+static BOOL read_packed_node(const unsigned char *data, unsigned size,
+                             unsigned *offset, BOOL *variable,
+                             unsigned *number, unsigned *arity)
+{
+  unsigned code;
+  unsigned flags;
+  int a;
+  if (!read_uvarint(data, size, offset, &code))
+    return FALSE;
+  *variable = (code & 1) == 0;
+  *number = code >> 1;
+  if (*variable) {
+    if (*number >= MAX_VNUM)
+      return FALSE;
+    *arity = 0;
+    return TRUE;
+  }
+  if (*number == 0 || *number > (unsigned) greatest_symnum() ||
+      !read_uvarint(data, size, offset, &flags) || flags > UCHAR_MAX)
+    return FALSE;
+  a = sn_to_arity((int) *number);
+  if (a < 0)
+    return FALSE;
+  *arity = (unsigned) a;
+  return TRUE;
+}
+
+static BOOL skip_packed_children(const unsigned char *data, unsigned size,
+                                 unsigned *offset, unsigned children)
+{
+  unsigned pending = children;
+  while (pending != 0) {
+    BOOL variable;
+    unsigned number, arity;
+    if (!read_packed_node(data, size, offset, &variable, &number, &arity))
+      return FALSE;
+    pending--;
+    if (arity > UINT_MAX - pending)
+      return FALSE;
+    pending += arity;
+  }
+  return TRUE;
+}
+
+static BOOL packed_terms_ident(const unsigned char *data,
+                               unsigned first_start, unsigned first_end,
+                               unsigned second_start, unsigned second_end)
+{
+  unsigned a = first_start;
+  unsigned b = second_start;
+  while (a < first_end && b < second_end) {
+    BOOL avar, bvar;
+    unsigned anum, bnum, aarity, barity;
+    if (!read_packed_node(data, first_end, &a, &avar, &anum, &aarity) ||
+        !read_packed_node(data, second_end, &b, &bvar, &bnum, &barity) ||
+        avar != bvar || anum != bnum || aarity != barity)
+      return FALSE;
+  }
+  return a == first_end && b == second_end;
+}
+
+/* Locate the unit atom inside the right-associated clause encoding. */
+static BOOL packed_unit_atom(Topform c, BOOL positive,
+                             const unsigned char **data_out,
+                             unsigned *start_out, unsigned *end_out)
+{
+  const unsigned char *data;
+  unsigned size, offset = 2;
+  if (c == NULL || c->compressed == NULL || c->compressed_size < 3 ||
+      c->packed_justification)
+    return FALSE;
+  data = (const unsigned char *) c->compressed;
+  size = c->compressed_size;
+  if (data[0] != CLAUSE_COMPRESS_MAGIC ||
+      data[1] != CLAUSE_COMPRESS_VERSION)
+    return FALSE;
+  if (!positive) {
+    BOOL variable;
+    unsigned number, arity;
+    if (!read_packed_node(data, size, &offset, &variable, &number, &arity) ||
+        variable || number != (unsigned) not_symnum() || arity != 1)
+      return FALSE;
+  }
+  *data_out = data;
+  *start_out = offset;
+  *end_out = size;
+  return TRUE;
+}
+
+/* Match an ordinary Term pattern against a preorder packed target. */
+static BOOL resident_matches_packed(Term pattern,
+                                    const unsigned char *data,
+                                    unsigned start, unsigned end,
+                                    BOOL *matched)
+{
+  Term stack[1000];
+  unsigned bind_start[MAX_VARS];
+  unsigned bind_end[MAX_VARS];
+  unsigned char bound[MAX_VARS];
+  int top = 0;
+  unsigned offset = start;
+  memset(bound, 0, sizeof(bound));
+  stack[top++] = pattern;
+  while (top > 0) {
+    Term p = stack[--top];
+    unsigned node_start = offset;
+    BOOL variable;
+    unsigned number, arity;
+    if (!read_packed_node(data, end, &offset, &variable, &number, &arity))
+      return FALSE;
+    if (VARIABLE(p)) {
+      unsigned vn = (unsigned) VARNUM(p);
+      unsigned node_end;
+      if (vn >= MAX_VARS ||
+          !skip_packed_children(data, end, &offset, arity))
+        return FALSE;
+      node_end = offset;
+      if (!bound[vn]) {
+        bound[vn] = 1;
+        bind_start[vn] = node_start;
+        bind_end[vn] = node_end;
+      }
+      else if (!packed_terms_ident(data, bind_start[vn], bind_end[vn],
+                                   node_start, node_end)) {
+        *matched = FALSE;
+        return TRUE;
+      }
+    }
+    else {
+      int i;
+      if (variable || number != (unsigned) SYMNUM(p) ||
+          arity != (unsigned) ARITY(p)) {
+        *matched = FALSE;
+        return TRUE;
+      }
+      if (top + ARITY(p) > (int) (sizeof(stack) / sizeof(stack[0])))
+        return FALSE;
+      for (i = ARITY(p) - 1; i >= 0; i--)
+        stack[top++] = ARG(p,i);
+    }
+  }
+  if (offset != end)
+    return FALSE;
+  *matched = TRUE;
+  return TRUE;
+}
+
+/* Match a preorder packed pattern against an ordinary Term target. */
+static BOOL packed_matches_resident(const unsigned char *data,
+                                    unsigned start, unsigned end,
+                                    Term target, BOOL *matched)
+{
+  Term stack[1000];
+  Term bindings[MAX_VARS];
+  int top = 0;
+  unsigned offset = start;
+  memset(bindings, 0, sizeof(bindings));
+  stack[top++] = target;
+  while (top > 0) {
+    Term t = stack[--top];
+    BOOL variable;
+    unsigned number, arity;
+    if (!read_packed_node(data, end, &offset, &variable, &number, &arity))
+      return FALSE;
+    if (variable) {
+      if (number >= MAX_VARS)
+        return FALSE;
+      if (bindings[number] == NULL)
+        bindings[number] = t;
+      else if (!term_ident(bindings[number], t)) {
+        *matched = FALSE;
+        return TRUE;
+      }
+    }
+    else {
+      int i;
+      if (VARIABLE(t) || number != (unsigned) SYMNUM(t) ||
+          arity != (unsigned) ARITY(t)) {
+        *matched = FALSE;
+        return TRUE;
+      }
+      if (top + ARITY(t) > (int) (sizeof(stack) / sizeof(stack[0])))
+        return FALSE;
+      for (i = ARITY(t) - 1; i >= 0; i--)
+        stack[top++] = ARG(t,i);
+    }
+  }
+  if (offset != end)
+    return FALSE;
+  *matched = TRUE;
+  return TRUE;
+}
+
+BOOL compressed_unit_target_matches(Literals resident,
+                                    Topform compressed,
+                                    BOOL *matched)
+{
+  const unsigned char *data;
+  unsigned start, end;
+  if (matched == NULL || compressed == NULL || resident == NULL ||
+      resident->next != NULL)
+    return FALSE;
+  if (resident->sign == compressed->neg_compressed) {
+    *matched = FALSE;
+    return TRUE;
+  }
+  if (!packed_unit_atom(compressed, resident->sign, &data, &start, &end))
+    return FALSE;
+  return resident_matches_packed(resident->atom, data, start, end, matched);
+}
+
+BOOL compressed_unit_pattern_matches(Topform compressed,
+                                     Literals resident,
+                                     BOOL *matched)
+{
+  const unsigned char *data;
+  unsigned start, end;
+  if (matched == NULL || compressed == NULL || resident == NULL ||
+      resident->next != NULL)
+    return FALSE;
+  if (resident->sign == compressed->neg_compressed) {
+    *matched = FALSE;
+    return TRUE;
+  }
+  if (!packed_unit_atom(compressed, resident->sign, &data, &start, &end))
+    return FALSE;
+  return packed_matches_resident(data, start, end, resident->atom, matched);
+}
+
 static
 void append_varint_term(String_buf sb, Term t)
 {

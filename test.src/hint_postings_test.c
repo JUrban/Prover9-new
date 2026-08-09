@@ -20,6 +20,7 @@ int main(void)
 {
   Hint_postings index = hint_postings_init();
   struct hint_postings_stats stats;
+  struct hint_dense_view dense;
   const unsigned *refs;
   unsigned count;
   unsigned i;
@@ -32,6 +33,18 @@ int main(void)
   require(count == 2, "posting 17 count");
   require(contains(refs, count, 3), "posting 17 ID 3");
   require(contains(refs, count, 91), "posting 17 ID 91");
+  require(hint_postings_generation(index, 17) == 2,
+          "posting generation counts insertions");
+  require(hint_postings_dense_view(index, 17, 256, TRUE, &dense),
+          "dense view promotion");
+  require((dense.bits[3 / 64] & (1ULL << (3 % 64))) != 0 &&
+          (dense.bits[91 / 64] & (1ULL << (91 % 64))) != 0,
+          "dense view contains existing IDs");
+  hint_postings_add(index, 17, 200);
+  require((dense.bits[200 / 64] & (1ULL << (200 % 64))) != 0,
+          "dense view tracks later insertion");
+  refs = hint_postings_get(index, 17, &count);
+  require(count == 3, "promoted posting remains appendable");
   refs = hint_postings_get(index, 0, &count);
   require(count == 1 && refs[0] == 7,
           "zero-valued feature key");
@@ -55,10 +68,13 @@ int main(void)
 
   hint_postings_get_stats(index, &stats);
   require(stats.keys == 2004, "key statistics");
-  require(stats.references == 4004, "reference statistics");
+  require(stats.references == 4005, "reference statistics");
   require(stats.maximum_posting == 2000, "maximum posting statistics");
   require(stats.table_bytes > 0 && stats.reference_bytes > 0,
           "byte statistics");
+  require(stats.dense_keys == 1 && stats.dense_bit_bytes > 0 &&
+          stats.dense_summary_bytes > 0,
+          "dense byte statistics");
 
   hint_postings_destroy(index);
   printf("hint_postings_test: PASS\n");

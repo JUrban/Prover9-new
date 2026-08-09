@@ -73,6 +73,19 @@ void recompress_clauses(Plist p);
 
 BOOL compressed_clause_is_valid(Topform c);
 
+/* Allocation-free one-way matching for a resident unit literal and a
+   version-2 compressed unit clause.  The first form treats RESIDENT as the
+   pattern and COMPRESSED as the target; the second reverses those roles.
+   TRUE means the representation was supported and *MATCHED is authoritative.
+   FALSE requests the ordinary materialize/subsumes fallback. */
+BOOL compressed_unit_target_matches(Literals resident,
+                                    Topform compressed,
+                                    BOOL *matched);
+
+BOOL compressed_unit_pattern_matches(Topform compressed,
+                                     Literals resident,
+                                     BOOL *matched);
+
 unsigned compressed_clause_justification_bytes(Topform c);
 
 unsigned long long clause_body_storage_bytes(Topform c);
