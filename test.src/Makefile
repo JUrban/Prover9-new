@@ -11,7 +11,7 @@ CFLAGS = $(XFLAGS) -g  -O0 -Wall
 # CFLAGS = $(XFLAGS) -pg -O -Wall
 # CFLAGS = $(XFLAGS)  -Wall -pedantic
 
-PROGRAMS = avltest memory_lifecycle_test allocator_churn_test bookkeeping_lifecycle_test ancestor_store_test ancestor_store_scale_test checkpoint_selector_test dense_selector_compaction_test cold_passive_store_test hint_postings_test hint_preview_test compressed_unit_match_test paramod_iterator_test hyper_iterator_test rewrite_only_store_test compact_rewrite_test
+PROGRAMS = avltest memory_lifecycle_test allocator_churn_test bookkeeping_lifecycle_test ancestor_store_test ancestor_store_scale_test checkpoint_selector_test dense_selector_compaction_test cold_passive_store_test hint_postings_test hint_preview_test compressed_unit_match_test paramod_iterator_test hyper_iterator_test rewrite_only_store_test compact_rewrite_test compact_unit_index_test
 
 all: ladr apps
 
@@ -78,6 +78,9 @@ rewrite_only_store_test: rewrite_only_store_test.o ../provers.src/rewrite_only_s
 compact_rewrite_test: compact_rewrite_test.o ../provers.src/compact_rewrite.o ../provers.src/demodulate.o ../ladr/libladr.a
 	$(CC) $(CFLAGS) -o compact_rewrite_test compact_rewrite_test.o ../provers.src/compact_rewrite.o ../provers.src/demodulate.o ../ladr/libladr.a -lm
 
+compact_unit_index_test: compact_unit_index_test.o ../provers.src/compact_unit_index.o ../ladr/libladr.a
+	$(CC) $(CFLAGS) -o compact_unit_index_test compact_unit_index_test.o ../provers.src/compact_unit_index.o ../ladr/libladr.a -lm
+
 memory_lifecycle_test.o allocator_churn_test.o bookkeeping_lifecycle_test.o ancestor_store_test.o: ../ladr/topform.h
 
 bookkeeping_lifecycle_test.o: ../ladr/clause_store.h ../ladr/clauseid.h
@@ -121,6 +124,9 @@ rewrite-only-store-test: rewrite_only_store_test
 
 compact-rewrite-test: compact_rewrite_test
 	./compact_rewrite_test
+
+compact-unit-index-test: compact_unit_index_test
+	./compact_unit_index_test
 
 ancestor-store-scale: ancestor_store_scale_test
 	./ancestor_store_scale_test
