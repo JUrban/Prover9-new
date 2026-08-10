@@ -704,6 +704,32 @@ must compare 8, 4, and 2 MiB directly: 4 MiB is the bounded-prefix leader,
 while 2 MiB remains useful for determining whether later pool regrowth, rather
 than the first compaction, sets the final high-water mark.
 
+The three full proofs are exact.  Each reaches `Given=2,945`,
+`Generated=8,248,032`, and `Kept=272,787`; each reconstructed 7,051-clause
+proof is byte-identical to the accepted reference.  CPU remains essentially
+flat despite the extra rebuilds:
+
+| Reclaim threshold | Pool compactions | User | Sampled peak | External peak | Final PSS |
+|---:|---:|---:|---:|---:|---:|
+| 8 MiB | 1 | 741.29 s | 150,180 KiB | 153,880 KiB | 129,960 KiB |
+| 4 MiB | 2 | 741.18 s | 145,192 KiB | 153,040 KiB | 129,838 KiB |
+| 2 MiB | 5 | 743.11 s | 142,640 KiB | 147,980 KiB | 123,724 KiB |
+
+The 2-MiB steady state is already 4,276 KiB below the formal 128,000-KiB
+gate, but the process high-water mark still misses it by 19,980 KiB.  The
+0.2-second trace locates the decisive late overlap: after the empty clause is
+found, `get_clause_ancestors()` materializes the complete 7,051-clause
+archived proof while all compact search indexes and the shared term pool are
+still resident.  A second, shorter gap between the sampled and `time -v`
+maxima occurs within the same reconstruction/printing transaction.
+
+The next accepted slice is therefore terminal-only and cannot change search
+semantics: determine nonredundancy from archived ID/parent/negative metadata,
+freeze the final statistics, release compact rewrite/unit/nonunit/back-demod
+indexes and their shared term pool, and only then reconstruct and print the
+proof DAG.  The frozen report must retain the pre-release index accounting,
+and all 7,051 proof clauses must remain exact.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:
