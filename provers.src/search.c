@@ -5370,10 +5370,22 @@ static void print_deferred_terminal_statistics(FILE *fp)
   fflush(fp);
 }
 
+static void compact_passive_cache_free(void);
+
 static void release_terminal_compact_indexes(void)
 {
   if (Terminal_compact_indexes_released || !compact_otter_passive_mode())
     return;
+  /* Freeze has already captured the final SOS statistics.  No still-passive
+     clause can be an ancestor of the terminal empty clause, so its dense
+     selector record and heap entries are search-only at this point.  Drop
+     them before materializing the proof DAG instead of overlapping roughly
+     ten MiB of passive metadata with thousands of proof clauses. */
+  compact_passive_cache_free();
+  reset_selector_indexes();
+  cold_passive_store_free(Dense_body_store);
+  Dense_body_store = NULL;
+  Dense_arena_bytes_reclaimed = 0;
   destroy_demodulation_index();
   compact_rewrite_free(Compact_rewrite_rules);
   Compact_rewrite_rules = NULL;
