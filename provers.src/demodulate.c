@@ -27,6 +27,7 @@
 static Mindex Demod_idx;
 static Mindex Back_demod_idx;
 static Compact_back_demod_index Compact_back_demod_idx;
+static Compact_term_pool Compact_back_demod_terms;
 static BOOL Compact_back_demod_audit;
 static BOOL Compact_back_demod_authoritative;
 static unsigned long long Compact_back_demod_failures;
@@ -55,6 +56,13 @@ void configure_compact_back_demod(BOOL audit, BOOL authoritative)
   Compact_back_demod_audit = audit;
   Compact_back_demod_authoritative = authoritative;
   Compact_back_demod_failures = 0;
+}
+
+void configure_compact_back_demod_term_pool(Compact_term_pool pool)
+{
+  if (Compact_back_demod_idx != NULL)
+    fatal_error("configure_compact_back_demod_term_pool: index is live");
+  Compact_back_demod_terms = pool;
 }
 
 static BOOL compact_back_demod_mode(void)
@@ -92,7 +100,8 @@ void init_back_demod_index(Mindextype mtype, Uniftype utype, int fpa_depth)
   Back_demod_idx = Compact_back_demod_authoritative ? NULL :
     mindex_init(mtype, utype, fpa_depth);
   Compact_back_demod_idx = compact_back_demod_mode() ?
-    compact_back_demod_init() : NULL;
+    (Compact_back_demod_terms == NULL ? compact_back_demod_init() :
+     compact_back_demod_init_with_pool(Compact_back_demod_terms)) : NULL;
 }  /* init_back_demod_index */
 
 /*************
@@ -324,6 +333,7 @@ void destroy_back_demod_index(void)
   Back_demod_idx = NULL;
   compact_back_demod_free(Compact_back_demod_idx);
   Compact_back_demod_idx = NULL;
+  Compact_back_demod_terms = NULL;
 }  /* destroy_back_demod_index */
 
 /*************

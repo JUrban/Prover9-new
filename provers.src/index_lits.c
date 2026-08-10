@@ -31,6 +31,7 @@ static Di_tree Nonunit_features_idx;  /* nonunit fsub, nonunit bsub */
 static BOOL Compact_unit_subsumption_audit;
 static BOOL Compact_unit_authoritative;
 static Compact_unit_index Compact_units;
+static Compact_term_pool Compact_unit_terms;
 static unsigned long long Compact_unit_audit_failures;
 static BOOL Compact_nonunit_audit;
 static BOOL Compact_nonunit_authoritative;
@@ -74,6 +75,13 @@ void configure_compact_unit_index(BOOL audit, BOOL authoritative)
   Compact_unit_subsumption_audit = audit;
   Compact_unit_authoritative = authoritative;
   Compact_unit_audit_failures = 0;
+}
+
+void configure_compact_unit_term_pool(Compact_term_pool pool)
+{
+  if (Compact_units != NULL)
+    fatal_error("configure_compact_unit_term_pool: index is live");
+  Compact_unit_terms = pool;
 }
 
 static BOOL compact_unit_index_mode(void)
@@ -409,7 +417,8 @@ void init_literals_index(int depth)
   Nonunit_features_idx = Compact_nonunit_authoritative ? NULL :
     init_di_tree();
   Compact_units = compact_unit_index_mode() ?
-    compact_unit_index_init() : NULL;
+    (Compact_unit_terms == NULL ? compact_unit_index_init() :
+     compact_unit_index_init_with_pool(Compact_unit_terms)) : NULL;
   Compact_nonunits = compact_nonunit_index_mode() ?
     compact_feature_index_init(feature_length()) : NULL;
 }  /* init_lits_index */
@@ -439,6 +448,7 @@ void destroy_literals_index(void)
     zap_di_tree(Nonunit_features_idx, feature_length());
   Nonunit_features_idx = NULL;
   compact_unit_index_free(Compact_units); Compact_units = NULL;
+  Compact_unit_terms = NULL;
   compact_feature_index_free(Compact_nonunits); Compact_nonunits = NULL;
 }  /* lits_destroy_index */
 

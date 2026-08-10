@@ -62,6 +62,7 @@ static Cold_passive_store Dense_body_store = NULL;
 static unsigned long long Dense_arena_bytes_reclaimed = 0;
 static Rewrite_only_store Rewrite_only_rules = NULL;
 static Compact_rewrite_bank Compact_rewrite_rules = NULL;
+static Compact_term_pool Compact_terms = NULL;
 static unsigned Rewrite_epoch = 1;    /* compact rewrite state seen by SOS */
 static size_t Rewrite_refresh_hot_cursor = 0;
 static size_t Rewrite_refresh_general_cursor = 0;
@@ -2936,6 +2937,20 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
   if (flag(Opt->compact_nonunit_subsumption_audit) ||
       flag(Opt->compact_otter_nonunit_index))
     fprint_compact_nonunit_index(fp);
+  if (Compact_terms != NULL) {
+    struct compact_term_pool_stats terms;
+    compact_term_pool_get_stats(Compact_terms, &terms);
+    fprintf(fp,
+            "Compact_term_pool: clauses=%s, serializations=%s, lookups=%s, "
+            "hits=%s, reused_tokens=%s, logical_tokens=%s, tokens=%s, "
+            "directory=%s, bytes=%s, peak_bytes=%s.\n",
+            comma_num(terms.clause_entries),
+            comma_num(terms.serializations), comma_num(terms.lookups),
+            comma_num(terms.hits), comma_num(terms.reused_tokens),
+            comma_num(terms.logical_tokens), comma_num(terms.token_bytes),
+            comma_num(terms.directory_bytes), comma_num(terms.total_bytes),
+            comma_num(terms.peak_bytes));
+  }
   if (collective_frontier_mode()) {
     fprintf(fp,
             "Collective_scheduler: policy=%s, drain=%d, high=%d, low=%d, "
@@ -6091,6 +6106,8 @@ void free_search_memory(void)
 
   destroy_literals_index();
   destroy_back_demod_index();
+  compact_term_pool_free(Compact_terms);
+  Compact_terms = NULL;
   lindex_destroy(Glob.clashable_idx);
   Glob.clashable_idx = NULL;
 
@@ -10245,6 +10262,7 @@ void index_and_process_initial_clauses(void)
   set_discrim_hash_threshold(parm(Opt->discrim_hash_threshold));
 
   int fpa_depth = parm(Opt->fpa_depth);
+  configure_compact_unit_term_pool(Compact_terms);
   configure_compact_unit_index(
     flag(Opt->compact_unit_subsumption_audit),
     flag(Opt->compact_otter_unit_index));
@@ -10260,6 +10278,7 @@ void index_and_process_initial_clauses(void)
   configure_compact_back_demod(
     flag(Opt->compact_back_demod_audit),
     flag(Opt->compact_otter_back_demod_index));
+  configure_compact_back_demod_term_pool(Compact_terms);
   configure_compact_back_demod_access(compact_otter_resolve_clause,
                                       compact_otter_release_clause, NULL);
   init_back_demod_index(FPA, ORDINARY_UNIF, fpa_depth);
@@ -15464,11 +15483,20 @@ Prover_results search(Prover_input p)
       fatal_error("search: previous rewrite-only store was not released");
     Rewrite_only_rules = maximum_discount_demod_mode() ?
       rewrite_only_store_init() : NULL;
+    if (Compact_terms != NULL)
+      fatal_error("search: previous compact term pool was not released");
+    Compact_terms =
+      (eager_interreduced_demod_mode() || compact_otter_bank_mode() ||
+       flag(Opt->compact_unit_subsumption_audit) ||
+       flag(Opt->compact_otter_unit_index) ||
+       flag(Opt->compact_back_demod_audit) ||
+       flag(Opt->compact_otter_back_demod_index)) ?
+      compact_term_pool_init() : NULL;
     if (Compact_rewrite_rules != NULL)
       fatal_error("search: previous compact rewrite bank was not released");
     Compact_rewrite_rules =
       (eager_interreduced_demod_mode() || compact_otter_bank_mode()) ?
-      compact_rewrite_init() : NULL;
+      compact_rewrite_init_with_pool(Compact_terms) : NULL;
     Glob.empties  = NULL;
     cold_passive_store_free(Dense_body_store);
     Dense_body_store = NULL;

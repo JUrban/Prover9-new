@@ -20,6 +20,7 @@
 #define TP_DEMODULATE_H
 
 #include "../ladr/ladr.h"
+#include "compact_term_pool.h"
 
 /* INTRODUCTION
 */
@@ -33,6 +34,8 @@
 void init_demodulator_index(Mindextype mtype, Uniftype utype, int fpa_depth);
 
 void configure_compact_back_demod(BOOL audit, BOOL authoritative);
+
+void configure_compact_back_demod_term_pool(Compact_term_pool pool);
 
 typedef Topform (*Compact_back_demod_resolver)(unsigned long long id,
                                                void *context);

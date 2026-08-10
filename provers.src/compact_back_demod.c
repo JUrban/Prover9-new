@@ -324,6 +324,15 @@ static void collect_term_slice(Compact_back_demod_index index,
   }
 }
 
+static int increasing_local_offset(const void *left, const void *right)
+{
+  const struct cbd_local_occurrence *a = left;
+  const struct cbd_local_occurrence *b = right;
+  if (a->offset != b->offset)
+    return a->offset < b->offset ? -1 : 1;
+  return a->symbol < b->symbol ? -1 : a->symbol > b->symbol ? 1 : 0;
+}
+
 Compact_back_demod_index compact_back_demod_init_with_pool(
   Compact_term_pool pool)
 {
@@ -409,6 +418,8 @@ BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
     }
   }
   record->token_length = have_tokens ? token_end - record->token_offset : 0;
+  qsort(symbols.occurrence_values, symbols.occurrence_count,
+        sizeof(*symbols.occurrence_values), increasing_local_offset);
   {
     size_t i;
     for (i = 0; i < symbols.count; i++) {
@@ -419,6 +430,8 @@ BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
       for (j = 0; j < symbols.occurrence_count; j++)
         if (symbols.occurrence_values[j].symbol == symbols.values[i]) {
           uint32_t offset = symbols.occurrence_values[j].offset;
+          if (!first && offset == previous)
+            continue;
           append_occurrence_delta(index, first ? offset : offset - previous);
           previous = offset;
           first = FALSE;

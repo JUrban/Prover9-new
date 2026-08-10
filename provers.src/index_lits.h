@@ -22,6 +22,7 @@
 #include "../ladr/clock.h"
 #include "../ladr/subsume.h"
 #include "../ladr/di_tree.h"
+#include "compact_term_pool.h"
 
 /* INTRODUCTION
 */
@@ -81,6 +82,8 @@ void write_fpa_lits_index(const char *dir);
 BOOL restore_fpa_lits_index(const char *dir);
 
 void configure_compact_unit_index(BOOL audit, BOOL authoritative);
+
+void configure_compact_unit_term_pool(Compact_term_pool pool);
 
 void configure_compact_nonunit_index(BOOL audit, BOOL authoritative);
 

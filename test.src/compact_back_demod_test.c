@@ -92,7 +92,7 @@ int main(void)
   {
     Compact_back_demod_index gap_index = compact_back_demod_init();
     struct compact_back_demod_stats gap_stats;
-    Topform gap_clause, gap_demod;
+    Topform gap_clause, gap_demod, duplicate_clause, duplicate_demod;
     char text[1024];
     size_t used = 0;
     int j;
@@ -119,9 +119,20 @@ int main(void)
           gap_stats.occurrence_stream_bytes <
             gap_stats.symbol_occurrences * sizeof(uint32_t),
           "multi-byte deltas remain smaller than raw offsets");
+    duplicate_clause = indexed_clause("d(n(a),n(a)).");
+    duplicate_demod = indexed_clause("n(x) = x.");
+    CHECK(compact_back_demod_add(gap_index, duplicate_clause),
+          "add clause whose arguments share one pooled token slice");
+    ids = compact_back_demod_candidate_ids(
+      gap_index, duplicate_demod, ORIENTED, &count);
+    CHECK(count == 1 && ids[0] == duplicate_clause->id,
+          "deduplicated pooled offsets retain the clause candidate");
+    safe_free(ids);
     compact_back_demod_free(gap_index);
     delete_clause(gap_clause);
     delete_clause(gap_demod);
+    delete_clause(duplicate_clause);
+    delete_clause(duplicate_demod);
   }
 
   delete_clause(first);
