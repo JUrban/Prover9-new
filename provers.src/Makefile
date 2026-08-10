@@ -104,6 +104,7 @@ PRVR_OBJ = index_lits.o forward_subsume.o demodulate.o\
 	   cold_passive_store.o\
 	   rewrite_only_store.o\
 	   compact_term_pool.o\
+	   compact_id_map.o\
 	   compact_rewrite.o\
 	   compact_unit_index.o\
 	   compact_back_demod.o\
