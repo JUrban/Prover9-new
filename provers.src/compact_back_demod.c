@@ -7,6 +7,9 @@
 #define CBD_NONE 0U
 #define CBD_TOMBSTONE UINT64_MAX
 #define CBD_POSTING_BLOCK_PAYLOAD 248
+#define CBD_PATH_DEPTH 3
+
+typedef uint16_t cbd_path_mask;
 
 struct cbd_posting_block {
   uint32_t next;
@@ -18,6 +21,7 @@ struct cbd_posting_block {
 struct cbd_local_occurrence {
   uint32_t symbol;
   uint32_t offset;
+  cbd_path_mask path_mask;
 };
 
 struct cbd_record {
@@ -66,6 +70,8 @@ struct compact_back_demod_index {
   unsigned long long symbol_occurrences;
   unsigned long long posting_groups_examined;
   unsigned long long occurrences_examined;
+  unsigned long long path_filter_checks;
+  unsigned long long path_filter_rejects;
   unsigned long long peak_bytes;
 };
 
@@ -300,6 +306,16 @@ static void append_occurrence_delta(Compact_back_demod_index index,
   } while (delta != 0);
 }
 
+static void append_occurrence_mask(Compact_back_demod_index index,
+                                   cbd_path_mask mask)
+{
+  unsigned i;
+  ensure_occurrence_bytes(index, sizeof(mask));
+  for (i = 0; i < sizeof(mask); i++)
+    index->occurrences[index->occurrence_count++] =
+      (unsigned char) (mask >> (8 * i));
+}
+
 static size_t encode_u32(unsigned char *destination, uint32_t value)
 {
   size_t count = 0;
@@ -373,8 +389,70 @@ static void append_symbol_record(Compact_back_demod_index index,
   index->posting_stream_used += length;
 }
 
+static cbd_path_mask path_feature_bit(uint32_t path, uint32_t symbol)
+{
+  uint32_t mixed = path * UINT32_C(0x9e3779b1) ^
+                   symbol * UINT32_C(0x85ebca6b);
+  mixed ^= mixed >> 16;
+  return (cbd_path_mask) 1U <<
+    (mixed % (sizeof(cbd_path_mask) * 8U));
+}
+
+static cbd_path_mask token_path_mask_rec(Compact_back_demod_index index,
+                                         uint32_t *position, unsigned depth,
+                                         uint32_t path)
+{
+  int32_t code;
+  int i, arity;
+  cbd_path_mask mask = 0;
+  if ((size_t) *position >= index->token_limit)
+    fatal_error("compact_back_demod: corrupt path token offset");
+  code = index->tokens[(*position)++];
+  arity = code < 0 ? 0 : sn_to_arity(code);
+  for (i = 0; i < arity; i++) {
+    uint32_t child_path = path * 17U + (uint32_t) i + 1U;
+    if ((size_t) *position >= index->token_limit)
+      fatal_error("compact_back_demod: corrupt path child offset");
+    if (depth < CBD_PATH_DEPTH && index->tokens[*position] >= 0)
+      mask |= path_feature_bit(
+        child_path, (uint32_t) index->tokens[*position]);
+    mask |= token_path_mask_rec(index, position, depth + 1, child_path);
+  }
+  return depth < CBD_PATH_DEPTH ? mask : 0;
+}
+
+static cbd_path_mask token_path_mask(Compact_back_demod_index index,
+                                     uint32_t offset)
+{
+  uint32_t position = offset;
+  return token_path_mask_rec(index, &position, 0, 0);
+}
+
+static cbd_path_mask term_path_mask_rec(Term term, unsigned depth,
+                                        uint32_t path)
+{
+  cbd_path_mask mask = 0;
+  int i;
+  if (VARIABLE(term) || depth >= CBD_PATH_DEPTH)
+    return 0;
+  for (i = 0; i < ARITY(term); i++) {
+    Term child = ARG(term, i);
+    uint32_t child_path = path * 17U + (uint32_t) i + 1U;
+    if (!VARIABLE(child)) {
+      mask |= path_feature_bit(child_path, (uint32_t) SYMNUM(child));
+      mask |= term_path_mask_rec(child, depth + 1, child_path);
+    }
+  }
+  return mask;
+}
+
+static cbd_path_mask term_path_mask(Term term)
+{
+  return term_path_mask_rec(term, 0, 0);
+}
+
 static void note_symbol(struct cbd_symbol_set *set, uint32_t symbol,
-                        uint32_t offset)
+                        uint32_t offset, cbd_path_mask path_mask)
 {
   size_t i;
   for (i = 0; i < set->count; i++)
@@ -413,6 +491,7 @@ static void note_symbol(struct cbd_symbol_set *set, uint32_t symbol,
   }
   set->occurrence_values[set->occurrence_count].symbol = symbol;
   set->occurrence_values[set->occurrence_count].offset = offset;
+  set->occurrence_values[set->occurrence_count].path_mask = path_mask;
   set->occurrence_count++;
 }
 
@@ -426,7 +505,8 @@ static void collect_term_slice(Compact_back_demod_index index,
     int32_t code = index->tokens[offset + i];
     if (code >= 0) {
       note_symbol(symbols, (uint32_t) code,
-                  offset + i - base);
+                  offset + i - base,
+                  token_path_mask(index, offset + i));
       index->symbol_occurrences++;
     }
   }
@@ -537,6 +617,8 @@ BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
           if (!first && offset == previous)
             continue;
           append_occurrence_delta(index, first ? offset : offset - previous);
+          append_occurrence_mask(
+            index, symbols.occurrence_values[j].path_mask);
           previous = offset;
           first = FALSE;
         }
@@ -702,6 +784,18 @@ static uint32_t decode_occurrence_delta(Compact_back_demod_index index,
   return 0;
 }
 
+static cbd_path_mask decode_occurrence_mask(
+  Compact_back_demod_index index, uint32_t *position, uint32_t end)
+{
+  cbd_path_mask value = 0;
+  unsigned i;
+  if (end - *position < sizeof(value))
+    fatal_error("compact_back_demod: truncated occurrence path mask");
+  for (i = 0; i < sizeof(value); i++)
+    value |= (cbd_path_mask) index->occurrences[(*position)++] << (8 * i);
+  return value;
+}
+
 /* A symbol posting names each clause once.  Its delta-varint stream retains
    just the matching subterm offsets, so exact probes avoid rescanning the
    rest of a large equational clause. */
@@ -709,7 +803,8 @@ static BOOL posting_contains_pattern(Compact_back_demod_index index,
                                      uint32_t occurrence_offset,
                                      uint32_t occurrence_length,
                                      struct cbd_record *record,
-                                     Term pattern, int32_t symbol)
+                                     Term pattern, int32_t symbol,
+                                     cbd_path_mask required_mask)
 {
   uint32_t position = occurrence_offset;
   uint32_t end;
@@ -720,6 +815,7 @@ static BOOL posting_contains_pattern(Compact_back_demod_index index,
   end = occurrence_offset + occurrence_length;
   while (position < end) {
     uint32_t delta = decode_occurrence_delta(index, &position, end);
+    cbd_path_mask path_mask = decode_occurrence_mask(index, &position, end);
     index->occurrences_examined++;
     if (delta > UINT32_MAX - relative)
       fatal_error("compact_back_demod: occurrence offset overflow");
@@ -727,6 +823,11 @@ static BOOL posting_contains_pattern(Compact_back_demod_index index,
     if (relative >= record->token_length ||
         index->tokens[record->token_offset + relative] != symbol)
       fatal_error("compact_back_demod: corrupt occurrence offset");
+    index->path_filter_checks++;
+    if ((path_mask & required_mask) != required_mask) {
+      index->path_filter_rejects++;
+      continue;
+    }
     if (occurrence_matches(index, pattern,
                            record->token_offset + relative))
       return TRUE;
@@ -761,6 +862,7 @@ static void collect_symbol(Compact_back_demod_index index, Term pattern,
   uint32_t record_index = 0;
   uint32_t occurrence_offset = 0;
   unsigned symbol;
+  cbd_path_mask required_mask;
   if (VARIABLE(pattern)) {
     size_t at;
     for (at = 1; at < index->record_count; at++)
@@ -768,6 +870,7 @@ static void collect_symbol(Compact_back_demod_index index, Term pattern,
     return;
   }
   symbol = (unsigned) SYMNUM(pattern);
+  required_mask = term_path_mask(pattern);
   if ((size_t) symbol >= index->symbol_capacity)
     return;
   for (block = index->posting_heads[symbol]; block != CBD_NONE;
@@ -799,7 +902,7 @@ static void collect_symbol(Compact_back_demod_index index, Term pattern,
           record->query_stamp != index->query_stamp &&
           posting_contains_pattern(index, occurrence_offset,
                                    occurrence_length, record, pattern,
-                                   (int32_t) symbol))
+                                   (int32_t) symbol, required_mask))
         collect_record(index, record_index, exclude_id, count);
       entries++;
     }
@@ -870,6 +973,8 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->symbol_occurrences = index->symbol_occurrences;
   stats->posting_groups_examined = index->posting_groups_examined;
   stats->occurrences_examined = index->occurrences_examined;
+  stats->path_filter_checks = index->path_filter_checks;
+  stats->path_filter_rejects = index->path_filter_rejects;
   stats->posting_bytes =
     index->posting_block_capacity * sizeof(*index->posting_blocks) +
     index->symbol_capacity *

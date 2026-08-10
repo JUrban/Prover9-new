@@ -495,7 +495,8 @@ void fprint_compact_back_demod(FILE *fp)
           "peak=%llu, retired=%llu, physical=%llu, queries=%llu, "
           "candidates=%llu, exact_tests=%llu, posting_groups=%llu, "
           "symbol_occurrences=%llu, groups_examined=%llu, "
-          "occurrences_examined=%llu, posting_stream_used=%llu, "
+          "occurrences_examined=%llu, path_checks=%llu, "
+          "path_rejects=%llu, posting_stream_used=%llu, "
           "posting_stream=%llu, occurrence_stream_used=%llu, "
           "occurrence_stream=%llu, postings=%llu, records=%llu, roots=%llu, "
           "tokens=%llu, hash=%llu, scratch=%llu, bytes=%llu, peak_bytes=%llu.\n",
@@ -504,6 +505,7 @@ void fprint_compact_back_demod(FILE *fp)
           stats.retired, stats.physical, stats.queries, stats.candidates,
           stats.exact_tests, stats.posting_groups, stats.symbol_occurrences,
           stats.posting_groups_examined, stats.occurrences_examined,
+          stats.path_filter_checks, stats.path_filter_rejects,
           stats.posting_stream_used, stats.posting_stream_bytes,
           stats.occurrence_stream_bytes, stats.occurrence_bytes,
           stats.posting_bytes, stats.record_bytes, stats.root_bytes,

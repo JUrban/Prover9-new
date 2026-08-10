@@ -23,7 +23,7 @@ int main(void)
   Compact_back_demod_index index;
   struct compact_back_demod_stats stats;
   Topform first, second, irrelevant, repeated_good, repeated_bad;
-  Topform demod, bidirectional, repeated_demod;
+  Topform demod, path_demod, bidirectional, repeated_demod;
   unsigned long long *ids;
   size_t count;
 
@@ -48,6 +48,13 @@ int main(void)
   CHECK(count == 2, "root-symbol posting finds both possible redex clauses");
   CHECK(ids != NULL && ids[0] == second->id && ids[1] == first->id,
         "candidate IDs are in decreasing proof-ID order");
+  safe_free(ids);
+
+  path_demod = indexed_clause("f(a) = a.");
+  ids = compact_back_demod_candidate_ids(index, path_demod,
+                                         ORIENTED, &count);
+  CHECK(count == 1 && ids[0] == first->id,
+        "path signature rejects a different fixed child");
   safe_free(ids);
 
   repeated_demod = indexed_clause("m(x,x) = x.");
@@ -76,14 +83,16 @@ int main(void)
   compact_back_demod_get_stats(index, &stats);
   CHECK(stats.active == 4 && stats.retired == 1 && stats.physical == 5,
         "lifecycle counters are exact");
-  CHECK(stats.queries == 4 && stats.exact_tests == 3,
+  CHECK(stats.queries == 5 && stats.exact_tests == 3,
         "query accounting is exact");
+  CHECK(stats.path_filter_checks > 0 && stats.path_filter_rejects > 0,
+        "path filter accounts for a safe fixed-symbol rejection");
   CHECK(stats.posting_groups == 14 && stats.symbol_occurrences == 15,
         "repeated clause symbols share one posting group");
   CHECK(stats.occurrence_stream_bytes > 0 &&
         stats.occurrence_stream_bytes <
-          stats.symbol_occurrences * sizeof(uint32_t),
-        "delta occurrence stream is smaller than raw offsets");
+          stats.symbol_occurrences * (sizeof(uint32_t) + sizeof(uint32_t)),
+        "delta offsets plus path masks beat fixed offset/mask records");
   CHECK(stats.posting_stream_used > 0 &&
         stats.posting_stream_used < stats.posting_groups * 12 &&
         stats.posting_stream_bytes >= stats.posting_stream_used,
@@ -121,8 +130,9 @@ int main(void)
           gap_stats.symbol_occurrences == 144 &&
           gap_stats.occurrence_stream_bytes > gap_stats.symbol_occurrences &&
           gap_stats.occurrence_stream_bytes <
-            gap_stats.symbol_occurrences * sizeof(uint32_t),
-          "multi-byte deltas remain smaller than raw offsets");
+            gap_stats.symbol_occurrences *
+              (sizeof(uint32_t) + sizeof(uint32_t)),
+          "multi-byte deltas plus masks beat fixed offset/mask records");
     duplicate_clause = indexed_clause("d(n(a),n(a)).");
     duplicate_demod = indexed_clause("n(x) = x.");
     CHECK(compact_back_demod_add(gap_index, duplicate_clause),
@@ -178,6 +188,7 @@ int main(void)
   delete_clause(repeated_good);
   delete_clause(repeated_bad);
   delete_clause(demod);
+  delete_clause(path_demod);
   delete_clause(bidirectional);
   delete_clause(repeated_demod);
 

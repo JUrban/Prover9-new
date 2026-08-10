@@ -304,6 +304,22 @@ candidate explain why the compact `back_demod` clock grows from 4.91 to
 path discrimination over the compact occurrence stream; cache sizing and
 record packing cannot compensate for this loss of selectivity.
 
+A 16-bit fixed-path Bloom signature is now stored beside each delta-packed
+occurrence.  It encodes fixed `(path, symbol)` features through depth three;
+pattern variables contribute no required bits, and every filter survivor is
+still checked by the existing exact matcher, so collisions can produce only
+false positives.  At 413 givens it rejects 41,365,527 of 41,497,798 probes
+(99.68%) and reduces the back-demod clock from 3.26 to 0.70 seconds.  At
+1,000 givens it rejects 475,277,784 of 476,702,937 probes, reduces total user
+CPU from 131.01 to 103.27 seconds and `back_demod` from 41.29 to 11.31
+seconds, with exact terminal state and 91,360 KiB peak RSS.  All 132,267 CHAT
+candidate/hint/kept/given oracle lines remain byte-identical at 300 givens.
+The back index grows by 524,320 bytes at the 1,000 boundary, making the five
+compact structures 13,763,488 bytes, **69.1% below** the original
+44,545,464-byte baseline.  Recovering roughly 400 KiB in the other compact
+arenas will restore the 70% structural gate without giving back this 21.2%
+CPU improvement.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:
