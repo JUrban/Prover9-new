@@ -8,7 +8,8 @@
 #define CR_TOMBSTONE UINT64_MAX
 
 struct cr_node {
-  int32_t code;
+  uint32_t token_offset;
+  uint32_t token_length;
   uint32_t first_child;
   uint32_t next_sibling;
   uint32_t first_posting;
@@ -319,43 +320,111 @@ static int code_compare(int32_t a, int32_t b)
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
-static uint32_t trie_child(Compact_rewrite_bank bank, uint32_t parent,
-                           int32_t code)
+static uint32_t new_node(Compact_rewrite_bank bank,
+                         uint32_t token_offset, uint32_t token_length)
 {
-  uint32_t current = bank->nodes[parent].first_child;
-  uint32_t previous = CR_NONE;
-  while (current != CR_NONE &&
-         code_compare(bank->nodes[current].code, code) < 0) {
-    previous = current;
-    current = bank->nodes[current].next_sibling;
-  }
-  if (current != CR_NONE && bank->nodes[current].code == code)
-    return current;
+  uint32_t node;
   ensure_nodes(bank);
   if (bank->node_count > UINT32_MAX)
     fatal_error("compact_rewrite: node offsets exceed 32 bits");
-  current = (uint32_t) bank->node_count++;
-  memset(&bank->nodes[current], 0, sizeof(bank->nodes[current]));
-  bank->nodes[current].code = code;
-  if (previous == CR_NONE) {
-    bank->nodes[current].next_sibling = bank->nodes[parent].first_child;
-    bank->nodes[parent].first_child = current;
+  node = (uint32_t) bank->node_count++;
+  memset(&bank->nodes[node], 0, sizeof(bank->nodes[node]));
+  bank->nodes[node].token_offset = token_offset;
+  bank->nodes[node].token_length = token_length;
+  return node;
+}
+
+static int32_t first_code(Compact_rewrite_bank bank, uint32_t node)
+{
+  struct cr_node *n = &bank->nodes[node];
+  if (n->token_length == 0)
+    fatal_error("compact_rewrite: empty nonroot radix edge");
+  return bank->tokens[n->token_offset];
+}
+
+/* Insert an immutable prefix-token slice as a radix path.  Siblings remain
+   ordered by their first token exactly as in the former token-per-node trie.
+   Splitting only changes the representation: terminal posting order is still
+   the order in which rewrite sides were admitted. */
+static uint32_t insert_token_path(Compact_rewrite_bank bank, uint32_t root,
+                                  uint32_t offset, uint32_t length)
+{
+  uint32_t parent = root;
+  uint32_t position = 0;
+  while (position < length) {
+    uint32_t current = bank->nodes[parent].first_child;
+    uint32_t previous = CR_NONE;
+    int32_t wanted = bank->tokens[offset + position];
+    while (current != CR_NONE &&
+           code_compare(first_code(bank, current), wanted) < 0) {
+      previous = current;
+      current = bank->nodes[current].next_sibling;
+    }
+    if (current == CR_NONE || first_code(bank, current) != wanted) {
+      uint32_t added = new_node(bank, offset + position,
+                                length - position);
+      if (previous == CR_NONE) {
+        bank->nodes[added].next_sibling =
+          bank->nodes[parent].first_child;
+        bank->nodes[parent].first_child = added;
+      }
+      else {
+        bank->nodes[added].next_sibling =
+          bank->nodes[previous].next_sibling;
+        bank->nodes[previous].next_sibling = added;
+      }
+      return added;
+    }
+    else {
+      uint32_t old_offset = bank->nodes[current].token_offset;
+      uint32_t old_length = bank->nodes[current].token_length;
+      uint32_t common = 0;
+      while (common < old_length && position + common < length &&
+             bank->tokens[old_offset + common] ==
+             bank->tokens[offset + position + common])
+        common++;
+      if (common == old_length) {
+        position += common;
+        parent = current;
+      }
+      else {
+        uint32_t old_next = bank->nodes[current].next_sibling;
+        uint32_t split = new_node(bank, old_offset, common);
+        uint32_t added;
+        if (common == 0)
+          fatal_error("compact_rewrite: invalid zero-length radix split");
+        bank->nodes[split].next_sibling = old_next;
+        if (previous == CR_NONE)
+          bank->nodes[parent].first_child = split;
+        else
+          bank->nodes[previous].next_sibling = split;
+        bank->nodes[current].token_offset += common;
+        bank->nodes[current].token_length -= common;
+        bank->nodes[current].next_sibling = CR_NONE;
+        bank->nodes[split].first_child = current;
+        position += common;
+        if (position == length)
+          return split;
+        added = new_node(bank, offset + position, length - position);
+        if (code_compare(first_code(bank, added),
+                         first_code(bank, current)) < 0) {
+          bank->nodes[added].next_sibling = current;
+          bank->nodes[split].first_child = added;
+        }
+        else
+          bank->nodes[current].next_sibling = added;
+        return added;
+      }
+    }
   }
-  else {
-    bank->nodes[current].next_sibling = bank->nodes[previous].next_sibling;
-    bank->nodes[previous].next_sibling = current;
-  }
-  return current;
+  return parent;
 }
 
 static void index_side(Compact_rewrite_bank bank, uint32_t rule,
                        uint32_t offset, uint32_t length, int direction)
 {
-  uint32_t node = 0;
+  uint32_t node = insert_token_path(bank, 0, offset, length);
   uint32_t posting;
-  uint32_t i;
-  for (i = 0; i < length; i++)
-    node = trie_child(bank, node, bank->tokens[offset + i]);
   ensure_postings(bank);
   if (bank->posting_count > UINT32_MAX)
     fatal_error("compact_rewrite: posting offsets exceed 32 bits");
@@ -426,9 +495,7 @@ static void index_rule_occurrences(Compact_rewrite_bank bank, uint32_t index)
 Compact_rewrite_bank compact_rewrite_init(void)
 {
   Compact_rewrite_bank bank = safe_calloc(1, sizeof(*bank));
-  ensure_nodes(bank);
-  memset(&bank->nodes[0], 0, sizeof(bank->nodes[0]));
-  bank->node_count = 1;
+  (void) new_node(bank, 0, 0);
   ensure_postings(bank);
   memset(&bank->postings[0], 0, sizeof(bank->postings[0]));
   bank->posting_count = 1;
@@ -930,9 +997,56 @@ static BOOL try_leaf(Compact_rewrite_bank bank, uint32_t node, Term target,
   return FALSE;
 }
 
+static BOOL match_rewrite_edge(
+  Compact_rewrite_bank bank, uint32_t node,
+  struct cr_query_term *query, uint32_t position, uint32_t end,
+  Term *bindings, unsigned *binding_trail, unsigned *trail_count,
+  uint32_t *next_position)
+{
+  struct cr_node *edge = &bank->nodes[node];
+  uint32_t i;
+  for (i = 0; i < edge->token_length; i++) {
+    int32_t code = bank->tokens[edge->token_offset + i];
+    Term query_term;
+    if (position >= end)
+      return FALSE;
+    query_term = query[position].term;
+    if (code < 0) {
+      unsigned variable = (unsigned) (-code - 1);
+      if (variable >= MAX_VARS)
+        fatal_error("compact_rewrite: variable exceeds MAX_VARS");
+      if (bindings[variable] == NULL) {
+        bindings[variable] = query_term;
+        binding_trail[(*trail_count)++] = variable;
+      }
+      else if (!term_ident(bindings[variable], query_term))
+        return FALSE;
+      position = query[position].end;
+    }
+    else {
+      if (VARIABLE(query_term) || SYMNUM(query_term) != code)
+        return FALSE;
+      position++;
+    }
+  }
+  *next_position = position;
+  return TRUE;
+}
+
+static void undo_rewrite_bindings(Term *bindings,
+                                  const unsigned *binding_trail,
+                                  unsigned *trail_count,
+                                  unsigned trail_mark)
+{
+  while (*trail_count != trail_mark)
+    bindings[binding_trail[--(*trail_count)]] = NULL;
+}
+
 static BOOL retrieve_rec(Compact_rewrite_bank bank, uint32_t node,
                          struct cr_query_term *query, uint32_t position,
-                         uint32_t end, Term *bindings, Term target,
+                         uint32_t end, Term *bindings,
+                         unsigned *binding_trail, unsigned *trail_count,
+                         Term target,
                          BOOL lex_order_vars,
                          int reduced_flag,
                          struct cr_match_result *result)
@@ -943,32 +1057,16 @@ static BOOL retrieve_rec(Compact_rewrite_bank bank, uint32_t node,
                     reduced_flag, result);
   for (child = bank->nodes[node].first_child; child != CR_NONE;
        child = bank->nodes[child].next_sibling) {
-    int32_t code = bank->nodes[child].code;
-    Term query_term = query[position].term;
-    if (code < 0) {
-      int variable = -code - 1;
-      BOOL newly_bound = FALSE;
-      if (variable >= MAX_VARS)
-        fatal_error("compact_rewrite: variable exceeds MAX_VARS");
-      if (bindings[variable] == NULL) {
-        bindings[variable] = query_term;
-        newly_bound = TRUE;
-      }
-      if ((newly_bound || term_ident(bindings[variable], query_term)) &&
-          retrieve_rec(bank, child, query, query[position].end, end,
-                       bindings, target, lex_order_vars, reduced_flag,
-                       result)) {
-        if (newly_bound)
-          bindings[variable] = NULL;
-        return TRUE;
-      }
-      if (newly_bound)
-        bindings[variable] = NULL;
-    }
-    else if (!VARIABLE(query_term) && SYMNUM(query_term) == code &&
-      retrieve_rec(bank, child, query, position + 1, end,
-                          bindings, target, lex_order_vars, reduced_flag,
-                          result))
+    unsigned trail_mark = *trail_count;
+    uint32_t next_position = position;
+    BOOL found = FALSE;
+    if (match_rewrite_edge(bank, child, query, position, end, bindings,
+                           binding_trail, trail_count, &next_position))
+      found = retrieve_rec(bank, child, query, next_position, end,
+                           bindings, binding_trail, trail_count, target,
+                           lex_order_vars, reduced_flag, result);
+    undo_rewrite_bindings(bindings, binding_trail, trail_count, trail_mark);
+    if (found)
       return TRUE;
   }
   return FALSE;
@@ -982,12 +1080,15 @@ static struct cr_match_result find_rewrite(Compact_rewrite_bank bank,
   struct cr_match_result result;
   size_t count = 0;
   Term bindings[MAX_VARS];
+  unsigned binding_trail[MAX_VARS];
+  unsigned trail_count = 0;
   memset(&result, 0, sizeof(result));
   memset(bindings, 0, sizeof(bindings));
   flatten_query_rec(bank, target, &count);
   if (count > 0)
-    retrieve_rec(bank, 0, bank->query, 0, (uint32_t) count, bindings, target,
-                 lex_order_vars, reduced_flag, &result);
+    retrieve_rec(bank, 0, bank->query, 0, (uint32_t) count, bindings,
+                 binding_trail, &trail_count, target, lex_order_vars,
+                 reduced_flag, &result);
   return result;
 }
 

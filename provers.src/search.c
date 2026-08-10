@@ -2908,7 +2908,9 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
     fprintf(fp,
             "Compact_otter_demodulation: current_rules=%s, peak_rules=%s, "
             "retired_rules=%s, physical_rules=%s, compactions=%s, "
-            "attempts=%s, rewrites=%s, bytes=%s, peak_bytes=%s.\n",
+            "attempts=%s, rewrites=%s, bytes=%s, peak_bytes=%s, "
+            "nodes=%s, postings=%s, occurrences=%s, rules=%s, terms=%s, "
+            "hash=%s.\n",
             comma_num(s.compact_rewrite_rules_current),
             comma_num(s.compact_rewrite_rules_peak),
             comma_num(s.compact_rewrite_rules_retired),
@@ -2917,7 +2919,13 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             comma_num(s.compact_rewrite_attempts),
             comma_num(s.compact_rewrite_rewrites),
             comma_num(s.rewrite_bank_bytes),
-            comma_num(s.rewrite_bank_peak_bytes));
+            comma_num(s.rewrite_bank_peak_bytes),
+            comma_num(s.compact_rewrite_node_bytes),
+            comma_num(s.compact_rewrite_posting_bytes),
+            comma_num(s.compact_rewrite_occurrence_bytes),
+            comma_num(s.compact_rewrite_rule_bytes),
+            comma_num(s.compact_rewrite_term_bytes),
+            comma_num(s.compact_rewrite_hash_bytes));
   }
   if (flag(Opt->compact_unit_subsumption_audit) ||
       flag(Opt->compact_otter_unit_index))
