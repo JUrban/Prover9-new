@@ -120,7 +120,7 @@ static unsigned Preview_key_scratch_capacity = 0;
    invalidate possible additions, so neither hash collisions nor unrelated
    hint mutations can cause an unsafe omission. */
 
-#define FAST_MATCH_CACHE_CAPACITY 32768U
+#define FAST_MATCH_CACHE_CAPACITY 16384U
 /* CHAT profiling shows that eight exact feature keys cover 98.7% of fast
    queries at 1,000 givens.  Larger profiles simply take the unchanged exact
    posting intersection; they never enter a truncated cache identity. */
