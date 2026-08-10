@@ -521,6 +521,31 @@ only 7.97 MB.  It performs 40,819 record writes and 154,834 bounded reads with
 zero validation failures.  The full proof is required to measure the intended
 benefit once mmap would otherwise retain/refault an 84.4-MB logical archive.
 
+The file-backed full run proves Osborn at the exact final state:
+`Given=2,945`, `Generated=8,248,032`, `Kept=272,787`, `Sos=131,001`, and
+`Demods=109,987`.  Normalizing away clause numbers, all 7,051 transformed
+proof clauses are byte-identical to the mmap proof, and `prooftrans
+parents_only` again ends at `272791 $F` with no diagnostics.  The archive
+contains 84,404,096 logical bytes but keeps only a 4,096-byte record buffer;
+1,340,586 read operations transfer 125,362,225 bytes and 412,174 writes
+transfer exactly the archive bytes, with zero validation failures.
+
+End-to-end time is 786.23 user seconds, 98.79 system seconds, and 885.26 wall
+seconds.  This is 1.027 times old OTTER and 0.974 times the compact mmap run.
+Peak RSS is 188,736 KiB, a 30.5% reduction from mmap's 271,684 KiB and a 65.7%
+reduction from old OTTER's 550,400 KiB.  Two-second `/proc` sampling shows a
+brief 189-MiB rebuild peak followed by roughly 177 MiB steady RSS; the 125-MiB
+stretch gate is still missed by about 59.3 MiB.
+
+With archive residency removed, the remaining targets are resident and
+measured: the five compact search structures total 67,621,976 bytes (64.49
+MiB), packed hint bodies/index total about 24.34 MiB, and the Prover9 allocator
+reserves 35,658,048 bytes for 20,105,440 live bytes (15,552,608 bytes reported
+fragmentation).  Further archive work cannot close the gap.  The next radical
+pass must combine cross-clause term sharing/capacity tightening, smaller or
+returnable allocator slabs, and a lower-residency packed-hint representation;
+it must also eliminate the short rebuild double-allocation peak.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:
