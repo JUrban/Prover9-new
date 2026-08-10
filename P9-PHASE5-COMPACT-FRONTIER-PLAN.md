@@ -263,6 +263,29 @@ cache cannot repair proof throughput.  `compact_passive_cache=0` is the
 current minimum-RAM setting, while the next diagnostic separates compact
 index matching from the cost of retaining and reprocessing rewritten bodies.
 
+That partition identifies the compact indexes, not archiving, as the main
+CPU regression.  Full-body packed-fast OTTER with ordinary indexes reaches
+1,500 givens in 154.79 user seconds and 179,400 KiB peak RSS.  The new
+`new_otter_compact_full` CHAT case keeps the same full bodies but switches on
+all four authoritative compact indexes; it takes 370.47 seconds and 140,048
+KiB.  Its `back_demod` clock is 166.24 versus 4.91 seconds, unit `conflict`
+is 18.62 versus 0.29, and `demod` is 77.44 versus 43.99.  Body
+archive/materialization is therefore not responsible for the roughly 2.4x
+slowdown at this boundary.
+
+This comparison also exposes the first post-1,000 exactness question.  Both
+runs finish with `Given=1501`, `Sos=42,583`, and `Demods=36,145`, but ordinary
+indexes report `Generated=2,947,138`, `Kept=66,935`, and `Disabled=23,091`,
+while combined authoritative compact indexes are lower by two in each of
+those three cumulative/retired counts.  Four parallel full-hint audit runs
+through the same boundary all pass: compact rewrite, unit, back-demod, and
+nonunit answers agree with their ordinary counterparts on the ordinary
+trajectory.  Their user times are 288.51, 185.97, 349.47, and 159.53 seconds,
+respectively, versus 154.79 for ordinary packed-fast OTTER.  Thus the next
+correctness step is a lightweight kept/given event comparison in combined
+authoritative mode; the answer-set audits rule out treating this as a known
+single-index omission.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:
