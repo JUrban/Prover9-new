@@ -728,7 +728,7 @@ static void compact_rewrite_compact_internal(Compact_rewrite_bank bank,
   struct compact_rewrite_bank old;
   unsigned long long old_bytes, old_peak, old_peak_rules;
   unsigned long long attempts, rewrites, retired, compactions, reclaimed;
-  size_t i;
+  size_t i, packed;
   if (bank == NULL ||
       (!force && !compact_rewrite_compaction_needed(bank)) ||
       (force && bank->rule_count - 1 == bank->active_rules))
@@ -742,27 +742,38 @@ static void compact_rewrite_compact_internal(Compact_rewrite_bank bank,
   compactions = bank->compactions;
   reclaimed = bank->bytes_reclaimed;
   bank->tokens = compact_term_pool_tokens(bank->term_pool);
-  replacement = bank->owns_term_pool ? compact_rewrite_init() :
-    compact_rewrite_init_with_pool(bank->term_pool);
+
+  /* A rule record plus the shared token pool is a complete rebuild recipe.
+     Pack live records in predecessor order, release all search structures,
+     and construct the replacement while retaining only that record array.
+     A standalone owning bank keeps its source pool until token copying ends. */
+  packed = 1;
   for (i = 1; i < bank->rule_count; i++)
-    if (rule_active(&bank->rules[i]))
-      copy_live_rule(replacement, bank, &bank->rules[i]);
+    if (rule_active(&bank->rules[i])) {
+      if (packed != i)
+        bank->rules[packed] = bank->rules[i];
+      packed++;
+    }
 
   old = *bank;
-  *bank = *replacement;
-  safe_free(replacement);
   safe_free(old.nodes);
   safe_free(old.postings);
   safe_free(old.occurrence_blocks);
   safe_free(old.occurrence_heads);
   safe_free(old.occurrence_tails);
   safe_free(old.occurrence_last_rules);
-  safe_free(old.rules);
-  if (old.owns_term_pool)
-    compact_term_pool_free(old.term_pool);
   safe_free(old.hash_keys);
   safe_free(old.hash_values);
   safe_free(old.query);
+  replacement = old.owns_term_pool ? compact_rewrite_init() :
+    compact_rewrite_init_with_pool(old.term_pool);
+  for (i = 1; i < packed; i++)
+    copy_live_rule(replacement, &old, &old.rules[i]);
+  *bank = *replacement;
+  safe_free(replacement);
+  safe_free(old.rules);
+  if (old.owns_term_pool)
+    compact_term_pool_free(old.term_pool);
   bank->attempts = attempts;
   bank->rewrites = rewrites;
   bank->retired_rules = retired;

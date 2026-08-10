@@ -852,6 +852,13 @@ audit passes, and the 300-given CHAT replay again emits the byte-identical
 the late replacement transient belonged to the unit index before applying
 the same lifetime split to the more involved back-demod occurrence stream.
 
+Rewrite-bank compaction now uses the same lifetime discipline.  Live rule
+records are packed in original order, predecessor radix/posting/occurrence
+and hash arrays are released, and the replacement is rebuilt from the packed
+rules plus the shared token pool.  A private owning bank retains its source
+pool only until token copying completes.  Dedicated rewrite/unit tests and
+the compact archive audit pass; the 300-given CHAT oracle remains exact.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:
