@@ -133,6 +133,12 @@ and archive cases finish in 75.54/78.33 user seconds with the exact terminal
 state; their compact `demod` clocks are 19.48/19.32 seconds, down from
 35.74/35.48.  Peak RSS is unchanged.
 
+The 1,500-given replay confirms the scaling result.  Full-body/archive user
+CPU is 167.73/176.85 seconds with the exact state and unchanged
+142,996/115,752 KiB peak RSS.  The archive is now 1.14 times the
+154.79-second ordinary packed-fast baseline and therefore passes the Phase 5
+1.25 throughput gate at this CHAT boundary.
+
 ## Exact old and compatibility proof baseline
 
 | Mode | Result | Given | Generated | Kept | User CPU | Wall | Peak RSS |

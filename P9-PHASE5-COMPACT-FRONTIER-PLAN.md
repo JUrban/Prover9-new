@@ -402,6 +402,14 @@ versus 101.87/103.31 before the change.  Their `demod` clocks fall from
 35.74/35.48 to 19.48/19.32 seconds, with peak RSS unchanged at 103,572/91,024
 KiB.
 
+At 1,500 givens the ordered-sibling gain also survives: full-body and archive
+take 167.73/176.85 user seconds, 13.6%/12.7% below the preceding
+194.09/202.51-second path-bucket runs.  Both preserve the exact compact state
+and their peak RSS remains 142,996/115,752 KiB.  The archive `demod` clock
+falls from 78.61 to 53.60 seconds.  Relative to the 154.79-second ordinary
+packed-fast baseline, full-body compact is now 1.08 times and the radical
+archive is 1.14 times ordinary CPU, inside the Phase 5 1.25 throughput gate.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:
