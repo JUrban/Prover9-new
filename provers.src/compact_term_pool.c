@@ -622,6 +622,43 @@ static size_t compacted_directory_capacity(size_t entries)
   return capacity;
 }
 
+unsigned long long compact_term_pool_retained_reclaimable_bytes(
+  Compact_term_pool pool, Compact_term_rebase_map map)
+{
+  unsigned long long current, compacted;
+  size_t slot, retained = 0, token_count = 0;
+  size_t token_capacity, directory_capacity;
+  if (pool == NULL || map == NULL || map->finalized ||
+      map->mode != REBASE_MODE_RETAINED ||
+      map->retained_source != pool || map->count == 0)
+    return 0;
+  for (slot = 0; slot < pool->directory_capacity; slot++) {
+    size_t word = slot / 64;
+    uint64_t bit = UINT64_C(1) << (slot % 64);
+    if ((map->retained_slots[word] & bit) != 0) {
+      if (pool->proof_ids[slot] == 0 ||
+          pool->clause_lengths[slot] > SIZE_MAX - token_count)
+        fatal_error("compact_term_pool: corrupt retained size prediction");
+      token_count += pool->clause_lengths[slot];
+      retained++;
+    }
+  }
+  if (retained != map->count)
+    fatal_error("compact_term_pool: incomplete retained size prediction");
+  token_capacity = compacted_token_capacity(token_count);
+  directory_capacity = compacted_directory_capacity(map->count);
+  current = pool_bytes(pool);
+  compacted = sizeof(*pool) +
+    (unsigned long long) token_capacity * sizeof(*pool->tokens) +
+    (unsigned long long) directory_capacity *
+      (sizeof(*pool->proof_ids) + sizeof(*pool->clause_offsets) +
+       sizeof(*pool->clause_lengths)) +
+    (unsigned long long) pool->profile_capacity *
+      (sizeof(*pool->profile_hashes) + sizeof(*pool->profile_offsets) +
+       sizeof(*pool->profile_lengths));
+  return current > compacted ? current - compacted : 0;
+}
+
 void compact_term_pool_compact_retained(Compact_term_pool pool,
                                         Compact_term_rebase_map map)
 {

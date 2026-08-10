@@ -63,6 +63,10 @@ static unsigned long long Dense_arena_bytes_reclaimed = 0;
 static Rewrite_only_store Rewrite_only_rules = NULL;
 static Compact_rewrite_bank Compact_rewrite_rules = NULL;
 static Compact_term_pool Compact_terms = NULL;
+static unsigned long long Compact_term_next_reclaim_serialization = 0;
+static unsigned long long Compact_term_reclaim_cooldown_skips = 0;
+static unsigned long long Compact_term_reclaim_deferrals = 0;
+static unsigned long long Compact_term_last_predicted_reclaim = 0;
 static FILE *Deferred_terminal_stats = NULL;
 static BOOL Terminal_stats_frozen = FALSE;
 static BOOL Terminal_compact_indexes_released = FALSE;
@@ -3011,6 +3015,14 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             parm(Opt->compact_term_reclaim_kb));
     fprintf(fp, "Compact_index_policy: stale_pct=%d.\n",
             parm(Opt->compact_index_stale_pct));
+    fprintf(fp,
+            "Compact_term_trigger: next_serialization=%s, "
+            "cooldown_skips=%s, capacity_deferrals=%s, "
+            "last_predicted_reclaim=%s.\n",
+            comma_num(Compact_term_next_reclaim_serialization),
+            comma_num(Compact_term_reclaim_cooldown_skips),
+            comma_num(Compact_term_reclaim_deferrals),
+            comma_num(Compact_term_last_predicted_reclaim));
     if (terms.sharing_profile_enabled)
       fprintf(fp,
               "Compact_term_sharing: occurrences=%s, unique=%s, "
@@ -6181,12 +6193,17 @@ static void maybe_compact_shared_term_pool(void)
   struct compact_rewrite_stats rewrite;
   unsigned long long retained, stale;
   unsigned long long stale_tokens, estimated_reclaimable_bytes;
+  unsigned long long configured_reclaim_bytes, predicted_reclaim_bytes;
   Compact_term_rebase_map map;
   if (!compact_otter_passive_mode() || Compact_terms == NULL)
     return;
   compact_term_pool_get_stats(Compact_terms, &terms);
   if (terms.sharing_profile_enabled)
     return;
+  if (terms.serializations < Compact_term_next_reclaim_serialization) {
+    Compact_term_reclaim_cooldown_skips++;
+    return;
+  }
   compact_rewrite_get_stats(Compact_rewrite_rules, &rewrite);
   /* Every physical record still owns a valid term slice even when it is
      inactive.  The index-specific 25%-stale policies rebuild those records
@@ -6213,8 +6230,9 @@ static void maybe_compact_shared_term_pool(void)
     ((terms.logical_tokens % terms.clause_entries) * stale) /
       terms.clause_entries;
   estimated_reclaimable_bytes = stale_tokens * sizeof(uint32_t);
-  if (estimated_reclaimable_bytes <
-      (unsigned long long) parm(Opt->compact_term_reclaim_kb) * 1024)
+  configured_reclaim_bytes =
+    (unsigned long long) parm(Opt->compact_term_reclaim_kb) * 1024;
+  if (estimated_reclaimable_bytes < configured_reclaim_bytes)
     return;
   map = compact_term_rebase_map_init();
   /* Back-demod records cover nearly the whole retained clause population;
@@ -6224,12 +6242,22 @@ static void maybe_compact_shared_term_pool(void)
   compact_back_demod_retain_term_clauses(map);
   compact_unit_retain_term_clauses(map);
   compact_rewrite_retain_live_clauses(Compact_rewrite_rules, map);
+  predicted_reclaim_bytes =
+    compact_term_pool_retained_reclaimable_bytes(Compact_terms, map);
+  Compact_term_last_predicted_reclaim = predicted_reclaim_bytes;
+  if (predicted_reclaim_bytes < configured_reclaim_bytes) {
+    Compact_term_reclaim_deferrals++;
+    Compact_term_next_reclaim_serialization = terms.serializations + 1024;
+    compact_term_rebase_map_free(map);
+    return;
+  }
   compact_term_pool_compact_retained(Compact_terms, map);
   compact_rewrite_rebase_term_pool(Compact_rewrite_rules,
                                    Compact_terms, map);
   compact_unit_rebase_term_pool(Compact_terms, map);
   compact_back_demod_rebase_shared_term_pool(Compact_terms, map);
   compact_term_rebase_map_free(map);
+  Compact_term_next_reclaim_serialization = terms.serializations + 1024;
 }
 
 /*************
@@ -15839,6 +15867,10 @@ Prover_results search(Prover_input p)
        flag(Opt->compact_back_demod_audit) ||
        flag(Opt->compact_otter_back_demod_index)) ?
       compact_term_pool_init() : NULL;
+    Compact_term_next_reclaim_serialization = 0;
+    Compact_term_reclaim_cooldown_skips = 0;
+    Compact_term_reclaim_deferrals = 0;
+    Compact_term_last_predicted_reclaim = 0;
     if (Compact_terms != NULL && flag(Opt->compact_term_sharing_stats))
       compact_term_pool_enable_sharing_profile(Compact_terms);
     if (Compact_rewrite_rules != NULL)

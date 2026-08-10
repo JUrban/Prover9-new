@@ -150,6 +150,8 @@ int main(void)
           compact_term_rebase_map_retain_clause(map, source, first->id) &&
           compact_term_rebase_map_retain_clause(map, source, first->id),
           "in-place retention deduplicates arbitrary proof-ID requests");
+    CHECK(compact_term_pool_retained_reclaimable_bytes(source, map) > 0,
+          "retained compaction predicts an allocation reduction");
     compact_term_pool_compact_retained(source, map);
     translated_first = compact_term_rebase_offset(map, first_offset);
     translated_last = compact_term_rebase_offset(map, last_offset);

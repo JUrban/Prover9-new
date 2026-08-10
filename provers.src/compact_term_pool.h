@@ -52,6 +52,11 @@ BOOL compact_term_rebase_map_retain_clause(Compact_term_rebase_map map,
                                            Compact_term_pool source,
                                            unsigned long long proof_id);
 
+/* Predict the resident allocation reduction of an in-place retained
+   compaction without materializing its rebase vector or touching tokens. */
+unsigned long long compact_term_pool_retained_reclaimable_bytes(
+  Compact_term_pool pool, Compact_term_rebase_map map);
+
 /* Move every retained source interval downward in the existing token array,
    rebuild the proof-ID directory, and finalize MAP for offset rebasing. */
 void compact_term_pool_compact_retained(Compact_term_pool pool,
