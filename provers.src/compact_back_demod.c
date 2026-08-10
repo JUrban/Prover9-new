@@ -1,11 +1,11 @@
 #include "compact_back_demod.h"
+#include "compact_id_map.h"
 
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define CBD_NONE 0U
-#define CBD_TOMBSTONE UINT64_MAX
 #define CBD_POSTING_BLOCK_PAYLOAD 56
 #define CBD_PATH_DEPTH 3
 
@@ -71,11 +71,7 @@ struct compact_back_demod_index {
   const int32_t *tokens;
   size_t token_limit;
   BOOL owns_term_pool;
-  unsigned long long *hash_keys;
-  uint32_t *hash_values;
-  size_t hash_capacity;
-  size_t hash_count;
-  size_t hash_tombstones;
+  Compact_id_map id_map;
   unsigned long long *results;
   size_t result_capacity;
   uint32_t query_stamp;
@@ -173,8 +169,7 @@ static unsigned long long index_bytes(Compact_back_demod_index index)
     index->occurrence_capacity * sizeof(*index->occurrences) +
     index->record_capacity * sizeof(*index->records) +
     (index->owns_term_pool ? terms.total_bytes : 0) +
-    index->hash_capacity *
-      (sizeof(*index->hash_keys) + sizeof(*index->hash_values)) +
+    compact_id_map_bytes(index->id_map) +
     index->result_capacity * sizeof(*index->results);
 }
 
@@ -187,70 +182,12 @@ static void update_peak(Compact_back_demod_index index)
     index->peak = index->active;
 }
 
-static size_t hash_slot(Compact_back_demod_index index, uint64_t id,
-                        BOOL inserting)
-{
-  size_t mask = index->hash_capacity - 1;
-  size_t at = (size_t) hash_id(id) & mask;
-  size_t tombstone = SIZE_MAX;
-  for (;;) {
-    uint64_t key = index->hash_keys[at];
-    if (key == 0)
-      return inserting && tombstone != SIZE_MAX ? tombstone : at;
-    if (key == id)
-      return at;
-    if (inserting && key == CBD_TOMBSTONE && tombstone == SIZE_MAX)
-      tombstone = at;
-    at = (at + 1) & mask;
-  }
-}
-
-static void rehash(Compact_back_demod_index index, size_t capacity)
-{
-  unsigned long long *old_keys = index->hash_keys;
-  uint32_t *old_values = index->hash_values;
-  size_t old_capacity = index->hash_capacity;
-  size_t i;
-  index->hash_keys = safe_calloc(capacity, sizeof(*index->hash_keys));
-  index->hash_values = safe_calloc(capacity, sizeof(*index->hash_values));
-  index->hash_capacity = capacity;
-  index->hash_tombstones = 0;
-  for (i = 0; i < old_capacity; i++)
-    if (old_keys[i] != 0 && old_keys[i] != CBD_TOMBSTONE) {
-      size_t at = hash_slot(index, old_keys[i], TRUE);
-      index->hash_keys[at] = old_keys[i];
-      index->hash_values[at] = old_values[i];
-    }
-  safe_free(old_keys);
-  safe_free(old_values);
-}
-
-static void ensure_hash(Compact_back_demod_index index)
-{
-  if (index->hash_capacity == 0)
-    rehash(index, 128);
-  else if ((index->hash_count + index->hash_tombstones + 1) * 20 >=
-           index->hash_capacity * 17) {
-    if (index->hash_tombstones != 0 &&
-        (index->hash_count + 1) * 20 < index->hash_capacity * 17)
-      rehash(index, index->hash_capacity);
-    else {
-      if (index->hash_capacity > SIZE_MAX / 2)
-        fatal_error("compact_back_demod: hash overflow");
-      rehash(index, index->hash_capacity * 2);
-    }
-  }
-}
-
 static uint32_t lookup_record(Compact_back_demod_index index,
                               unsigned long long proof_id)
 {
-  size_t at;
-  if (index == NULL || proof_id == 0 || index->hash_capacity == 0)
-    return CBD_NONE;
-  at = hash_slot(index, proof_id, FALSE);
-  return index->hash_keys[at] == proof_id ?
-    index->hash_values[at] : CBD_NONE;
+  uint32_t value = CBD_NONE;
+  return index != NULL &&
+    compact_id_map_get(index->id_map, proof_id, &value) ? value : CBD_NONE;
 }
 
 static void ensure_symbols(Compact_back_demod_index index, unsigned symbol)
@@ -580,6 +517,7 @@ Compact_back_demod_index compact_back_demod_init_with_pool(
     fatal_error("compact_back_demod_init_with_pool: null term pool");
   index->term_pool = pool;
   index->tokens = compact_term_pool_tokens(pool);
+  index->id_map = compact_id_map_init(1);
   index->token_limit = compact_term_pool_token_count(pool);
   if (new_posting_block(index) != CBD_NONE)
     fatal_error("compact_back_demod: invalid posting block sentinel");
@@ -613,7 +551,6 @@ BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
   Literals literal;
   uint32_t token_end = 0;
   BOOL have_tokens = FALSE;
-  size_t at_hash;
   if (index == NULL || clause == NULL || clause->id == 0 ||
       clause->literals == NULL ||
       lookup_record(index, clause->id) != CBD_NONE)
@@ -687,13 +624,8 @@ BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
   }
   if (symbols.occurrence_values != symbols.occurrence_fixed)
     safe_free(symbols.occurrence_values);
-  ensure_hash(index);
-  at_hash = hash_slot(index, clause->id, TRUE);
-  if (index->hash_keys[at_hash] == CBD_TOMBSTONE)
-    index->hash_tombstones--;
-  index->hash_keys[at_hash] = clause->id;
-  index->hash_values[at_hash] = record_index;
-  index->hash_count++;
+  if (!compact_id_map_put(index->id_map, clause->id, &record_index))
+    fatal_error("compact_back_demod: duplicate proof ID");
   index->active++;
   update_peak(index);
   return TRUE;
@@ -703,15 +635,11 @@ BOOL compact_back_demod_remove(Compact_back_demod_index index,
                                unsigned long long proof_id)
 {
   uint32_t record = lookup_record(index, proof_id);
-  size_t at;
   if (record == CBD_NONE || !index->records[record].active)
     return FALSE;
   index->records[record].active = FALSE;
-  at = hash_slot(index, proof_id, FALSE);
-  index->hash_keys[at] = CBD_TOMBSTONE;
-  index->hash_values[at] = CBD_NONE;
-  index->hash_count--;
-  index->hash_tombstones++;
+  if (!compact_id_map_remove(index->id_map, proof_id))
+    fatal_error("compact_back_demod: missing proof ID on removal");
   index->active--;
   index->retired++;
   return TRUE;
@@ -1076,7 +1004,6 @@ static void compact_back_demod_compact_internal(
     if (index->records[i].active) {
       uint32_t added;
       struct cbd_record *record;
-      size_t at_hash;
       ensure_records(replacement);
       if (replacement->record_count > UINT32_MAX)
         fatal_error("compact_back_demod: compacted record overflow");
@@ -1085,11 +1012,8 @@ static void compact_back_demod_compact_internal(
       *record = index->records[i];
       record->query_stamp = 0;
       record_map[i] = added;
-      ensure_hash(replacement);
-      at_hash = hash_slot(replacement, record->proof_id, TRUE);
-      replacement->hash_keys[at_hash] = record->proof_id;
-      replacement->hash_values[at_hash] = added;
-      replacement->hash_count++;
+      if (!compact_id_map_put(replacement->id_map, record->proof_id, &added))
+        fatal_error("compact_back_demod: duplicate compacted proof ID");
       replacement->active++;
     }
   for (i = 1; i < index->path_bucket_count; i++) {
@@ -1147,8 +1071,7 @@ static void compact_back_demod_compact_internal(
   safe_free(old.path_bucket_hash);
   safe_free(old.occurrences);
   safe_free(old.records);
-  safe_free(old.hash_keys);
-  safe_free(old.hash_values);
+  compact_id_map_free(old.id_map);
   safe_free(old.results);
   index->retired = retired;
   index->compactions = compactions + 1;
@@ -1226,8 +1149,7 @@ void compact_back_demod_compact_materialized(
   safe_free(old.path_bucket_hash);
   safe_free(old.occurrences);
   safe_free(old.records);
-  safe_free(old.hash_keys);
-  safe_free(old.hash_values);
+  compact_id_map_free(old.id_map);
   safe_free(old.results);
   replacement = compact_back_demod_init_with_pool(old.term_pool);
   replacement->owns_term_pool = old.owns_term_pool;
@@ -1351,8 +1273,7 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
     index->path_bucket_capacity * sizeof(*index->path_buckets) +
     index->path_bucket_hash_capacity * sizeof(*index->path_bucket_hash);
   stats->token_bytes = index->owns_term_pool ? terms.token_bytes : 0;
-  stats->hash_bytes = index->hash_capacity *
-    (sizeof(*index->hash_keys) + sizeof(*index->hash_values));
+  stats->hash_bytes = compact_id_map_bytes(index->id_map);
   stats->scratch_bytes = index->result_capacity * sizeof(*index->results);
   stats->total_bytes = index_bytes(index);
   stats->peak_bytes = index->peak_bytes;
@@ -1370,8 +1291,7 @@ void compact_back_demod_free(Compact_back_demod_index index)
   safe_free(index->records);
   if (index->owns_term_pool)
     compact_term_pool_free(index->term_pool);
-  safe_free(index->hash_keys);
-  safe_free(index->hash_values);
+  compact_id_map_free(index->id_map);
   safe_free(index->results);
   safe_free(index);
 }

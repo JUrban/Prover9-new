@@ -1,10 +1,10 @@
 #include "compact_unit_index.h"
+#include "compact_id_map.h"
 
 #include <stdint.h>
 #include <string.h>
 
 #define CUI_NONE 0U
-#define CUI_TOMBSTONE UINT64_MAX
 
 static unsigned Compaction_stale_pct = 25;
 
@@ -53,11 +53,7 @@ struct compact_unit_index {
   Compact_term_pool term_pool;
   const int32_t *tokens;
   BOOL owns_term_pool;
-  unsigned long long *hash_keys;
-  uint32_t *hash_values;
-  size_t hash_capacity;
-  size_t hash_count;
-  size_t hash_tombstones;
+  Compact_id_map id_map;
   struct cui_query_term *query;
   size_t query_capacity;
   unsigned long long *result_ids;
@@ -119,16 +115,6 @@ static size_t grow_dense_capacity(size_t current, size_t item_size,
   return next;
 }
 
-static uint64_t hash_id(uint64_t x)
-{
-  x ^= x >> 30;
-  x *= UINT64_C(0xbf58476d1ce4e5b9);
-  x ^= x >> 27;
-  x *= UINT64_C(0x94d049bb133111eb);
-  x ^= x >> 31;
-  return x;
-}
-
 static uint64_t symbol_bit(unsigned symbol)
 {
   return UINT64_C(1) << ((symbol * UINT32_C(2654435761)) >> 26);
@@ -148,8 +134,7 @@ static unsigned long long index_bytes(Compact_unit_index index)
       (sizeof(*index->unifier_heads[0]) +
        sizeof(*index->unifier_heads[1])) +
     (index->owns_term_pool ? terms.total_bytes : 0) +
-    index->hash_capacity *
-      (sizeof(*index->hash_keys) + sizeof(*index->hash_values)) +
+    compact_id_map_bytes(index->id_map) +
     index->query_capacity * sizeof(*index->query) +
     index->result_capacity * sizeof(*index->result_ids);
 }
@@ -172,70 +157,12 @@ static void update_peak(Compact_unit_index index)
   }                                                                    \
 } while (0)
 
-static size_t hash_slot(Compact_unit_index index, uint64_t id,
-                        BOOL inserting)
-{
-  size_t mask = index->hash_capacity - 1;
-  size_t at = (size_t) hash_id(id) & mask;
-  size_t tombstone = SIZE_MAX;
-  for (;;) {
-    uint64_t key = index->hash_keys[at];
-    if (key == 0)
-      return inserting && tombstone != SIZE_MAX ? tombstone : at;
-    if (key == id)
-      return at;
-    if (inserting && key == CUI_TOMBSTONE && tombstone == SIZE_MAX)
-      tombstone = at;
-    at = (at + 1) & mask;
-  }
-}
-
-static void rehash(Compact_unit_index index, size_t capacity)
-{
-  unsigned long long *old_keys = index->hash_keys;
-  uint32_t *old_values = index->hash_values;
-  size_t old_capacity = index->hash_capacity;
-  size_t i;
-  index->hash_keys = safe_calloc(capacity, sizeof(*index->hash_keys));
-  index->hash_values = safe_calloc(capacity, sizeof(*index->hash_values));
-  index->hash_capacity = capacity;
-  index->hash_tombstones = 0;
-  for (i = 0; i < old_capacity; i++)
-    if (old_keys[i] != 0 && old_keys[i] != CUI_TOMBSTONE) {
-      size_t at = hash_slot(index, old_keys[i], TRUE);
-      index->hash_keys[at] = old_keys[i];
-      index->hash_values[at] = old_values[i];
-    }
-  safe_free(old_keys);
-  safe_free(old_values);
-}
-
-static void ensure_hash(Compact_unit_index index)
-{
-  if (index->hash_capacity == 0)
-    rehash(index, 128);
-  else if ((index->hash_count + index->hash_tombstones + 1) * 20 >=
-           index->hash_capacity * 17) {
-    if (index->hash_tombstones != 0 &&
-        (index->hash_count + 1) * 20 < index->hash_capacity * 17)
-      rehash(index, index->hash_capacity);
-    else {
-      if (index->hash_capacity > SIZE_MAX / 2)
-        fatal_error("compact_unit_index: hash overflow");
-      rehash(index, index->hash_capacity * 2);
-    }
-  }
-}
-
 static uint32_t lookup_record(Compact_unit_index index,
                               unsigned long long proof_id)
 {
-  size_t at;
-  if (index == NULL || proof_id == 0 || index->hash_capacity == 0)
-    return CUI_NONE;
-  at = hash_slot(index, proof_id, FALSE);
-  return index->hash_keys[at] == proof_id ?
-    index->hash_values[at] : CUI_NONE;
+  uint32_t value = CUI_NONE;
+  return index != NULL &&
+    compact_id_map_get(index->id_map, proof_id, &value) ? value : CUI_NONE;
 }
 
 static int code_compare(int32_t a, int32_t b)
@@ -420,6 +347,7 @@ Compact_unit_index compact_unit_index_init_with_pool(Compact_term_pool pool)
     fatal_error("compact_unit_index_init_with_pool: null term pool");
   index->term_pool = pool;
   index->tokens = compact_term_pool_tokens(pool);
+  index->id_map = compact_id_map_init(1);
   (void) new_node(index, 0, 0);  /* reserved null node */
   index->roots[0] = new_node(index, 0, 0);
   index->roots[1] = new_node(index, 0, 0);
@@ -448,7 +376,6 @@ BOOL compact_unit_index_add(Compact_unit_index index, Topform unit)
 {
   struct cui_record *record;
   uint32_t at_record;
-  size_t at_hash;
   if (index == NULL || unit == NULL || unit->id == 0 ||
       unit->literals == NULL || unit->literals->next != NULL ||
       lookup_record(index, unit->id) != CUI_NONE)
@@ -475,13 +402,8 @@ BOOL compact_unit_index_add(Compact_unit_index index, Topform unit)
     index->unifier_heads[record->sign ? 1 : 0][root] = at_record;
   }
   index_record(index, at_record);
-  ensure_hash(index);
-  at_hash = hash_slot(index, unit->id, TRUE);
-  if (index->hash_keys[at_hash] == CUI_TOMBSTONE)
-    index->hash_tombstones--;
-  index->hash_keys[at_hash] = unit->id;
-  index->hash_values[at_hash] = at_record;
-  index->hash_count++;
+  if (!compact_id_map_put(index->id_map, unit->id, &at_record))
+    fatal_error("compact_unit_index: duplicate proof ID");
   index->active++;
   update_peak(index);
   return TRUE;
@@ -491,15 +413,11 @@ BOOL compact_unit_index_remove(Compact_unit_index index,
                                unsigned long long proof_id)
 {
   uint32_t record = lookup_record(index, proof_id);
-  size_t at;
   if (record == CUI_NONE || !index->records[record].active)
     return FALSE;
   index->records[record].active = FALSE;
-  at = hash_slot(index, proof_id, FALSE);
-  index->hash_keys[at] = CUI_TOMBSTONE;
-  index->hash_values[at] = 0;
-  index->hash_count--;
-  index->hash_tombstones++;
+  if (!compact_id_map_remove(index->id_map, proof_id))
+    fatal_error("compact_unit_index: missing proof ID on removal");
   index->active--;
   index->retired++;
   return TRUE;
@@ -516,7 +434,6 @@ static void copy_live_record(Compact_unit_index destination,
 {
   struct cui_record *record;
   uint32_t at_record;
-  size_t at_hash;
   ENSURE_ARRAY(destination, records, record_count, record_capacity,
                "compact_unit_index: compacted record overflow");
   if (destination->record_count > UINT32_MAX)
@@ -534,11 +451,8 @@ static void copy_live_record(Compact_unit_index destination,
     destination->unifier_heads[record->sign ? 1 : 0][root] = at_record;
   }
   index_record(destination, at_record);
-  ensure_hash(destination);
-  at_hash = hash_slot(destination, record->proof_id, TRUE);
-  destination->hash_keys[at_hash] = record->proof_id;
-  destination->hash_values[at_hash] = at_record;
-  destination->hash_count++;
+  if (!compact_id_map_put(destination->id_map, record->proof_id, &at_record))
+    fatal_error("compact_unit_index: duplicate compacted proof ID");
   destination->active++;
   update_peak(destination);
 }
@@ -608,8 +522,7 @@ static void compact_unit_index_compact_internal(Compact_unit_index index,
   safe_free(old.postings);
   safe_free(old.unifier_heads[0]);
   safe_free(old.unifier_heads[1]);
-  safe_free(old.hash_keys);
-  safe_free(old.hash_values);
+  compact_id_map_free(old.id_map);
   safe_free(old.query);
   safe_free(old.result_ids);
   replacement = compact_unit_index_init_with_pool(old.term_pool);
@@ -1198,8 +1111,7 @@ void compact_unit_index_get_stats(Compact_unit_index index,
     (sizeof(*index->unifier_heads[0]) +
      sizeof(*index->unifier_heads[1]));
   stats->token_bytes = index->owns_term_pool ? terms.token_bytes : 0;
-  stats->hash_bytes = index->hash_capacity *
-    (sizeof(*index->hash_keys) + sizeof(*index->hash_values));
+  stats->hash_bytes = compact_id_map_bytes(index->id_map);
   stats->scratch_bytes =
     index->query_capacity * sizeof(*index->query) +
     index->result_capacity * sizeof(*index->result_ids);
@@ -1218,8 +1130,7 @@ void compact_unit_index_free(Compact_unit_index index)
   safe_free(index->unifier_heads[1]);
   if (index->owns_term_pool)
     compact_term_pool_free(index->term_pool);
-  safe_free(index->hash_keys);
-  safe_free(index->hash_values);
+  compact_id_map_free(index->id_map);
   safe_free(index->query);
   safe_free(index->result_ids);
   safe_free(index);

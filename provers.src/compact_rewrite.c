@@ -1,4 +1,5 @@
 #include "compact_rewrite.h"
+#include "compact_id_map.h"
 
 #include <limits.h>
 #include <stdint.h>
@@ -7,7 +8,6 @@
 static unsigned Compaction_stale_pct = 25;
 
 #define CR_NONE 0U
-#define CR_TOMBSTONE UINT64_MAX
 #define CR_OCCURRENCE_BLOCK_PAYLOAD 248
 #define CR_RULE_LENGTH_MASK UINT32_C(0x0fffffff)
 #define CR_RULE_TYPE_SHIFT 28
@@ -66,11 +66,7 @@ struct compact_rewrite_bank {
   Compact_term_pool term_pool;
   const int32_t *tokens;
   BOOL owns_term_pool;
-  unsigned long long *hash_keys;
-  uint32_t *hash_values;
-  size_t hash_capacity;
-  size_t hash_count;
-  size_t hash_tombstones;
+  Compact_id_map id_map;
   struct cr_query_term *query;
   size_t query_capacity;
   unsigned long long active_rules;
@@ -199,8 +195,7 @@ static unsigned long long bank_bytes(Compact_rewrite_bank bank)
        sizeof(*bank->occurrence_last_rules)) +
     bank->rule_capacity * sizeof(*bank->rules) +
     (bank->owns_term_pool ? terms.total_bytes : 0) +
-    bank->hash_capacity *
-      (sizeof(*bank->hash_keys) + sizeof(*bank->hash_values)) +
+    compact_id_map_bytes(bank->id_map) +
     bank->query_capacity * sizeof(*bank->query);
 }
 
@@ -293,69 +288,12 @@ static void ensure_rules(Compact_rewrite_bank bank)
   }
 }
 
-static size_t hash_slot(Compact_rewrite_bank bank, uint64_t id,
-                        BOOL inserting)
-{
-  size_t mask = bank->hash_capacity - 1;
-  size_t at = (size_t) hash_id(id) & mask;
-  size_t tombstone = SIZE_MAX;
-  for (;;) {
-    uint64_t key = bank->hash_keys[at];
-    if (key == 0)
-      return inserting && tombstone != SIZE_MAX ? tombstone : at;
-    if (key == id)
-      return at;
-    if (inserting && key == CR_TOMBSTONE && tombstone == SIZE_MAX)
-      tombstone = at;
-    at = (at + 1) & mask;
-  }
-}
-
-static void rehash(Compact_rewrite_bank bank, size_t capacity)
-{
-  unsigned long long *old_keys = bank->hash_keys;
-  uint32_t *old_values = bank->hash_values;
-  size_t old_capacity = bank->hash_capacity;
-  size_t i;
-  bank->hash_keys = safe_calloc(capacity, sizeof(*bank->hash_keys));
-  bank->hash_values = safe_calloc(capacity, sizeof(*bank->hash_values));
-  bank->hash_capacity = capacity;
-  bank->hash_tombstones = 0;
-  for (i = 0; i < old_capacity; i++)
-    if (old_keys[i] != 0 && old_keys[i] != CR_TOMBSTONE) {
-      size_t at = hash_slot(bank, old_keys[i], TRUE);
-      bank->hash_keys[at] = old_keys[i];
-      bank->hash_values[at] = old_values[i];
-    }
-  safe_free(old_keys);
-  safe_free(old_values);
-}
-
-static void ensure_hash(Compact_rewrite_bank bank)
-{
-  if (bank->hash_capacity == 0)
-    rehash(bank, 128);
-  else if ((bank->hash_count + bank->hash_tombstones + 1) * 20 >=
-           bank->hash_capacity * 17) {
-    if (bank->hash_tombstones != 0 &&
-        (bank->hash_count + 1) * 20 < bank->hash_capacity * 17)
-      rehash(bank, bank->hash_capacity);
-    else {
-      if (bank->hash_capacity > SIZE_MAX / 2)
-        fatal_error("compact_rewrite: hash overflow");
-      rehash(bank, bank->hash_capacity * 2);
-    }
-  }
-}
-
 static uint32_t lookup_rule(Compact_rewrite_bank bank,
                             unsigned long long proof_id)
 {
-  size_t at;
-  if (bank == NULL || proof_id == 0 || bank->hash_capacity == 0)
-    return CR_NONE;
-  at = hash_slot(bank, proof_id, FALSE);
-  return bank->hash_keys[at] == proof_id ? bank->hash_values[at] : CR_NONE;
+  uint32_t value = CR_NONE;
+  return bank != NULL &&
+    compact_id_map_get(bank->id_map, proof_id, &value) ? value : CR_NONE;
 }
 
 static uint32_t append_term_tokens(Compact_rewrite_bank bank, Topform clause,
@@ -592,6 +530,7 @@ Compact_rewrite_bank compact_rewrite_init_with_pool(Compact_term_pool pool)
     fatal_error("compact_rewrite_init_with_pool: null term pool");
   bank->term_pool = pool;
   bank->tokens = compact_term_pool_tokens(pool);
+  bank->id_map = compact_id_map_init(1);
   (void) new_node(bank, 0, 0);
   ensure_postings(bank);
   memset(&bank->postings[0], 0, sizeof(bank->postings[0]));
@@ -620,7 +559,6 @@ BOOL compact_rewrite_add(Compact_rewrite_bank bank, Topform clause, int type)
   uint32_t index;
   uint32_t right_length;
   Term atom;
-  size_t at;
   if (bank == NULL || clause == NULL || clause->id == 0 ||
       type == NOT_DEMODULATOR || lookup_rule(bank, clause->id) != CR_NONE)
     return FALSE;
@@ -643,13 +581,8 @@ BOOL compact_rewrite_add(Compact_rewrite_bank bank, Topform clause, int type)
   if (type == LEX_DEP_RL || type == LEX_DEP_BOTH)
     index_side(bank, index, rule->right_offset, right_length, 2);
   index_rule_occurrences(bank, index);
-  ensure_hash(bank);
-  at = hash_slot(bank, clause->id, TRUE);
-  if (bank->hash_keys[at] == CR_TOMBSTONE)
-    bank->hash_tombstones--;
-  bank->hash_keys[at] = clause->id;
-  bank->hash_values[at] = index;
-  bank->hash_count++;
+  if (!compact_id_map_put(bank->id_map, clause->id, &index))
+    fatal_error("compact_rewrite: duplicate proof ID");
   bank->active_rules++;
   update_peak(bank);
   return TRUE;
@@ -663,7 +596,6 @@ static void copy_live_rule(Compact_rewrite_bank destination,
   uint32_t index;
   uint32_t right_length = rule_right_length(old);
   int type = rule_type(old);
-  size_t at;
   ensure_rules(destination);
   if (destination->rule_count > UINT32_MAX)
     fatal_error("compact_rewrite: compacted rule offsets exceed 32 bits");
@@ -691,11 +623,8 @@ static void copy_live_rule(Compact_rewrite_bank destination,
   if (type == LEX_DEP_RL || type == LEX_DEP_BOTH)
     index_side(destination, index, rule->right_offset, right_length, 2);
   index_rule_occurrences(destination, index);
-  ensure_hash(destination);
-  at = hash_slot(destination, rule->proof_id, TRUE);
-  destination->hash_keys[at] = rule->proof_id;
-  destination->hash_values[at] = index;
-  destination->hash_count++;
+  if (!compact_id_map_put(destination->id_map, rule->proof_id, &index))
+    fatal_error("compact_rewrite: duplicate compacted proof ID");
   destination->active_rules++;
   update_peak(destination);
 }
@@ -762,8 +691,7 @@ static void compact_rewrite_compact_internal(Compact_rewrite_bank bank,
   safe_free(old.occurrence_heads);
   safe_free(old.occurrence_tails);
   safe_free(old.occurrence_last_rules);
-  safe_free(old.hash_keys);
-  safe_free(old.hash_values);
+  compact_id_map_free(old.id_map);
   safe_free(old.query);
   replacement = old.owns_term_pool ? compact_rewrite_init() :
     compact_rewrite_init_with_pool(old.term_pool);
@@ -800,15 +728,11 @@ static BOOL remove_rule(Compact_rewrite_bank bank,
                         unsigned long long proof_id, BOOL retirement)
 {
   uint32_t index = lookup_rule(bank, proof_id);
-  size_t at;
   if (index == CR_NONE || !rule_active(&bank->rules[index]))
     return FALSE;
   set_rule_active(&bank->rules[index], FALSE);
-  at = hash_slot(bank, proof_id, FALSE);
-  bank->hash_keys[at] = CR_TOMBSTONE;
-  bank->hash_values[at] = 0;
-  bank->hash_count--;
-  bank->hash_tombstones++;
+  if (!compact_id_map_remove(bank->id_map, proof_id))
+    fatal_error("compact_rewrite: missing proof ID on removal");
   bank->active_rules--;
   if (retirement)
     bank->retired_rules++;
@@ -1440,8 +1364,7 @@ void compact_rewrite_get_stats(Compact_rewrite_bank bank,
     bank->occurrence_block_capacity * sizeof(*bank->occurrence_blocks);
   stats->rule_bytes = bank->rule_capacity * sizeof(*bank->rules);
   stats->term_bytes = bank->owns_term_pool ? terms.token_bytes : 0;
-  stats->hash_bytes = bank->hash_capacity *
-    (sizeof(*bank->hash_keys) + sizeof(*bank->hash_values));
+  stats->hash_bytes = compact_id_map_bytes(bank->id_map);
   stats->total_bytes = bank_bytes(bank);
   stats->peak_bytes = bank->peak_bytes;
 }
@@ -1459,8 +1382,7 @@ void compact_rewrite_free(Compact_rewrite_bank bank)
   safe_free(bank->rules);
   if (bank->owns_term_pool)
     compact_term_pool_free(bank->term_pool);
-  safe_free(bank->hash_keys);
-  safe_free(bank->hash_values);
+  compact_id_map_free(bank->id_map);
   safe_free(bank->query);
   safe_free(bank);
 }
