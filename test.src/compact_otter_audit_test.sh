@@ -119,4 +119,66 @@ cmp "$test_tmp/reference.search" "$test_tmp/unit-compact.search"
 cmp "$test_tmp/reference.search" "$test_tmp/back-demod-audit.search"
 cmp "$test_tmp/reference.search" "$test_tmp/back-demod-compact.search"
 
+# x2 itself is unit-only.  Add one harmless nonunit equality clause and turn
+# automatic setup off so the feature-index audit and authoritative paths are
+# both exercised without enabling unsupported unit deletion.
+awk 'BEGIN { added=0 }
+     !added && /^end_of_list\.$/ {
+       print "  x * y = y * x | x = e."
+       added=1
+     }
+     { print }' "$repo_dir/prover9.examples/x2.in" > "$test_tmp/nonunit.in"
+
+sed '1i\
+clear(auto).\
+clear(auto_setup).\
+clear(auto_inference).\
+clear(unit_deletion).\
+set(paramodulation).\
+assign(stats,all).' "$test_tmp/nonunit.in" | \
+  "$repo_dir/bin/prover9" > "$test_tmp/nonunit-reference.out" 2> "$test_tmp/nonunit-reference.err"
+
+sed '1i\
+clear(auto).\
+clear(auto_setup).\
+clear(auto_inference).\
+clear(unit_deletion).\
+set(paramodulation).\
+set(compact_otter_demodulation).\
+set(compact_otter_unit_index).\
+set(compact_otter_back_demod_index).\
+set(compact_nonunit_subsumption_audit).\
+assign(stats,all).' "$test_tmp/nonunit.in" | \
+  "$repo_dir/bin/prover9" > "$test_tmp/nonunit-audit.out" 2> "$test_tmp/nonunit-audit.err"
+
+sed '1i\
+clear(auto).\
+clear(auto_setup).\
+clear(auto_inference).\
+clear(unit_deletion).\
+set(paramodulation).\
+set(compact_otter_demodulation).\
+set(compact_otter_unit_index).\
+set(compact_otter_back_demod_index).\
+set(compact_otter_nonunit_index).\
+assign(stats,all).' "$test_tmp/nonunit.in" | \
+  "$repo_dir/bin/prover9" > "$test_tmp/nonunit-compact.out" 2> "$test_tmp/nonunit-compact.err"
+
+for run in nonunit-reference nonunit-audit nonunit-compact; do
+  grep -q 'THEOREM PROVED' "$test_tmp/$run.out"
+  "$repo_dir/bin/prooftrans" parents_only < "$test_tmp/$run.out" | \
+    sed -n '/^% Length of proof:/,/^============================== end of proof/p' \
+    > "$test_tmp/$run.norm"
+  grep '^Given=' "$test_tmp/$run.out" | tail -n 1 > "$test_tmp/$run.search"
+  grep '^Usable=' "$test_tmp/$run.out" | tail -n 1 >> "$test_tmp/$run.search"
+done
+grep -Eq 'Compact_nonunit_index: mode=audit, failures=0, active=[1-9][0-9]*,' \
+  "$test_tmp/nonunit-audit.out"
+grep -Eq 'Compact_nonunit_index: mode=authoritative, failures=0, active=[1-9][0-9]*,' \
+  "$test_tmp/nonunit-compact.out"
+cmp "$test_tmp/nonunit-reference.norm" "$test_tmp/nonunit-audit.norm"
+cmp "$test_tmp/nonunit-reference.norm" "$test_tmp/nonunit-compact.norm"
+cmp "$test_tmp/nonunit-reference.search" "$test_tmp/nonunit-audit.search"
+cmp "$test_tmp/nonunit-reference.search" "$test_tmp/nonunit-compact.search"
+
 echo 'compact_otter_audit_test: PASS'

@@ -1856,6 +1856,10 @@ Prover_options init_prover_options(void)
     init_flag("compact_back_demod_audit", FALSE);
   p->compact_otter_back_demod_index =
     init_flag("compact_otter_back_demod_index", FALSE);
+  p->compact_nonunit_subsumption_audit =
+    init_flag("compact_nonunit_subsumption_audit", FALSE);
+  p->compact_otter_nonunit_index =
+    init_flag("compact_otter_nonunit_index", FALSE);
   p->collective_trace       = init_flag("collective_trace",       FALSE);
   p->collective_hint_probes = init_flag("collective_hint_probes",  FALSE);
   p->collective_promising_candidates =
@@ -2871,6 +2875,9 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
   if (flag(Opt->compact_back_demod_audit) ||
       flag(Opt->compact_otter_back_demod_index))
     fprint_compact_back_demod(fp);
+  if (flag(Opt->compact_nonunit_subsumption_audit) ||
+      flag(Opt->compact_otter_nonunit_index))
+    fprint_compact_nonunit_index(fp);
   if (collective_frontier_mode()) {
     fprintf(fp,
             "Collective_scheduler: policy=%s, drain=%d, high=%d, low=%d, "
@@ -9787,6 +9794,9 @@ void index_and_process_initial_clauses(void)
   configure_compact_unit_index(
     flag(Opt->compact_unit_subsumption_audit),
     flag(Opt->compact_otter_unit_index));
+  configure_compact_nonunit_index(
+    flag(Opt->compact_nonunit_subsumption_audit),
+    flag(Opt->compact_otter_nonunit_index));
   init_literals_index(fpa_depth);  // fsub, bsub, fudel, budel, ucon
 
   init_demodulator_index(DISCRIM_BIND, ORDINARY_UNIF, 0);
@@ -14827,6 +14837,32 @@ Prover_results search(Prover_input p)
         fatal_error("compact_otter_back_demod_index does not support checkpoint resume");
       if (flag(Opt->compact_back_demod_audit))
         fatal_error("compact_otter_back_demod_index and its audit are mutually exclusive");
+    }
+    if (flag(Opt->compact_nonunit_subsumption_audit)) {
+      if (discount_mode())
+        fatal_error("compact_nonunit_subsumption_audit requires search_loop=otter");
+      if (!str_ident(stringparm1(Opt->inference_frontier), "clauses"))
+        fatal_error("compact_nonunit_subsumption_audit requires inference_frontier=clauses");
+      if (flag(Opt->ancestor_subsume))
+        fatal_error("compact_nonunit_subsumption_audit does not support ancestor_subsume");
+      if (p->resume_dir != NULL)
+        fatal_error("compact_nonunit_subsumption_audit does not support checkpoint resume");
+    }
+    if (flag(Opt->compact_otter_nonunit_index)) {
+      if (discount_mode())
+        fatal_error("compact_otter_nonunit_index requires search_loop=otter");
+      if (!str_ident(stringparm1(Opt->inference_frontier), "clauses"))
+        fatal_error("compact_otter_nonunit_index requires inference_frontier=clauses");
+      if (!flag(Opt->compact_otter_unit_index))
+        fatal_error("compact_otter_nonunit_index requires compact_otter_unit_index");
+      if (flag(Opt->unit_deletion))
+        fatal_error("compact_otter_nonunit_index does not support unit_deletion");
+      if (flag(Opt->ancestor_subsume))
+        fatal_error("compact_otter_nonunit_index does not support ancestor_subsume");
+      if (p->resume_dir != NULL)
+        fatal_error("compact_otter_nonunit_index does not support checkpoint resume");
+      if (flag(Opt->compact_nonunit_subsumption_audit))
+        fatal_error("compact_otter_nonunit_index and its audit are mutually exclusive");
     }
     if (maximum_discount_demod_mode()) {
       if (!dense_passive_mode())

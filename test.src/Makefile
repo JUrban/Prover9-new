@@ -75,8 +75,8 @@ hyper_iterator_test: hyper_iterator_test.o ../ladr/libladr.a
 rewrite_only_store_test: rewrite_only_store_test.o ../provers.src/rewrite_only_store.o ../ladr/libladr.a
 	$(CC) $(CFLAGS) -o rewrite_only_store_test rewrite_only_store_test.o ../provers.src/rewrite_only_store.o ../ladr/libladr.a -lm
 
-compact_rewrite_test: compact_rewrite_test.o ../provers.src/compact_rewrite.o ../provers.src/demodulate.o ../ladr/libladr.a
-	$(CC) $(CFLAGS) -o compact_rewrite_test compact_rewrite_test.o ../provers.src/compact_rewrite.o ../provers.src/demodulate.o ../ladr/libladr.a -lm
+compact_rewrite_test: compact_rewrite_test.o ../provers.src/compact_rewrite.o ../provers.src/compact_back_demod.o ../provers.src/demodulate.o ../ladr/libladr.a
+	$(CC) $(CFLAGS) -o compact_rewrite_test compact_rewrite_test.o ../provers.src/compact_rewrite.o ../provers.src/compact_back_demod.o ../provers.src/demodulate.o ../ladr/libladr.a -lm
 
 compact_unit_index_test: compact_unit_index_test.o ../provers.src/compact_unit_index.o ../ladr/libladr.a
 	$(CC) $(CFLAGS) -o compact_unit_index_test compact_unit_index_test.o ../provers.src/compact_unit_index.o ../ladr/libladr.a -lm

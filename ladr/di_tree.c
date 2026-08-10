@@ -497,6 +497,15 @@ BOOL subsumes_di(Literals c, Literals d, Context subst)
   return subsumed;
 }  /* subsumes_di */
 
+/* PUBLIC */
+BOOL feature_subsumes_raw(Topform c, Topform d)
+{
+  Context subst = get_context();
+  BOOL result = subsumes_di(c->literals, d->literals, subst);
+  free_context(subst);
+  return result;
+}
+
 /*************
  *
  *   di_tree_forward()

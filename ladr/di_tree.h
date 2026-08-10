@@ -68,6 +68,10 @@ Topform forward_feature_subsume(Topform d, Di_tree root);
 
 Plist back_feature_subsume(Topform c, Di_tree root);
 
+/* Exact matcher used after an external feature filter.  It deliberately does
+   not alter the legacy candidate-test counters. */
+BOOL feature_subsumes_raw(Topform c, Topform d);
+
 unsigned mega_sub_calls(void);
 
 #endif  /* conditional compilation of whole file */
