@@ -53,9 +53,9 @@ struct compact_rewrite_bank {
   struct cr_rule *rules;
   size_t rule_count;
   size_t rule_capacity;
-  int32_t *tokens;
-  size_t token_count;
-  size_t token_capacity;
+  Compact_term_pool term_pool;
+  const int32_t *tokens;
+  BOOL owns_term_pool;
   unsigned long long *hash_keys;
   uint32_t *hash_values;
   size_t hash_capacity;
@@ -106,8 +106,10 @@ static uint64_t hash_id(uint64_t x)
 
 static unsigned long long bank_bytes(Compact_rewrite_bank bank)
 {
+  struct compact_term_pool_stats terms;
   if (bank == NULL)
     return 0;
+  compact_term_pool_get_stats(bank->term_pool, &terms);
   return sizeof(*bank) +
     bank->node_capacity * sizeof(*bank->nodes) +
     bank->posting_capacity * sizeof(*bank->postings) +
@@ -115,7 +117,7 @@ static unsigned long long bank_bytes(Compact_rewrite_bank bank)
     bank->occurrence_symbol_capacity *
       (sizeof(*bank->occurrence_heads) + sizeof(*bank->occurrence_tails)) +
     bank->rule_capacity * sizeof(*bank->rules) +
-    bank->token_capacity * sizeof(*bank->tokens) +
+    (bank->owns_term_pool ? terms.total_bytes : 0) +
     bank->hash_capacity *
       (sizeof(*bank->hash_keys) + sizeof(*bank->hash_values)) +
     bank->query_capacity * sizeof(*bank->query);
@@ -198,23 +200,6 @@ static void ensure_rules(Compact_rewrite_bank bank)
   }
 }
 
-static void ensure_tokens(Compact_rewrite_bank bank, size_t extra)
-{
-  size_t needed;
-  if (extra > SIZE_MAX - bank->token_count)
-    fatal_error("compact_rewrite: token overflow");
-  needed = bank->token_count + extra;
-  if (needed > UINT32_MAX)
-    fatal_error("compact_rewrite: token offsets exceed 32 bits");
-  while (needed > bank->token_capacity) {
-    bank->token_capacity = grow_capacity(bank->token_capacity,
-                                          sizeof(*bank->tokens),
-                                          "compact_rewrite: token capacity overflow");
-    bank->tokens = safe_realloc(
-      bank->tokens, bank->token_capacity * sizeof(*bank->tokens));
-  }
-}
-
 static size_t hash_slot(Compact_rewrite_bank bank, uint64_t id,
                         BOOL inserting)
 {
@@ -275,37 +260,12 @@ static uint32_t lookup_rule(Compact_rewrite_bank bank,
   return bank->hash_keys[at] == proof_id ? bank->hash_values[at] : CR_NONE;
 }
 
-static uint32_t append_term_tokens(Compact_rewrite_bank bank, Term term,
+static uint32_t append_term_tokens(Compact_rewrite_bank bank, Topform clause,
+                                   Term term,
                                    uint32_t *length)
 {
-  size_t offset = bank->token_count;
-  size_t cap = 128, top = 0;
-  Term fixed[128];
-  Term *stack = fixed;
-  stack[top++] = term;
-  while (top != 0) {
-    Term current = stack[--top];
-    int i;
-    ensure_tokens(bank, 1);
-    bank->tokens[bank->token_count++] = VARIABLE(current) ?
-      -(int32_t) VARNUM(current) - 1 : (int32_t) SYMNUM(current);
-    for (i = ARITY(current) - 1; i >= 0; i--) {
-      if (top == cap) {
-        cap *= 2;
-        if (stack == fixed) {
-          stack = safe_malloc(cap * sizeof(*stack));
-          memcpy(stack, fixed, top * sizeof(*stack));
-        }
-        else
-          stack = safe_realloc(stack, cap * sizeof(*stack));
-      }
-      stack[top++] = ARG(current, i);
-    }
-  }
-  if (stack != fixed)
-    safe_free(stack);
-  *length = (uint32_t) (bank->token_count - offset);
-  return (uint32_t) offset;
+  return compact_term_pool_intern(bank->term_pool, clause->id,
+                                  clause->literals, term, length);
 }
 
 static int code_compare(int32_t a, int32_t b)
@@ -492,9 +452,13 @@ static void index_rule_occurrences(Compact_rewrite_bank bank, uint32_t index)
   safe_free(symbols);
 }
 
-Compact_rewrite_bank compact_rewrite_init(void)
+Compact_rewrite_bank compact_rewrite_init_with_pool(Compact_term_pool pool)
 {
   Compact_rewrite_bank bank = safe_calloc(1, sizeof(*bank));
+  if (pool == NULL)
+    fatal_error("compact_rewrite_init_with_pool: null term pool");
+  bank->term_pool = pool;
+  bank->tokens = compact_term_pool_tokens(pool);
   (void) new_node(bank, 0, 0);
   ensure_postings(bank);
   memset(&bank->postings[0], 0, sizeof(bank->postings[0]));
@@ -505,6 +469,15 @@ Compact_rewrite_bank compact_rewrite_init(void)
   ensure_rules(bank);
   memset(&bank->rules[0], 0, sizeof(bank->rules[0]));
   bank->rule_count = 1;
+  update_peak(bank);
+  return bank;
+}
+
+Compact_rewrite_bank compact_rewrite_init(void)
+{
+  Compact_term_pool pool = compact_term_pool_init();
+  Compact_rewrite_bank bank = compact_rewrite_init_with_pool(pool);
+  bank->owns_term_pool = TRUE;
   update_peak(bank);
   return bank;
 }
@@ -528,10 +501,11 @@ BOOL compact_rewrite_add(Compact_rewrite_bank bank, Topform clause, int type)
   rule->type = (unsigned char) type;
   rule->active = TRUE;
   atom = clause->literals->atom;
-  rule->left_offset = append_term_tokens(bank, ARG(atom, 0),
+  rule->left_offset = append_term_tokens(bank, clause, ARG(atom, 0),
                                           &rule->left_length);
-  rule->right_offset = append_term_tokens(bank, ARG(atom, 1),
+  rule->right_offset = append_term_tokens(bank, clause, ARG(atom, 1),
                                            &rule->right_length);
+  bank->tokens = compact_term_pool_tokens(bank->term_pool);
   if (type == ORIENTED || type == LEX_DEP_LR || type == LEX_DEP_BOTH)
     index_side(bank, index, rule->left_offset, rule->left_length, 1);
   if (type == LEX_DEP_RL || type == LEX_DEP_BOTH)
@@ -556,7 +530,6 @@ static void copy_live_rule(Compact_rewrite_bank destination,
   struct cr_rule *rule;
   uint32_t index;
   size_t at;
-  size_t token_total = (size_t) old->left_length + old->right_length;
   ensure_rules(destination);
   if (destination->rule_count > UINT32_MAX)
     fatal_error("compact_rewrite: compacted rule offsets exceed 32 bits");
@@ -566,19 +539,21 @@ static void copy_live_rule(Compact_rewrite_bank destination,
   rule->proof_id = old->proof_id;
   rule->type = old->type;
   rule->active = TRUE;
-  ensure_tokens(destination, token_total);
-  rule->left_offset = (uint32_t) destination->token_count;
   rule->left_length = old->left_length;
-  memcpy(destination->tokens + destination->token_count,
-         source->tokens + old->left_offset,
-         (size_t) old->left_length * sizeof(*destination->tokens));
-  destination->token_count += old->left_length;
-  rule->right_offset = (uint32_t) destination->token_count;
   rule->right_length = old->right_length;
-  memcpy(destination->tokens + destination->token_count,
-         source->tokens + old->right_offset,
-         (size_t) old->right_length * sizeof(*destination->tokens));
-  destination->token_count += old->right_length;
+  if (destination->term_pool == source->term_pool) {
+    rule->left_offset = old->left_offset;
+    rule->right_offset = old->right_offset;
+  }
+  else {
+    rule->left_offset = compact_term_pool_append(
+      destination->term_pool, source->tokens + old->left_offset,
+      old->left_length);
+    rule->right_offset = compact_term_pool_append(
+      destination->term_pool, source->tokens + old->right_offset,
+      old->right_length);
+  }
+  destination->tokens = compact_term_pool_tokens(destination->term_pool);
   if (rule->type == ORIENTED || rule->type == LEX_DEP_LR ||
       rule->type == LEX_DEP_BOTH)
     index_side(destination, index, rule->left_offset, rule->left_length, 1);
@@ -624,7 +599,9 @@ void compact_rewrite_compact(Compact_rewrite_bank bank)
   retired = bank->retired_rules;
   compactions = bank->compactions;
   reclaimed = bank->bytes_reclaimed;
-  replacement = compact_rewrite_init();
+  bank->tokens = compact_term_pool_tokens(bank->term_pool);
+  replacement = bank->owns_term_pool ? compact_rewrite_init() :
+    compact_rewrite_init_with_pool(bank->term_pool);
   for (i = 1; i < bank->rule_count; i++)
     if (bank->rules[i].active)
       copy_live_rule(replacement, bank, &bank->rules[i]);
@@ -638,7 +615,8 @@ void compact_rewrite_compact(Compact_rewrite_bank bank)
   safe_free(old.occurrence_heads);
   safe_free(old.occurrence_tails);
   safe_free(old.rules);
-  safe_free(old.tokens);
+  if (old.owns_term_pool)
+    compact_term_pool_free(old.term_pool);
   safe_free(old.hash_keys);
   safe_free(old.hash_values);
   safe_free(old.query);
@@ -819,6 +797,7 @@ void compact_rewrite_visit_overlaps(Compact_rewrite_bank bank,
   unsigned pattern_count = 0, i;
   if (new_index == CR_NONE || visit == NULL)
     return;
+  bank->tokens = compact_term_pool_tokens(bank->term_pool);
   rule = &bank->rules[new_index];
   if (rule->type == ORIENTED || rule->type == LEX_DEP_LR ||
       rule->type == LEX_DEP_BOTH) {
@@ -1143,6 +1122,7 @@ void compact_rewrite_clause(Compact_rewrite_bank bank, Topform clause,
   int reduced_flag;
   if (bank == NULL || bank->active_rules == 0 || clause == NULL)
     return;
+  bank->tokens = compact_term_pool_tokens(bank->term_pool);
   reduced_flag = claim_term_flag();
   step_limit = step_limit == -1 ? INT_MAX : step_limit;
   increase_limit = increase_limit == -1 ? INT_MAX : increase_limit;
@@ -1170,11 +1150,13 @@ void compact_rewrite_clause(Compact_rewrite_bank bank, Topform clause,
 void compact_rewrite_get_stats(Compact_rewrite_bank bank,
                                struct compact_rewrite_stats *stats)
 {
+  struct compact_term_pool_stats terms;
   if (stats == NULL)
     return;
   memset(stats, 0, sizeof(*stats));
   if (bank == NULL)
     return;
+  compact_term_pool_get_stats(bank->term_pool, &terms);
   stats->rules_current = bank->active_rules;
   stats->rules_peak = bank->peak_rules;
   stats->rules_retired = bank->retired_rules;
@@ -1190,7 +1172,7 @@ void compact_rewrite_get_stats(Compact_rewrite_bank bank,
     bank->occurrence_symbol_capacity *
       (sizeof(*bank->occurrence_heads) + sizeof(*bank->occurrence_tails));
   stats->rule_bytes = bank->rule_capacity * sizeof(*bank->rules);
-  stats->term_bytes = bank->token_capacity * sizeof(*bank->tokens);
+  stats->term_bytes = bank->owns_term_pool ? terms.token_bytes : 0;
   stats->hash_bytes = bank->hash_capacity *
     (sizeof(*bank->hash_keys) + sizeof(*bank->hash_values));
   stats->total_bytes = bank_bytes(bank);
@@ -1207,7 +1189,8 @@ void compact_rewrite_free(Compact_rewrite_bank bank)
   safe_free(bank->occurrence_heads);
   safe_free(bank->occurrence_tails);
   safe_free(bank->rules);
-  safe_free(bank->tokens);
+  if (bank->owns_term_pool)
+    compact_term_pool_free(bank->term_pool);
   safe_free(bank->hash_keys);
   safe_free(bank->hash_values);
   safe_free(bank->query);

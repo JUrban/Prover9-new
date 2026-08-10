@@ -2,6 +2,7 @@
 #define TP_COMPACT_REWRITE_H
 
 #include "../ladr/ladr.h"
+#include "compact_term_pool.h"
 
 typedef struct compact_rewrite_bank * Compact_rewrite_bank;
 
@@ -28,6 +29,8 @@ typedef void (*Compact_rewrite_overlap_fn)(unsigned long long proof_id,
                                            void *context);
 
 Compact_rewrite_bank compact_rewrite_init(void);
+
+Compact_rewrite_bank compact_rewrite_init_with_pool(Compact_term_pool pool);
 
 BOOL compact_rewrite_add(Compact_rewrite_bank bank, Topform clause, int type);
 
