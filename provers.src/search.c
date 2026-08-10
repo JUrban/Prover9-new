@@ -79,6 +79,8 @@ static unsigned long long Resume_rewrite_interreduce_cursor_id = 0;
 
 static void update_rewrite_only_stats(void);
 static void current_demodulate_clause(Topform, int, int, BOOL, BOOL);
+static Topform compact_otter_resolve_clause(unsigned long long, void *);
+static void compact_otter_release_clause(Topform, void *);
 
 /* Progress callback for shared-memory IPC (set by -cores scheduler) */
 static Search_progress_fn Progress_callback = NULL;
@@ -104,8 +106,19 @@ static BOOL compressed_passive_mode(void)
 
 static BOOL dense_passive_mode(void)
 {
-  return discount_mode() && Opt != NULL &&
-         str_ident(stringparm1(Opt->passive_store), "dense");
+  return Opt != NULL &&
+         str_ident(stringparm1(Opt->passive_store), "dense") &&
+         (discount_mode() ||
+          (!discount_mode() &&
+           flag(Opt->compact_otter_demodulation) &&
+           flag(Opt->compact_otter_unit_index) &&
+           flag(Opt->compact_otter_back_demod_index) &&
+           flag(Opt->compact_otter_nonunit_index)));
+}
+
+static BOOL compact_otter_passive_mode(void)
+{
+  return dense_passive_mode() && !discount_mode();
 }
 
 static BOOL eager_legacy_demod_mode(void)
@@ -2663,9 +2676,16 @@ void update_stats(void)
   Stats.usable_size = Glob.usable ? Glob.usable->length : 0;
   Stats.sos_size = dense_passive_mode() ? dense_passive_size() :
                    (Glob.sos ? Glob.sos->length : 0);
-  Stats.demodulators_size = Glob.demods ? Glob.demods->length : 0;
+  Stats.demodulators_size = compact_otter_passive_mode() ?
+    compact.rules_current : (Glob.demods ? Glob.demods->length : 0);
   Stats.limbo_size = Glob.limbo ? Glob.limbo->length : 0;
   Stats.disabled_size = clause_store_current_length(Glob.disabled);
+  if (compact_otter_passive_mode()) {
+    size_t passive = dense_passive_size();
+    if (Stats.disabled_size < passive)
+      fatal_error("update_stats: archived passive count exceeds archive size");
+    Stats.disabled_size -= passive;
+  }
   Stats.hints_size = Glob.hints ? Glob.hints->length : 0;
   Stats.active_indexed_clauses = Stats.usable_size;
   Stats.passive_indexed_clauses = discount_mode() ? 0 : Stats.sos_size;
@@ -3154,8 +3174,11 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             "heap_bytes=%s, arena_records=%s, arena_record_bytes=%s, "
             "arena_backing=%s, arena_physical=%s, "
             "allocated_bytes_per_active=%.2f.\n",
-            cold_passive_store_mode_name(
-              cold_passive_store_get_stats(Dense_body_store).mode),
+            compact_otter_passive_mode() ?
+              (str_ident(stringparm1(Opt->ancestor_store), "mmap") ?
+               "ancestor-mmap" : "ancestor-memory") :
+              cold_passive_store_mode_name(
+                cold_passive_store_get_stats(Dense_body_store).mode),
             comma_num(s.dense_passive_records),
             comma_num(s.dense_passive_record_bytes),
             comma_num(s.dense_passive_heap_bytes),
@@ -5277,6 +5300,16 @@ static size_t relocate_dense_passive(size_t old_position, void *context)
                                          ctx->destination);
 }
 
+/* The compact OTTER archive is append-only and its record positions remain
+   stable.  Selector compaction therefore only has to discard inactive dense
+   metadata; the backing positions relocate to themselves. */
+static size_t retain_dense_archive_position(size_t old_position,
+                                            void *context)
+{
+  (void) context;
+  return old_position;
+}
+
 static void compact_dense_passive_store(void)
 {
   Cold_passive_store old_store = Dense_body_store;
@@ -5433,6 +5466,7 @@ static Topform materialize_dense_passive(
   c->semantics = view->semantics;
   c->simplifier_epoch = view->simplifier_epoch;
   c->rewrite_epoch = view->rewrite_epoch;
+  c->used = view->used;
   c->delayed_demodulator = view->delayed_demodulator;
   c->rewrite_rule_dirty = view->rewrite_rule_dirty;
   {
@@ -5443,6 +5477,87 @@ static Topform materialize_dense_passive(
   }
   return c;
 }  /* materialize_dense_passive */
+
+/* Compact OTTER uses the ancestor archive as the single immutable owner of
+   a passive body.  This keeps proof ancestry and on-demand clause lookup in
+   the established archived-ID namespace instead of duplicating every body
+   in the DISCOUNT cold store. */
+static size_t archive_compact_otter_passive(
+  Topform c, unsigned *body_bytes, unsigned *justification_bytes,
+  unsigned *logical_body_bytes)
+{
+  size_t position;
+  unsigned just_bytes;
+  Clause_compress_result result;
+  if (c == NULL || c->id == 0 || active_or_indexable_clause(c))
+    fatal_error("archive_compact_otter_passive: clause is still on a live list");
+  if (dense_passive_compaction_needed())
+    dense_passive_compact(retain_dense_archive_position, NULL);
+  result = compress_clause_with_justification(c);
+  if (result != CLAUSE_COMPRESS_OK && result != CLAUSE_COMPRESS_ALREADY)
+    return SIZE_MAX;
+  just_bytes = compressed_clause_justification_bytes(c);
+  if (just_bytes > c->compressed_size)
+    return SIZE_MAX;
+  if (body_bytes != NULL)
+    *body_bytes = c->compressed_size - just_bytes;
+  if (justification_bytes != NULL)
+    *justification_bytes = just_bytes;
+  if (logical_body_bytes != NULL)
+    *logical_body_bytes = c->uncompressed_body_bytes;
+  position = clause_store_length(Glob.disabled);
+  clause_store_append(Glob.disabled, c);
+  if (!clause_store_archive_clause(Glob.disabled, c))
+    return SIZE_MAX;
+  return position;
+}
+
+static Topform activate_compact_otter_passive(
+  size_t position, unsigned long long id, unsigned long long hint_id)
+{
+  Topform c = clause_store_activate(Glob.disabled, position);
+  if (c == NULL || c->id != id)
+    return NULL;
+  c->matching_hint = hint_by_id(hint_id);
+  if (compact_rewrite_contains(Compact_rewrite_rules, id) &&
+      !clist_member(c, Glob.demods))
+    clist_append(c, Glob.demods);
+  return c;
+}
+
+static Topform compact_otter_resolve_clause(unsigned long long id,
+                                             void *context)
+{
+  struct dense_passive_view view;
+  Topform c;
+  (void) context;
+  if (!compact_otter_passive_mode() ||
+      !dense_passive_view_id(id, &view))
+    return NULL;
+  c = clause_store_materialize(Glob.disabled, view.store_position);
+  if (c == NULL || c->id != id || !c->archive_materialized)
+    fatal_error("compact_otter_resolve_clause: archive identity mismatch");
+  c->matching_hint = hint_by_id(view.hint_id);
+  c->weight = view.weight;
+  c->semantics = view.semantics;
+  c->simplifier_epoch = view.simplifier_epoch;
+  c->rewrite_epoch = view.rewrite_epoch;
+  c->used = view.used;
+  c->delayed_demodulator = view.delayed_demodulator;
+  c->rewrite_rule_dirty = view.rewrite_rule_dirty;
+  return c;
+}
+
+static void compact_otter_release_clause(Topform c, void *context)
+{
+  (void) context;
+  if (c == NULL || !c->archive_materialized)
+    return;
+  if (c->used && dense_passive_contains_id(c->id) &&
+      !dense_passive_mark_used(c->id))
+    fatal_error("compact_otter_release_clause: passive used bit was lost");
+  clause_store_release_materialized(c);
+}
 
 static
 void compress_retained_clause(Topform c)
@@ -5546,6 +5661,40 @@ void disable_clause(Topform c)
   // it will be freed during the call.
 
   clock_start(Clocks.disable);
+
+  if (compact_otter_passive_mode() && c->archive_materialized &&
+      dense_passive_contains_id(c->id)) {
+    struct dense_passive_view view;
+    unsigned long long id = c->id;
+    if (!dense_passive_view_id(id, &view))
+      fatal_error("disable_clause: cold passive metadata is missing");
+    clause_store_release_materialized(c);
+    c = clause_store_activate(Glob.disabled, view.store_position);
+    if (c == NULL || c->id != id)
+      fatal_error("disable_clause: cannot activate cold passive");
+    c->matching_hint = hint_by_id(view.hint_id);
+    c->weight = view.weight;
+    c->semantics = view.semantics;
+    c->simplifier_epoch = view.simplifier_epoch;
+    c->rewrite_epoch = view.rewrite_epoch;
+    c->used = view.used;
+    c->delayed_demodulator = view.delayed_demodulator;
+    c->rewrite_rule_dirty = view.rewrite_rule_dirty;
+    if (!dense_passive_deactivate_id(id, NULL))
+      fatal_error("disable_clause: cold passive selector record is missing");
+    if (compact_rewrite_contains(Compact_rewrite_rules, id)) {
+      if (!compact_rewrite_remove(Compact_rewrite_rules, id))
+        fatal_error("disable_clause: compact cold demodulator is missing");
+      if (compact_rewrite_compaction_needed(Compact_rewrite_rules))
+        compact_rewrite_compact(Compact_rewrite_rules);
+      update_rewrite_only_stats();
+    }
+    index_literals(c, DELETE, Clocks.index, FALSE);
+    index_back_demod(c, DELETE, Clocks.index, flag(Opt->back_demod));
+    retain_disabled_clause(c);
+    clock_stop(Clocks.disable);
+    return;
+  }
 
   if (clist_member(c, Glob.demods)) {
     if (eager_interreduced_demod_mode() || compact_otter_demod_mode()) {
@@ -7126,13 +7275,17 @@ BOOL cl_process_delete(Topform c)
     }
     clock_stop(Clocks.subsume);
     if (subsumer != NULL && !c->used) {
+      unsigned long long subsumer_id = subsumer->id;
+      release_compact_index_clause(subsumer);
       if (flag(Opt->print_gen))
-	printf("%ssubsumed by %llu.\n", TPTP_PFX, subsumer->id);
+	printf("%ssubsumed by %llu.\n", TPTP_PFX, subsumer_id);
       Stats.subsumed++;
       return TRUE;  // delete
     }
-    else
+    else {
+      release_compact_index_clause(subsumer);
       return FALSE;  // keep the clause
+    }
   }
 }  // cl_process_delete
 
@@ -7310,7 +7463,8 @@ void back_demod(Topform demod)
   p = results;
   while(p != NULL) {
     Topform old = p->v;
-    if (!clause_store_member(Glob.disabled, old)) {
+    if (!clause_store_member(Glob.disabled, old) ||
+        dense_passive_contains_id(old->id)) {
       Topform new;
       if (flag(Opt->basic_paramodulation))
 	new = copy_clause_with_flag(old, nonbasic_flag());
@@ -7329,6 +7483,8 @@ void back_demod(Topform demod)
       disable_clause(old);
       cl_process(new);
     }
+    else
+      compact_otter_release_clause(old, NULL);
     prev = p;
     p = p->next;
     free_plist(prev);
@@ -7616,6 +7772,7 @@ void limbo_process(BOOL pre_search)
 	   forward subsumption (due to being marked used) but then being
 	   caught by back subsumption. */
 	if (flag(Opt->back_subsume_skip_used) && d->used) {
+	  compact_otter_release_clause(d, NULL);
 	  subsumees = plist_pop(subsumees);
 	  continue;
 	}
@@ -7628,6 +7785,7 @@ void limbo_process(BOOL pre_search)
 	   in the same limbo_process() loop.  The limbo clause will be
 	   handled in its own iteration of the loop. */
 	if (flag(Opt->back_subsume_skip_limbo) && clist_member(d, Glob.limbo)) {
+	  compact_otter_release_clause(d, NULL);
 	  subsumees = plist_pop(subsumees);
 	  continue;
 	}
@@ -7641,6 +7799,7 @@ void limbo_process(BOOL pre_search)
 	    printf("%s    back subsumption of %llu by %llu blocked"
 		   " by ancestor_subsume.\n",
 		   TPTP_PFX, d->id, c->id);
+	  compact_otter_release_clause(d, NULL);
 	  subsumees = plist_pop(subsumees);
 	  continue;
 	}
@@ -7652,7 +7811,7 @@ void limbo_process(BOOL pre_search)
 	    && d->matching_hint != NULL
 	    && Dcount_c > 0) {
 	  int Dcount_d = degradation_count(d);
-	  if (clist_member(d, Glob.sos)) {
+	  if (clist_member(d, Glob.sos) || dense_passive_contains_id(d->id)) {
 	    if (Dcount_d < Dcount_min_sos)
 	      Dcount_min_sos = Dcount_d;
 	  }
@@ -7741,8 +7900,26 @@ void limbo_process(BOOL pre_search)
 	c->initial = TRUE;
       else
 	c->initial = FALSE;
-      insert_into_sos2(c, Glob.sos);
-      index_back_demod(c, INSERT, Clocks.index, flag(Opt->back_demod));
+      if (compact_otter_passive_mode()) {
+        /* Every semantic transaction above has completed.  Populate the
+           final pointer-free sidecar before surrendering the body, and drop
+           the transient demod-list owner; the compact rewrite bank remains
+           authoritative while this rule is cold. */
+        index_back_demod(c, INSERT, Clocks.index, flag(Opt->back_demod));
+        if (clist_member(c, Glob.demods))
+          clist_remove(c, Glob.demods);
+        if (To_trace_cl == c) {
+          printf("\n*** Trace: clause %llu entered the compact passive archive.\n",
+                 c->id);
+          To_trace_cl = NULL;
+        }
+        insert_into_sos2(c, Glob.sos);  /* archives and deletes C */
+        continue;
+      }
+      else {
+        insert_into_sos2(c, Glob.sos);
+        index_back_demod(c, INSERT, Clocks.index, flag(Opt->back_demod));
+      }
     }
 
     // Report if this single iteration took a long time
@@ -8821,9 +8998,11 @@ BOOL discount_refresh_selected(Topform c)
   clock_stop(Clocks.subsume);
 
   if (subsumer != NULL && !c->used) {
+    unsigned long long subsumer_id = subsumer->id;
+    release_compact_index_clause(subsumer);
     if (flag(Opt->print_gen))
       printf("%sDISCOUNT refresh: %llu subsumed by %llu.\n",
-             TPTP_PFX, c->id, subsumer->id);
+             TPTP_PFX, c->id, subsumer_id);
     Stats.subsumed++;
     Stats.passive_refresh_subsumed++;
     if (eager_interreduced_demod_mode() && c->delayed_demodulator) {
@@ -8836,6 +9015,7 @@ BOOL discount_refresh_selected(Topform c)
     retain_disabled_clause(c);
     return FALSE;
   }
+  release_compact_index_clause(subsumer);
 
   c->simplifier_epoch = Simplifier_epoch;
   c->rewrite_epoch = Rewrite_epoch;
@@ -9797,6 +9977,8 @@ void index_and_process_initial_clauses(void)
   configure_compact_nonunit_index(
     flag(Opt->compact_nonunit_subsumption_audit),
     flag(Opt->compact_otter_nonunit_index));
+  configure_compact_clause_access(compact_otter_resolve_clause,
+                                  compact_otter_release_clause, NULL);
   init_literals_index(fpa_depth);  // fsub, bsub, fudel, budel, ucon
 
   init_demodulator_index(DISCRIM_BIND, ORDINARY_UNIF, 0);
@@ -9804,6 +9986,8 @@ void index_and_process_initial_clauses(void)
   configure_compact_back_demod(
     flag(Opt->compact_back_demod_audit),
     flag(Opt->compact_otter_back_demod_index));
+  configure_compact_back_demod_access(compact_otter_resolve_clause,
+                                      compact_otter_release_clause, NULL);
   init_back_demod_index(FPA, ORDINARY_UNIF, fpa_depth);
 
   Glob.clashable_idx = lindex_init(FPA, ORDINARY_UNIF, fpa_depth,
@@ -14864,6 +15048,19 @@ Prover_results search(Prover_input p)
       if (flag(Opt->compact_nonunit_subsumption_audit))
         fatal_error("compact_otter_nonunit_index and its audit are mutually exclusive");
     }
+    if (!discount_mode() &&
+        str_ident(stringparm1(Opt->passive_store), "dense")) {
+      if (!compact_otter_passive_mode())
+        fatal_error("OTTER passive_store=dense requires all four authoritative compact indexes");
+      if (str_ident(stringparm1(Opt->ancestor_store), "off"))
+        fatal_error("compact OTTER passive_store=dense requires ancestor_store=memory or mmap");
+      if (parm(Opt->sos_limit) != -1)
+        fatal_error("compact OTTER passive_store=dense requires sos_limit=-1");
+      if (!flag(Opt->process_initial_sos))
+        fatal_error("compact OTTER passive_store=dense requires process_initial_sos");
+      if (p->resume_dir != NULL)
+        fatal_error("compact OTTER passive_store=dense does not support checkpoint resume");
+    }
     if (maximum_discount_demod_mode()) {
       if (!dense_passive_mode())
         fatal_error(eager_legacy_demod_mode() ?
@@ -15007,9 +15204,14 @@ Prover_results search(Prover_input p)
         fatal_error("passive_store=dense requires ancestor_store=memory or mmap");
       if (parm(Opt->sos_limit) != -1)
         fatal_error("passive_store=dense currently requires sos_limit=-1");
-      Dense_body_store = new_dense_body_store();
-      configure_dense_passive(TRUE, archive_dense_passive,
-                              activate_dense_passive);
+      if (compact_otter_passive_mode())
+        configure_dense_passive(TRUE, archive_compact_otter_passive,
+                                activate_compact_otter_passive);
+      else {
+        Dense_body_store = new_dense_body_store();
+        configure_dense_passive(TRUE, archive_dense_passive,
+                                activate_dense_passive);
+      }
     }
     else
       configure_dense_passive(FALSE, NULL, NULL);

@@ -32,6 +32,16 @@
 
 /* Public function prototypes from index_lits.c */
 
+typedef Topform (*Compact_clause_resolver)(unsigned long long id,
+                                           void *context);
+typedef void (*Compact_clause_releaser)(Topform clause, void *context);
+
+void configure_compact_clause_access(Compact_clause_resolver resolver,
+                                     Compact_clause_releaser releaser,
+                                     void *context);
+
+void release_compact_index_clause(Topform clause);
+
 void init_literals_index(int depth);
 
 void destroy_literals_index(void);

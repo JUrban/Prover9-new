@@ -34,6 +34,15 @@ void init_demodulator_index(Mindextype mtype, Uniftype utype, int fpa_depth);
 
 void configure_compact_back_demod(BOOL audit, BOOL authoritative);
 
+typedef Topform (*Compact_back_demod_resolver)(unsigned long long id,
+                                               void *context);
+typedef void (*Compact_back_demod_releaser)(Topform clause, void *context);
+
+void configure_compact_back_demod_access(
+  Compact_back_demod_resolver resolver,
+  Compact_back_demod_releaser releaser,
+  void *context);
+
 void init_back_demod_index(Mindextype mtype, Uniftype utype, int fpa_depth);
 
 void index_demodulator(Topform c, int type, Indexop operation, Clock clock);

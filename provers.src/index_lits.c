@@ -38,6 +38,32 @@ static Compact_feature_index Compact_nonunits;
 static unsigned long long Compact_nonunit_audit_failures;
 static unsigned long long Compact_nonunit_forward_exact_tests;
 static unsigned long long Compact_nonunit_back_exact_tests;
+static Compact_clause_resolver Compact_clause_resolve;
+static Compact_clause_releaser Compact_clause_release;
+static void *Compact_clause_context;
+
+void configure_compact_clause_access(Compact_clause_resolver resolver,
+                                     Compact_clause_releaser releaser,
+                                     void *context)
+{
+  Compact_clause_resolve = resolver;
+  Compact_clause_release = releaser;
+  Compact_clause_context = context;
+}
+
+static Topform resolve_compact_index_clause(unsigned long long id)
+{
+  Topform clause = find_clause_by_id(id);
+  if (clause == NULL && Compact_clause_resolve != NULL)
+    clause = Compact_clause_resolve(id, Compact_clause_context);
+  return clause;
+}
+
+void release_compact_index_clause(Topform clause)
+{
+  if (clause != NULL && Compact_clause_release != NULL)
+    Compact_clause_release(clause, Compact_clause_context);
+}
 
 void configure_compact_unit_index(BOOL audit, BOOL authoritative)
 {
@@ -553,7 +579,7 @@ void unit_conflict(Topform c, void (*empty_proc) (Topform))
     for (i = 0; i < direct_count + flipped_count; i++) {
       BOOL flip = i >= direct_count;
       unsigned long long id = flip ? flipped[i - direct_count] : direct[i];
-      Topform candidate = find_clause_by_id(id);
+      Topform candidate = resolve_compact_index_clause(id);
       Topform empty;
       if (candidate == NULL)
         fatal_error("unit_conflict: compact candidate is not resident");
@@ -562,6 +588,7 @@ void unit_conflict(Topform c, void (*empty_proc) (Topform))
       if (empty == NULL)
         fatal_error("unit_conflict: compact candidate no longer unifies");
       (*empty_proc)(empty);
+      release_compact_index_clause(candidate);
     }
     safe_free(direct);
     safe_free(flipped);
@@ -618,12 +645,14 @@ static Topform compact_nonunit_forward_subsumption(Topform query)
   Topform result = NULL;
   ids = compact_feature_forward_candidates(Compact_nonunits, vector, &count);
   for (i = 0; i < count && result == NULL; i++) {
-    Topform candidate = find_clause_by_id(ids[i]);
+    Topform candidate = resolve_compact_index_clause(ids[i]);
     if (candidate == NULL)
       fatal_error("compact_nonunit_forward_subsumption: candidate is not resident");
     Compact_nonunit_forward_exact_tests++;
     if (feature_subsumes_raw(candidate, query))
       result = candidate;
+    else
+      release_compact_index_clause(candidate);
   }
   safe_free(ids);
   return result;
@@ -637,14 +666,18 @@ static Plist compact_nonunit_back_subsumption(Topform query)
   Plist result = NULL;
   ids = compact_feature_back_candidates(Compact_nonunits, vector, &count);
   for (i = 0; i < count; i++) {
-    Topform candidate = find_clause_by_id(ids[i]);
+    Topform candidate = resolve_compact_index_clause(ids[i]);
     if (candidate == NULL)
       fatal_error("compact_nonunit_back_subsumption: candidate is not resident");
     if (candidate != query) {
       Compact_nonunit_back_exact_tests++;
       if (feature_subsumes_raw(query, candidate))
         result = plist_prepend(result, candidate);
+      else
+        release_compact_index_clause(candidate);
     }
+    else
+      release_compact_index_clause(candidate);
   }
   safe_free(ids);
   return result;
@@ -665,7 +698,7 @@ Topform forward_subsumption(Topform d)
       compact = compact_unit_generalization_first(
         Compact_units, literal->atom, literal->sign, 0);
     if (compact != 0) {
-      subsumer = find_clause_by_id(compact);
+      subsumer = resolve_compact_index_clause(compact);
       if (subsumer == NULL)
         fatal_error("forward_subsumption: compact subsumer is not resident");
     }
@@ -751,7 +784,7 @@ Plist back_subsumption(Topform c)
     ids = compact_unit_instance_ids(
       Compact_units, c->literals->atom, c->literals->sign, c->id, &count);
     for (i = 0; i < count; i++) {
-      Topform candidate = find_clause_by_id(ids[i]);
+      Topform candidate = resolve_compact_index_clause(ids[i]);
       Plist cell;
       if (candidate == NULL)
         fatal_error("back_subsumption: compact subsumee is not resident");

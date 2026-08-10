@@ -30,6 +30,20 @@ static Compact_back_demod_index Compact_back_demod_idx;
 static BOOL Compact_back_demod_audit;
 static BOOL Compact_back_demod_authoritative;
 static unsigned long long Compact_back_demod_failures;
+static Compact_back_demod_resolver Compact_back_demod_resolve;
+static Compact_back_demod_releaser Compact_back_demod_release;
+static void *Compact_back_demod_context;
+
+/* PUBLIC */
+void configure_compact_back_demod_access(
+  Compact_back_demod_resolver resolver,
+  Compact_back_demod_releaser releaser,
+  void *context)
+{
+  Compact_back_demod_resolve = resolver;
+  Compact_back_demod_release = releaser;
+  Compact_back_demod_context = context;
+}
 
 /* PUBLIC */
 void configure_compact_back_demod(BOOL audit, BOOL authoritative)
@@ -395,6 +409,9 @@ static Plist compact_back_demodulatable(Topform demod, int type,
   compact_back_demod_note_exact_tests(Compact_back_demod_idx, count);
   for (i = 0; i < count; i++) {
     Topform candidate = find_clause_by_id(ids[i]);
+    if (candidate == NULL && Compact_back_demod_resolve != NULL)
+      candidate = Compact_back_demod_resolve(
+        ids[i], Compact_back_demod_context);
     if (candidate == NULL)
       fatal_error("compact_back_demodulatable: candidate is not resident");
     if (rewritable_clause_type(demod, candidate, type, lex_order_vars)) {
@@ -407,6 +424,8 @@ static Plist compact_back_demodulatable(Topform demod, int type,
         tail->next = cell;
       tail = cell;
     }
+    else if (Compact_back_demod_release != NULL)
+      Compact_back_demod_release(candidate, Compact_back_demod_context);
   }
   safe_free(ids);
   return answer;

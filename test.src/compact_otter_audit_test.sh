@@ -164,7 +164,25 @@ set(compact_otter_nonunit_index).\
 assign(stats,all).' "$test_tmp/nonunit.in" | \
   "$repo_dir/bin/prover9" > "$test_tmp/nonunit-compact.out" 2> "$test_tmp/nonunit-compact.err"
 
-for run in nonunit-reference nonunit-audit nonunit-compact; do
+sed '1i\
+clear(auto).\
+clear(auto_setup).\
+clear(auto_inference).\
+clear(unit_deletion).\
+set(paramodulation).\
+assign(search_loop,otter).\
+assign(inference_frontier,clauses).\
+assign(passive_store,dense).\
+assign(ancestor_store,mmap).\
+assign(sos_limit,-1).\
+set(compact_otter_demodulation).\
+set(compact_otter_unit_index).\
+set(compact_otter_back_demod_index).\
+set(compact_otter_nonunit_index).\
+assign(stats,all).' "$test_tmp/nonunit.in" | \
+  "$repo_dir/bin/prover9" > "$test_tmp/nonunit-archive.out" 2> "$test_tmp/nonunit-archive.err"
+
+for run in nonunit-reference nonunit-audit nonunit-compact nonunit-archive; do
   grep -q 'THEOREM PROVED' "$test_tmp/$run.out"
   "$repo_dir/bin/prooftrans" parents_only < "$test_tmp/$run.out" | \
     sed -n '/^% Length of proof:/,/^============================== end of proof/p' \
@@ -176,9 +194,15 @@ grep -Eq 'Compact_nonunit_index: mode=audit, failures=0, active=[1-9][0-9]*,' \
   "$test_tmp/nonunit-audit.out"
 grep -Eq 'Compact_nonunit_index: mode=authoritative, failures=0, active=[1-9][0-9]*,' \
   "$test_tmp/nonunit-compact.out"
+grep -Eq 'Dense_passive: backing=ancestor-mmap, records=[1-9][0-9]*,' \
+  "$test_tmp/nonunit-archive.out"
+grep -Eq 'Ancestor_store: records=[1-9][0-9]*, .*validation_failures=0\.' \
+  "$test_tmp/nonunit-archive.out"
 cmp "$test_tmp/nonunit-reference.norm" "$test_tmp/nonunit-audit.norm"
 cmp "$test_tmp/nonunit-reference.norm" "$test_tmp/nonunit-compact.norm"
+cmp "$test_tmp/nonunit-reference.norm" "$test_tmp/nonunit-archive.norm"
 cmp "$test_tmp/nonunit-reference.search" "$test_tmp/nonunit-audit.search"
 cmp "$test_tmp/nonunit-reference.search" "$test_tmp/nonunit-compact.search"
+cmp "$test_tmp/nonunit-reference.search" "$test_tmp/nonunit-archive.search"
 
 echo 'compact_otter_audit_test: PASS'
