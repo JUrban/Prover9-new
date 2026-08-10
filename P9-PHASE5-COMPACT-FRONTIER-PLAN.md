@@ -61,6 +61,7 @@ columns:
 | 1,000 | archive, 4 MiB cache | 140.45 s | 156.25 s | 113,264 KiB | 19.17 MB |
 | 1,000 | archive, shared clause term pool | 142.07 s | 156.66 s | 94,652 KiB | 19.17 MB |
 | 1,000 | archive, delta back-posting stream | 126.12 s | 140.04 s | 93,524 KiB | 19.17 MB |
+| 1,000 | archive, delta rewrite-occurrence stream | 125.53 s | 138.90 s | 92,164 KiB | 19.17 MB |
 
 All compared runs have identical given, generated, kept, usable, SOS,
 demodulator, disabled, hint, and active-hint counts.  At 1,000 givens both
@@ -98,6 +99,7 @@ unchanged:
 | all four indexes | 7,652,792 B | 3,937,752 B | 48.5% |
 | all four plus shared clause term pool | 7,652,792 B | 3,020,360 B | 60.5% |
 | plus delta back-posting stream | 7,652,792 B | 2,760,368 B | 63.9% |
+| plus delta rewrite-occurrence stream | 7,652,792 B | 2,663,112 B | 65.2% |
 
 The rewrite node pool itself falls from 655,360 to 196,608 bytes (70.0%).
 The optimized rewrite traversal uses one binding trail per query; allocating
@@ -163,6 +165,16 @@ allocated block bytes.  Complete back-demod storage falls from 6,033,664 to
 17,628,848 bytes: **60.4% below** the pre-structural 44,545,464 bytes.  The
 exact gate takes 126.12 user seconds and 93,524 KiB peak RSS, improvements
 over the preceding shared-pool run's 142.07 seconds and 94,652 KiB.
+
+Rewrite overlap occurrences now use the same per-symbol block principle, with
+one monotone varint rule delta per entry.  At 300 givens the 16,174 logical
+bytes occupy 32,768 block bytes, the complete rewrite bank falls from 792,840
+to 695,584 bytes, and the full 132,267-line CHAT trace remains identical.  At
+1,000 givens the stream is 108,440 logical and 131,072 allocated bytes; the
+rewrite bank falls from 4,856,072 to 3,939,616 bytes (-18.9%).  Combined
+structural storage is now 16,712,392 bytes, **62.5% below** the pre-structural
+baseline.  The gate remains exact at 125.53 user seconds and 92,164 KiB peak
+RSS.
 
 ### Next radical index reduction
 
