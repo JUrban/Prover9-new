@@ -6142,7 +6142,7 @@ static void maybe_compact_shared_term_pool(void)
 {
   struct compact_term_pool_stats terms;
   struct compact_rewrite_stats rewrite;
-  unsigned long long retained, stale, threshold;
+  unsigned long long retained, stale;
   unsigned long long stale_tokens, estimated_reclaimable_bytes;
   Compact_term_rebase_map map;
   if (!compact_otter_passive_mode() || Compact_terms == NULL)
@@ -6159,18 +6159,14 @@ static void maybe_compact_shared_term_pool(void)
   if (terms.clause_entries <= retained)
     return;
   stale = terms.clause_entries - retained;
-  threshold = retained / 4;
-  if (threshold < 1024)
-    threshold = 1024;
-  if (stale < threshold)
+  if (stale < 1024)
     return;
   /* Rebuilding all three indexes is deliberately a cold operation.  A
-     clause-count ratio alone fires much too early on CHAT-sized prefixes:
-     1,153 apparently stale clauses caused a complete rebuild to reclaim
-     only 45 KiB.  Estimate just the stale token payload (and therefore err
-     on the conservative side by ignoring directory/index savings).  The
-     default waits for 8 MiB; compact_term_reclaim_kb exposes lower bounded
-     thresholds for peak-RSS experiments without changing clause semantics. */
+     clause-count ratio alone fired much too early on CHAT-sized prefixes,
+     while a 25% ratio later delayed a configured 2-MiB recovery until the
+     token array had already crossed another realloc high-water mark.  Keep a
+     1,024-clause noise floor, then make the conservative stale-token payload
+     budget authoritative.  Directory/index savings are still ignored. */
   stale_tokens =
     (terms.logical_tokens / terms.clause_entries) * stale +
     ((terms.logical_tokens % terms.clause_entries) * stale) /

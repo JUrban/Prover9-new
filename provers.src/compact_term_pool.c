@@ -1,12 +1,21 @@
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+#define _GNU_SOURCE
+#endif
 #include "compact_term_pool.h"
 
 #include <stdint.h>
 #include <string.h>
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
 
 struct compact_term_pool {
   int32_t *tokens;
   size_t token_count;
   size_t token_capacity;
+  size_t token_mapping_bytes;
+  BOOL tokens_mapped;
   unsigned long long *proof_ids;
   uint32_t *clause_offsets;
   uint32_t *clause_lengths;
@@ -73,6 +82,79 @@ static size_t grow_token_capacity(size_t current)
   if (next > SIZE_MAX / sizeof(int32_t))
     fatal_error("compact_term_pool: token capacity overflow");
   return next;
+}
+
+/* Linux can resize an anonymous token mapping by moving page tables instead
+   of allocating and copying both the old and new multi-megabyte arrays.  The
+   fallback retains the established realloc behavior on other platforms. */
+static BOOL resize_tokens(Compact_term_pool pool, size_t capacity)
+{
+  size_t bytes = capacity * sizeof(*pool->tokens);
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+  long page_size = sysconf(_SC_PAGESIZE);
+  size_t mapped_bytes;
+  void *p;
+  if (page_size <= 0)
+    fatal_error("compact_term_pool: cannot determine page size");
+  if (bytes > SIZE_MAX - (size_t) page_size + 1)
+    fatal_error("compact_term_pool: token mapping overflow");
+  mapped_bytes = bytes == 0 ? 0 :
+    ((bytes + (size_t) page_size - 1) / (size_t) page_size) *
+      (size_t) page_size;
+  if (mapped_bytes == pool->token_mapping_bytes) {
+    pool->token_capacity = capacity;
+    return FALSE;
+  }
+  if (!pool->tokens_mapped && pool->tokens != NULL)
+    fatal_error("compact_term_pool: mixed token allocation modes");
+  if (mapped_bytes == 0) {
+    if (pool->tokens != NULL &&
+        munmap(pool->tokens, pool->token_mapping_bytes) != 0)
+      fatal_error("compact_term_pool: cannot release token mapping");
+    pool->tokens = NULL;
+    pool->token_mapping_bytes = 0;
+    pool->token_capacity = 0;
+    pool->tokens_mapped = FALSE;
+    return FALSE;
+  }
+  if (pool->tokens == NULL)
+    p = mmap(NULL, mapped_bytes, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  else
+    p = mremap(pool->tokens, pool->token_mapping_bytes, mapped_bytes,
+               MREMAP_MAYMOVE);
+  if (p == MAP_FAILED)
+    fatal_error("compact_term_pool: cannot resize token mapping");
+  pool->tokens = p;
+  pool->token_mapping_bytes = mapped_bytes;
+  pool->token_capacity = capacity;
+  pool->tokens_mapped = TRUE;
+  return FALSE;
+#else
+  size_t old_capacity = pool->token_capacity;
+  pool->tokens = safe_realloc(pool->tokens, bytes);
+  pool->token_capacity = capacity;
+  return old_capacity != 0;
+#endif
+}
+
+static void release_tokens(Compact_term_pool pool)
+{
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+  if (pool->tokens_mapped) {
+    if (pool->tokens != NULL &&
+        munmap(pool->tokens, pool->token_mapping_bytes) != 0)
+      fatal_error("compact_term_pool: cannot release token mapping");
+  }
+  else
+    safe_free(pool->tokens);
+#else
+  safe_free(pool->tokens);
+#endif
+  pool->tokens = NULL;
+  pool->token_capacity = 0;
+  pool->token_mapping_bytes = 0;
+  pool->tokens_mapped = FALSE;
 }
 
 static uint64_t hash_id(uint64_t x)
@@ -245,12 +327,12 @@ static void ensure_tokens(Compact_term_pool pool, size_t extra)
     fatal_error("compact_term_pool: token offsets exceed 32 bits");
   while (needed > pool->token_capacity) {
     size_t old_capacity = pool->token_capacity;
-    pool->token_capacity = grow_token_capacity(pool->token_capacity);
-    pool->tokens = safe_realloc(
-      pool->tokens, pool->token_capacity * sizeof(*pool->tokens));
+    size_t next_capacity = grow_token_capacity(pool->token_capacity);
+    BOOL copied = resize_tokens(pool, next_capacity);
     pool->token_growths++;
-    pool->token_copy_bytes +=
-      old_capacity * sizeof(*pool->tokens);
+    if (copied)
+      pool->token_copy_bytes +=
+        old_capacity * sizeof(*pool->tokens);
   }
 }
 
@@ -557,9 +639,7 @@ void compact_term_pool_compact_retained(Compact_term_pool pool,
   }
   pool->token_count = token_count;
   token_capacity = compacted_token_capacity(token_count);
-  pool->tokens = safe_realloc(
-    pool->tokens, token_capacity * sizeof(*pool->tokens));
-  pool->token_capacity = token_capacity;
+  (void) resize_tokens(pool, token_capacity);
   pool->compactions++;
   if (old_bytes > pool_bytes(pool))
     pool->bytes_reclaimed += old_bytes - pool_bytes(pool);
@@ -734,7 +814,7 @@ void compact_term_pool_free(Compact_term_pool pool)
 {
   if (pool == NULL)
     return;
-  safe_free(pool->tokens);
+  release_tokens(pool);
   safe_free(pool->proof_ids);
   safe_free(pool->clause_offsets);
   safe_free(pool->clause_lengths);

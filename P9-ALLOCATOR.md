@@ -220,3 +220,12 @@ token intervals downward in the existing array, rebuilds the directory, and
 then rebases all three indexes; it no longer allocates a second complete term
 pool.  `Compact_term_pool` reports both the configured `reclaim_kb` and the
 actual compaction/reclaimed-byte counts.
+
+On Linux, shared term tokens live in a private anonymous mapping.  Capacity
+changes use `mremap(MREMAP_MAYMOVE)`, so growing a 10--20 MiB token array moves
+page tables rather than holding and copying old and new arrays simultaneously.
+Other platforms retain the portable `realloc` path.  `token_growths` still
+counts logical capacity changes; `token_copy_bytes=0` confirms the Linux
+zero-copy path.  After the 1,024-stale-clause noise floor, the configured
+stale-token byte budget is authoritative; a percentage-of-live-clauses guard
+no longer delays a requested reclaim past another token growth boundary.

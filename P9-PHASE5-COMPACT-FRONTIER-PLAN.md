@@ -730,6 +730,26 @@ indexes and their shared term pool, and only then reconstruct and print the
 proof DAG.  The frozen report must retain the pre-release index accounting,
 and all 7,051 proof clauses must remain exact.
 
+That terminal lifetime split is implemented.  Archived parent and negativity
+metadata identify the same first denial without constructing the proof DAG;
+the complete final statistics and selector report are frozen to a temporary
+stream; compact search indexes and the shared pool are released; and the
+proof is then materialized.  The deferred report is emitted in its original
+post-proof position, and `collect_prover_results` retains the frozen component
+counters.  The compact archive proof audit and all of its normalized proof
+comparisons pass.
+
+A distinct mid-search spike came from growing the shared token array with
+`realloc`.  Linux now stores it in an anonymous mapping and uses
+`mremap(MREMAP_MAYMOVE)` for zero-copy capacity changes; non-Linux builds keep
+the portable fallback.  The stale-payload byte budget is authoritative after
+a 1,024-clause noise floor, replacing the 25%-stale guard that delayed a
+configured reclaim past the next growth boundary.  A forced 32-KiB,
+300-given `chat_test.in` replay again emits the exact 132,567-line oracle,
+performs one compaction, takes 17.95 user seconds, and reports
+`token_copy_bytes=0`.  The terminal release plus the 2-MiB policy now require
+one final exact full-proof/RSS measurement.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:
