@@ -191,3 +191,19 @@ allocator separately reserves 21,502,272 bytes in direct slabs.  Thus libc
 fragmentation is measurable, but its free arena bytes are not automatically
 reclaimable or additive to an RSS saving; only 131,824 bytes are reported as
 the top releasable block at this boundary.
+
+For long compact-frontier runs on glibc, set `P9_COMPACT_HEAP=1` in the
+process environment.  Prover9 applies `mallopt(M_TRIM_THRESHOLD, 0)` before
+building its saved command line or reading the problem.  This both lowers the
+trim threshold and prevents glibc's dynamic mmap threshold from rising, so
+large transient arrays remain independently returnable instead of leaving
+holes in the main arena.  Unsupported libcs safely leave the policy disabled;
+`Libc_heap_bytes` reports `compact_policy=enabled|disabled` for audit.
+
+At 1,000 givens the P9 control and the raw
+`GLIBC_TUNABLES=glibc.malloc.trim_threshold=0` control produce identical
+search state and essentially identical arena/mmap/RSS values.  The raw-tunable
+full proof is exact at 2,945 givens and takes 788.08 user seconds, 886.05 wall
+seconds, and 152,616 KiB peak RSS.  This is 18,352 KiB below the preceding
+170,968-KiB proof with no CPU regression.  A full run through the P9-specific
+environment switch remains the final product-validation boundary.

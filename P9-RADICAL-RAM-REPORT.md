@@ -354,7 +354,42 @@ pending rule work.  The Osborn gate showed that the provisional value 4096
 allowed the 250-given prefix to finish with 715 of 750 descriptors pending;
 256/192 completed 525 descriptors and materially restored the hint stream.
 
-### 4.3 Tighter-memory and legacy-order experiments
+### 4.3 Compact-OTTER proof/replay mode and heap policy
+
+For an old-OTTER-trajectory comparison with the Phase-5 compact indexes, use
+the file-backed ancestor archive and start Prover9 with the compact glibc heap
+policy:
+
+```sh
+P9_COMPACT_HEAP=1 bin/prover9 < osborn-compact.in > osborn-compact.out
+```
+
+The corresponding input controls are:
+
+```text
+assign(search_loop,otter).
+assign(passive_store,dense).
+assign(hint_index,packed_fast).
+assign(inference_frontier,clauses).
+assign(ancestor_store,file).
+assign(compact_passive_cache,0).
+set(compact_otter_demodulation).
+set(compact_otter_unit_index).
+set(compact_otter_back_demod_index).
+set(compact_otter_nonunit_index).
+assign(sos_limit,-1).
+```
+
+`P9_COMPACT_HEAP=1` is a process-start environment control, not an input-file
+assignment.  On glibc it requests a zero trim threshold before problem
+allocation and keeps large transient arrays independently returnable.  On an
+unsupported libc it is a safe no-op.  With `assign(stats,all)`, verify the
+line `Libc_heap_bytes: ... compact_policy=enabled`; a disabled value means the
+platform did not honor the policy.  The equivalent low-level glibc spelling
+is `GLIBC_TUNABLES=glibc.malloc.trim_threshold=0`, but the P9 switch is the
+portable invocation for scripts.
+
+### 4.4 Tighter-memory and legacy-order experiments
 
 To make the balanced hard count agree with its default 64-entry ranked
 window:
@@ -385,7 +420,7 @@ candidates become active first.  Native balanced iterators do not replay raw
 prefixes, but legacy promising modes can.  Compare 4,096, 1,024, 256, and 64
 on a representative solved suite before changing an established deployment.
 
-### 4.4 Statistics to watch
+### 4.5 Statistics to watch
 
 With `assign(stats,all)`, the important lines are:
 
@@ -410,7 +445,7 @@ The cache peak includes initial/preprocessing SOS occupancy.  If the initial
 set is larger than the configured cache, selection first drains it; this does
 not mean a collective turn overfilled the cache.
 
-### 4.5 Checkpoints and proof verification
+### 4.6 Checkpoints and proof verification
 
 Enable integrity hashes with:
 
@@ -448,7 +483,7 @@ bin/prooftrans expand < run.out > expanded-proof.out
 bin/directproof < run.out > direct-proof.out
 ```
 
-### 4.6 Bounded comparison harness
+### 4.7 Bounded comparison harness
 
 The control harness arguments are input, output directory, maximum givens,
 maximum CPU seconds, and maximum MiB.  `OSBORN_CASES` prevents accidental

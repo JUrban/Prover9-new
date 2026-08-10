@@ -598,6 +598,7 @@ struct prover_stats {
     allocator_reclaimed_bytes,
     process_smaps_supported,
     process_libc_heap_supported,
+    process_compact_heap_enabled,
     process_pss_kbytes,
     process_anonymous_kbytes,
     process_shared_clean_kbytes,

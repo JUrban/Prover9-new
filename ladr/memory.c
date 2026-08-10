@@ -71,6 +71,7 @@ static unsigned long long Bytes_palloced = 0;  /* 64-bit to handle >4GB */
 
 static unsigned Mem_calls = 0;
 static unsigned Mem_calls_overflows = 0;
+static BOOL Compact_system_heap_enabled = FALSE;
 
 #define BUMP_MEM_CALLS {Mem_calls++; if (Mem_calls==0) Mem_calls_overflows++;}
 
@@ -537,6 +538,25 @@ void memory_get_process_stats(struct memory_process_stats *stats)
 #endif
 #endif
 }  /* memory_get_process_stats */
+
+/* PUBLIC */
+BOOL memory_configure_compact_system_heap(void)
+{
+#if defined(__GLIBC__) && !defined(__EMSCRIPTEN__)
+  if (mallopt(M_TRIM_THRESHOLD, 0) == 0)
+    return FALSE;
+  Compact_system_heap_enabled = TRUE;
+  return TRUE;
+#else
+  return FALSE;
+#endif
+}  /* memory_configure_compact_system_heap */
+
+/* PUBLIC */
+BOOL memory_compact_system_heap_enabled(void)
+{
+  return Compact_system_heap_enabled;
+}  /* memory_compact_system_heap_enabled */
 
 /* PUBLIC */
 void memory_release_unused(void)

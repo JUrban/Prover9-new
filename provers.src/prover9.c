@@ -1597,6 +1597,15 @@ int main(int argc, char **argv)
   int slice_sec = -1;       /* -slice N: per-child time slice override */
 #endif
 
+  {
+    const char *compact_heap = getenv("P9_COMPACT_HEAP");
+    if (compact_heap != NULL &&
+        (strcmp(compact_heap, "1") == 0 ||
+         strcmp(compact_heap, "true") == 0 ||
+         strcmp(compact_heap, "yes") == 0))
+      (void) memory_configure_compact_system_heap();
+  }
+
   /* Save original command line before any argv mutation. */
   saved_command = build_command_string(argc, argv);
 

@@ -637,6 +637,22 @@ showing that extra miss/materialization churn turns the nominal 4.52-MiB
 table saving into persistent heap fragmentation.  The cache is restored to
 32,768 entries; this is a measured rejection, not an accepted Phase-5 gain.
 
+Keeping that cache and setting glibc's trim threshold to zero produces the
+opposite full-run result.  The exact 2,945-given/7,051-clause proof takes
+788.08 user and 886.05 wall seconds and peaks at 152,616 KiB, down 18,352 KiB
+from 170,968 with no CPU penalty.  Its sampled compaction peak is 141,072 KiB
+and final internal RSS is 132,096 KiB.  The glibc arena stays near 24.9 MB
+while large arrays remain in independently returnable malloc-mmap regions,
+rather than growing past 100 MB with tens of megabytes stranded free.
+
+`P9_COMPACT_HEAP=1` now requests the same policy through `mallopt` at the
+start of `prover9` and reports `compact_policy=enabled` when honored.  At the
+exact 1,000-given CHAT boundary, the P9 switch, raw glibc tunable, and both
+together have identical search states and essentially identical memory
+breakdowns.  The full P9-switch proof remains to be run before replacing the
+raw-tunable result as the product acceptance boundary.  Even the measured
+152,616-KiB result remains 24,616 KiB above the 125-MiB gate.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:

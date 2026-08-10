@@ -94,6 +94,12 @@ void memory_get_stats(struct memory_stats *stats);
 
 void memory_get_process_stats(struct memory_process_stats *stats);
 
+/* Request a low-retention libc heap policy before workload allocation.
+   Returns FALSE on unsupported platforms or if libc rejects the request. */
+BOOL memory_configure_compact_system_heap(void);
+
+BOOL memory_compact_system_heap_enabled(void);
+
 void memory_release_unused(void);
 
 unsigned long long memory_slab_bytes(void);

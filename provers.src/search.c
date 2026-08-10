@@ -2691,6 +2691,7 @@ void update_memory_stats(void)
   Stats.allocator_reclaimed_bytes = ms.reclaimed_bytes;
   Stats.process_smaps_supported = process.smaps_supported;
   Stats.process_libc_heap_supported = process.libc_heap_supported;
+  Stats.process_compact_heap_enabled = memory_compact_system_heap_enabled();
   Stats.process_pss_kbytes = process.pss_kbytes;
   Stats.process_anonymous_kbytes = process.anonymous_kbytes;
   Stats.process_shared_clean_kbytes = process.shared_clean_kbytes;
@@ -3428,10 +3429,11 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
   if (s.process_libc_heap_supported)
     fprintf(fp,
             "Libc_heap_bytes: arena=%s, mmap=%s, in_use=%s, free=%s, "
-            "releasable=%s.\n",
+            "releasable=%s, compact_policy=%s.\n",
             comma_num(s.libc_arena_bytes), comma_num(s.libc_mmap_bytes),
             comma_num(s.libc_in_use_bytes), comma_num(s.libc_free_bytes),
-            comma_num(s.libc_releasable_bytes));
+            comma_num(s.libc_releasable_bytes),
+            s.process_compact_heap_enabled ? "enabled" : "disabled");
 
   fprintf(fp,"User_CPU=%.2f, System_CPU=%.2f, Wall_clock=%u.\n",
 	  user_seconds(), system_seconds(), wallclock());
