@@ -110,13 +110,16 @@ void fprint_compact_nonunit_index(FILE *fp)
           "peak=%llu, retired=%llu, physical=%llu, forward_queries=%llu, "
           "forward_candidates=%llu, forward_exact_tests=%llu, "
           "back_queries=%llu, back_candidates=%llu, back_exact_tests=%llu, "
-          "bytes=%llu, peak_bytes=%llu.\n",
+          "nodes=%llu, postings=%llu, records=%llu, hash=%llu, "
+          "scratch=%llu, bytes=%llu, peak_bytes=%llu.\n",
           Compact_nonunit_authoritative ? "authoritative" : "audit",
           Compact_nonunit_audit_failures, stats.active, stats.peak,
           stats.retired, stats.physical, stats.forward_queries,
           stats.forward_candidates, Compact_nonunit_forward_exact_tests,
           stats.back_queries, stats.back_candidates,
-          Compact_nonunit_back_exact_tests, stats.total_bytes,
+          Compact_nonunit_back_exact_tests, stats.node_bytes,
+          stats.posting_bytes, stats.record_bytes, stats.hash_bytes,
+          stats.scratch_bytes, stats.total_bytes,
           stats.peak_bytes);
 }
 
@@ -150,13 +153,16 @@ void fprint_compact_unit_index(FILE *fp)
           "Compact_unit_index: mode=%s, failures=%llu, active=%llu, "
           "peak=%llu, retired=%llu, physical=%llu, forward_queries=%llu, "
           "back_queries=%llu, back_exact_tests=%llu, conflict_queries=%llu, "
-          "conflict_exact_tests=%llu, bytes=%llu, "
+          "conflict_exact_tests=%llu, nodes=%llu, postings=%llu, "
+          "records=%llu, tokens=%llu, hash=%llu, scratch=%llu, bytes=%llu, "
           "peak_bytes=%llu.\n",
           Compact_unit_authoritative ? "authoritative" : "audit",
           Compact_unit_audit_failures, stats.active, stats.peak,
           stats.retired, stats.physical, stats.generalization_queries,
           stats.instance_queries, stats.instance_exact_tests,
-          stats.unifier_queries, stats.unifier_exact_tests,
+          stats.unifier_queries, stats.unifier_exact_tests, stats.node_bytes,
+          stats.posting_bytes, stats.record_bytes, stats.token_bytes,
+          stats.hash_bytes, stats.scratch_bytes,
           stats.total_bytes, stats.peak_bytes);
 }
 

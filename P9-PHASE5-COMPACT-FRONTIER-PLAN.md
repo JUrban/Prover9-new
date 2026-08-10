@@ -16,16 +16,103 @@ The new mode is isolated behind the proposed configuration:
 assign(search_loop,otter).
 assign(passive_store,dense).
 assign(hint_index,packed_fast).
-assign(inference_frontier,compact_otter).
+assign(inference_frontier,clauses).
 assign(ancestor_store,mmap).
 assign(sos_limit,-1).
 set(back_demod_hints).
+set(compact_otter_demodulation).
+set(compact_otter_unit_index).
+set(compact_otter_back_demod_index).
+set(compact_otter_nonunit_index).
+assign(compact_passive_cache,4).
 ```
 
-`search_loop=otter` without `inference_frontier=compact_otter` remains the
-unchanged compatibility reference.  The option must fail at startup for an
-operation that has no exact compact implementation; it must never silently
-fall back to DISCOUNT timing.
+`search_loop=otter` without all four authoritative compact flags remains the
+unchanged compatibility reference.  OTTER `passive_store=dense` fails at
+startup unless every pointer-free index is authoritative; it never silently
+falls back to DISCOUNT timing or a resident passive index.
+
+## Implementation and measured status (2026-08-10)
+
+Stages 1--4 are implemented on `phase5-compact-frontier`.  Compact rewrite,
+unit, back-demodulation, and nonunit indexes first passed differential audit
+at 10, 100, and 300 givens and are now authoritative.  A retained OTTER
+clause completes the ordinary eager backward transaction before its body is
+archived.  The dense selector and every index retain stable IDs and compact
+metadata only.  Exact probes decode an immutable body on demand; selection
+activates that same archived proof record.
+
+The ancestor archive is the sole owner of a cold passive body and its proof
+data.  This avoids duplicating bodies between a passive arena and proof
+archive.  A 4-way hot materialization cache is bounded by
+`compact_passive_cache` MiB (default 4, zero disables it).  It is an
+optimization only: entries are pinned during exact probes and invalidated
+before selection or backward retirement.
+
+The bounded gates use the same clauses, hints, and selector rules in both
+columns:
+
+| Boundary | Representation | User | Wall | Peak RSS | Live P9 allocation |
+|---|---:|---:|---:|---:|---:|
+| 300 | compact indexes, full bodies | 19.55 s | 22.53 s | 90,612 KiB | 20.76 MB |
+| 300 | archive, cache disabled | 23.22 s | 26.92 s | 90,484 KiB | 16.43 MB |
+| 300 | archive, 4 MiB cache | 19.32--20.34 s | 22.04--23.01 s | 90,636 KiB | 16.89 MB |
+| 1,000 | compact indexes, full bodies | 118.56 s | 133.05 s | 123,236 KiB | 45.73 MB |
+| 1,000 | archive, 4 MiB cache | 140.45 s | 156.25 s | 113,264 KiB | 19.17 MB |
+
+All compared runs have identical given, generated, kept, usable, SOS,
+demodulator, disabled, hint, and active-hint counts.  At 1,000 givens both
+runs end at `Generated=1,268,285`, `Kept=33,909`, and `Sos=26,052`.  The
+archive run is 1.185 times the compact/full-body CPU, within the 1.25 gate,
+and is below the 125 MiB prefix RSS gate.  Its cache served 60,667 hits from
+8,893 misses, peaked at about 2.03 MiB charged, and the archive reported zero
+validation failures.
+
+The 300-given component accounting explains why body eviction alone is not
+the final radical reduction:
+
+| Structure | Total | Dominant component |
+|---|---:|---:|
+| compact unit index | 3.57 MB | 2.62 MB trie nodes (73%) |
+| compact back-demod index | 1.74 MB | 0.79 MB postings + 0.52 MB tokens |
+| compact nonunit index | 0.56 MB | 0.52 MB trie nodes (93%) |
+
+At 1,000 givens the rewrite, unit, and back-demod structures total about
+43.4 MB, while the complete shared clause archive is only 8 MB.  These
+indexes grow with the passive population, so extrapolating the current
+representation to the historical 131,001-clause proof boundary would miss
+the final 125 MiB target even though passive bodies are cold.
+
+### Next radical index reduction
+
+The next implementation slice is structural, not another cache-size tweak:
+
+1. Add one hash-consed compact term pool shared by rewrite rules, unit
+   matching, and passive redex occurrences.  Each normalized subterm is
+   stored once; the three indexes retain 32-bit term IDs instead of private
+   flattened token copies.
+2. Replace token-per-node unit and rewrite discrimination paths with radix
+   edges over shared term IDs.  Unary paths become one edge; child order and
+   terminal posting order remain the audited legacy order.
+3. Radix-compress the fixed-length nonunit feature trie.  Its current node
+   array is 93% of the index, so collapsing unary feature runs should remove
+   most of this cost without adding exact probes.
+4. Group back-demod occurrences by `(symbol, clause ID)` and delta-pack the
+   matching subterm IDs/offsets.  Keep the existing structural exact filter,
+   but eliminate the current 12-byte posting per raw symbol occurrence.
+5. Share a packed stable-ID directory across the indexes and compact inactive
+   records at deterministic thresholds.  Rebuilds preserve result ordering
+   and are checked against the 10/100/300 event oracle.
+6. Reclaim immutable archive pages behind the bounded cache (or add a true
+   file-I/O clause-store backend).  The old 13 GB deleted mmap retaining
+   roughly 10 GB RSS demonstrates that logical archive bytes cannot be
+   assumed nonresident.
+
+The gate for this slice is at least a 70% reduction of combined rewrite,
+unit, nonunit, and redex-index bytes at 1,000 givens, with the exact 300 trace
+unchanged and 1,000-given CPU no worse than the current archive run.  That is
+large enough to matter at the proof boundary; 5--10% container tuning is not
+accepted as completion.
 
 ## Why selected DISCOUNT did not solve Osborn
 
