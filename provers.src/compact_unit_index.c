@@ -63,6 +63,8 @@ struct compact_unit_index {
   unsigned long long active;
   unsigned long long peak;
   unsigned long long retired;
+  unsigned long long compactions;
+  unsigned long long bytes_reclaimed;
   unsigned long long generalization_queries;
   unsigned long long instance_queries;
   unsigned long long instance_exact_tests;
@@ -488,6 +490,106 @@ BOOL compact_unit_index_contains(Compact_unit_index index,
                                  unsigned long long proof_id)
 {
   return lookup_record(index, proof_id) != CUI_NONE;
+}
+
+static void copy_live_record(Compact_unit_index destination,
+                             const struct cui_record *old)
+{
+  struct cui_record *record;
+  uint32_t at_record;
+  size_t at_hash;
+  ENSURE_ARRAY(destination, records, record_count, record_capacity,
+               "compact_unit_index: compacted record overflow");
+  if (destination->record_count > UINT32_MAX)
+    fatal_error("compact_unit_index: compacted record offsets exceed 32 bits");
+  at_record = (uint32_t) destination->record_count++;
+  record = &destination->records[at_record];
+  *record = *old;
+  record->next_root = CUI_NONE;
+  {
+    unsigned root = (unsigned)
+      destination->tokens[record->token_offset];
+    ensure_unifier_symbol(destination, root);
+    record->next_root =
+      destination->unifier_heads[record->sign ? 1 : 0][root];
+    destination->unifier_heads[record->sign ? 1 : 0][root] = at_record;
+  }
+  index_record(destination, at_record);
+  ensure_hash(destination);
+  at_hash = hash_slot(destination, record->proof_id, TRUE);
+  destination->hash_keys[at_hash] = record->proof_id;
+  destination->hash_values[at_hash] = at_record;
+  destination->hash_count++;
+  destination->active++;
+  update_peak(destination);
+}
+
+BOOL compact_unit_index_compaction_needed(Compact_unit_index index)
+{
+  unsigned long long physical, stale, threshold;
+  if (index == NULL || index->record_count <= 1)
+    return FALSE;
+  physical = index->record_count - 1;
+  stale = physical - index->active;
+  threshold = index->active / 4;
+  if (threshold < 1024)
+    threshold = 1024;
+  return stale >= threshold;
+}
+
+void compact_unit_index_compact(Compact_unit_index index)
+{
+  Compact_unit_index replacement;
+  struct compact_unit_index old;
+  unsigned long long old_bytes, old_peak, old_peak_active;
+  unsigned long long retired, compactions, reclaimed;
+  unsigned long long generalization_queries, instance_queries;
+  unsigned long long instance_exact_tests, unifier_queries;
+  unsigned long long unifier_exact_tests;
+  size_t i;
+  if (!compact_unit_index_compaction_needed(index))
+    return;
+  old_bytes = index_bytes(index);
+  old_peak = index->peak_bytes;
+  old_peak_active = index->peak;
+  retired = index->retired;
+  compactions = index->compactions;
+  reclaimed = index->bytes_reclaimed;
+  generalization_queries = index->generalization_queries;
+  instance_queries = index->instance_queries;
+  instance_exact_tests = index->instance_exact_tests;
+  unifier_queries = index->unifier_queries;
+  unifier_exact_tests = index->unifier_exact_tests;
+  replacement = compact_unit_index_init_with_pool(index->term_pool);
+  replacement->tokens = compact_term_pool_tokens(index->term_pool);
+  for (i = 1; i < index->record_count; i++)
+    if (index->records[i].active)
+      copy_live_record(replacement, &index->records[i]);
+  old = *index;
+  *index = *replacement;
+  safe_free(replacement);
+  safe_free(old.nodes);
+  safe_free(old.postings);
+  safe_free(old.records);
+  safe_free(old.unifier_heads[0]);
+  safe_free(old.unifier_heads[1]);
+  safe_free(old.hash_keys);
+  safe_free(old.hash_values);
+  safe_free(old.query);
+  safe_free(old.result_ids);
+  index->retired = retired;
+  index->compactions = compactions + 1;
+  index->bytes_reclaimed = reclaimed +
+    (old_bytes > index_bytes(index) ? old_bytes - index_bytes(index) : 0);
+  index->generalization_queries = generalization_queries;
+  index->instance_queries = instance_queries;
+  index->instance_exact_tests = instance_exact_tests;
+  index->unifier_queries = unifier_queries;
+  index->unifier_exact_tests = unifier_exact_tests;
+  if (old_peak > index->peak_bytes)
+    index->peak_bytes = old_peak;
+  if (old_peak_active > index->peak)
+    index->peak = old_peak_active;
 }
 
 static void flatten_query(Compact_unit_index index, Term term,
@@ -982,6 +1084,8 @@ void compact_unit_index_get_stats(Compact_unit_index index,
   stats->peak = index->peak;
   stats->retired = index->retired;
   stats->physical = index->record_count - 1;
+  stats->compactions = index->compactions;
+  stats->bytes_reclaimed = index->bytes_reclaimed;
   stats->generalization_queries = index->generalization_queries;
   stats->instance_queries = index->instance_queries;
   stats->instance_exact_tests = index->instance_exact_tests;

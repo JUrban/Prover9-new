@@ -11,6 +11,8 @@ struct compact_back_demod_stats {
   unsigned long long peak;
   unsigned long long retired;
   unsigned long long physical;
+  unsigned long long compactions;
+  unsigned long long bytes_reclaimed;
   unsigned long long queries;
   unsigned long long candidates;
   unsigned long long exact_tests;
@@ -44,6 +46,10 @@ BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause);
 
 BOOL compact_back_demod_remove(Compact_back_demod_index index,
                                unsigned long long proof_id);
+
+BOOL compact_back_demod_compaction_needed(Compact_back_demod_index index);
+
+void compact_back_demod_compact(Compact_back_demod_index index);
 
 /* Return a conservative set of live clause IDs that can contain a redex for
    DEMOD/TYPE.  The owned result is sorted by decreasing proof ID.  Callers

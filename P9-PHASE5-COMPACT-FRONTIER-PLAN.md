@@ -446,6 +446,17 @@ bytes, preserves the exact state, takes 71.61 user seconds, and peaks at
 91,028 KiB RSS.  The lower CPU versus 78.33 seconds reflects removal of the
 periodic full archive scan; the full proof is needed to measure RSS eviction.
 
+Unit and back-demod indexes now rebuild in stable record order whenever stale
+physical records reach 25% of the active population (with a 1,024-record
+floor).  Unit radix/posting/root state is regenerated from live records while
+retaining the shared token offsets.  Back-demod rebuild copies only live
+delta-coded occurrence slices into new sparse path buckets, without clause
+materialization.  At 300 givens each index compacts once: unit bytes fall from
+a 633,832-byte peak to 428,904, and back-demod falls from 610,456 to 561,304.
+All 126,530 CHAT oracle lines remain byte-identical, and focused plus
+compact-vs-legacy audit tests pass.  Shared pool tokens are deliberately not
+reclaimed by this commit; offset rebasing is the next isolated layer.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:

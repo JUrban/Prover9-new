@@ -152,6 +152,12 @@ from reports.  The store has 7,973,611 record bytes at this boundary, below
 the 16-MiB first cold-page eviction threshold.  A separate 200,000-record
 mmap test exercises that path and confirms an 8-MiB synchronized eviction.
 
+Deterministic 25%-stale unit and back-index rebuilds also pass the 300-given
+full-hint oracle and compact-vs-legacy audit.  Both trigger once by this
+boundary and reduce current unit/back bytes to 428,904/561,304 without
+materializing archived clauses.  Shared term-pool compaction is tested
+separately so any offset-rebasing defect cannot hide inside this result.
+
 ## Exact old and compatibility proof baseline
 
 | Mode | Result | Given | Generated | Kept | User CPU | Wall | Peak RSS |

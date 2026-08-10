@@ -80,6 +80,8 @@ struct compact_back_demod_index {
   unsigned long long active;
   unsigned long long peak;
   unsigned long long retired;
+  unsigned long long compactions;
+  unsigned long long bytes_reclaimed;
   unsigned long long queries;
   unsigned long long candidates;
   unsigned long long exact_tests;
@@ -1001,6 +1003,157 @@ void compact_back_demod_note_exact_tests(Compact_back_demod_index index,
     index->exact_tests += count;
 }
 
+BOOL compact_back_demod_compaction_needed(Compact_back_demod_index index)
+{
+  unsigned long long physical, stale, threshold;
+  if (index == NULL || index->record_count <= 1)
+    return FALSE;
+  physical = index->record_count - 1;
+  stale = physical - index->active;
+  threshold = index->active / 4;
+  if (threshold < 1024)
+    threshold = 1024;
+  return stale >= threshold;
+}
+
+static unsigned long long occurrence_items(
+  Compact_back_demod_index index, uint32_t offset, uint32_t length)
+{
+  uint32_t position = offset;
+  uint32_t end = offset + length;
+  unsigned long long count = 0;
+  while (position < end) {
+    (void) decode_occurrence_delta(index, &position, end);
+    count++;
+  }
+  return count;
+}
+
+void compact_back_demod_compact(Compact_back_demod_index index)
+{
+  Compact_back_demod_index replacement;
+  struct compact_back_demod_index old;
+  uint32_t *record_map;
+  unsigned long long old_bytes, old_peak, old_peak_active;
+  unsigned long long retired, compactions, reclaimed;
+  unsigned long long queries, candidates, exact_tests;
+  unsigned long long groups_examined, occurrences_examined;
+  unsigned long long path_checks, path_rejects;
+  size_t i;
+  if (!compact_back_demod_compaction_needed(index))
+    return;
+  old_bytes = index_bytes(index);
+  old_peak = index->peak_bytes;
+  old_peak_active = index->peak;
+  retired = index->retired;
+  compactions = index->compactions;
+  reclaimed = index->bytes_reclaimed;
+  queries = index->queries;
+  candidates = index->candidates;
+  exact_tests = index->exact_tests;
+  groups_examined = index->posting_groups_examined;
+  occurrences_examined = index->occurrences_examined;
+  path_checks = index->path_filter_checks;
+  path_rejects = index->path_filter_rejects;
+  replacement = compact_back_demod_init_with_pool(index->term_pool);
+  replacement->tokens = compact_term_pool_tokens(index->term_pool);
+  replacement->token_limit = compact_term_pool_token_count(index->term_pool);
+  record_map = safe_calloc(index->record_count, sizeof(*record_map));
+  for (i = 1; i < index->record_count; i++)
+    if (index->records[i].active) {
+      uint32_t added;
+      struct cbd_record *record;
+      size_t at_hash;
+      ensure_records(replacement);
+      if (replacement->record_count > UINT32_MAX)
+        fatal_error("compact_back_demod: compacted record overflow");
+      added = (uint32_t) replacement->record_count++;
+      record = &replacement->records[added];
+      *record = index->records[i];
+      record->query_stamp = 0;
+      record_map[i] = added;
+      ensure_hash(replacement);
+      at_hash = hash_slot(replacement, record->proof_id, TRUE);
+      replacement->hash_keys[at_hash] = record->proof_id;
+      replacement->hash_values[at_hash] = added;
+      replacement->hash_count++;
+      replacement->active++;
+    }
+  for (i = 1; i < index->path_bucket_count; i++) {
+    struct cbd_path_bucket *bucket = &index->path_buckets[i];
+    uint32_t block;
+    uint32_t record_index = 0;
+    uint32_t occurrence_offset = 0;
+    for (block = bucket->posting_head; block != CBD_NONE;
+         block = index->posting_blocks[block].next) {
+      const struct cbd_posting_block *current =
+        &index->posting_blocks[block];
+      uint16_t position = 0;
+      uint16_t entries = 0;
+      while (position < current->used) {
+        uint32_t delta = decode_posting_value(current, &position);
+        uint32_t occurrence_delta =
+          decode_posting_value(current, &position);
+        uint32_t occurrence_length =
+          decode_posting_value(current, &position);
+        if (delta > UINT32_MAX - record_index ||
+            occurrence_delta > UINT32_MAX - occurrence_offset)
+          fatal_error("compact_back_demod: compacted posting overflow");
+        record_index += delta;
+        occurrence_offset += occurrence_delta;
+        if (record_index == CBD_NONE || record_index >= index->record_count ||
+            occurrence_offset > index->occurrence_count ||
+            occurrence_length > index->occurrence_count - occurrence_offset)
+          fatal_error("compact_back_demod: corrupt compacted posting");
+        if (record_map[record_index] != CBD_NONE) {
+          uint32_t new_offset = (uint32_t) replacement->occurrence_count;
+          ensure_occurrence_bytes(replacement, occurrence_length);
+          memcpy(replacement->occurrences + replacement->occurrence_count,
+                 index->occurrences + occurrence_offset, occurrence_length);
+          replacement->occurrence_count += occurrence_length;
+          replacement->symbol_occurrences += occurrence_items(
+            index, occurrence_offset, occurrence_length);
+          append_symbol_record(replacement, record_map[record_index],
+                               bucket->symbol, bucket->mask, new_offset,
+                               occurrence_length);
+        }
+        entries++;
+      }
+      if (position != current->used || entries != current->count)
+        fatal_error("compact_back_demod: corrupt compacted posting block");
+    }
+  }
+  safe_free(record_map);
+  update_peak(replacement);
+  old = *index;
+  *index = *replacement;
+  safe_free(replacement);
+  safe_free(old.posting_blocks);
+  safe_free(old.symbol_buckets);
+  safe_free(old.path_buckets);
+  safe_free(old.path_bucket_hash);
+  safe_free(old.occurrences);
+  safe_free(old.records);
+  safe_free(old.hash_keys);
+  safe_free(old.hash_values);
+  safe_free(old.results);
+  index->retired = retired;
+  index->compactions = compactions + 1;
+  index->bytes_reclaimed = reclaimed +
+    (old_bytes > index_bytes(index) ? old_bytes - index_bytes(index) : 0);
+  index->queries = queries;
+  index->candidates = candidates;
+  index->exact_tests = exact_tests;
+  index->posting_groups_examined = groups_examined;
+  index->occurrences_examined = occurrences_examined;
+  index->path_filter_checks = path_checks;
+  index->path_filter_rejects = path_rejects;
+  if (old_peak > index->peak_bytes)
+    index->peak_bytes = old_peak;
+  if (old_peak_active > index->peak)
+    index->peak = old_peak_active;
+}
+
 void compact_back_demod_get_stats(Compact_back_demod_index index,
                                   struct compact_back_demod_stats *stats)
 {
@@ -1013,6 +1166,8 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->peak = index->peak;
   stats->retired = index->retired;
   stats->physical = index->record_count - 1;
+  stats->compactions = index->compactions;
+  stats->bytes_reclaimed = index->bytes_reclaimed;
   stats->queries = index->queries;
   stats->candidates = index->candidates;
   stats->exact_tests = index->exact_tests;

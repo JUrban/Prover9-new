@@ -143,6 +143,9 @@ void index_back_demod(Topform c, Indexop operation, Clock clock, BOOL enabled)
         fatal_error(operation == INSERT ?
           "index_back_demod: duplicate compact clause" :
           "index_back_demod: missing compact clause");
+      if (operation == DELETE &&
+          compact_back_demod_compaction_needed(Compact_back_demod_idx))
+        compact_back_demod_compact(Compact_back_demod_idx);
     }
     if (!Compact_back_demod_authoritative)
       index_clause_back_demod(c, Back_demod_idx, operation);
@@ -492,7 +495,8 @@ void fprint_compact_back_demod(FILE *fp)
   compact_back_demod_get_stats(Compact_back_demod_idx, &stats);
   fprintf(fp,
           "Compact_back_demod: mode=%s, failures=%llu, active=%llu, "
-          "peak=%llu, retired=%llu, physical=%llu, queries=%llu, "
+          "peak=%llu, retired=%llu, physical=%llu, compactions=%llu, "
+          "reclaimed=%llu, queries=%llu, "
           "candidates=%llu, exact_tests=%llu, posting_groups=%llu, "
           "path_buckets=%llu, "
           "symbol_occurrences=%llu, groups_examined=%llu, "
@@ -503,7 +507,8 @@ void fprint_compact_back_demod(FILE *fp)
           "tokens=%llu, hash=%llu, scratch=%llu, bytes=%llu, peak_bytes=%llu.\n",
           Compact_back_demod_authoritative ? "authoritative" : "audit",
           Compact_back_demod_failures, stats.active, stats.peak,
-          stats.retired, stats.physical, stats.queries, stats.candidates,
+          stats.retired, stats.physical, stats.compactions,
+          stats.bytes_reclaimed, stats.queries, stats.candidates,
           stats.exact_tests, stats.posting_groups, stats.path_buckets,
           stats.symbol_occurrences,
           stats.posting_groups_examined, stats.occurrences_examined,

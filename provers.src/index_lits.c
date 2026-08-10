@@ -159,7 +159,8 @@ void fprint_compact_unit_index(FILE *fp)
   compact_unit_index_get_stats(Compact_units, &stats);
   fprintf(fp,
           "Compact_unit_index: mode=%s, failures=%llu, active=%llu, "
-          "peak=%llu, retired=%llu, physical=%llu, forward_queries=%llu, "
+          "peak=%llu, retired=%llu, physical=%llu, compactions=%llu, "
+          "reclaimed=%llu, forward_queries=%llu, "
           "back_queries=%llu, back_exact_tests=%llu, conflict_queries=%llu, "
           "conflict_exact_tests=%llu, node_items=%llu, posting_items=%llu, "
           "nodes=%llu, postings=%llu, "
@@ -167,7 +168,8 @@ void fprint_compact_unit_index(FILE *fp)
           "peak_bytes=%llu.\n",
           Compact_unit_authoritative ? "authoritative" : "audit",
           Compact_unit_audit_failures, stats.active, stats.peak,
-          stats.retired, stats.physical, stats.generalization_queries,
+          stats.retired, stats.physical, stats.compactions,
+          stats.bytes_reclaimed, stats.generalization_queries,
           stats.instance_queries, stats.instance_exact_tests,
           stats.unifier_queries, stats.unifier_exact_tests,
           stats.node_items, stats.posting_items, stats.node_bytes,
@@ -476,6 +478,8 @@ void index_literals(Topform c, Indexop op, Clock clock, BOOL no_fapl)
       fatal_error(op == INSERT ?
         "index_literals: duplicate compact unit" :
         "index_literals: missing compact unit");
+    if (op == DELETE && compact_unit_index_compaction_needed(Compact_units))
+      compact_unit_index_compact(Compact_units);
   }
   if ((unit ? !Compact_unit_authoritative : !Compact_nonunit_authoritative) &&
       (!no_fapl || !positive_clause(c->literals)))

@@ -11,6 +11,8 @@ struct compact_unit_index_stats {
   unsigned long long peak;
   unsigned long long retired;
   unsigned long long physical;
+  unsigned long long compactions;
+  unsigned long long bytes_reclaimed;
   unsigned long long generalization_queries;
   unsigned long long instance_queries;
   unsigned long long instance_exact_tests;
@@ -40,6 +42,10 @@ BOOL compact_unit_index_remove(Compact_unit_index index,
 
 BOOL compact_unit_index_contains(Compact_unit_index index,
                                  unsigned long long proof_id);
+
+BOOL compact_unit_index_compaction_needed(Compact_unit_index index);
+
+void compact_unit_index_compact(Compact_unit_index index);
 
 /* Return the first live unit, in legacy discrimination-tree order, whose
    literal has SIGN and whose atom matches TARGET.  EXCLUDE_ID may be zero. */
