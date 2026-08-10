@@ -621,6 +621,14 @@ arena bytes; the slab allocator separately reserves 21,502,272 bytes.  Only
 300-given full trace and 1,000-given terminal state remain exact, and the
 memory lifecycle, allocator churn, and bookkeeping tests pass.
 
+The packed-fast cache working set is also much smaller than its original
+32,768-entry allocation.  An 8,192-entry cache removes 4,521,984 persistent
+bytes while changing the 1,000-given hit rate only from 35.88% to 35.57%.
+The 300-given full trace and 1,000-given terminal state are exact; isolated
+1,000-given current RSS falls from 73,496 to 69,140 KiB and user CPU changes
+from 84.33 to 84.07 seconds.  This exact reduction is accepted for a full
+proof measurement; it cannot by itself close the remaining RSS gap.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:

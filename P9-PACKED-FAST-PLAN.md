@@ -359,6 +359,15 @@ and 14,156,800 table bytes, with no preview workspace.  The 125-MiB Phase-5
 gate remains open by 42,968 KiB, so this cleanup is an accepted component,
 not a completed radical-memory result.
 
+The exact working set does not require 32,768 cache entries.  Reducing the
+fixed packed-fast cache to 8,192 entries cuts its table from 6,029,312 to
+1,507,328 bytes (-4,521,984).  At 300 givens its hit rate changes only from
+35.10% to 34.96%, and all 126,530 event records remain identical.  At the
+isolated 1,000-given boundary, hit rate changes from 35.88% to 35.57%, current
+RSS falls from 73,496 to 69,140 KiB, and user CPU changes from 84.33 to 84.07
+seconds.  The exact terminal state and hint preview/trace/checkpoint tests
+pass.  A full proof remains the acceptance boundary for this capacity change.
+
 ### Guarded full-run result
 
 The 900-CPU-second/512-MiB guarded selected-DISCOUNT run did not prove the
