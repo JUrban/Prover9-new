@@ -153,6 +153,8 @@ void zap_given_selectors(void);
 
 void selector_report(void);
 
+void fprint_selector_report(FILE *fp);
+
 void get_low_selector_state(const char **name, int *count);
 
 void set_low_selector_state(const char *name, int count);

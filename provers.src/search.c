@@ -63,6 +63,9 @@ static unsigned long long Dense_arena_bytes_reclaimed = 0;
 static Rewrite_only_store Rewrite_only_rules = NULL;
 static Compact_rewrite_bank Compact_rewrite_rules = NULL;
 static Compact_term_pool Compact_terms = NULL;
+static FILE *Deferred_terminal_stats = NULL;
+static BOOL Terminal_stats_frozen = FALSE;
+static BOOL Terminal_compact_indexes_released = FALSE;
 static unsigned Rewrite_epoch = 1;    /* compact rewrite state seen by SOS */
 static size_t Rewrite_refresh_hot_cursor = 0;
 static size_t Rewrite_refresh_general_cursor = 0;
@@ -3507,7 +3510,7 @@ void fprint_all_stats(FILE *fp, char *stats_level)
 
   if (str_ident(stats_level, "all")) {
     print_memory_stats(fp);
-    selector_report();
+    fprint_selector_report(fp);
     /* p_sos_dist(); */
   }
   print_separator(fp, "end of statistics", TRUE);
@@ -5307,10 +5310,62 @@ void possible_report(void)
  *
  *************/
 
+static void freeze_terminal_statistics(void)
+{
+  if (Terminal_stats_frozen)
+    return;
+  if (flag(Opt->tptp_output))
+    update_stats();
+  else {
+    Deferred_terminal_stats = tmpfile();
+    if (Deferred_terminal_stats == NULL)
+      fatal_error("freeze_terminal_statistics: cannot create temporary report");
+    fprint_all_stats(Deferred_terminal_stats,
+                     Opt ? stringparm1(Opt->stats) : "lots");
+    rewind(Deferred_terminal_stats);
+  }
+  Terminal_stats_frozen = TRUE;
+}
+
+static void print_deferred_terminal_statistics(FILE *fp)
+{
+  char buffer[8192];
+  size_t n;
+  if (Deferred_terminal_stats == NULL)
+    return;
+  while ((n = fread(buffer, 1, sizeof(buffer),
+                    Deferred_terminal_stats)) != 0)
+    if (fwrite(buffer, 1, n, fp) != n)
+      fatal_error("print_deferred_terminal_statistics: write failed");
+  if (ferror(Deferred_terminal_stats))
+    fatal_error("print_deferred_terminal_statistics: read failed");
+  fclose(Deferred_terminal_stats);
+  Deferred_terminal_stats = NULL;
+  fflush(fp);
+}
+
+static void release_terminal_compact_indexes(void)
+{
+  if (Terminal_compact_indexes_released || !compact_otter_passive_mode())
+    return;
+  destroy_demodulation_index();
+  compact_rewrite_free(Compact_rewrite_rules);
+  Compact_rewrite_rules = NULL;
+  destroy_literals_index();
+  destroy_back_demod_index();
+  compact_term_pool_free(Compact_terms);
+  Compact_terms = NULL;
+  memory_release_unused();
+  Terminal_compact_indexes_released = TRUE;
+}
+
 static
 void done_with_search(int return_code)
 {
-  fprint_all_stats(stdout, Opt ? stringparm1(Opt->stats) : "lots");
+  if (Deferred_terminal_stats != NULL)
+    print_deferred_terminal_statistics(stdout);
+  else if (!Terminal_stats_frozen)
+    fprint_all_stats(stdout, Opt ? stringparm1(Opt->stats) : "lots");
   /* If we need to return 0, we have to encode it as something else. */
   longjmp(Jump_env, return_code == 0 ? INT_MAX : return_code);
 }  /* done_with_search */
@@ -5414,6 +5469,56 @@ void restore_archive_hint_links(Plist clauses)
       c->matching_hint = hint_by_id(id);
     }
   }
+}
+
+/* Return the same first negative proof clause that first_negative_clause()
+   would see in the ID-sorted materialized DAG, but consult only resident or
+   archived parent/negative metadata.  Terminal compact runs use this before
+   releasing search-only indexes, so proof reconstruction cannot overlap
+   those indexes merely to decide denial reuse. */
+static unsigned first_negative_ancestor_id(Topform root)
+{
+  unsigned char *seen;
+  unsigned *stack;
+  size_t count = 0, capacity = 1024;
+  unsigned result = 0;
+  if (root == NULL || root->id == 0 || root->id > UINT_MAX)
+    fatal_error("first_negative_ancestor_id: invalid proof root");
+  seen = safe_calloc((size_t) root->id + 1, sizeof(*seen));
+  stack = safe_malloc(capacity * sizeof(*stack));
+  stack[count++] = (unsigned) root->id;
+  while (count != 0) {
+    unsigned id = stack[--count];
+    Ilist parents, p;
+    BOOL known;
+    if (id == 0 || id > root->id)
+      fatal_error("first_negative_ancestor_id: invalid parent ID");
+    if (seen[id])
+      continue;
+    seen[id] = 1;
+    if (clause_negative_by_id(id, &known) && known &&
+        (result == 0 || id < result))
+      result = id;
+    parents = clause_parents_by_id(id);
+    for (p = parents; p != NULL; p = p->next) {
+      unsigned parent = (unsigned) p->i;
+      if (parent == 0 || parent > root->id)
+        fatal_error("first_negative_ancestor_id: corrupt parent ID");
+      if (!seen[parent]) {
+        if (count == capacity) {
+          if (capacity > SIZE_MAX / 2 / sizeof(*stack))
+            fatal_error("first_negative_ancestor_id: proof stack overflow");
+          capacity *= 2;
+          stack = safe_realloc(stack, capacity * sizeof(*stack));
+        }
+        stack[count++] = parent;
+      }
+    }
+    zap_ilist(parents);
+  }
+  safe_free(stack);
+  safe_free(seen);
+  return result;
 }
 
 static
@@ -6313,29 +6418,25 @@ void handle_proof_and_maybe_exit(Topform empty_clause)
 {
   Term answers;
   Plist proof, materialized, p;
+  BOOL terminal_proof;
 
   assign_clause_id(empty_clause);
-  proof = get_clause_ancestors(empty_clause);
-  restore_archive_hint_links(proof);
-  materialized = materialize_clauses(proof);
 
   if (!flag(Opt->reuse_denials) && Glob.horn) {
-    Topform c = first_negative_clause(proof);
-    if (ilist_member(Glob.desc_to_be_disabled, (int) c->id)) {
+    unsigned negative_id = first_negative_ancestor_id(empty_clause);
+    if (negative_id == 0)
+      fatal_error("handle_proof_and_maybe_exit: negative ancestor is missing");
+    if (ilist_member(Glob.desc_to_be_disabled, (int) negative_id)) {
       if (!flag(Opt->quiet)) {
 	printf("%% Redundant proof: ");
 	f_clause(empty_clause);
       }
-      recompress_clauses(materialized);
-      zap_plist(materialized);
-      clause_store_release_materialized_plist(proof);
-      zap_plist(proof);
       return;
     }
     else
-      /* Descendants of c will be disabled when it is safe to do so. */
+      /* Descendants of this denial will be disabled when it is safe. */
       Glob.desc_to_be_disabled =
-        ilist_prepend(Glob.desc_to_be_disabled, (int) c->id);
+        ilist_prepend(Glob.desc_to_be_disabled, (int) negative_id);
   }
 
   /* Mark parents as used only for non-redundant proofs.  If done earlier,
@@ -6346,6 +6447,20 @@ void handle_proof_and_maybe_exit(Topform empty_clause)
 
   Glob.empties = plist_append(Glob.empties, empty_clause);
   Stats.proofs++;
+  terminal_proof = at_parm_limit(Stats.proofs, Opt->max_proofs);
+
+  /* A terminal compact proof needs the ancestor archive and hints, but it
+     cannot issue another rewrite/subsumption/redex query.  Preserve the
+     pre-release statistics, then remove search-only compact indexes before
+     materializing the proof DAG. */
+  if (terminal_proof && compact_otter_passive_mode()) {
+    freeze_terminal_statistics();
+    release_terminal_compact_indexes();
+  }
+
+  proof = get_clause_ancestors(empty_clause);
+  restore_archive_hint_links(proof);
+  materialized = materialize_clauses(proof);
 
   answers = get_term_attributes(empty_clause->attributes, Att.answer);
 
@@ -6627,7 +6742,7 @@ void handle_proof_and_maybe_exit(Topform empty_clause)
   clause_store_release_materialized_plist(proof);
   zap_plist(proof);
 
-  if (at_parm_limit(Stats.proofs, Opt->max_proofs))
+  if (terminal_proof)
     done_with_search(MAX_PROOFS_EXIT);  /* does not return */
 }  // handle_proof_and_maybe_exit
 
@@ -10832,7 +10947,8 @@ Prover_results collect_prover_results(BOOL xproofs)
       results->xproofs = plist_append(results->xproofs, xproof);
     }
   }
-  update_stats();  /* puts package stats into Stats */
+  if (!Terminal_stats_frozen)
+    update_stats();  /* puts package stats into Stats */
   results->stats = Stats;  /* structure copy */
   results->user_seconds = user_seconds();
   results->system_seconds = system_seconds();
@@ -15396,6 +15512,12 @@ Prover_results search(Prover_input p)
       print_separator(stdout, "PROCESS INITIAL CLAUSES", TRUE);
 
     Opt = p->options;          // put options into a global variable
+    if (Deferred_terminal_stats != NULL) {
+      fclose(Deferred_terminal_stats);
+      Deferred_terminal_stats = NULL;
+    }
+    Terminal_stats_frozen = FALSE;
+    Terminal_compact_indexes_released = FALSE;
     Current_inference_source = INFER_SOURCE_OTHER;
     collective_reset_state();
     Simplifier_epoch = 1;

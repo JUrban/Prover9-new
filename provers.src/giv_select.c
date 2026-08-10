@@ -1720,14 +1720,14 @@ void set_high_selector_state(const char *name, int count)
 */
 
 /* PUBLIC */
-void selector_report(void)
+void fprint_selector_report(FILE *fp)
 {
   Plist p;
-  print_separator(stdout, "SELECTOR REPORT", TRUE);
-  printf("Sos_deleted=%d, Sos_displaced=%d, Sos_size=%d\n",
-	 Sos_deleted, Sos_displaced, Sos_size);
-  printf("%10s %10s %10s %10s %10s %10s\n",
-	 "SELECTOR", "PART", "PRIORITY", "ORDER", "SIZE", "SELECTED");
+  print_separator(fp, "SELECTOR REPORT", TRUE);
+  fprintf(fp, "Sos_deleted=%d, Sos_displaced=%d, Sos_size=%d\n",
+	  Sos_deleted, Sos_displaced, Sos_size);
+  fprintf(fp, "%10s %10s %10s %10s %10s %10s\n",
+	  "SELECTOR", "PART", "PRIORITY", "ORDER", "SIZE", "SELECTED");
   for (p = High.selectors; p; p = p->next) {
     Giv_select gs = p->v;
     char *s1, *s2;
@@ -1739,8 +1739,8 @@ void selector_report(void)
     case GS_ORDER_RANDOM: s2 = "random"; break;
     default: s2 = "???"; break;
     }
-    printf("%10s %10d %10s %10s %10d %10d\n",
-	   gs->name, gs->part, s1, s2, (int) selector_size(gs), gs->selected);
+    fprintf(fp, "%10s %10d %10s %10s %10d %10d\n",
+	    gs->name, gs->part, s1, s2, (int) selector_size(gs), gs->selected);
   }
   for (p = Low.selectors; p; p = p->next) {
     Giv_select gs = p->v;
@@ -1753,11 +1753,16 @@ void selector_report(void)
     case GS_ORDER_RANDOM: s2 = "random"; break;
     default: s2 = "???"; break;
     }
-    printf("%10s %10d %10s %10s %10d %10d\n",
-	   gs->name, gs->part, s1, s2, (int) selector_size(gs), gs->selected);
+    fprintf(fp, "%10s %10d %10s %10s %10d %10d\n",
+	    gs->name, gs->part, s1, s2, (int) selector_size(gs), gs->selected);
   }
-  print_separator(stdout, "end of selector report", FALSE);  
-  fflush(stdout);
+  print_separator(fp, "end of selector report", FALSE);
+  fflush(fp);
+}  /* fprint_selector_report */
+
+void selector_report(void)
+{
+  fprint_selector_report(stdout);
 }  /* selector_report */
 
 /*************
