@@ -169,3 +169,13 @@ seconds with one-MiB slabs (+13.1%); this remains inside the full-proof CPU
 budget but requires final-boundary validation.  Peak prefix RSS changes only
 from 90,632 to 90,256 KiB because that peak is the fixed 84.8-MB initialization
 wave; the final current RSS probe falls from 84,504 to 80,852 KiB.
+
+The full Osborn proof confirms that the reservation reduction is real but not
+fully resident.  At the exact final boundary, reservation falls from
+35,658,048 to 24,123,712 bytes and reported fragmentation from 15,552,608 to
+4,018,272 bytes.  Internal current RSS falls from 177,652 to 167,796 KiB,
+while external peak RSS falls from 188,736 to 178,704 KiB.  The 11.00-MiB
+virtual-reservation saving therefore yields 9.63 MiB less current RSS, not an
+11-MiB peak guarantee: a material part of the old unallocated slab capacity
+had never faulted resident.  The exact proof takes 804.04 user seconds versus
+786.23 seconds with one-MiB slabs and the old array capacities (+2.3%).

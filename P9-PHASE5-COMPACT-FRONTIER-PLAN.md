@@ -569,6 +569,25 @@ gate.  At the measured full boundary the same growth sequences project
 roughly 5.5 MiB less allocated capacity, which must be confirmed rather than
 counted as achieved before the next proof run.
 
+That full proof run is now complete.  It reaches the exact state
+`Given=2,945`, `Generated=8,248,032`, `Kept=272,787`, `Sos=131,001`, and
+`Demods=109,987`; all 7,051 normalized `prooftrans parents_only` clauses are
+byte-identical to the accepted file-backed proof and end at `272791 $F` with
+no diagnostics.  Time is 804.04 user, 104.10 system, and 908.43 wall seconds,
+only 1.023 times the accepted user-CPU result and safely inside the 957-second
+CPU and 18-minute wall gates.
+
+Peak RSS is 178,704 KiB, 10,032 KiB (5.3%) below the preceding 188,736-KiB
+file-backed result but still 50,704 KiB above the 125-MiB gate.  The five
+compact structures fall from 67,621,976 to 63,197,244 bytes (-4.22 MiB), and
+final allocator reservation falls from 35,658,048 to 24,123,712 bytes
+(-11.00 MiB).  Internal current RSS falls by 9,856 KiB.  The fact that RSS
+does not fall by the sum of the capacity reductions is expected: much of the
+old unallocated slab capacity was virtual but untouched, while tighter growth
+copies and touches predecessor arrays.  A two-second sample also catches a
+late rebuild peak before compaction releases pages.  This slice is accepted
+as an exact reduction, but it does **not** close the Phase-5 RSS gate.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:
