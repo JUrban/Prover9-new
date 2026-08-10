@@ -9,19 +9,19 @@
 
 struct cbd_posting {
   uint32_t record;
-  uint32_t token_offset;
   uint32_t next;
+  uint32_t occurrence_offset;
 };
 
-struct cbd_root {
-  uint32_t token_offset;
-  uint32_t token_length;
+struct cbd_local_occurrence {
+  uint32_t symbol;
+  uint32_t offset;
 };
 
 struct cbd_record {
   unsigned long long proof_id;
-  uint32_t root_offset;
-  uint32_t root_count;
+  uint32_t token_offset;
+  uint32_t token_length;
   uint32_t query_stamp;
   unsigned char active;
 };
@@ -33,9 +33,9 @@ struct compact_back_demod_index {
   uint32_t *posting_heads;
   uint32_t *posting_tails;
   size_t symbol_capacity;
-  struct cbd_root *roots;
-  size_t root_count;
-  size_t root_capacity;
+  unsigned char *occurrences;
+  size_t occurrence_count;
+  size_t occurrence_capacity;
   struct cbd_record *records;
   size_t record_count;
   size_t record_capacity;
@@ -56,7 +56,20 @@ struct compact_back_demod_index {
   unsigned long long queries;
   unsigned long long candidates;
   unsigned long long exact_tests;
+  unsigned long long symbol_occurrences;
   unsigned long long peak_bytes;
+};
+
+struct cbd_symbol_set {
+  uint32_t fixed[32];
+  uint32_t *values;
+  size_t count;
+  size_t capacity;
+  struct cbd_local_occurrence occurrence_fixed[128];
+  struct cbd_local_occurrence *occurrence_values;
+  size_t occurrence_count;
+  size_t occurrence_capacity;
+  uint32_t token_base;
 };
 
 static size_t grow_capacity(size_t current, size_t item_size,
@@ -95,7 +108,7 @@ static unsigned long long index_bytes(Compact_back_demod_index index)
     index->posting_capacity * sizeof(*index->postings) +
     index->symbol_capacity *
       (sizeof(*index->posting_heads) + sizeof(*index->posting_tails)) +
-    index->root_capacity * sizeof(*index->roots) +
+    index->occurrence_capacity * sizeof(*index->occurrences) +
     index->record_capacity * sizeof(*index->records) +
     index->token_capacity * sizeof(*index->tokens) +
     index->hash_capacity *
@@ -214,9 +227,40 @@ static void ensure_tokens(Compact_back_demod_index index, size_t extra)
   }
 }
 
-static void append_occurrence(Compact_back_demod_index index,
-                              uint32_t record, unsigned symbol,
-                              uint32_t token_offset)
+static void ensure_occurrence_bytes(Compact_back_demod_index index,
+                                    size_t extra)
+{
+  size_t needed;
+  if (extra > SIZE_MAX - index->occurrence_count)
+    fatal_error("compact_back_demod: occurrence stream overflow");
+  needed = index->occurrence_count + extra;
+  if (needed > UINT32_MAX)
+    fatal_error("compact_back_demod: occurrence offsets exceed 32 bits");
+  while (needed > index->occurrence_capacity) {
+    index->occurrence_capacity = grow_capacity(
+      index->occurrence_capacity, sizeof(*index->occurrences),
+      "compact_back_demod: occurrence capacity overflow");
+    index->occurrences = safe_realloc(
+      index->occurrences,
+      index->occurrence_capacity * sizeof(*index->occurrences));
+  }
+}
+
+static void append_occurrence_delta(Compact_back_demod_index index,
+                                    uint32_t delta)
+{
+  do {
+    unsigned char byte = (unsigned char) (delta & 0x7fU);
+    delta >>= 7;
+    if (delta != 0)
+      byte |= 0x80U;
+    ensure_occurrence_bytes(index, 1);
+    index->occurrences[index->occurrence_count++] = byte;
+  } while (delta != 0);
+}
+
+static void append_symbol_record(Compact_back_demod_index index,
+                                 uint32_t record, unsigned symbol)
 {
   uint32_t posting;
   ensure_symbols(index, symbol);
@@ -226,8 +270,9 @@ static void append_occurrence(Compact_back_demod_index index,
     fatal_error("compact_back_demod: posting offsets exceed 32 bits");
   posting = (uint32_t) index->posting_count++;
   index->postings[posting].record = record;
-  index->postings[posting].token_offset = token_offset;
   index->postings[posting].next = CBD_NONE;
+  index->postings[posting].occurrence_offset =
+    (uint32_t) index->occurrence_count;
   if (index->posting_heads[symbol] == CBD_NONE)
     index->posting_heads[symbol] = posting;
   else
@@ -235,10 +280,52 @@ static void append_occurrence(Compact_back_demod_index index,
   index->posting_tails[symbol] = posting;
 }
 
-static uint32_t append_term(Compact_back_demod_index index, Term term,
-                            uint32_t record, uint32_t *length)
+static void note_symbol(struct cbd_symbol_set *set, uint32_t symbol,
+                        uint32_t offset)
 {
-  size_t offset = index->token_count;
+  size_t i;
+  for (i = 0; i < set->count; i++)
+    if (set->values[i] == symbol)
+      break;
+  if (i == set->count) {
+    if (set->count == set->capacity) {
+      size_t next = grow_capacity(set->capacity, sizeof(*set->values),
+                                  "compact_back_demod: symbol set overflow");
+      if (set->values == set->fixed) {
+        set->values = safe_malloc(next * sizeof(*set->values));
+        memcpy(set->values, set->fixed,
+               set->count * sizeof(*set->values));
+      }
+      else
+        set->values = safe_realloc(set->values,
+                                   next * sizeof(*set->values));
+      set->capacity = next;
+    }
+    set->values[set->count++] = symbol;
+  }
+  if (set->occurrence_count == set->occurrence_capacity) {
+    size_t next = grow_capacity(
+      set->occurrence_capacity, sizeof(*set->occurrence_values),
+      "compact_back_demod: local occurrence overflow");
+    if (set->occurrence_values == set->occurrence_fixed) {
+      set->occurrence_values = safe_malloc(
+        next * sizeof(*set->occurrence_values));
+      memcpy(set->occurrence_values, set->occurrence_fixed,
+             set->occurrence_count * sizeof(*set->occurrence_values));
+    }
+    else
+      set->occurrence_values = safe_realloc(
+        set->occurrence_values, next * sizeof(*set->occurrence_values));
+    set->occurrence_capacity = next;
+  }
+  set->occurrence_values[set->occurrence_count].symbol = symbol;
+  set->occurrence_values[set->occurrence_count].offset = offset;
+  set->occurrence_count++;
+}
+
+static void append_term(Compact_back_demod_index index, Term term,
+                        struct cbd_symbol_set *symbols)
+{
   size_t capacity = 128, top = 0;
   Term fixed[128];
   Term *stack = fixed;
@@ -248,11 +335,13 @@ static uint32_t append_term(Compact_back_demod_index index, Term term,
     int i;
     int32_t code = VARIABLE(current) ?
       -(int32_t) VARNUM(current) - 1 : (int32_t) SYMNUM(current);
-    uint32_t token_offset = (uint32_t) index->token_count;
     ensure_tokens(index, 1);
     index->tokens[index->token_count++] = code;
-    if (code >= 0)
-      append_occurrence(index, record, (unsigned) code, token_offset);
+    if (code >= 0) {
+      note_symbol(symbols, (uint32_t) code,
+                  (uint32_t) index->token_count - 1 - symbols->token_base);
+      index->symbol_occurrences++;
+    }
     for (i = ARITY(current) - 1; i >= 0; i--) {
       if (top == capacity) {
         capacity *= 2;
@@ -268,8 +357,6 @@ static uint32_t append_term(Compact_back_demod_index index, Term term,
   }
   if (stack != fixed)
     safe_free(stack);
-  *length = (uint32_t) (index->token_count - offset);
-  return (uint32_t) offset;
 }
 
 Compact_back_demod_index compact_back_demod_init(void)
@@ -291,6 +378,7 @@ BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
 {
   uint32_t record_index;
   struct cbd_record *record;
+  struct cbd_symbol_set symbols;
   Literals literal;
   size_t at_hash;
   if (index == NULL || clause == NULL || clause->id == 0 ||
@@ -305,23 +393,42 @@ BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
   record = &index->records[record_index];
   memset(record, 0, sizeof(*record));
   record->proof_id = clause->id;
-  record->root_offset = (uint32_t) index->root_count;
+  record->token_offset = (uint32_t) index->token_count;
   record->active = TRUE;
+  memset(&symbols, 0, sizeof(symbols));
+  symbols.values = symbols.fixed;
+  symbols.capacity = sizeof(symbols.fixed) / sizeof(symbols.fixed[0]);
+  symbols.occurrence_values = symbols.occurrence_fixed;
+  symbols.occurrence_capacity = sizeof(symbols.occurrence_fixed) /
+    sizeof(symbols.occurrence_fixed[0]);
+  symbols.token_base = record->token_offset;
   for (literal = clause->literals; literal != NULL; literal = literal->next) {
     Term atom = literal->atom;
     int arg;
-    for (arg = 0; arg < ARITY(atom); arg++) {
-      struct cbd_root *root;
-      ENSURE_ARRAY(index, roots, root_count, root_capacity,
-                   "compact_back_demod: root overflow");
-      if (index->root_count > UINT32_MAX)
-        fatal_error("compact_back_demod: root offsets exceed 32 bits");
-      root = &index->roots[index->root_count++];
-      root->token_offset = append_term(
-        index, ARG(atom, arg), record_index, &root->token_length);
-      record->root_count++;
+    for (arg = 0; arg < ARITY(atom); arg++)
+      append_term(index, ARG(atom, arg), &symbols);
+  }
+  record->token_length = (uint32_t) index->token_count - record->token_offset;
+  {
+    size_t i;
+    for (i = 0; i < symbols.count; i++) {
+      size_t j;
+      uint32_t previous = 0;
+      BOOL first = TRUE;
+      append_symbol_record(index, record_index, symbols.values[i]);
+      for (j = 0; j < symbols.occurrence_count; j++)
+        if (symbols.occurrence_values[j].symbol == symbols.values[i]) {
+          uint32_t offset = symbols.occurrence_values[j].offset;
+          append_occurrence_delta(index, first ? offset : offset - previous);
+          previous = offset;
+          first = FALSE;
+        }
     }
   }
+  if (symbols.values != symbols.fixed)
+    safe_free(symbols.values);
+  if (symbols.occurrence_values != symbols.occurrence_fixed)
+    safe_free(symbols.occurrence_values);
   ensure_hash(index);
   at_hash = hash_slot(index, clause->id, TRUE);
   if (index->hash_keys[at_hash] == CBD_TOMBSTONE)
@@ -455,6 +562,54 @@ static BOOL occurrence_matches(Compact_back_demod_index index,
   return match_token_term(index, pattern, &position, bindings);
 }
 
+static uint32_t decode_occurrence_delta(Compact_back_demod_index index,
+                                        uint32_t *position, uint32_t end)
+{
+  uint32_t value = 0;
+  unsigned shift = 0;
+  while (*position < end) {
+    unsigned char byte = index->occurrences[(*position)++];
+    if (shift == 28 && (byte & 0xf0U) != 0)
+      fatal_error("compact_back_demod: corrupt occurrence delta");
+    value |= (uint32_t) (byte & 0x7fU) << shift;
+    if ((byte & 0x80U) == 0)
+      return value;
+    shift += 7;
+    if (shift > 28)
+      fatal_error("compact_back_demod: corrupt occurrence delta");
+  }
+  fatal_error("compact_back_demod: truncated occurrence delta");
+  return 0;
+}
+
+/* A symbol posting names each clause once.  Its delta-varint stream retains
+   just the matching subterm offsets, so exact probes avoid rescanning the
+   rest of a large equational clause. */
+static BOOL posting_contains_pattern(Compact_back_demod_index index,
+                                     uint32_t posting,
+                                     struct cbd_record *record,
+                                     Term pattern, int32_t symbol)
+{
+  uint32_t position = index->postings[posting].occurrence_offset;
+  uint32_t end = posting + 1 < index->posting_count ?
+    index->postings[posting + 1].occurrence_offset :
+    (uint32_t) index->occurrence_count;
+  uint32_t relative = 0;
+  while (position < end) {
+    uint32_t delta = decode_occurrence_delta(index, &position, end);
+    if (delta > UINT32_MAX - relative)
+      fatal_error("compact_back_demod: occurrence offset overflow");
+    relative += delta;
+    if (relative >= record->token_length ||
+        index->tokens[record->token_offset + relative] != symbol)
+      fatal_error("compact_back_demod: corrupt occurrence offset");
+    if (occurrence_matches(index, pattern,
+                           record->token_offset + relative))
+      return TRUE;
+  }
+  return FALSE;
+}
+
 static void collect_symbol(Compact_back_demod_index index, Term pattern,
                            unsigned long long exclude_id, size_t *count)
 {
@@ -475,7 +630,8 @@ static void collect_symbol(Compact_back_demod_index index, Term pattern,
     struct cbd_record *record = &index->records[candidate->record];
     if (record->active && record->proof_id != exclude_id &&
         record->query_stamp != index->query_stamp &&
-        occurrence_matches(index, pattern, candidate->token_offset))
+        posting_contains_pattern(index, posting, record, pattern,
+                                 (int32_t) symbol))
       collect_record(index, candidate->record, exclude_id, count);
   }
 }
@@ -534,11 +690,17 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->queries = index->queries;
   stats->candidates = index->candidates;
   stats->exact_tests = index->exact_tests;
+  stats->posting_groups = index->posting_count - 1;
+  stats->symbol_occurrences = index->symbol_occurrences;
   stats->posting_bytes = index->posting_capacity * sizeof(*index->postings) +
     index->symbol_capacity *
-      (sizeof(*index->posting_heads) + sizeof(*index->posting_tails));
+      (sizeof(*index->posting_heads) + sizeof(*index->posting_tails)) +
+    index->occurrence_capacity * sizeof(*index->occurrences);
+  stats->occurrence_bytes =
+    index->occurrence_capacity * sizeof(*index->occurrences);
+  stats->occurrence_stream_bytes = index->occurrence_count;
   stats->record_bytes = index->record_capacity * sizeof(*index->records);
-  stats->root_bytes = index->root_capacity * sizeof(*index->roots);
+  stats->root_bytes = 0;
   stats->token_bytes = index->token_capacity * sizeof(*index->tokens);
   stats->hash_bytes = index->hash_capacity *
     (sizeof(*index->hash_keys) + sizeof(*index->hash_values));
@@ -554,7 +716,7 @@ void compact_back_demod_free(Compact_back_demod_index index)
   safe_free(index->postings);
   safe_free(index->posting_heads);
   safe_free(index->posting_tails);
-  safe_free(index->roots);
+  safe_free(index->occurrences);
   safe_free(index->records);
   safe_free(index->tokens);
   safe_free(index->hash_keys);

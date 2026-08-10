@@ -483,15 +483,18 @@ void fprint_compact_back_demod(FILE *fp)
   fprintf(fp,
           "Compact_back_demod: mode=%s, failures=%llu, active=%llu, "
           "peak=%llu, retired=%llu, physical=%llu, queries=%llu, "
-          "candidates=%llu, exact_tests=%llu, postings=%llu, records=%llu, "
-          "roots=%llu, tokens=%llu, hash=%llu, scratch=%llu, bytes=%llu, "
-          "peak_bytes=%llu.\n",
+          "candidates=%llu, exact_tests=%llu, posting_groups=%llu, "
+          "symbol_occurrences=%llu, occurrence_stream_used=%llu, "
+          "occurrence_stream=%llu, postings=%llu, records=%llu, roots=%llu, "
+          "tokens=%llu, hash=%llu, scratch=%llu, bytes=%llu, peak_bytes=%llu.\n",
           Compact_back_demod_authoritative ? "authoritative" : "audit",
           Compact_back_demod_failures, stats.active, stats.peak,
           stats.retired, stats.physical, stats.queries, stats.candidates,
-          stats.exact_tests, stats.posting_bytes, stats.record_bytes,
-          stats.root_bytes, stats.token_bytes, stats.hash_bytes,
-          stats.scratch_bytes, stats.total_bytes, stats.peak_bytes);
+          stats.exact_tests, stats.posting_groups, stats.symbol_occurrences,
+          stats.occurrence_stream_bytes, stats.occurrence_bytes,
+          stats.posting_bytes, stats.record_bytes, stats.root_bytes,
+          stats.token_bytes, stats.hash_bytes, stats.scratch_bytes,
+          stats.total_bytes, stats.peak_bytes);
 }
 
 /*************

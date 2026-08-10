@@ -1,5 +1,7 @@
 #include "../provers.src/compact_back_demod.h"
 
+#include <stdint.h>
+
 static int Failures;
 
 #define CHECK(test, message) do {                                    \
@@ -76,10 +78,52 @@ int main(void)
         "lifecycle counters are exact");
   CHECK(stats.queries == 4 && stats.exact_tests == 3,
         "query accounting is exact");
+  CHECK(stats.posting_groups == 14 && stats.symbol_occurrences == 15,
+        "repeated clause symbols share one posting group");
+  CHECK(stats.occurrence_stream_bytes > 0 &&
+        stats.occurrence_stream_bytes <
+          stats.symbol_occurrences * sizeof(uint32_t),
+        "delta occurrence stream is smaller than raw offsets");
   CHECK(stats.total_bytes > 0 && stats.peak_bytes >= stats.total_bytes,
         "resident byte accounting is present");
 
   compact_back_demod_free(index);
+
+  {
+    Compact_back_demod_index gap_index = compact_back_demod_init();
+    struct compact_back_demod_stats gap_stats;
+    Topform gap_clause, gap_demod;
+    char text[1024];
+    size_t used = 0;
+    int j;
+    used += (size_t) snprintf(text + used, sizeof(text) - used, "t(m(a),");
+    for (j = 0; j < 140; j++)
+      used += (size_t) snprintf(text + used, sizeof(text) - used, "g(");
+    used += (size_t) snprintf(text + used, sizeof(text) - used, "m(b)");
+    for (j = 0; j < 140; j++)
+      used += (size_t) snprintf(text + used, sizeof(text) - used, ")");
+    (void) snprintf(text + used, sizeof(text) - used, ").");
+    gap_clause = indexed_clause(text);
+    gap_demod = indexed_clause("m(x) = x.");
+    CHECK(compact_back_demod_add(gap_index, gap_clause),
+          "add clause with distant repeated symbol");
+    ids = compact_back_demod_candidate_ids(
+      gap_index, gap_demod, ORIENTED, &count);
+    CHECK(count == 1 && ids[0] == gap_clause->id,
+          "multi-byte occurrence delta retrieves distant occurrence");
+    safe_free(ids);
+    compact_back_demod_get_stats(gap_index, &gap_stats);
+    CHECK(gap_stats.posting_groups == 4 &&
+          gap_stats.symbol_occurrences == 144 &&
+          gap_stats.occurrence_stream_bytes > gap_stats.symbol_occurrences &&
+          gap_stats.occurrence_stream_bytes <
+            gap_stats.symbol_occurrences * sizeof(uint32_t),
+          "multi-byte deltas remain smaller than raw offsets");
+    compact_back_demod_free(gap_index);
+    delete_clause(gap_clause);
+    delete_clause(gap_demod);
+  }
+
   delete_clause(first);
   delete_clause(second);
   delete_clause(irrelevant);
