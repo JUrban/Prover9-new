@@ -131,6 +131,9 @@ static void dense_record_view(const struct dense_passive_record *r,
   view->weight = r->weight;
   view->simplifier_epoch = r->simplifier_epoch;
   view->rewrite_epoch = r->rewrite_epoch;
+  view->body_bytes = r->body_bytes;
+  view->justification_bytes = r->justification_bytes;
+  view->logical_body_bytes = r->logical_body_bytes;
   view->semantics = dense_record_semantics(r);
   view->used = (r->flags & DENSE_PASSIVE_USED) != 0;
   view->delayed_demodulator =

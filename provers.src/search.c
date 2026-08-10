@@ -77,6 +77,35 @@ static unsigned long long Resume_rewrite_hot_cursor_id = 0;
 static unsigned long long Resume_rewrite_general_cursor_id = 0;
 static unsigned long long Resume_rewrite_interreduce_cursor_id = 0;
 
+#define COMPACT_PASSIVE_CACHE_WAYS 4
+#define COMPACT_PASSIVE_CACHE_MIN_CHARGE 512
+#define COMPACT_PASSIVE_CACHE_MAX_SLOTS 8192
+
+struct compact_passive_cache_entry {
+  unsigned long long id;
+  size_t position;
+  size_t charge;
+  unsigned long long stamp;
+  Topform clause;
+  unsigned pins;
+};
+
+static struct compact_passive_cache_entry *Compact_passive_cache;
+static size_t Compact_passive_cache_sets;
+static size_t Compact_passive_cache_slots;
+static size_t Compact_passive_cache_budget;
+static size_t Compact_passive_cache_bytes;
+static size_t Compact_passive_cache_peak_bytes;
+static size_t Compact_passive_cache_entries;
+static size_t Compact_passive_cache_peak_entries;
+static size_t Compact_passive_cache_eviction_cursor;
+static unsigned long long Compact_passive_cache_clock;
+static unsigned long long Compact_passive_cache_hits;
+static unsigned long long Compact_passive_cache_misses;
+static unsigned long long Compact_passive_cache_bypasses;
+static unsigned long long Compact_passive_cache_evictions;
+static unsigned long long Compact_passive_cache_invalidations;
+
 static void update_rewrite_only_stats(void);
 static void current_demodulate_clause(Topform, int, int, BOOL, BOOL);
 static Topform compact_otter_resolve_clause(unsigned long long, void *);
@@ -2047,6 +2076,7 @@ Prover_options init_prover_options(void)
   p->report_stderr =    init_parm("report_stderr",        -1,     -1,INT_MAX);
   p->report_given =     init_parm("report_given",         -1,     -1,INT_MAX);
   p->report_preprocessing = init_parm("report_preprocessing", -1, -1,INT_MAX);
+  p->compact_passive_cache = init_parm("compact_passive_cache", 4, 0, 1024);
   p->fpa_depth =        init_parm("fpa_depth",            10,      1,    100);
   p->candidate_warn_limit = init_parm("candidate_warn_limit", -1,   -1,INT_MAX);
   p->candidate_hard_limit = init_parm("candidate_hard_limit", -1,   -1,INT_MAX);
@@ -3229,6 +3259,24 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
           comma_num(s.ancestor_backing_bytes), comma_num(s.ancestor_handle_bytes),
           comma_num(s.ancestor_materializations),
           comma_num(s.ancestor_validation_failures));
+  if (compact_otter_passive_mode())
+    fprintf(fp,
+            "Compact_passive_cache: budget=%s, metadata_bytes=%s, "
+            "entries=%s, peak_entries=%s, charged_bytes=%s, "
+            "peak_charged_bytes=%s, hits=%s, misses=%s, bypasses=%s, "
+            "evictions=%s, invalidations=%s.\n",
+            comma_num(Compact_passive_cache_budget),
+            comma_num(Compact_passive_cache_slots *
+                      sizeof(*Compact_passive_cache)),
+            comma_num(Compact_passive_cache_entries),
+            comma_num(Compact_passive_cache_peak_entries),
+            comma_num(Compact_passive_cache_bytes),
+            comma_num(Compact_passive_cache_peak_bytes),
+            comma_num(Compact_passive_cache_hits),
+            comma_num(Compact_passive_cache_misses),
+            comma_num(Compact_passive_cache_bypasses),
+            comma_num(Compact_passive_cache_evictions),
+            comma_num(Compact_passive_cache_invalidations));
   fprintf(fp,
           "Bookkeeping_bytes: disabled_store=%s (legacy_clist=%s, %.2f/clause), "
           "clause_id_table=%s (legacy_hash=%s, entries=%s, pages=%s, "
@@ -5478,6 +5526,221 @@ static Topform materialize_dense_passive(
   return c;
 }  /* materialize_dense_passive */
 
+static size_t compact_passive_cache_set(unsigned long long id)
+{
+  id ^= id >> 33;
+  id *= 0xff51afd7ed558ccdULL;
+  id ^= id >> 33;
+  return (size_t) id & (Compact_passive_cache_sets - 1);
+}
+
+static struct compact_passive_cache_entry *compact_passive_cache_find(
+  unsigned long long id)
+{
+  size_t i, base;
+  if (Compact_passive_cache == NULL)
+    return NULL;
+  base = compact_passive_cache_set(id) * COMPACT_PASSIVE_CACHE_WAYS;
+  for (i = 0; i < COMPACT_PASSIVE_CACHE_WAYS; i++) {
+    struct compact_passive_cache_entry *entry =
+      &Compact_passive_cache[base + i];
+    if (entry->clause != NULL && entry->id == id)
+      return entry;
+  }
+  return NULL;
+}
+
+static void compact_passive_cache_clear_entry(
+  struct compact_passive_cache_entry *entry)
+{
+  if (entry == NULL || entry->clause == NULL)
+    return;
+  if (entry->pins != 0)
+    fatal_error("compact passive cache: attempted to evict a pinned clause");
+  clause_store_release_materialized(entry->clause);
+  Compact_passive_cache_bytes -= entry->charge;
+  Compact_passive_cache_entries--;
+  memset(entry, 0, sizeof(*entry));
+}
+
+static void compact_passive_cache_free(void)
+{
+  size_t i;
+  if (Compact_passive_cache != NULL) {
+    for (i = 0; i < Compact_passive_cache_slots; i++)
+      compact_passive_cache_clear_entry(&Compact_passive_cache[i]);
+    safe_free(Compact_passive_cache);
+  }
+  Compact_passive_cache = NULL;
+  Compact_passive_cache_sets = 0;
+  Compact_passive_cache_slots = 0;
+  Compact_passive_cache_budget = 0;
+  Compact_passive_cache_bytes = 0;
+  Compact_passive_cache_entries = 0;
+}
+
+static void compact_passive_cache_init(unsigned megs)
+{
+  size_t desired, sets = 1;
+  compact_passive_cache_free();
+  Compact_passive_cache_peak_bytes = 0;
+  Compact_passive_cache_peak_entries = 0;
+  Compact_passive_cache_clock = 0;
+  Compact_passive_cache_eviction_cursor = 0;
+  Compact_passive_cache_hits = 0;
+  Compact_passive_cache_misses = 0;
+  Compact_passive_cache_bypasses = 0;
+  Compact_passive_cache_evictions = 0;
+  Compact_passive_cache_invalidations = 0;
+  if (megs == 0)
+    return;
+  Compact_passive_cache_budget = (size_t) megs * 1024 * 1024;
+  desired = Compact_passive_cache_budget /
+            COMPACT_PASSIVE_CACHE_MIN_CHARGE;
+  if (desired < COMPACT_PASSIVE_CACHE_WAYS)
+    desired = COMPACT_PASSIVE_CACHE_WAYS;
+  if (desired > COMPACT_PASSIVE_CACHE_MAX_SLOTS)
+    desired = COMPACT_PASSIVE_CACHE_MAX_SLOTS;
+  while (sets <= desired / (COMPACT_PASSIVE_CACHE_WAYS * 2))
+    sets *= 2;
+  Compact_passive_cache_sets = sets;
+  Compact_passive_cache_slots = sets * COMPACT_PASSIVE_CACHE_WAYS;
+  Compact_passive_cache = safe_malloc(
+    Compact_passive_cache_slots * sizeof(*Compact_passive_cache));
+  memset(Compact_passive_cache, 0,
+         Compact_passive_cache_slots * sizeof(*Compact_passive_cache));
+}
+
+static void restore_compact_passive_metadata(
+  Topform c, const struct dense_passive_view *view)
+{
+  c->matching_hint = hint_by_id(view->hint_id);
+  c->weight = view->weight;
+  c->semantics = view->semantics;
+  c->simplifier_epoch = view->simplifier_epoch;
+  c->rewrite_epoch = view->rewrite_epoch;
+  c->used = view->used;
+  c->delayed_demodulator = view->delayed_demodulator;
+  c->rewrite_rule_dirty = view->rewrite_rule_dirty;
+}
+
+static Topform materialize_compact_otter_passive(
+  const struct dense_passive_view *view)
+{
+  Topform c = clause_store_materialize(Glob.disabled, view->store_position);
+  if (c == NULL || c->id != view->id || !c->archive_materialized)
+    fatal_error("materialize_compact_otter_passive: archive identity mismatch");
+  restore_compact_passive_metadata(c, view);
+  return c;
+}
+
+static Topform compact_passive_cache_resolve(
+  const struct dense_passive_view *view)
+{
+  struct compact_passive_cache_entry *entry;
+  size_t i, base, charge;
+  entry = compact_passive_cache_find(view->id);
+  if (entry != NULL) {
+    if (entry->position != view->store_position)
+      fatal_error("compact passive cache: archive position changed");
+    entry->pins++;
+    entry->stamp = ++Compact_passive_cache_clock;
+    restore_compact_passive_metadata(entry->clause, view);
+    Compact_passive_cache_hits++;
+    return entry->clause;
+  }
+
+  Compact_passive_cache_misses++;
+  if (Compact_passive_cache == NULL) {
+    Compact_passive_cache_bypasses++;
+    return materialize_compact_otter_passive(view);
+  }
+
+  charge = (size_t) view->logical_body_bytes + view->body_bytes +
+           view->justification_bytes + COMPACT_PASSIVE_CACHE_MIN_CHARGE;
+  if (charge < COMPACT_PASSIVE_CACHE_MIN_CHARGE ||
+      charge > Compact_passive_cache_budget) {
+    Compact_passive_cache_bypasses++;
+    return materialize_compact_otter_passive(view);
+  }
+
+  base = compact_passive_cache_set(view->id) * COMPACT_PASSIVE_CACHE_WAYS;
+  entry = NULL;
+  for (i = 0; i < COMPACT_PASSIVE_CACHE_WAYS; i++) {
+    struct compact_passive_cache_entry *candidate =
+      &Compact_passive_cache[base + i];
+    if (candidate->clause == NULL) {
+      entry = candidate;
+      break;
+    }
+    if (candidate->pins == 0 &&
+        (entry == NULL || candidate->stamp < entry->stamp))
+      entry = candidate;
+  }
+  if (entry == NULL) {
+    Compact_passive_cache_bypasses++;
+    return materialize_compact_otter_passive(view);
+  }
+  if (entry->clause != NULL) {
+    compact_passive_cache_clear_entry(entry);
+    Compact_passive_cache_evictions++;
+  }
+  while (Compact_passive_cache_bytes >
+         Compact_passive_cache_budget - charge) {
+    size_t scanned;
+    BOOL evicted = FALSE;
+    for (scanned = 0; scanned < Compact_passive_cache_slots; scanned++) {
+      struct compact_passive_cache_entry *candidate =
+        &Compact_passive_cache[Compact_passive_cache_eviction_cursor];
+      Compact_passive_cache_eviction_cursor =
+        (Compact_passive_cache_eviction_cursor + 1) %
+        Compact_passive_cache_slots;
+      if (candidate->clause != NULL && candidate->pins == 0) {
+        compact_passive_cache_clear_entry(candidate);
+        Compact_passive_cache_evictions++;
+        evicted = TRUE;
+        break;
+      }
+    }
+    if (!evicted) {
+      Compact_passive_cache_bypasses++;
+      return materialize_compact_otter_passive(view);
+    }
+  }
+
+  entry->clause = materialize_compact_otter_passive(view);
+  entry->id = view->id;
+  entry->position = view->store_position;
+  entry->charge = charge;
+  entry->stamp = ++Compact_passive_cache_clock;
+  entry->pins = 1;
+  Compact_passive_cache_bytes += charge;
+  Compact_passive_cache_entries++;
+  if (Compact_passive_cache_bytes > Compact_passive_cache_peak_bytes)
+    Compact_passive_cache_peak_bytes = Compact_passive_cache_bytes;
+  if (Compact_passive_cache_entries > Compact_passive_cache_peak_entries)
+    Compact_passive_cache_peak_entries = Compact_passive_cache_entries;
+  return entry->clause;
+}
+
+static void compact_passive_cache_discard(unsigned long long id,
+                                          Topform expected)
+{
+  struct compact_passive_cache_entry *entry =
+    compact_passive_cache_find(id);
+  if (entry != NULL) {
+    if (expected != NULL && entry->clause != expected)
+      fatal_error("compact passive cache: materialized identity mismatch");
+    if (entry->pins != (expected == NULL ? 0U : 1U))
+      fatal_error("compact passive cache: invalid activation pin count");
+    entry->pins = 0;
+    compact_passive_cache_clear_entry(entry);
+    Compact_passive_cache_invalidations++;
+  }
+  else if (expected != NULL)
+    clause_store_release_materialized(expected);
+}
+
 /* Compact OTTER uses the ancestor archive as the single immutable owner of
    a passive body.  This keeps proof ancestry and on-demand clause lookup in
    the established archived-ID namespace instead of duplicating every body
@@ -5515,6 +5778,7 @@ static size_t archive_compact_otter_passive(
 static Topform activate_compact_otter_passive(
   size_t position, unsigned long long id, unsigned long long hint_id)
 {
+  compact_passive_cache_discard(id, NULL);
   Topform c = clause_store_activate(Glob.disabled, position);
   if (c == NULL || c->id != id)
     return NULL;
@@ -5534,17 +5798,7 @@ static Topform compact_otter_resolve_clause(unsigned long long id,
   if (!compact_otter_passive_mode() ||
       !dense_passive_view_id(id, &view))
     return NULL;
-  c = clause_store_materialize(Glob.disabled, view.store_position);
-  if (c == NULL || c->id != id || !c->archive_materialized)
-    fatal_error("compact_otter_resolve_clause: archive identity mismatch");
-  c->matching_hint = hint_by_id(view.hint_id);
-  c->weight = view.weight;
-  c->semantics = view.semantics;
-  c->simplifier_epoch = view.simplifier_epoch;
-  c->rewrite_epoch = view.rewrite_epoch;
-  c->used = view.used;
-  c->delayed_demodulator = view.delayed_demodulator;
-  c->rewrite_rule_dirty = view.rewrite_rule_dirty;
+  c = compact_passive_cache_resolve(&view);
   return c;
 }
 
@@ -5556,7 +5810,18 @@ static void compact_otter_release_clause(Topform c, void *context)
   if (c->used && dense_passive_contains_id(c->id) &&
       !dense_passive_mark_used(c->id))
     fatal_error("compact_otter_release_clause: passive used bit was lost");
-  clause_store_release_materialized(c);
+  {
+    struct compact_passive_cache_entry *entry =
+      compact_passive_cache_find(c->id);
+    if (entry != NULL && entry->clause == c) {
+      if (entry->pins == 0)
+        fatal_error("compact passive cache: release of unpinned clause");
+      entry->pins--;
+      entry->stamp = ++Compact_passive_cache_clock;
+    }
+    else
+      clause_store_release_materialized(c);
+  }
 }
 
 static
@@ -5668,7 +5933,7 @@ void disable_clause(Topform c)
     unsigned long long id = c->id;
     if (!dense_passive_view_id(id, &view))
       fatal_error("disable_clause: cold passive metadata is missing");
-    clause_store_release_materialized(c);
+    compact_passive_cache_discard(id, c);
     c = clause_store_activate(Glob.disabled, view.store_position);
     if (c == NULL || c->id != id)
       fatal_error("disable_clause: cannot activate cold passive");
@@ -5826,6 +6091,7 @@ void free_search_memory(void)
   zap_ilist(Glob.desc_to_be_disabled);
   Glob.desc_to_be_disabled = NULL;
 
+  compact_passive_cache_free();
   clause_store_delete_clauses(Glob.disabled);
   Glob.disabled = NULL;
   reset_selector_indexes();
@@ -15215,6 +15481,8 @@ Prover_results search(Prover_input p)
     }
     else
       configure_dense_passive(FALSE, NULL, NULL);
+    compact_passive_cache_init(compact_otter_passive_mode() ?
+                               (unsigned) parm(Opt->compact_passive_cache) : 0);
 
     if (p->resume_dir) {
       // Resume from checkpoint.  Minimal setup here - the actual checkpoint

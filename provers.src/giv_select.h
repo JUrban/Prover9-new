@@ -47,6 +47,9 @@ struct dense_passive_view {
   double weight;
   unsigned simplifier_epoch;
   unsigned rewrite_epoch;
+  unsigned body_bytes;
+  unsigned justification_bytes;
+  unsigned logical_body_bytes;
   int semantics;
   BOOL used;
   BOOL delayed_demodulator;
