@@ -831,6 +831,27 @@ the 300-given CHAT trace remains the byte-identical 132,567-event oracle and
 performs no index rebuild; bounded 50%/100% runs must determine whether the
 larger steady state is still below the avoided replacement peak.
 
+The higher thresholds are rejected by the 2,000-given comparison.  Both are
+exact, but 50% takes 351.66 user seconds and peaks at 140,776 KiB; 100% takes
+350.55 seconds and peaks at 143,584 KiB.  The accepted 25% policy takes
+316.80 seconds and peaks at 136,448 KiB in the corresponding decoupled run.
+At 100%, final PSS rises to 132,585 KiB as inactive unit/back-demod records
+and their term clauses accumulate.  Delaying replacement therefore loses on
+both CPU and memory; `compact_index_stale_pct` remains an experimental audit
+control with its 25% default.  The next implementation must reduce the
+old/new overlap itself, beginning with rebuilding the unit index from a
+packed record snapshot after releasing its predecessor search structures.
+
+That unit-index lifetime split is implemented.  Live records are compacted
+downward in their existing array, all predecessor nodes/postings/root heads,
+hashes, and query scratch are released, and the replacement is rebuilt in
+the same record order while only the packed record array overlaps it.  The
+shared term pool and ownership semantics are preserved.  The compact archive
+audit passes, and the 300-given CHAT replay again emits the byte-identical
+132,567-event oracle; a bounded peak measurement must determine how much of
+the late replacement transient belonged to the unit index before applying
+the same lifetime split to the more involved back-demod occurrence stream.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:

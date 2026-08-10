@@ -574,7 +574,7 @@ static void compact_unit_index_compact_internal(Compact_unit_index index,
   unsigned long long generalization_queries, instance_queries;
   unsigned long long instance_exact_tests, unifier_queries;
   unsigned long long unifier_exact_tests;
-  size_t i;
+  size_t i, packed;
   if (index == NULL ||
       (!force && !compact_unit_index_compaction_needed(index)) ||
       (force && index->record_count - 1 == index->active))
@@ -590,23 +590,36 @@ static void compact_unit_index_compact_internal(Compact_unit_index index,
   instance_exact_tests = index->instance_exact_tests;
   unifier_queries = index->unifier_queries;
   unifier_exact_tests = index->unifier_exact_tests;
-  replacement = compact_unit_index_init_with_pool(index->term_pool);
-  replacement->tokens = compact_term_pool_tokens(index->term_pool);
+
+  /* Records contain the complete immutable recipe for rebuilding nodes,
+     postings, roots, and the ID hash.  Pack live records downward first,
+     release every other predecessor array, and only then allocate the
+     replacement.  This changes the peak from old-index + new-index to one
+     record array + new-index without changing insertion order. */
+  packed = 1;
   for (i = 1; i < index->record_count; i++)
-    if (index->records[i].active)
-      copy_live_record(replacement, &index->records[i]);
+    if (index->records[i].active) {
+      if (packed != i)
+        index->records[packed] = index->records[i];
+      packed++;
+    }
   old = *index;
-  *index = *replacement;
-  safe_free(replacement);
   safe_free(old.nodes);
   safe_free(old.postings);
-  safe_free(old.records);
   safe_free(old.unifier_heads[0]);
   safe_free(old.unifier_heads[1]);
   safe_free(old.hash_keys);
   safe_free(old.hash_values);
   safe_free(old.query);
   safe_free(old.result_ids);
+  replacement = compact_unit_index_init_with_pool(old.term_pool);
+  replacement->owns_term_pool = old.owns_term_pool;
+  replacement->tokens = compact_term_pool_tokens(old.term_pool);
+  for (i = 1; i < packed; i++)
+    copy_live_record(replacement, &old.records[i]);
+  *index = *replacement;
+  safe_free(replacement);
+  safe_free(old.records);
   index->retired = retired;
   index->compactions = compactions + 1;
   index->bytes_reclaimed = reclaimed +
