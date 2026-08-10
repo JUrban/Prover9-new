@@ -546,6 +546,29 @@ pass must combine cross-clause term sharing/capacity tightening, smaller or
 returnable allocator slabs, and a lower-residency packed-hint representation;
 it must also eliminate the short rebuild double-allocation peak.
 
+The first resident follow-up reduces allocator slabs from 1 MiB to 256 KiB.
+Pointer ownership remains a mask operation because the new size is also a
+power of two; empty slabs are still unmapped immediately and the public
+pointer-count API is unchanged.  At 1,000 givens allocator reservation falls
+from 32,512,320 to 21,502,272 bytes and fragmentation from 14,747,728 to
+3,737,680 bytes.  The exact 300-given CHAT trace, 1,000-given terminal state,
+and allocator/lifecycle/audit tests pass.  Controlled 1,000-given user CPU
+rises from 74.63 to 84.38 seconds (+13.1%), still
+inside the final 957-second gate, while current RSS falls by 3.65 MiB.  Peak
+prefix RSS is dominated by initialization and therefore does not measure the
+expected late-proof saving.
+
+Persistent compact arrays now use 25% growth for unit records/postings,
+rewrite postings, and the back-demod occurrence stream.  At 1,000 givens this
+already removes 187,420 bytes net despite a unit-capacity boundary landing
+slightly above the old power of two.  The 300-given CHAT trace, the
+1,000-given terminal search state, and all focused audits are exact.  The
+combined controlled run takes 92.62 user seconds, 1.241 times the accepted
+74.63-second file-backed reference and therefore just inside the 1.25 prefix
+gate.  At the measured full boundary the same growth sequences project
+roughly 5.5 MiB less allocated capacity, which must be confirmed rather than
+counted as achieved before the next proof run.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:

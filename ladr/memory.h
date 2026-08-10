@@ -74,6 +74,8 @@ void memory_get_stats(struct memory_stats *stats);
 
 void memory_release_unused(void);
 
+unsigned long long memory_slab_bytes(void);
+
 unsigned long long memory_current_rss_kbytes(void);
 
 unsigned long long memory_peak_rss_kbytes(void);

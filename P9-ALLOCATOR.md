@@ -31,14 +31,14 @@ The required invariants are:
 
 ## Allocation layout and lifecycle
 
-Classes 1 through 127 use independent 1 MiB slabs.  Larger pointer-count
+Classes 1 through 127 use independent 256 KiB slabs.  Larger pointer-count
 requests remain individually allocated and freed.  `tp_alloc()` remains
 permanent by contract and uses a direct allocation rather than sharing a slab
 whose lifetime could otherwise be misrepresented.
 
 On native POSIX builds, a slab is an anonymous private mapping aligned to its
-own 1 MiB size.  Alignment is obtained by temporarily mapping 2 MiB, retaining
-the aligned 1 MiB interval, and unmapping the prefix and suffix.  The slab for
+own 256 KiB size.  Alignment is obtained by temporarily mapping 512 KiB,
+retaining the aligned 256 KiB interval, and unmapping the prefix and suffix.  The slab for
 a pointer is therefore recovered with an address mask; no per-object header is
 needed.  On Emscripten, a slab uses `safe_malloc()`/`safe_free()` and is found
 by a bounded walk of the requested class, preserving the existing build path
@@ -69,7 +69,7 @@ slab cannot leave a global free-list node pointing into returned storage.
 - `logical_live_bytes`: outstanding bytes requested through the pointer-count
   interface, direct path, and permanent path;
 - `logical_peak_bytes`: high-water of logical live bytes;
-- `reserved_bytes` / `peak_reserved_bytes`: current and peak 1 MiB mappings
+- `reserved_bytes` / `peak_reserved_bytes`: current and peak slab mappings
   plus requested bytes for direct/permanent allocations;
 - `reusable_bytes`: allocated slab slots currently on local free lists;
 - `unallocated_bytes`: capacity in mapped slabs not yet carved into slots;
@@ -111,7 +111,7 @@ raw term struct, so their formats are unchanged.
 The bounded aK `stats=all` profile justified this change: 2,005,677 term
 headers were allocated, 53,295 remained live, and the redundant pointer cost
 16,045,416 bytes of allocation traffic and 426,360 live bytes.  Removing it
-reduced current/peak reservation by one 1 MiB slab and process peak RSS by
+reduced current/peak reservation by one then-1-MiB slab and process peak RSS by
 about 536 KiB in the paired run, with identical search work and runtime.
 
 The other evaluated changes were not made:
@@ -137,7 +137,7 @@ review boundary.
 ## Test contract and limits
 
 `allocator_churn_test` allocates and touches 300,000 256-byte objects across
-74 slabs, frees earlier slabs while a late pointer remains live, checks exact
+many slabs, frees earlier slabs while a late pointer remains live, checks exact
 live/reserved/fragmentation counters, observes RSS growth and fall, purges the
 warm slab, exercises zeroed and direct allocations, and performs four
 deterministically shuffled mixed-class rounds over classes 1 through 127.
@@ -145,8 +145,27 @@ The compact-term lifecycle test locks the 24-byte 64-bit header and verifies
 that parsed argument access still addresses the contiguous array.
 
 The allocator remains process-global and non-thread-safe, matching the old
-allocator.  The 1 MiB reservation is virtual address space; untouched pages do
+allocator.  A slab reservation is virtual address space; untouched pages do
 not equal RSS.  A warm slab can make logical fragmentation look large for a
 small class, which is why all accounting components and RSS are reported
 separately.  Phase 5 does not repair the already documented checkpoint
 selector/AVL restart divergence and does not begin Phase 6.
+
+## Phase-5 resident-memory follow-up (2026-08-10)
+
+The file-backed full Osborn proof exposed 35,658,048 allocator-reserved bytes
+for 20,105,440 live bytes.  Four classes retained completely empty one-MiB
+warm slabs, and several low-occupancy classes retained almost a MiB for only
+bytes or kilobytes of live data.  Reducing the fixed power-of-two slab to 256
+KiB preserves mask-based owner recovery and immediate empty-slab unmapping
+while substantially lowering this per-class floor.
+
+At the exact 1,000-given CHAT boundary, current reservation falls from
+32,512,320 to 21,502,272 bytes and fragmentation from 14,747,728 to 3,737,680
+bytes.  The complete 300-given candidate/hint/kept/given trace is
+byte-identical, the 1,000-given terminal search state is exact, and all
+lifecycle tests pass.  A controlled 1,000-given run takes 84.38 user seconds versus 74.63
+seconds with one-MiB slabs (+13.1%); this remains inside the full-proof CPU
+budget but requires final-boundary validation.  Peak prefix RSS changes only
+from 90,632 to 90,256 KiB because that peak is the fixed 84.8-MB initialization
+wave; the final current RSS probe falls from 84,504 to 80,852 KiB.

@@ -225,9 +225,9 @@ static void ensure_nodes(Compact_rewrite_bank bank)
 static void ensure_postings(Compact_rewrite_bank bank)
 {
   if (bank->posting_count == bank->posting_capacity) {
-    bank->posting_capacity = grow_capacity(bank->posting_capacity,
-                                            sizeof(*bank->postings),
-                                            "compact_rewrite: posting overflow");
+    bank->posting_capacity = grow_record_capacity(
+      bank->posting_capacity, sizeof(*bank->postings),
+      "compact_rewrite: posting overflow");
     bank->postings = safe_realloc(
       bank->postings, bank->posting_capacity * sizeof(*bank->postings));
   }

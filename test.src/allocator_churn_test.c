@@ -152,7 +152,7 @@ int main(int argc, char **argv)
         "logical live bytes return to baseline with a warm slab");
   CHECK(freed.slab_count == before.slab_count + 1,
         "one empty size-class slab remains warm");
-  CHECK(freed.reserved_bytes == before.reserved_bytes + 1024 * 1024,
+  CHECK(freed.reserved_bytes == before.reserved_bytes + memory_slab_bytes(),
         "warm slab reservation is explicit in accounting");
   memory_release_unused();
   memory_get_stats(&freed);

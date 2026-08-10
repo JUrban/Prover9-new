@@ -100,6 +100,23 @@ static size_t grow_node_capacity(size_t current, size_t item_size,
   return next;
 }
 
+static size_t grow_dense_capacity(size_t current, size_t item_size,
+                                  const char *message)
+{
+  size_t increment, next;
+  if (current == 0)
+    return 64;
+  increment = current / 4;
+  if (increment < 64)
+    increment = 64;
+  if (increment > SIZE_MAX - current)
+    fatal_error((char *) message);
+  next = current + increment;
+  if (next > SIZE_MAX / item_size)
+    fatal_error((char *) message);
+  return next;
+}
+
 static uint64_t hash_id(uint64_t x)
 {
   x ^= x >> 30;
@@ -146,7 +163,7 @@ static void update_peak(Compact_unit_index index)
 
 #define ENSURE_ARRAY(index, field, count, capacity, message) do {       \
   if ((index)->count == (index)->capacity) {                            \
-    (index)->capacity = grow_capacity((index)->capacity,                \
+    (index)->capacity = grow_dense_capacity((index)->capacity,          \
       sizeof(*(index)->field), (message));                              \
     (index)->field = safe_realloc((index)->field,                       \
       (index)->capacity * sizeof(*(index)->field));                     \

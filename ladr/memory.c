@@ -34,7 +34,7 @@
 
 #define DEFAULT_MAX_MEGS  49152  /* 48 GB; change with set_max_megs(n) */
 #define MAX_SLAB_LISTS      128  /* larger requests use direct allocation */
-#define SLAB_BYTES      (1024 * 1024)
+#define SLAB_BYTES      (256 * 1024)
 #define SLAB_MAGIC ((uintptr_t) 0x51ab51abU)
 
 struct memory_slab {
@@ -492,6 +492,12 @@ void memory_release_unused(void)
 {
   release_empty_slabs();
 }  /* memory_release_unused */
+
+/* PUBLIC */
+unsigned long long memory_slab_bytes(void)
+{
+  return SLAB_BYTES;
+}  /* memory_slab_bytes */
 
 /*************
  *

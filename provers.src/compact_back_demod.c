@@ -279,7 +279,7 @@ static void ensure_occurrence_bytes(Compact_back_demod_index index,
   if (needed > UINT32_MAX)
     fatal_error("compact_back_demod: occurrence offsets exceed 32 bits");
   while (needed > index->occurrence_capacity) {
-    index->occurrence_capacity = grow_capacity(
+    index->occurrence_capacity = grow_record_capacity(
       index->occurrence_capacity, sizeof(*index->occurrences),
       "compact_back_demod: occurrence capacity overflow");
     index->occurrences = safe_realloc(
