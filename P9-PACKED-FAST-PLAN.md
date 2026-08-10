@@ -329,6 +329,26 @@ total user CPU is at least 8.4 times faster and ordinary/flipped hint time is
 47.7 times faster, far beyond the four-times gate, with unchanged peak RSS.
 The next required gate is the proof-producing full run.
 
+### Better-mode resident cleanup
+
+The Phase-5 proof-boundary audit found that `packed` and `packed_fast` still
+allocated the legacy 128-feature bitset and rewrite-symbol array even though
+their better postings path never reads either structure.  Better modes now
+omit those arrays.  The independent preview candidate/intersection workspace
+is also allocated only on the first collective preview; ordinary OTTER hint
+matching leaves it absent and reports
+`Packed_hint_preview_workspace: initialized=0, bytes=0`.
+
+At the 300-given CHAT boundary, packed reference/table storage falls by
+5,767,424 bytes (5.50 MiB), from 29,648,564 to 23,881,140 bytes, and current
+RSS falls from 67,808 to 61,588 KiB.  All 126,530 candidate/hint/kept/given
+trace records are byte-identical.  At the isolated 1,000-given boundary the
+terminal state is exact, current RSS falls from 80,284 to 73,540 KiB, and
+user CPU improves from 92.62 to 87.26 seconds.  Hint trace, hint preview,
+hint checkpoint, collective balanced/frontier, hint-postings, and compact
+OTTER audit suites pass.  Startup peak RSS remains about 90.4 MiB because the
+initial full hint parsing wave, not the persistent packed bank, sets it.
+
 ### Guarded full-run result
 
 The 900-CPU-second/512-MiB guarded selected-DISCOUNT run did not prove the

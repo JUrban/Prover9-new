@@ -588,6 +588,19 @@ copies and touches predecessor arrays.  A two-second sample also catches a
 late rebuild peak before compaction releases pages.  This slice is accepted
 as an exact reduction, but it does **not** close the Phase-5 RSS gate.
 
+The next packed-hint cleanup removes two better-mode structures that were
+provably dead after construction: the legacy 128-feature bitset and the
+legacy rewrite-symbol array.  Collective preview candidate/intersection
+scratch is now lazy and separately reported, so ordinary OTTER does not pay
+for a second full workspace.  Persistent packed storage falls by 5,767,424
+bytes (5.50 MiB) at both CHAT boundaries.  The 300-given oracle retains all
+126,530 exact event records; the isolated 1,000-given run retains the exact
+terminal state, reduces current RSS from 80,284 to 73,540 KiB, and improves
+user CPU from 92.62 to 87.26 seconds.  Dedicated preview, hint trace,
+checkpoint, collective scheduler, hint-postings, and compact audit tests all
+pass.  Full-proof RSS remains to be measured before counting the saving at
+the acceptance boundary.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:

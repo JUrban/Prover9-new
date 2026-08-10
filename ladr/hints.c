@@ -270,7 +270,7 @@ static void packed_reserve_hints(unsigned id)
     while (cap <= id)
       cap *= 2;
     new_words = (cap + 63) / 64;
-    {
+    if (!Better_packed_index) {
       unsigned long long *bits = safe_calloc(
         (size_t) 128 * new_words, sizeof(unsigned long long));
       if (Packed_feature_bitsets != NULL) {
@@ -287,20 +287,24 @@ static void packed_reserve_hints(unsigned id)
                                      (size_t) cap * sizeof(Topform));
     Packed_hint_active = safe_realloc(Packed_hint_active, cap);
     Packed_hint_anyconst = safe_realloc(Packed_hint_anyconst, cap);
-    Packed_hint_rewrite_symbols = safe_realloc(
-      Packed_hint_rewrite_symbols,
-      (size_t) cap * sizeof(unsigned long long));
+    if (!Better_packed_index)
+      Packed_hint_rewrite_symbols = safe_realloc(
+        Packed_hint_rewrite_symbols,
+        (size_t) cap * sizeof(unsigned long long));
     Packed_hint_pos_features = safe_realloc(
       Packed_hint_pos_features, (size_t) cap * sizeof(unsigned long long));
     Packed_hint_neg_features = safe_realloc(
       Packed_hint_neg_features, (size_t) cap * sizeof(unsigned long long));
     Packed_candidate_mark = safe_realloc(Packed_candidate_mark,
                                          (size_t) cap * sizeof(unsigned));
-    Preview_candidate_mark = safe_realloc(
-      Preview_candidate_mark, (size_t) cap * sizeof(unsigned));
-    Preview_candidates = safe_realloc(
-      Preview_candidates, (size_t) cap * sizeof(unsigned));
-    Preview_candidates_capacity = cap;
+    if (Preview_candidate_mark != NULL)
+      Preview_candidate_mark = safe_realloc(
+        Preview_candidate_mark, (size_t) cap * sizeof(unsigned));
+    if (Preview_candidates != NULL) {
+      Preview_candidates = safe_realloc(
+        Preview_candidates, (size_t) cap * sizeof(unsigned));
+      Preview_candidates_capacity = cap;
+    }
     if (Better_packed_index) {
       Better_hint_feature_count = safe_realloc(
         Better_hint_feature_count, (size_t) cap * sizeof(unsigned));
@@ -317,33 +321,32 @@ static void packed_reserve_hints(unsigned id)
         Better_intersection_member, (size_t) cap * sizeof(unsigned));
       Better_intersection_match = safe_realloc(
         Better_intersection_match, (size_t) cap * sizeof(unsigned));
-      Preview_intersection_member = safe_realloc(
-        Preview_intersection_member, (size_t) cap * sizeof(unsigned));
-      Preview_intersection_match = safe_realloc(
-        Preview_intersection_match, (size_t) cap * sizeof(unsigned));
-      Preview_intersection_ids = safe_realloc(
-        Preview_intersection_ids, (size_t) cap * sizeof(unsigned));
-      Preview_intersection_capacity = cap;
-      if (Preview_key_scratch_capacity == 0) {
-        Preview_key_scratch_capacity = 32;
-        Preview_key_scratch = safe_calloc(
-          Preview_key_scratch_capacity, sizeof(*Preview_key_scratch));
+      if (Preview_intersection_member != NULL) {
+        Preview_intersection_member = safe_realloc(
+          Preview_intersection_member, (size_t) cap * sizeof(unsigned));
+        Preview_intersection_match = safe_realloc(
+          Preview_intersection_match, (size_t) cap * sizeof(unsigned));
+        Preview_intersection_ids = safe_realloc(
+          Preview_intersection_ids, (size_t) cap * sizeof(unsigned));
+        Preview_intersection_capacity = cap;
       }
     }
     memset(Packed_hint_by_id + old, 0,
            (size_t) (cap - old) * sizeof(Topform));
     memset(Packed_hint_active + old, 0, cap - old);
     memset(Packed_hint_anyconst + old, 0, cap - old);
-    memset(Packed_hint_rewrite_symbols + old, 0,
-           (size_t) (cap - old) * sizeof(unsigned long long));
+    if (Packed_hint_rewrite_symbols != NULL)
+      memset(Packed_hint_rewrite_symbols + old, 0,
+             (size_t) (cap - old) * sizeof(unsigned long long));
     memset(Packed_hint_pos_features + old, 0,
            (size_t) (cap - old) * sizeof(unsigned long long));
     memset(Packed_hint_neg_features + old, 0,
            (size_t) (cap - old) * sizeof(unsigned long long));
     memset(Packed_candidate_mark + old, 0,
            (size_t) (cap - old) * sizeof(unsigned));
-    memset(Preview_candidate_mark + old, 0,
-           (size_t) (cap - old) * sizeof(unsigned));
+    if (Preview_candidate_mark != NULL)
+      memset(Preview_candidate_mark + old, 0,
+             (size_t) (cap - old) * sizeof(unsigned));
     if (Better_packed_index) {
       memset(Better_hint_feature_count + old, 0,
              (size_t) (cap - old) * sizeof(unsigned));
@@ -357,14 +360,40 @@ static void packed_reserve_hints(unsigned id)
              (size_t) (cap - old) * sizeof(unsigned));
       memset(Better_intersection_match + old, 0,
              (size_t) (cap - old) * sizeof(unsigned));
-      memset(Preview_intersection_member + old, 0,
-             (size_t) (cap - old) * sizeof(unsigned));
-      memset(Preview_intersection_match + old, 0,
-             (size_t) (cap - old) * sizeof(unsigned));
+      if (Preview_intersection_member != NULL) {
+        memset(Preview_intersection_member + old, 0,
+               (size_t) (cap - old) * sizeof(unsigned));
+        memset(Preview_intersection_match + old, 0,
+               (size_t) (cap - old) * sizeof(unsigned));
+      }
     }
     Packed_hint_capacity = cap;
   }
 }
+
+static void packed_reserve_preview_workspace(void)
+{
+  unsigned cap = Packed_hint_capacity;
+  if (cap == 0)
+    return;
+  if (Preview_candidate_mark == NULL)
+    Preview_candidate_mark = safe_calloc(cap, sizeof(unsigned));
+  if (Preview_candidates == NULL) {
+    Preview_candidates = safe_malloc((size_t) cap * sizeof(unsigned));
+    Preview_candidates_capacity = cap;
+  }
+  if (Better_packed_index && Preview_intersection_member == NULL) {
+    Preview_intersection_member = safe_calloc(cap, sizeof(unsigned));
+    Preview_intersection_match = safe_calloc(cap, sizeof(unsigned));
+    Preview_intersection_ids = safe_malloc((size_t) cap * sizeof(unsigned));
+    Preview_intersection_capacity = cap;
+  }
+  if (Better_packed_index && Preview_key_scratch == NULL) {
+    Preview_key_scratch_capacity = 32;
+    Preview_key_scratch = safe_calloc(
+      Preview_key_scratch_capacity, sizeof(*Preview_key_scratch));
+  }
+}  /* packed_reserve_preview_workspace */
 
 static BOOL packed_term_has_theory_symbol(Term t);
 
@@ -428,14 +457,11 @@ static void packed_index_hint_terms(Topform h, BOOL anyconst)
   packed_reserve_hints(id);
   Packed_hint_by_id[id] = h;
   Packed_hint_active[id] = 1;
-  if (Better_packed_index) {
-    Packed_hint_anyconst[id] = anyconst ? 1 : 0;
+  Packed_hint_anyconst[id] = anyconst ? 1 : 0;
+  Packed_hint_pos_features[id] = 0;
+  Packed_hint_neg_features[id] = 0;
+  if (!Better_packed_index)
     Packed_hint_rewrite_symbols[id] = 0;
-    Packed_hint_pos_features[id] = 0;
-    Packed_hint_neg_features[id] = 0;
-  }
-  else if (anyconst)
-    Packed_hint_anyconst[id] = 1;
   for (lit = h->literals; lit != NULL; lit = lit->next) {
     int i;
     unsigned long long mask = packed_term_feature_mask(lit->atom, FALSE);
@@ -443,18 +469,20 @@ static void packed_index_hint_terms(Topform h, BOOL anyconst)
       Packed_hint_pos_features[id] |= mask;
     else
       Packed_hint_neg_features[id] |= mask;
-    if (Back_demod_hints && !anyconst) {
+    if (Back_demod_hints && !Better_packed_index && !anyconst) {
       for (i = 0; i < ARITY(lit->atom); i++)
         Packed_hint_rewrite_symbols[id] |=
           packed_rewrite_symbol_bits(ARG(lit->atom,i));
     }
   }
-  for (bit = 0; bit < 64; bit++) {
-    unsigned long long b = 1ULL << bit;
-    if (Packed_hint_pos_features[id] & b)
-      packed_add_feature_ref(1, bit, id);
-    if (Packed_hint_neg_features[id] & b)
-      packed_add_feature_ref(0, bit, id);
+  if (!Better_packed_index) {
+    for (bit = 0; bit < 64; bit++) {
+      unsigned long long b = 1ULL << bit;
+      if (Packed_hint_pos_features[id] & b)
+        packed_add_feature_ref(1, bit, id);
+      if (Packed_hint_neg_features[id] & b)
+        packed_add_feature_ref(0, bit, id);
+    }
   }
 }
 
@@ -2228,10 +2256,11 @@ Topform preview_weight_with_hints(Topform c,
   Hint_preview_active = TRUE;
 
   /* Packed retrieval uses global arrays only as reusable query workspace.
-     Temporarily swap in preview-owned workspace so even serial marks,
-     capacities, and allocator-owned persistent scratch objects are exactly
+     Lazily reserve preview-owned scratch, then temporarily swap it in so
+     authoritative serial marks, capacities, and scratch objects are exactly
      unchanged when this function returns. */
   if (Packed_index) {
+    packed_reserve_preview_workspace();
     saved_candidate_mark = Packed_candidate_mark;
     saved_candidates = Packed_candidates;
     saved_candidate_serial = Packed_candidate_serial;
@@ -2651,16 +2680,17 @@ void packed_hint_index_stats(unsigned long long *node_bytes,
 {
   struct hint_postings_stats posting_stats;
   *node_bytes = 0;
-  *reference_bytes = Packed_index ?
+  *reference_bytes = Packed_feature_bitsets != NULL ?
     (unsigned long long) 128 * Packed_feature_words *
       sizeof(unsigned long long) : 0;
   *table_bytes = Packed_index ?
     (unsigned long long) Packed_hint_capacity *
       (sizeof(Topform) + 2 * sizeof(unsigned char) + sizeof(unsigned) +
-       3 * sizeof(unsigned long long)) +
-    (unsigned long long) Packed_candidates_capacity * sizeof(unsigned) +
-    (unsigned long long) Packed_hint_capacity * sizeof(unsigned) +
-    (unsigned long long) Preview_candidates_capacity * sizeof(unsigned) : 0;
+       2 * sizeof(unsigned long long)) +
+    (Packed_hint_rewrite_symbols == NULL ? 0 :
+      (unsigned long long) Packed_hint_capacity *
+        sizeof(unsigned long long)) +
+    (unsigned long long) Packed_candidates_capacity * sizeof(unsigned) : 0;
   *candidate_checks = Packed_candidate_checks;
   if (Better_packed_index) {
     hint_postings_get_stats(Better_postings, &posting_stats);
@@ -2675,10 +2705,6 @@ void packed_hint_index_stats(unsigned long long *node_bytes,
       (unsigned long long) Better_key_scratch_capacity *
         sizeof(unsigned long long) +
       (unsigned long long) Better_intersection_capacity * sizeof(unsigned) +
-      (unsigned long long) Packed_hint_capacity * 2 * sizeof(unsigned) +
-      (unsigned long long) Preview_intersection_capacity * sizeof(unsigned) +
-      (unsigned long long) Preview_key_scratch_capacity *
-        sizeof(unsigned long long) +
       (unsigned long long) Better_equivalence_bucket_capacity *
         sizeof(unsigned) +
       (unsigned long long) Better_anyconst_reference_capacity *
@@ -2688,6 +2714,26 @@ void packed_hint_index_stats(unsigned long long *node_bytes,
     *table_bytes += (unsigned long long) FAST_MATCH_CACHE_CAPACITY *
       sizeof(struct fast_match_cache_entry);
 }
+
+static unsigned long long packed_preview_workspace_bytes(void)
+{
+  unsigned long long bytes = 0;
+  if (Preview_candidate_mark != NULL)
+    bytes += (unsigned long long) Packed_hint_capacity * sizeof(unsigned);
+  if (Preview_candidates != NULL)
+    bytes += (unsigned long long) Preview_candidates_capacity *
+             sizeof(unsigned);
+  if (Preview_intersection_member != NULL)
+    bytes += (unsigned long long) Packed_hint_capacity *
+             2 * sizeof(unsigned);
+  if (Preview_intersection_ids != NULL)
+    bytes += (unsigned long long) Preview_intersection_capacity *
+             sizeof(unsigned);
+  if (Preview_key_scratch != NULL)
+    bytes += (unsigned long long) Preview_key_scratch_capacity *
+             sizeof(unsigned long long);
+  return bytes;
+}  /* packed_preview_workspace_bytes */
 
 /* PUBLIC */
 void fprint_packed_hint_operation_stats(FILE *fp)
@@ -2721,6 +2767,10 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             s->candidate_buckets[4], s->candidate_buckets[5],
             s->candidate_buckets[6], s->candidate_buckets[7]);
   }
+  fprintf(fp,
+          "Packed_hint_preview_workspace: initialized=%d, bytes=%llu.\n",
+          Preview_candidate_mark != NULL,
+          packed_preview_workspace_bytes());
   if (Better_packed_index) {
     struct hint_postings_stats s;
     unsigned long long equivalence_stale;
