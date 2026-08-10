@@ -150,11 +150,16 @@ static void ensure_hash(Compact_feature_index index)
 {
   if (index->hash_capacity == 0)
     rehash(index, 128);
-  else if ((index->hash_count + index->hash_tombstones + 1) * 10 >=
-           index->hash_capacity * 7) {
-    if (index->hash_capacity > SIZE_MAX / 2)
-      fatal_error("compact_feature_index: hash overflow");
-    rehash(index, index->hash_capacity * 2);
+  else if ((index->hash_count + index->hash_tombstones + 1) * 20 >=
+           index->hash_capacity * 17) {
+    if (index->hash_tombstones != 0 &&
+        (index->hash_count + 1) * 20 < index->hash_capacity * 17)
+      rehash(index, index->hash_capacity);
+    else {
+      if (index->hash_capacity > SIZE_MAX / 2)
+        fatal_error("compact_feature_index: hash overflow");
+      rehash(index, index->hash_capacity * 2);
+    }
   }
 }
 

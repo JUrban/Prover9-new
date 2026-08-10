@@ -261,11 +261,16 @@ static void ensure_hash(Compact_rewrite_bank bank)
 {
   if (bank->hash_capacity == 0)
     rehash(bank, 128);
-  else if ((bank->hash_count + bank->hash_tombstones + 1) * 10 >=
-           bank->hash_capacity * 7) {
-    if (bank->hash_capacity > SIZE_MAX / 2)
-      fatal_error("compact_rewrite: hash overflow");
-    rehash(bank, bank->hash_capacity * 2);
+  else if ((bank->hash_count + bank->hash_tombstones + 1) * 20 >=
+           bank->hash_capacity * 17) {
+    if (bank->hash_tombstones != 0 &&
+        (bank->hash_count + 1) * 20 < bank->hash_capacity * 17)
+      rehash(bank, bank->hash_capacity);
+    else {
+      if (bank->hash_capacity > SIZE_MAX / 2)
+        fatal_error("compact_rewrite: hash overflow");
+      rehash(bank, bank->hash_capacity * 2);
+    }
   }
 }
 
