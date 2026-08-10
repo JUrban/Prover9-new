@@ -119,6 +119,13 @@ and 91,048 KiB peak RSS.  This makes `chat_test.in`, rather than a synthetic
 microbenchmark alone, the acceptance oracle for both the signature filter and
 its memory/CPU tradeoff.
 
+At 1,500 givens the paired full-body/archive replay remains exact and takes
+194.09/202.51 user seconds with 142,996/115,752 KiB peak RSS.  The archive
+back-demodulation clock is 16.03 seconds, down from 63.66 before sparse path
+buckets.  The remaining comparison against ordinary OTTER is therefore a
+compact-rewrite problem, not evidence that dense passive materialization has
+undone the back-index gain.
+
 ## Exact old and compatibility proof baseline
 
 | Mode | Result | Given | Generated | Kept | User CPU | Wall | Peak RSS |

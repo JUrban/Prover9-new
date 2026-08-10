@@ -377,6 +377,19 @@ while this complete prefix remains 21.1% faster than the earlier 131.01-second
 packed-record archive.  A parallel full-body replay reaches the same state in
 101.87 seconds and 103,572 KiB peak RSS.
 
+At 1,500 givens the same parallel CHAT comparison confirms that the gain
+survives the larger passive population.  Full-body compact OTTER takes 194.09
+user seconds and 142,996 KiB peak RSS; the zero-cache dense archive takes
+202.51 seconds and 115,752 KiB.  These are 23.7% and 21.1% faster than their
+respective pre-bucket 254.36/256.53-second runs.  Both end at the exact compact
+state (`Generated=2,947,136`, `Kept=66,933`, `Sos=42,583`,
+`Demods=36,145`, `Disabled=23,089`).  The archive `back_demod` clock falls
+from 63.66 to 16.03 seconds.  Ordinary packed-fast OTTER still takes only
+154.79 seconds, so full-body compact is 1.25 times and the radical archive is
+1.31 times ordinary CPU.  Compact demodulation is now the principal measured
+gap: the archive spends 78.61 seconds there versus 43.99 in the ordinary
+baseline.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:
