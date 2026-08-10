@@ -179,3 +179,15 @@ virtual-reservation saving therefore yields 9.63 MiB less current RSS, not an
 11-MiB peak guarantee: a material part of the old unallocated slab capacity
 had never faulted resident.  The exact proof takes 804.04 user seconds versus
 786.23 seconds with one-MiB slabs and the old array capacities (+2.3%).
+
+Whole-process reports now include Linux `smaps_rollup` residency classes and,
+when glibc provides `mallinfo2`, libc arena/mmap accounting.  These probes run
+only at an existing statistics snapshot and are zero-filled on unsupported
+platforms.  At the exact 1,000-given CHAT state, process RSS is 73,496 KiB:
+70,356 KiB is anonymous, 896 KiB private-clean, and 2,244 KiB shared-clean.
+Glibc owns a 29,949,952-byte arena plus 23,912,448 malloc-mmap bytes; the
+arena contains 21,336,336 in-use and 8,613,616 free bytes.  The pointer-count
+allocator separately reserves 21,502,272 bytes in direct slabs.  Thus libc
+fragmentation is measurable, but its free arena bytes are not automatically
+reclaimable or additive to an RSS saving; only 131,824 bytes are reported as
+the top releasable block at this boundary.

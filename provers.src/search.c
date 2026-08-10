@@ -2537,7 +2537,9 @@ void update_memory_stats(void)
   struct cold_passive_store_stats ps =
     cold_passive_store_get_stats(Dense_body_store);
   struct memory_stats ms;
+  struct memory_process_stats process;
   memory_get_stats(&ms);
+  memory_get_process_stats(&process);
   Clist_pos p;
   size_t i;
 
@@ -2687,6 +2689,20 @@ void update_memory_stats(void)
   Stats.allocator_peak_slab_count = ms.peak_slab_count;
   Stats.allocator_reclaimed_slabs = ms.reclaimed_slabs;
   Stats.allocator_reclaimed_bytes = ms.reclaimed_bytes;
+  Stats.process_smaps_supported = process.smaps_supported;
+  Stats.process_libc_heap_supported = process.libc_heap_supported;
+  Stats.process_pss_kbytes = process.pss_kbytes;
+  Stats.process_anonymous_kbytes = process.anonymous_kbytes;
+  Stats.process_shared_clean_kbytes = process.shared_clean_kbytes;
+  Stats.process_shared_dirty_kbytes = process.shared_dirty_kbytes;
+  Stats.process_private_clean_kbytes = process.private_clean_kbytes;
+  Stats.process_private_dirty_kbytes = process.private_dirty_kbytes;
+  Stats.process_swap_kbytes = process.swap_kbytes;
+  Stats.libc_arena_bytes = process.libc_arena_bytes;
+  Stats.libc_mmap_bytes = process.libc_mmap_bytes;
+  Stats.libc_in_use_bytes = process.libc_in_use_bytes;
+  Stats.libc_free_bytes = process.libc_free_bytes;
+  Stats.libc_releasable_bytes = process.libc_releasable_bytes;
   Stats.current_rss_kbytes = memory_current_rss_kbytes();
   Stats.peak_rss_kbytes = memory_peak_rss_kbytes();
   Stats.allocator_cumulative_bytes = ms.cumulative_bytes;
@@ -3398,6 +3414,24 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
           comma_num(s.allocator_cumulative_bytes),
           comma_num(s.fpa_live_nodes), comma_num(s.fpa_peak_nodes),
           comma_num(s.fpa_live_lists), comma_num(s.fpa_peak_lists));
+  if (s.process_smaps_supported)
+    fprintf(fp,
+            "Process_residency_kb: pss=%s, anonymous=%s, shared_clean=%s, "
+            "shared_dirty=%s, private_clean=%s, private_dirty=%s, swap=%s.\n",
+            comma_num(s.process_pss_kbytes),
+            comma_num(s.process_anonymous_kbytes),
+            comma_num(s.process_shared_clean_kbytes),
+            comma_num(s.process_shared_dirty_kbytes),
+            comma_num(s.process_private_clean_kbytes),
+            comma_num(s.process_private_dirty_kbytes),
+            comma_num(s.process_swap_kbytes));
+  if (s.process_libc_heap_supported)
+    fprintf(fp,
+            "Libc_heap_bytes: arena=%s, mmap=%s, in_use=%s, free=%s, "
+            "releasable=%s.\n",
+            comma_num(s.libc_arena_bytes), comma_num(s.libc_mmap_bytes),
+            comma_num(s.libc_in_use_bytes), comma_num(s.libc_free_bytes),
+            comma_num(s.libc_releasable_bytes));
 
   fprintf(fp,"User_CPU=%.2f, System_CPU=%.2f, Wall_clock=%u.\n",
 	  user_seconds(), system_seconds(), wallclock());

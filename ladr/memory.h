@@ -60,6 +60,26 @@ struct memory_stats {
   unsigned long long cumulative_bytes;
 };
 
+/* Whole-process diagnostics.  smaps values are KiB as reported by the
+   kernel; libc values are bytes.  Unsupported platform fields remain zero. */
+struct memory_process_stats {
+  BOOL smaps_supported;
+  BOOL libc_heap_supported;
+  unsigned long long rss_kbytes;
+  unsigned long long pss_kbytes;
+  unsigned long long anonymous_kbytes;
+  unsigned long long shared_clean_kbytes;
+  unsigned long long shared_dirty_kbytes;
+  unsigned long long private_clean_kbytes;
+  unsigned long long private_dirty_kbytes;
+  unsigned long long swap_kbytes;
+  unsigned long long libc_arena_bytes;
+  unsigned long long libc_mmap_bytes;
+  unsigned long long libc_in_use_bytes;
+  unsigned long long libc_free_bytes;
+  unsigned long long libc_releasable_bytes;
+};
+
 /* Public function prototypes from memory.c */
 
 void *get_cmem(unsigned n);
@@ -71,6 +91,8 @@ void free_mem(void *q, unsigned n);
 void memory_report(FILE *fp);
 
 void memory_get_stats(struct memory_stats *stats);
+
+void memory_get_process_stats(struct memory_process_stats *stats);
 
 void memory_release_unused(void);
 

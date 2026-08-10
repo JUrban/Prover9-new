@@ -22,6 +22,9 @@
 #include <unistd.h>
 #include <string.h>
 #include <stdint.h>
+#if defined(__GLIBC__) && !defined(__EMSCRIPTEN__)
+#include <malloc.h>
+#endif
 #if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
 #include <mach/mach.h>
 #endif
@@ -486,6 +489,54 @@ void memory_get_stats(struct memory_stats *stats)
                                stats->logical_live_bytes ?
     stats->reserved_bytes - stats->logical_live_bytes : 0;
 }  /* memory_get_stats */
+
+/* PUBLIC */
+void memory_get_process_stats(struct memory_process_stats *stats)
+{
+  memset(stats, 0, sizeof(*stats));
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+  {
+    FILE *fp = fopen("/proc/self/smaps_rollup", "r");
+    char line[256];
+    if (fp != NULL) {
+      stats->smaps_supported = TRUE;
+      while (fgets(line, sizeof(line), fp) != NULL) {
+        unsigned long long value;
+        if (sscanf(line, "Rss: %llu kB", &value) == 1)
+          stats->rss_kbytes = value;
+        else if (sscanf(line, "Pss: %llu kB", &value) == 1)
+          stats->pss_kbytes = value;
+        else if (sscanf(line, "Anonymous: %llu kB", &value) == 1)
+          stats->anonymous_kbytes = value;
+        else if (sscanf(line, "Shared_Clean: %llu kB", &value) == 1)
+          stats->shared_clean_kbytes = value;
+        else if (sscanf(line, "Shared_Dirty: %llu kB", &value) == 1)
+          stats->shared_dirty_kbytes = value;
+        else if (sscanf(line, "Private_Clean: %llu kB", &value) == 1)
+          stats->private_clean_kbytes = value;
+        else if (sscanf(line, "Private_Dirty: %llu kB", &value) == 1)
+          stats->private_dirty_kbytes = value;
+        else if (sscanf(line, "Swap: %llu kB", &value) == 1)
+          stats->swap_kbytes = value;
+      }
+      fclose(fp);
+    }
+  }
+#endif
+#if defined(__GLIBC__) && !defined(__EMSCRIPTEN__)
+#if __GLIBC_PREREQ(2, 33)
+  {
+    struct mallinfo2 info = mallinfo2();
+    stats->libc_heap_supported = TRUE;
+    stats->libc_arena_bytes = info.arena;
+    stats->libc_mmap_bytes = info.hblkhd;
+    stats->libc_in_use_bytes = info.uordblks;
+    stats->libc_free_bytes = info.fordblks;
+    stats->libc_releasable_bytes = info.keepcost;
+  }
+#endif
+#endif
+}  /* memory_get_process_stats */
 
 /* PUBLIC */
 void memory_release_unused(void)

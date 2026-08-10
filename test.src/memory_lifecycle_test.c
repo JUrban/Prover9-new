@@ -62,6 +62,25 @@ static void compact_term_layout_test(void)
   zap_term(t);
 }
 
+static void process_accounting_test(void)
+{
+  struct memory_process_stats stats;
+  memory_get_process_stats(&stats);
+  if (stats.smaps_supported) {
+    CHECK(stats.rss_kbytes > 0 && stats.pss_kbytes > 0,
+          "smaps rollup reports resident and proportional bytes");
+    CHECK(stats.private_clean_kbytes + stats.private_dirty_kbytes <=
+          stats.rss_kbytes,
+          "private smaps components do not exceed RSS");
+  }
+  if (stats.libc_heap_supported) {
+    CHECK(stats.libc_arena_bytes >= stats.libc_in_use_bytes,
+          "libc arena covers its allocated heap bytes");
+    CHECK(stats.libc_arena_bytes >= stats.libc_free_bytes,
+          "libc arena covers its free heap bytes");
+  }
+}
+
 static void compression_shape_test(void)
 {
   enum { WIDTH = 300, DEPTH = 300, LITERALS = 1100 };
@@ -399,6 +418,7 @@ static void fpa_hash_invariant_test(void)
 int main(void)
 {
   init_standard_ladr();
+  process_accounting_test();
   compact_term_layout_test();
   compression_round_trip_test();
   fpa_pruning_test();

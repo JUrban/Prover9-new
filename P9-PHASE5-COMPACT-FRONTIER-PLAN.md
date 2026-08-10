@@ -611,6 +611,16 @@ gate by 42,968 KiB.  A two-second sample peaks at 166,512 KiB and therefore
 also confirms that the external maximum includes a shorter allocation or
 rebuild transient.  The packed cleanup is accepted, but Phase 5 remains open.
 
+To avoid guessing at the remaining 42-MiB gap, statistics now report Linux
+`smaps_rollup` classes and glibc `mallinfo2` arena/mmap state.  At the exact
+1,000-given CHAT boundary, 70,356 of 73,496 KiB is anonymous.  Glibc reports
+a 29,949,952-byte arena, 23,912,448 malloc-mmap bytes, and 8,613,616 free
+arena bytes; the slab allocator separately reserves 21,502,272 bytes.  Only
+131,824 libc bytes are the top releasable block, so simply calling
+`malloc_trim` cannot be credited with the full 8.6-MiB arena slack.  The
+300-given full trace and 1,000-given terminal state remain exact, and the
+memory lifecycle, allocator churn, and bookkeeping tests pass.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:
