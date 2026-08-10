@@ -9,6 +9,7 @@
 
 struct cbd_posting {
   uint32_t record;
+  uint32_t token_offset;
   uint32_t next;
 };
 
@@ -213,9 +214,29 @@ static void ensure_tokens(Compact_back_demod_index index, size_t extra)
   }
 }
 
+static void append_occurrence(Compact_back_demod_index index,
+                              uint32_t record, unsigned symbol,
+                              uint32_t token_offset)
+{
+  uint32_t posting;
+  ensure_symbols(index, symbol);
+  ENSURE_ARRAY(index, postings, posting_count, posting_capacity,
+               "compact_back_demod: posting overflow");
+  if (index->posting_count > UINT32_MAX)
+    fatal_error("compact_back_demod: posting offsets exceed 32 bits");
+  posting = (uint32_t) index->posting_count++;
+  index->postings[posting].record = record;
+  index->postings[posting].token_offset = token_offset;
+  index->postings[posting].next = CBD_NONE;
+  if (index->posting_heads[symbol] == CBD_NONE)
+    index->posting_heads[symbol] = posting;
+  else
+    index->postings[index->posting_tails[symbol]].next = posting;
+  index->posting_tails[symbol] = posting;
+}
+
 static uint32_t append_term(Compact_back_demod_index index, Term term,
-                            uint32_t *length, int32_t **symbols,
-                            size_t *symbol_count, size_t *symbol_capacity)
+                            uint32_t record, uint32_t *length)
 {
   size_t offset = index->token_count;
   size_t capacity = 128, top = 0;
@@ -227,23 +248,11 @@ static uint32_t append_term(Compact_back_demod_index index, Term term,
     int i;
     int32_t code = VARIABLE(current) ?
       -(int32_t) VARNUM(current) - 1 : (int32_t) SYMNUM(current);
+    uint32_t token_offset = (uint32_t) index->token_count;
     ensure_tokens(index, 1);
     index->tokens[index->token_count++] = code;
-    if (code >= 0) {
-      size_t at;
-      for (at = 0; at < *symbol_count && (*symbols)[at] != code; at++)
-        ;
-      if (at == *symbol_count) {
-        if (*symbol_count == *symbol_capacity) {
-          *symbol_capacity = grow_capacity(
-            *symbol_capacity, sizeof(**symbols),
-            "compact_back_demod: temporary symbol overflow");
-          *symbols = safe_realloc(
-            *symbols, *symbol_capacity * sizeof(**symbols));
-        }
-        (*symbols)[(*symbol_count)++] = code;
-      }
-    }
+    if (code >= 0)
+      append_occurrence(index, record, (unsigned) code, token_offset);
     for (i = ARITY(current) - 1; i >= 0; i--) {
       if (top == capacity) {
         capacity *= 2;
@@ -282,8 +291,6 @@ BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
 {
   uint32_t record_index;
   struct cbd_record *record;
-  int32_t *symbols = NULL;
-  size_t symbol_count = 0, symbol_capacity = 0, i;
   Literals literal;
   size_t at_hash;
   if (index == NULL || clause == NULL || clause->id == 0 ||
@@ -311,29 +318,10 @@ BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
         fatal_error("compact_back_demod: root offsets exceed 32 bits");
       root = &index->roots[index->root_count++];
       root->token_offset = append_term(
-        index, ARG(atom, arg), &root->token_length,
-        &symbols, &symbol_count, &symbol_capacity);
+        index, ARG(atom, arg), record_index, &root->token_length);
       record->root_count++;
     }
   }
-  for (i = 0; i < symbol_count; i++) {
-    unsigned symbol = (unsigned) symbols[i];
-    uint32_t posting;
-    ensure_symbols(index, symbol);
-    ENSURE_ARRAY(index, postings, posting_count, posting_capacity,
-                 "compact_back_demod: posting overflow");
-    if (index->posting_count > UINT32_MAX)
-      fatal_error("compact_back_demod: posting offsets exceed 32 bits");
-    posting = (uint32_t) index->posting_count++;
-    index->postings[posting].record = record_index;
-    index->postings[posting].next = CBD_NONE;
-    if (index->posting_heads[symbol] == CBD_NONE)
-      index->posting_heads[symbol] = posting;
-    else
-      index->postings[index->posting_tails[symbol]].next = posting;
-    index->posting_tails[symbol] = posting;
-  }
-  safe_free(symbols);
   ensure_hash(index);
   at_hash = hash_slot(index, clause->id, TRUE);
   if (index->hash_keys[at_hash] == CBD_TOMBSTONE)
@@ -398,6 +386,75 @@ static void collect_record(Compact_back_demod_index index, uint32_t at,
   index->results[(*count)++] = record->proof_id;
 }
 
+static uint32_t token_term_end(Compact_back_demod_index index,
+                               uint32_t position)
+{
+  int32_t code;
+  int i, arity;
+  if ((size_t) position >= index->token_count)
+    fatal_error("compact_back_demod: corrupt term token offset");
+  code = index->tokens[position++];
+  arity = code < 0 ? 0 : sn_to_arity(code);
+  for (i = 0; i < arity; i++)
+    position = token_term_end(index, position);
+  return position;
+}
+
+struct cbd_binding {
+  uint32_t offset;
+  uint32_t end;
+  unsigned char bound;
+};
+
+static BOOL match_token_term(Compact_back_demod_index index, Term pattern,
+                             uint32_t *position,
+                             struct cbd_binding *bindings)
+{
+  uint32_t at = *position;
+  int i;
+  if ((size_t) at >= index->token_count)
+    fatal_error("compact_back_demod: corrupt match token offset");
+  if (VARIABLE(pattern)) {
+    int variable = VARNUM(pattern);
+    uint32_t end;
+    if (variable < 0 || variable >= MAX_VARS)
+      fatal_error("compact_back_demod: pattern variable exceeds MAX_VARS");
+    end = token_term_end(index, at);
+    if (bindings[variable].bound) {
+      size_t old_length = bindings[variable].end - bindings[variable].offset;
+      size_t new_length = end - at;
+      if (old_length != new_length ||
+          memcmp(index->tokens + bindings[variable].offset,
+                 index->tokens + at,
+                 new_length * sizeof(*index->tokens)) != 0)
+        return FALSE;
+    }
+    else {
+      bindings[variable].offset = at;
+      bindings[variable].end = end;
+      bindings[variable].bound = TRUE;
+    }
+    *position = end;
+    return TRUE;
+  }
+  if (index->tokens[at] < 0 || index->tokens[at] != SYMNUM(pattern))
+    return FALSE;
+  *position = at + 1;
+  for (i = 0; i < ARITY(pattern); i++)
+    if (!match_token_term(index, ARG(pattern, i), position, bindings))
+      return FALSE;
+  return TRUE;
+}
+
+static BOOL occurrence_matches(Compact_back_demod_index index,
+                               Term pattern, uint32_t token_offset)
+{
+  struct cbd_binding bindings[MAX_VARS];
+  uint32_t position = token_offset;
+  memset(bindings, 0, sizeof(bindings));
+  return match_token_term(index, pattern, &position, bindings);
+}
+
 static void collect_symbol(Compact_back_demod_index index, Term pattern,
                            unsigned long long exclude_id, size_t *count)
 {
@@ -413,9 +470,14 @@ static void collect_symbol(Compact_back_demod_index index, Term pattern,
   if ((size_t) symbol >= index->symbol_capacity)
     return;
   for (posting = index->posting_heads[symbol]; posting != CBD_NONE;
-       posting = index->postings[posting].next)
-    collect_record(index, index->postings[posting].record,
-                   exclude_id, count);
+       posting = index->postings[posting].next) {
+    struct cbd_posting *candidate = &index->postings[posting];
+    struct cbd_record *record = &index->records[candidate->record];
+    if (record->active && record->proof_id != exclude_id &&
+        record->query_stamp != index->query_stamp &&
+        occurrence_matches(index, pattern, candidate->token_offset))
+      collect_record(index, candidate->record, exclude_id, count);
+  }
 }
 
 static int decreasing_id(const void *left, const void *right)

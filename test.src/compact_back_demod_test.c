@@ -20,7 +20,8 @@ int main(void)
 {
   Compact_back_demod_index index;
   struct compact_back_demod_stats stats;
-  Topform first, second, irrelevant, demod, bidirectional;
+  Topform first, second, irrelevant, repeated_good, repeated_bad;
+  Topform demod, bidirectional, repeated_demod;
   unsigned long long *ids;
   size_t count;
 
@@ -29,9 +30,15 @@ int main(void)
   first = indexed_clause("p(f(a),g(b)).");
   second = indexed_clause("q(h(f(c))).");
   irrelevant = indexed_clause("r(k(d)).");
+  repeated_good = indexed_clause("s(m(a,a)).");
+  repeated_bad = indexed_clause("s(m(a,b)).");
   CHECK(compact_back_demod_add(index, first), "add first clause");
   CHECK(compact_back_demod_add(index, second), "add second clause");
   CHECK(compact_back_demod_add(index, irrelevant), "add irrelevant clause");
+  CHECK(compact_back_demod_add(index, repeated_good),
+        "add repeated-variable match");
+  CHECK(compact_back_demod_add(index, repeated_bad),
+        "add repeated-variable nonmatch");
   CHECK(!compact_back_demod_add(index, first), "reject duplicate proof ID");
 
   demod = indexed_clause("f(x) = x.");
@@ -39,6 +46,13 @@ int main(void)
   CHECK(count == 2, "root-symbol posting finds both possible redex clauses");
   CHECK(ids != NULL && ids[0] == second->id && ids[1] == first->id,
         "candidate IDs are in decreasing proof-ID order");
+  safe_free(ids);
+
+  repeated_demod = indexed_clause("m(x,x) = x.");
+  ids = compact_back_demod_candidate_ids(index, repeated_demod,
+                                         ORIENTED, &count);
+  CHECK(count == 1 && ids[0] == repeated_good->id,
+        "structural filter enforces repeated pattern variables");
   safe_free(ids);
 
   bidirectional = indexed_clause("k(x) = g(x).");
@@ -58,9 +72,9 @@ int main(void)
 
   compact_back_demod_note_exact_tests(index, 3);
   compact_back_demod_get_stats(index, &stats);
-  CHECK(stats.active == 2 && stats.retired == 1 && stats.physical == 3,
+  CHECK(stats.active == 4 && stats.retired == 1 && stats.physical == 5,
         "lifecycle counters are exact");
-  CHECK(stats.queries == 3 && stats.exact_tests == 3,
+  CHECK(stats.queries == 4 && stats.exact_tests == 3,
         "query accounting is exact");
   CHECK(stats.total_bytes > 0 && stats.peak_bytes >= stats.total_bytes,
         "resident byte accounting is present");
@@ -69,8 +83,11 @@ int main(void)
   delete_clause(first);
   delete_clause(second);
   delete_clause(irrelevant);
+  delete_clause(repeated_good);
+  delete_clause(repeated_bad);
   delete_clause(demod);
   delete_clause(bidirectional);
+  delete_clause(repeated_demod);
 
   if (Failures != 0) {
     fprintf(stderr, "compact_back_demod_test: %d failure(s)\n", Failures);
