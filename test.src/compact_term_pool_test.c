@@ -161,6 +161,10 @@ int main(void)
     CHECK(compacted.clause_entries == 2 &&
           compacted.logical_tokens == first_length + last_length &&
           compacted.compactions == 1 &&
+          compacted.rebase_growths > 0 &&
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+          compacted.rebase_copy_bytes == 0 &&
+#endif
           compacted.bytes_reclaimed > 0 &&
           compacted.total_bytes < before.total_bytes,
           "in-place compaction drops stale tokens and directory entries");

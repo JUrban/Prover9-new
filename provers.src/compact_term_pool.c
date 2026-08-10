@@ -27,6 +27,8 @@ struct compact_term_pool {
   unsigned long long reused_tokens;
   unsigned long long token_growths;
   unsigned long long token_copy_bytes;
+  unsigned long long rebase_growths;
+  unsigned long long rebase_copy_bytes;
   unsigned long long peak_bytes;
   unsigned long long compactions;
   unsigned long long bytes_reclaimed;
@@ -54,6 +56,10 @@ struct compact_term_rebase_map {
   struct compact_term_rebase_entry *entries;
   size_t count;
   size_t capacity;
+  size_t entries_mapping_bytes;
+  BOOL entries_mapped;
+  unsigned long long growths;
+  unsigned long long copy_bytes;
   Compact_term_pool retained_source;
   uint64_t *retained_slots;
   size_t retained_slot_words;
@@ -444,6 +450,47 @@ Compact_term_rebase_map compact_term_rebase_map_init(void)
   return safe_calloc(1, sizeof(struct compact_term_rebase_map));
 }
 
+/* A late Osborn compaction retains roughly 150,000 clauses.  Growing this
+   temporary vector with realloc briefly overlapped its old and new 2/4-MiB
+   allocations and set the process RSS high-water mark even though the term
+   tokens themselves already use mremap.  Give the vector the same Linux
+   page-table-only growth path; the portable fallback keeps realloc and
+   reports the bytes that may have been copied. */
+static void resize_rebase_entries(Compact_term_rebase_map map, size_t capacity)
+{
+  size_t bytes = capacity * sizeof(*map->entries);
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+  long page_size = sysconf(_SC_PAGESIZE);
+  size_t mapped_bytes;
+  void *p;
+  if (page_size <= 0)
+    fatal_error("compact_term_pool: cannot determine rebase page size");
+  if (bytes > SIZE_MAX - (size_t) page_size + 1)
+    fatal_error("compact_term_pool: rebase mapping overflow");
+  mapped_bytes = ((bytes + (size_t) page_size - 1) /
+                  (size_t) page_size) * (size_t) page_size;
+  if (!map->entries_mapped && map->entries != NULL)
+    fatal_error("compact_term_pool: mixed rebase allocation modes");
+  if (map->entries == NULL)
+    p = mmap(NULL, mapped_bytes, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  else
+    p = mremap(map->entries, map->entries_mapping_bytes, mapped_bytes,
+               MREMAP_MAYMOVE);
+  if (p == MAP_FAILED)
+    fatal_error("compact_term_pool: cannot resize rebase mapping");
+  map->entries = p;
+  map->entries_mapping_bytes = mapped_bytes;
+  map->entries_mapped = TRUE;
+#else
+  if (map->capacity != 0)
+    map->copy_bytes += map->capacity * sizeof(*map->entries);
+  map->entries = safe_realloc(map->entries, bytes);
+#endif
+  map->capacity = capacity;
+  map->growths++;
+}
+
 static struct compact_term_rebase_entry *append_rebase_entry(
   Compact_term_rebase_map map)
 {
@@ -452,9 +499,7 @@ static struct compact_term_rebase_entry *append_rebase_entry(
     if (next < map->capacity ||
         next > SIZE_MAX / sizeof(*map->entries))
       fatal_error("compact_term_pool: rebase map overflow");
-    map->entries = safe_realloc(
-      map->entries, next * sizeof(*map->entries));
-    map->capacity = next;
+    resize_rebase_entries(map, next);
   }
   return &map->entries[map->count++];
 }
@@ -640,6 +685,8 @@ void compact_term_pool_compact_retained(Compact_term_pool pool,
   pool->token_count = token_count;
   token_capacity = compacted_token_capacity(token_count);
   (void) resize_tokens(pool, token_capacity);
+  pool->rebase_growths += map->growths;
+  pool->rebase_copy_bytes += map->copy_bytes;
   pool->compactions++;
   if (old_bytes > pool_bytes(pool))
     pool->bytes_reclaimed += old_bytes - pool_bytes(pool);
@@ -678,7 +725,17 @@ void compact_term_rebase_map_free(Compact_term_rebase_map map)
 {
   if (map == NULL)
     return;
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+  if (map->entries_mapped) {
+    if (map->entries != NULL &&
+        munmap(map->entries, map->entries_mapping_bytes) != 0)
+      fatal_error("compact_term_pool: cannot release rebase mapping");
+  }
+  else
+    safe_free(map->entries);
+#else
   safe_free(map->entries);
+#endif
   safe_free(map->retained_slots);
   safe_free(map);
 }
@@ -697,6 +754,8 @@ void compact_term_pool_finish_compaction(Compact_term_pool destination,
   destination->reused_tokens = source->reused_tokens;
   destination->token_growths += source->token_growths;
   destination->token_copy_bytes += source->token_copy_bytes;
+  destination->rebase_growths += source->rebase_growths;
+  destination->rebase_copy_bytes += source->rebase_copy_bytes;
   destination->compactions = source->compactions + 1;
   destination->bytes_reclaimed = source->bytes_reclaimed +
     (source_bytes > destination_bytes ? source_bytes - destination_bytes : 0);
@@ -790,6 +849,8 @@ void compact_term_pool_get_stats(Compact_term_pool pool,
   stats->token_bytes = pool->token_capacity * sizeof(*pool->tokens);
   stats->token_growths = pool->token_growths;
   stats->token_copy_bytes = pool->token_copy_bytes;
+  stats->rebase_growths = pool->rebase_growths;
+  stats->rebase_copy_bytes = pool->rebase_copy_bytes;
   stats->directory_bytes = pool->directory_capacity *
     (sizeof(*pool->proof_ids) + sizeof(*pool->clause_offsets) +
      sizeof(*pool->clause_lengths));

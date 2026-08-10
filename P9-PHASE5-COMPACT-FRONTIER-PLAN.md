@@ -768,6 +768,17 @@ is no longer the maximum.  The remaining work is precisely bounded: trigger
 reclaim before the 139-MiB pre-compaction state and eliminate growth copies in
 the temporary rebase-entry vector, then repeat the exact full gate.
 
+The rebase vector now uses the same private anonymous mapping and
+`mremap(MREMAP_MAYMOVE)` growth policy as the token array on Linux, with the
+portable `realloc` fallback retained and copy bytes reported explicitly.
+The forced 32-KiB, 300-given `chat_test.in` run performs one real coordinated
+compaction and reports eight rebase-vector growths with
+`rebase_copy_bytes=0`.  Its 132,567-event trace remains byte-identical to the
+oracle (SHA-256 `bc38f369ef02271d9b8a00db0cd01a6ba8f890e9608e0abd947de68f763322aa`),
+and the compact archive proof audit passes.  Parallel 1-MiB and 2-MiB CHAT
+runs also reach the exact 1,000-given state without firing; the reclaim
+threshold therefore needs a later bounded prefix to choose between them.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:
