@@ -16,6 +16,8 @@ struct compact_term_pool {
   unsigned long long lookups;
   unsigned long long hits;
   unsigned long long reused_tokens;
+  unsigned long long token_growths;
+  unsigned long long token_copy_bytes;
   unsigned long long peak_bytes;
   BOOL sharing_profile_enabled;
   uint64_t *profile_hashes;
@@ -28,12 +30,20 @@ struct compact_term_pool {
   unsigned long long profile_atom_roots;
 };
 
-static size_t grow_capacity(size_t current, size_t item_size,
-                            const char *message)
+static size_t grow_token_capacity(size_t current)
 {
-  size_t next = current == 0 ? 64 : current * 2;
-  if (next < current || next > SIZE_MAX / item_size)
-    fatal_error((char *) message);
+  size_t increment;
+  size_t next;
+  if (current == 0)
+    return 64;
+  increment = current / 12;
+  if (increment < 64)
+    increment = 64;
+  if (increment > SIZE_MAX - current)
+    fatal_error("compact_term_pool: token capacity overflow");
+  next = current + increment;
+  if (next > SIZE_MAX / sizeof(int32_t))
+    fatal_error("compact_term_pool: token capacity overflow");
   return next;
 }
 
@@ -206,11 +216,13 @@ static void ensure_tokens(Compact_term_pool pool, size_t extra)
   if (needed > UINT32_MAX)
     fatal_error("compact_term_pool: token offsets exceed 32 bits");
   while (needed > pool->token_capacity) {
-    pool->token_capacity = grow_capacity(
-      pool->token_capacity, sizeof(*pool->tokens),
-      "compact_term_pool: token capacity overflow");
+    size_t old_capacity = pool->token_capacity;
+    pool->token_capacity = grow_token_capacity(pool->token_capacity);
     pool->tokens = safe_realloc(
       pool->tokens, pool->token_capacity * sizeof(*pool->tokens));
+    pool->token_growths++;
+    pool->token_copy_bytes +=
+      old_capacity * sizeof(*pool->tokens);
   }
 }
 
@@ -401,6 +413,8 @@ void compact_term_pool_get_stats(Compact_term_pool pool,
   stats->reused_tokens = pool->reused_tokens;
   stats->logical_tokens = pool->token_count;
   stats->token_bytes = pool->token_capacity * sizeof(*pool->tokens);
+  stats->token_growths = pool->token_growths;
+  stats->token_copy_bytes = pool->token_copy_bytes;
   stats->directory_bytes = pool->directory_capacity *
     (sizeof(*pool->proof_ids) + sizeof(*pool->clause_offsets) +
      sizeof(*pool->clause_lengths));

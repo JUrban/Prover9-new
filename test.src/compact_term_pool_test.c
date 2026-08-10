@@ -58,6 +58,8 @@ int main(void)
   CHECK(stats.logical_tokens == 9 && stats.total_bytes > 0 &&
         stats.peak_bytes >= stats.total_bytes,
         "pool byte accounting includes tokens and proof directory");
+  CHECK(stats.token_growths == 1 && stats.token_copy_bytes == 0,
+        "small pool growth accounting has no copied predecessor capacity");
   CHECK(stats.sharing_profile_enabled &&
         stats.profile_term_occurrences == 9 &&
         stats.profile_unique_terms == 7 &&

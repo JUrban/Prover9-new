@@ -15,6 +15,8 @@ struct compact_term_pool_stats {
   unsigned long long reused_tokens;
   unsigned long long logical_tokens;
   unsigned long long token_bytes;
+  unsigned long long token_growths;
+  unsigned long long token_copy_bytes;
   unsigned long long directory_bytes;
   unsigned long long total_bytes;
   unsigned long long peak_bytes;

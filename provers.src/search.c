@@ -2953,11 +2953,13 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
     fprintf(fp,
             "Compact_term_pool: clauses=%s, serializations=%s, lookups=%s, "
             "hits=%s, reused_tokens=%s, logical_tokens=%s, tokens=%s, "
-            "directory=%s, bytes=%s, peak_bytes=%s.\n",
+            "token_growths=%s, token_copy_bytes=%s, directory=%s, bytes=%s, "
+            "peak_bytes=%s.\n",
             comma_num(terms.clause_entries),
             comma_num(terms.serializations), comma_num(terms.lookups),
             comma_num(terms.hits), comma_num(terms.reused_tokens),
             comma_num(terms.logical_tokens), comma_num(terms.token_bytes),
+            comma_num(terms.token_growths), comma_num(terms.token_copy_bytes),
             comma_num(terms.directory_bytes), comma_num(terms.total_bytes),
             comma_num(terms.peak_bytes));
     if (terms.sharing_profile_enabled)
