@@ -5891,6 +5891,26 @@ static Topform materialize_compact_otter_passive(
   return c;
 }
 
+/* Checkpoint writers operate on either kind of dense frontier.  DISCOUNT
+   owns passive bodies in Cold_passive_store; compact OTTER deliberately
+   makes the ancestor archive their sole owner.  Keep that ownership choice
+   behind one paired materialize/release interface so checkpoint traversal
+   cannot accidentally decode an archive position through the wrong store. */
+static Topform materialize_checkpoint_passive(
+  const struct dense_passive_view *view)
+{
+  return compact_otter_passive_mode() ?
+    materialize_compact_otter_passive(view) : materialize_dense_passive(view);
+}
+
+static void release_checkpoint_passive(Topform c)
+{
+  if (compact_otter_passive_mode())
+    clause_store_release_materialized(c);
+  else
+    cold_passive_store_release(c);
+}
+
 static Topform compact_passive_cache_resolve(
   const struct dense_passive_view *view)
 {
@@ -7665,13 +7685,13 @@ static void restore_compact_rewrite_bank(void)
     rules[count++].cold = FALSE;
   }
   for (p = Glob.sos->first; p != NULL; p = p->next) {
-    int type = p->c->delayed_demodulator ?
+    int type = (compact_otter_demod_mode() || p->c->delayed_demodulator) ?
       demodulator_type(p->c, parm(Opt->lex_dep_demod_lim),
                        flag(Opt->lex_dep_demod_sane)) : NOT_DEMODULATOR;
     if (type != NOT_DEMODULATOR) {
       rules[count].clause = p->c;
       rules[count].type = type;
-      rules[count++].cold = TRUE;
+      rules[count++].cold = eager_interreduced_demod_mode();
     }
   }
   if (count > 1)
@@ -10593,6 +10613,38 @@ void init_search(void)
   init_search_late();
 }  /* init_search */
 
+/* Configure the optional compact indexes before their ordinary index shells
+   are initialized.  Normal startup and checkpoint resume must make exactly
+   the same ownership decision; previously these calls lived only in initial
+   clause processing, which made a resume process silently prepare legacy
+   indexes instead. */
+static void configure_search_indexes(void)
+{
+  compact_rewrite_set_compaction_stale_pct(
+    (unsigned) parm(Opt->compact_index_stale_pct));
+  configure_compact_unit_stale_pct(
+    (unsigned) parm(Opt->compact_index_stale_pct));
+  configure_compact_back_demod_stale_pct(
+    (unsigned) parm(Opt->compact_index_stale_pct));
+  configure_compact_unit_term_pool(Compact_terms);
+  configure_compact_unit_index(
+    flag(Opt->compact_unit_subsumption_audit),
+    flag(Opt->compact_otter_unit_index));
+  configure_compact_nonunit_index(
+    flag(Opt->compact_nonunit_subsumption_audit),
+    flag(Opt->compact_otter_nonunit_index));
+  configure_compact_clause_access(compact_otter_resolve_clause,
+                                  compact_otter_release_clause, NULL);
+  configure_compact_back_demod(
+    flag(Opt->compact_back_demod_audit),
+    flag(Opt->compact_otter_back_demod_index));
+  configure_compact_back_demod_term_pool(Compact_terms);
+  configure_compact_back_demod_access(compact_otter_resolve_clause,
+                                      compact_otter_release_clause,
+                                      compact_otter_advise_rebuild_batch,
+                                      NULL);
+}
+
 /*************
  *
  *   index_and_process_initial_clauses()
@@ -10615,33 +10667,11 @@ void index_and_process_initial_clauses(void)
   set_discrim_hash_threshold(parm(Opt->discrim_hash_threshold));
 
   int fpa_depth = parm(Opt->fpa_depth);
-  compact_rewrite_set_compaction_stale_pct(
-    (unsigned) parm(Opt->compact_index_stale_pct));
-  configure_compact_unit_stale_pct(
-    (unsigned) parm(Opt->compact_index_stale_pct));
-  configure_compact_back_demod_stale_pct(
-    (unsigned) parm(Opt->compact_index_stale_pct));
-  configure_compact_unit_term_pool(Compact_terms);
-  configure_compact_unit_index(
-    flag(Opt->compact_unit_subsumption_audit),
-    flag(Opt->compact_otter_unit_index));
-  configure_compact_nonunit_index(
-    flag(Opt->compact_nonunit_subsumption_audit),
-    flag(Opt->compact_otter_nonunit_index));
-  configure_compact_clause_access(compact_otter_resolve_clause,
-                                  compact_otter_release_clause, NULL);
+  configure_search_indexes();
   init_literals_index(fpa_depth);  // fsub, bsub, fudel, budel, ucon
 
   init_demodulator_index(DISCRIM_BIND, ORDINARY_UNIF, 0);
 
-  configure_compact_back_demod(
-    flag(Opt->compact_back_demod_audit),
-    flag(Opt->compact_otter_back_demod_index));
-  configure_compact_back_demod_term_pool(Compact_terms);
-  configure_compact_back_demod_access(compact_otter_resolve_clause,
-                                      compact_otter_release_clause,
-                                      compact_otter_advise_rebuild_batch,
-                                      NULL);
   init_back_demod_index(FPA, ORDINARY_UNIF, fpa_depth);
 
   Glob.clashable_idx = lindex_init(FPA, ORDINARY_UNIF, fpa_depth,
@@ -11211,12 +11241,12 @@ static void write_dense_bare_visit(const struct dense_passive_view *view,
                                    void *context)
 {
   struct dense_bare_context *ctx = context;
-  Topform c = materialize_dense_passive(view);
+  Topform c = materialize_checkpoint_passive(view);
   if (write_bare_clause(ctx->clause_fp, ctx->data_fp, c,
                         ctx->list_name, ctx->list_pos, &ctx->file_pos,
                         ctx->seen_tab, ctx->seen_tab_size))
     ctx->list_pos++;
-  cold_passive_store_release(c);
+  release_checkpoint_passive(c);
 }
 
 static int write_dense_bare(FILE *clause_fp, FILE *data_fp,
@@ -11551,9 +11581,9 @@ static void write_dense_fpa_visit(const struct dense_passive_view *view,
                                   void *context)
 {
   struct dense_fpa_context *ctx = context;
-  Topform c = materialize_dense_passive(view);
+  Topform c = materialize_checkpoint_passive(view);
   write_clause_fpa_ids(ctx->fp, c);
-  cold_passive_store_release(c);
+  release_checkpoint_passive(c);
 }
 
 /*************
@@ -12001,9 +12031,9 @@ static void write_dense_justification_visit(
   const struct dense_passive_view *view, void *context)
 {
   FILE *fp = context;
-  Topform c = materialize_dense_passive(view);
+  Topform c = materialize_checkpoint_passive(view);
   write_clause_justification(fp, c);
-  cold_passive_store_release(c);
+  release_checkpoint_passive(c);
 }
 
 static
@@ -13621,28 +13651,33 @@ void write_checkpoint(void)
     /* 3c. Write FPA_IDs for deterministic FPA leaf ordering on resume */
     write_fpa_ids(tmpdir);
 
-    /* 3c2. Write DISCRIM index leaf orderings for deterministic
-       forward demodulation and forward subsumption on resume */
-    write_demod_index(tmpdir);
-    write_unit_discrim_index(tmpdir);
+    /* 3c2-3. Legacy indexes preserve pointer-leaf order in serialized trie
+       files.  A compact OTTER frontier instead rebuilds all pointer-free
+       indexes from the ID-ordered resident checkpoint clauses.  Its literal
+       and back-demod FPA indexes do not exist, so calling their legacy
+       serializers would be both misleading and invalid. */
+    if (!compact_otter_passive_mode()) {
+      write_demod_index(tmpdir);
+      write_unit_discrim_index(tmpdir);
 
-    /* 3c3. Write FPA trie structure for fast resume (avoids rebuilding
-       from scratch, which is O(n * paths * depth) for millions of clauses) */
-    write_fpa_lits_index(tmpdir);
-    write_fpa_back_demod_index(tmpdir);
-    /* Clashable FPA index */
-    {
-      char cpath[600];
-      FILE *cfp;
-      snprintf(cpath, sizeof(cpath), "%s/fpa_clashable_index.txt", tmpdir);
-      cfp = fopen(cpath, "w");
-      if (cfp) {
-        fprintf(cfp, "SECTION pos\n");
-        fpa_write_index(cfp, Glob.clashable_idx->pos->fpa);
-        fprintf(cfp, "SECTION neg\n");
-        fpa_write_index(cfp, Glob.clashable_idx->neg->fpa);
-        fprintf(cfp, "END\n");
-        fclose(cfp);
+      /* Write FPA trie structure for fast resume (avoids rebuilding from
+         scratch, which is O(n * paths * depth) for millions of clauses). */
+      write_fpa_lits_index(tmpdir);
+      write_fpa_back_demod_index(tmpdir);
+      /* Clashable FPA index */
+      {
+        char cpath[600];
+        FILE *cfp;
+        snprintf(cpath, sizeof(cpath), "%s/fpa_clashable_index.txt", tmpdir);
+        cfp = fopen(cpath, "w");
+        if (cfp) {
+          fprintf(cfp, "SECTION pos\n");
+          fpa_write_index(cfp, Glob.clashable_idx->pos->fpa);
+          fprintf(cfp, "SECTION neg\n");
+          fpa_write_index(cfp, Glob.clashable_idx->neg->fpa);
+          fprintf(cfp, "END\n");
+          fclose(cfp);
+        }
       }
     }
 
@@ -14904,7 +14939,8 @@ void load_checkpoint_into_loop(void)
   clause_store_delete_clauses(Glob.disabled);
   Glob.disabled = new_disabled_store();
   cold_passive_store_free(Dense_body_store);
-  Dense_body_store = dense_passive_mode() ? new_dense_body_store() : NULL;
+  Dense_body_store = dense_passive_mode() && !compact_otter_passive_mode() ?
+    new_dense_body_store() : NULL;
   Dense_arena_bytes_reclaimed = 0;
 
   /* Clear clause ID hash table so stale entries don't shadow
@@ -15088,6 +15124,7 @@ void load_checkpoint_into_loop(void)
   set_discrim_hash_threshold(parm(Opt->discrim_hash_threshold));
 
   fpa_depth = parm(Opt->fpa_depth);
+  configure_search_indexes();
   init_literals_index(fpa_depth);
   init_demodulator_index(DISCRIM_BIND, ORDINARY_UNIF, 0);
   init_back_demod_index(FPA, ORDINARY_UNIF, fpa_depth);
@@ -15178,7 +15215,7 @@ void load_checkpoint_into_loop(void)
          multiplicity check, rebuild the comparatively small active indexes
          from clauses instead of accepting a structurally valid but lossy
          fast restore. */
-      if (!collective_frontier_mode()) {
+      if (!collective_frontier_mode() && !compact_otter_passive_mode()) {
       /* Build FPA_ID -> Term* lookup table for trie restore */
       {
         unsigned id_count = get_fpa_id_count();
@@ -15264,8 +15301,17 @@ void load_checkpoint_into_loop(void)
         fflush(stderr);
         for (idx = 0; idx < n_all; idx++) {
           Topform c = all_clauses[idx];
-          if ((!discount_mode() || is_usable[idx]) &&
-              !collective_frontier_mode()) {
+          if (compact_otter_passive_mode()) {
+            /* Reproduce the original eager admission sequence.  Compact
+               literal/nonunit and back-demod records retain IDs and term
+               slices only, so all bodies can be archived again after this
+               deterministic replay. */
+            index_literals(c, INSERT, Clocks.index, FALSE);
+            index_back_demod(c, INSERT, Clocks.index,
+                             flag(Opt->back_demod));
+          }
+          else if ((!discount_mode() || is_usable[idx]) &&
+                   !collective_frontier_mode()) {
             index_literals_fpa_only(c, INSERT, Clocks.index, FALSE);
             index_back_demod(c, INSERT, Clocks.index, flag(Opt->back_demod));
           }
@@ -15304,7 +15350,10 @@ void load_checkpoint_into_loop(void)
       /* The serialized FPA tries do not include the nonunit feature tree
          used by forward/back subsumption.  Rebuild it for both the fast
          restore and fallback paths. */
-      if (collective_frontier_mode()) {
+      if (compact_otter_passive_mode()) {
+        /* index_literals() above rebuilt both compact subsumption indexes. */
+      }
+      else if (collective_frontier_mode()) {
         unsigned long long position;
         for (position = 0; position < Collective_activation_count;
              position++) {
@@ -15332,7 +15381,7 @@ void load_checkpoint_into_loop(void)
        compact bank is rebuilt in global clause-ID order so first-match rule
        ordering is identical to uninterrupted admission order.  Owners remain
        unregistered until dense bulk archival transfers each proof ID. */
-    if (eager_interreduced_demod_mode())
+    if (eager_interreduced_demod_mode() || compact_otter_demod_mode())
       restore_compact_rewrite_bank();
     else if (eager_legacy_demod_mode()) {
       for (p = Glob.sos->first; p != NULL; p = p->next) {
@@ -15353,12 +15402,13 @@ void load_checkpoint_into_loop(void)
     /* Restore DISCRIM index leaf orderings from serialized data.
        This preserves the exact leaf-list order from the original run,
        which determines forward demodulation and subsumption behavior. */
-    if (!eager_interreduced_demod_mode())
+    if (!eager_interreduced_demod_mode() && !compact_otter_demod_mode())
       restore_demod_index(Resume_dir, Clocks.index,
                           eager_legacy_demod_mode() ?
                             resolve_rewrite_only_demodulator : NULL,
                           NULL);
-    restore_unit_discrim_index(Resume_dir);
+    if (!flag(Opt->compact_otter_unit_index))
+      restore_unit_discrim_index(Resume_dir);
 
     if (flag(Opt->eval_rewrite))
       init_dollar_eval(Glob.demods);
@@ -15639,8 +15689,6 @@ Prover_results search(Prover_input p)
         fatal_error("compact_otter_demodulation is incompatible with eval_rewrite");
       if (!str_ident(stringparm1(Opt->inference_frontier), "clauses"))
         fatal_error("compact_otter_demodulation requires inference_frontier=clauses");
-      if (p->resume_dir != NULL)
-        fatal_error("compact_otter_demodulation does not yet support checkpoint resume");
       if (compact_otter_audit_mode())
         fatal_error("compact_otter_demodulation and compact_otter_audit are mutually exclusive");
     }
@@ -15663,8 +15711,6 @@ Prover_results search(Prover_input p)
         fatal_error("compact_otter_unit_index does not yet support ancestor_subsume");
       if (flag(Opt->unit_deletion))
         fatal_error("compact_otter_unit_index does not yet support unit_deletion");
-      if (p->resume_dir != NULL)
-        fatal_error("compact_otter_unit_index does not support checkpoint resume");
       if (flag(Opt->compact_unit_subsumption_audit))
         fatal_error("compact_otter_unit_index and its audit are mutually exclusive");
     }
@@ -15685,8 +15731,6 @@ Prover_results search(Prover_input p)
         fatal_error("compact_otter_back_demod_index requires inference_frontier=clauses");
       if (!flag(Opt->back_demod))
         fatal_error("compact_otter_back_demod_index requires set(back_demod)");
-      if (p->resume_dir != NULL)
-        fatal_error("compact_otter_back_demod_index does not support checkpoint resume");
       if (flag(Opt->compact_back_demod_audit))
         fatal_error("compact_otter_back_demod_index and its audit are mutually exclusive");
     }
@@ -15711,8 +15755,6 @@ Prover_results search(Prover_input p)
         fatal_error("compact_otter_nonunit_index does not support unit_deletion");
       if (flag(Opt->ancestor_subsume))
         fatal_error("compact_otter_nonunit_index does not support ancestor_subsume");
-      if (p->resume_dir != NULL)
-        fatal_error("compact_otter_nonunit_index does not support checkpoint resume");
       if (flag(Opt->compact_nonunit_subsumption_audit))
         fatal_error("compact_otter_nonunit_index and its audit are mutually exclusive");
     }
@@ -15726,8 +15768,6 @@ Prover_results search(Prover_input p)
         fatal_error("compact OTTER passive_store=dense requires sos_limit=-1");
       if (!flag(Opt->process_initial_sos))
         fatal_error("compact OTTER passive_store=dense requires process_initial_sos");
-      if (p->resume_dir != NULL)
-        fatal_error("compact OTTER passive_store=dense does not support checkpoint resume");
     }
     if (maximum_discount_demod_mode()) {
       if (!dense_passive_mode())
