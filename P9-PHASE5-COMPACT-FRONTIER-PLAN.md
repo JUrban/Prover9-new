@@ -214,6 +214,42 @@ search state remains `Given=1001`, `Generated=1,268,285`, `Kept=33,909`,
 takes 131.01 user seconds and 90,712 KiB peak RSS.  This completes the
 radical index-reduction gate while retaining the old OTTER trajectory.
 
+### Bounded proof-boundary result
+
+The first long validation used the same full CHAT/Osborn clauses and hints,
+with `max_given=4000`, `max_seconds=1200`, and `max_megs=512`.  It stopped at
+the time bound without a proof.  The last complete report is `Given=2025`,
+`Generated=4,572,040`, `Kept=148,200`, `Sos=71,683`, `Demods=60,912`, and
+`Disabled=75,226`; all archive and authoritative-index validation failure
+counts remain zero.  External timing is 1,154.57 user seconds, 48.45 system
+seconds, 1,203.25 wall seconds, and 177,116 KiB peak RSS.
+
+This result rejects a simple extrapolation from the 1,000-given gate.  It is
+still a 60.2% RSS reduction from current FPA's 445,576-KiB proof run, but it
+misses both the 957-second proof CPU gate and the 125-MiB final RSS gate.  At
+the last report, the five compact structures occupy 58,121,952 bytes:
+8,850,856 rewrite, 18,351,864 unit, 11,898,464 back-demod, 836,832 nonunit,
+and 18,183,936 shared-term-pool bytes.  The ancestor archive has 44,308,928
+logical record bytes in a 67,108,864-byte mapping; the packed hint index uses
+29,282,780 bytes of nodes, references, and tables; dense selector metadata
+and its cache account for about 10.3 MB; and the general allocator retains
+36,706,624 reserved bytes.  These categories explain the measured resident
+set to within mapping residency and ordinary process overhead.
+
+The CPU diagnosis is sharper than the aggregate time: `back_demod` accounts
+for 701.29 seconds, with 389.67 seconds in the nested preprocessing path,
+while inference itself accounts for only 22.04 seconds.  Packed-hint
+back-demodulation is 62.14 seconds, so hint lookup is not the dominant
+regression.  By this point the 4-MiB materialization cache has 165,562 hits,
+101,404 misses, 23,348 capacity evictions, and 74,453 invalidations.  Eager
+backward rewriting repeatedly activates, preprocesses, and rearchives cold
+clauses; compacting another small posting array cannot make this comparable
+to resident-term FPA.  The next CPU experiment must therefore measure cache
+capacity against decode/rearchive work, followed by a direct compact rewrite
+pipeline if cache misses are not responsible for most of the gap.  In
+parallel, inactive unit/back records and shared term-pool slices must be
+reclaimed, and cold proof/archive pages must cease being permanently resident.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:
