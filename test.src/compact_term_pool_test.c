@@ -21,6 +21,7 @@ int main(void)
 
   init_standard_ladr();
   pool = compact_term_pool_init();
+  compact_term_pool_enable_sharing_profile(pool);
   clause = parse_clause_from_string("f(a) = g(a).");
   clause->id = 101;
   atom_offset = compact_term_pool_intern(
@@ -57,6 +58,14 @@ int main(void)
   CHECK(stats.logical_tokens == 9 && stats.total_bytes > 0 &&
         stats.peak_bytes >= stats.total_bytes,
         "pool byte accounting includes tokens and proof directory");
+  CHECK(stats.sharing_profile_enabled &&
+        stats.profile_term_occurrences == 9 &&
+        stats.profile_unique_terms == 7 &&
+        stats.profile_child_references == 7 &&
+        stats.profile_atom_roots == 2 &&
+        stats.profile_dag_payload_bytes == 64 &&
+        stats.profile_table_bytes > 0,
+        "sharing profile exactly counts canonical subterms and DAG payload");
 
   compact_term_pool_free(pool);
   delete_clause(clause);

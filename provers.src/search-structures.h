@@ -94,6 +94,7 @@ struct prover_options {
     compact_otter_back_demod_index, // pointer-free redex index authoritative
     compact_nonunit_subsumption_audit, // compare compact/legacy feature trie
     compact_otter_nonunit_index, // stable-ID nonunit feature trie authoritative
+    compact_term_sharing_stats, // opt-in exact cross-clause term profile
     collective_trace,        // one line per collective batch expansion
     collective_hint_probes,  // one bounded early expansion for hinted givens
     collective_promising_candidates, // raw-weight order within inference set

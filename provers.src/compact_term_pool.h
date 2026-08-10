@@ -18,9 +18,20 @@ struct compact_term_pool_stats {
   unsigned long long directory_bytes;
   unsigned long long total_bytes;
   unsigned long long peak_bytes;
+  BOOL sharing_profile_enabled;
+  unsigned long long profile_term_occurrences;
+  unsigned long long profile_unique_terms;
+  unsigned long long profile_child_references;
+  unsigned long long profile_atom_roots;
+  unsigned long long profile_dag_payload_bytes;
+  unsigned long long profile_table_bytes;
 };
 
 Compact_term_pool compact_term_pool_init(void);
+
+/* Enable exact cross-clause subterm accounting.  This diagnostic allocates
+   its own hash table and is deliberately off during ordinary measurements. */
+void compact_term_pool_enable_sharing_profile(Compact_term_pool pool);
 
 /* Return a stable 32-bit offset for TARGET's prefix-token representation.
    The first request for PROOF_ID serializes all clause atoms; later compact

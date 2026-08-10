@@ -1903,6 +1903,8 @@ Prover_options init_prover_options(void)
     init_flag("compact_nonunit_subsumption_audit", FALSE);
   p->compact_otter_nonunit_index =
     init_flag("compact_otter_nonunit_index", FALSE);
+  p->compact_term_sharing_stats =
+    init_flag("compact_term_sharing_stats", FALSE);
   p->collective_trace       = init_flag("collective_trace",       FALSE);
   p->collective_hint_probes = init_flag("collective_hint_probes",  FALSE);
   p->collective_promising_candidates =
@@ -2950,6 +2952,19 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             comma_num(terms.logical_tokens), comma_num(terms.token_bytes),
             comma_num(terms.directory_bytes), comma_num(terms.total_bytes),
             comma_num(terms.peak_bytes));
+    if (terms.sharing_profile_enabled)
+      fprintf(fp,
+              "Compact_term_sharing: occurrences=%s, unique=%s, "
+              "duplicates=%s, child_refs=%s, atom_roots=%s, "
+              "dag_payload=%s, profile_table=%s.\n",
+              comma_num(terms.profile_term_occurrences),
+              comma_num(terms.profile_unique_terms),
+              comma_num(terms.profile_term_occurrences -
+                        terms.profile_unique_terms),
+              comma_num(terms.profile_child_references),
+              comma_num(terms.profile_atom_roots),
+              comma_num(terms.profile_dag_payload_bytes),
+              comma_num(terms.profile_table_bytes));
   }
   if (collective_frontier_mode()) {
     fprintf(fp,
@@ -15247,6 +15262,13 @@ Prover_results search(Prover_input p)
     if (!str_ident(stringparm1(Opt->discount_demodulation), "selected") &&
         !discount_mode())
       fatal_error("eager DISCOUNT demodulation requires search_loop=discount");
+    if (flag(Opt->compact_term_sharing_stats) &&
+        !(compact_otter_bank_mode() ||
+          flag(Opt->compact_unit_subsumption_audit) ||
+          flag(Opt->compact_otter_unit_index) ||
+          flag(Opt->compact_back_demod_audit) ||
+          flag(Opt->compact_otter_back_demod_index)))
+      fatal_error("compact_term_sharing_stats requires a compact term index");
     if (compact_otter_audit_mode()) {
       if (discount_mode())
         fatal_error("compact_otter_audit requires search_loop=otter");
@@ -15492,6 +15514,8 @@ Prover_results search(Prover_input p)
        flag(Opt->compact_back_demod_audit) ||
        flag(Opt->compact_otter_back_demod_index)) ?
       compact_term_pool_init() : NULL;
+    if (Compact_terms != NULL && flag(Opt->compact_term_sharing_stats))
+      compact_term_pool_enable_sharing_profile(Compact_terms);
     if (Compact_rewrite_rules != NULL)
       fatal_error("search: previous compact rewrite bank was not released");
     Compact_rewrite_rules =
