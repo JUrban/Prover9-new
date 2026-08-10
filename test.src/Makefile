@@ -11,7 +11,7 @@ CFLAGS = $(XFLAGS) -g  -O0 -Wall
 # CFLAGS = $(XFLAGS) -pg -O -Wall
 # CFLAGS = $(XFLAGS)  -Wall -pedantic
 
-PROGRAMS = avltest memory_lifecycle_test allocator_churn_test bookkeeping_lifecycle_test ancestor_store_test ancestor_store_scale_test checkpoint_selector_test dense_selector_compaction_test cold_passive_store_test hint_postings_test hint_preview_test compressed_unit_match_test paramod_iterator_test hyper_iterator_test rewrite_only_store_test compact_rewrite_test compact_unit_index_test compact_back_demod_test compact_feature_index_test
+PROGRAMS = avltest memory_lifecycle_test allocator_churn_test bookkeeping_lifecycle_test ancestor_store_test ancestor_store_scale_test checkpoint_selector_test dense_selector_compaction_test cold_passive_store_test hint_postings_test hint_preview_test compressed_unit_match_test paramod_iterator_test hyper_iterator_test rewrite_only_store_test compact_term_pool_test compact_rewrite_test compact_unit_index_test compact_back_demod_test compact_feature_index_test
 
 all: ladr apps
 
@@ -75,6 +75,9 @@ hyper_iterator_test: hyper_iterator_test.o ../ladr/libladr.a
 rewrite_only_store_test: rewrite_only_store_test.o ../provers.src/rewrite_only_store.o ../ladr/libladr.a
 	$(CC) $(CFLAGS) -o rewrite_only_store_test rewrite_only_store_test.o ../provers.src/rewrite_only_store.o ../ladr/libladr.a -lm
 
+compact_term_pool_test: compact_term_pool_test.o ../provers.src/compact_term_pool.o ../ladr/libladr.a
+	$(CC) $(CFLAGS) -o compact_term_pool_test compact_term_pool_test.o ../provers.src/compact_term_pool.o ../ladr/libladr.a -lm
+
 compact_rewrite_test: compact_rewrite_test.o ../provers.src/compact_rewrite.o ../provers.src/compact_back_demod.o ../provers.src/demodulate.o ../ladr/libladr.a
 	$(CC) $(CFLAGS) -o compact_rewrite_test compact_rewrite_test.o ../provers.src/compact_rewrite.o ../provers.src/compact_back_demod.o ../provers.src/demodulate.o ../ladr/libladr.a -lm
 
@@ -130,6 +133,9 @@ rewrite-only-store-test: rewrite_only_store_test
 
 compact-rewrite-test: compact_rewrite_test
 	./compact_rewrite_test
+
+compact-term-pool-test: compact_term_pool_test
+	./compact_term_pool_test
 
 compact-unit-index-test: compact_unit_index_test
 	./compact_unit_index_test
