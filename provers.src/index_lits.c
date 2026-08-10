@@ -162,14 +162,15 @@ void fprint_compact_unit_index(FILE *fp)
           "peak=%llu, retired=%llu, physical=%llu, forward_queries=%llu, "
           "back_queries=%llu, back_exact_tests=%llu, conflict_queries=%llu, "
           "conflict_exact_tests=%llu, nodes=%llu, postings=%llu, "
-          "records=%llu, tokens=%llu, hash=%llu, scratch=%llu, bytes=%llu, "
+          "records=%llu, roots=%llu, tokens=%llu, hash=%llu, scratch=%llu, bytes=%llu, "
           "peak_bytes=%llu.\n",
           Compact_unit_authoritative ? "authoritative" : "audit",
           Compact_unit_audit_failures, stats.active, stats.peak,
           stats.retired, stats.physical, stats.generalization_queries,
           stats.instance_queries, stats.instance_exact_tests,
           stats.unifier_queries, stats.unifier_exact_tests, stats.node_bytes,
-          stats.posting_bytes, stats.record_bytes, stats.token_bytes,
+          stats.posting_bytes, stats.record_bytes, stats.root_bytes,
+          stats.token_bytes,
           stats.hash_bytes, stats.scratch_bytes,
           stats.total_bytes, stats.peak_bytes);
 }

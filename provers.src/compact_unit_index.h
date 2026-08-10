@@ -19,6 +19,7 @@ struct compact_unit_index_stats {
   unsigned long long node_bytes;
   unsigned long long posting_bytes;
   unsigned long long record_bytes;
+  unsigned long long root_bytes;
   unsigned long long token_bytes;
   unsigned long long hash_bytes;
   unsigned long long scratch_bytes;

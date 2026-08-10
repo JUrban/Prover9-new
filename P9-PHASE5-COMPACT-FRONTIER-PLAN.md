@@ -320,6 +320,15 @@ compact structures 13,763,488 bytes, **69.1% below** the original
 arenas will restore the 70% structural gate without giving back this 21.2%
 CPU improvement.
 
+Unit-conflict retrieval now links records by literal sign and root symbol,
+using four bytes that previously fell inside each 32-byte record's padding.
+The 1,000-given conflict clock falls from 4.32 to 0.20 seconds; total user CPU
+is 102.78 seconds, and root heads add only 512 accounted bytes.  Terminal
+state and the complete 132,267-line CHAT oracle remain exact.  This removes
+the unit index's physical-record scan, although the saved clock is nested in
+preprocessing and therefore changes aggregate CPU by only about half a
+second in this prefix.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:

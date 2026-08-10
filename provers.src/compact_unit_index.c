@@ -25,6 +25,7 @@ struct cui_record {
   uint64_t symbol_mask;
   uint32_t token_offset;
   uint32_t token_length;
+  uint32_t next_root;
   unsigned char sign;
   unsigned char active;
 };
@@ -45,6 +46,8 @@ struct compact_unit_index {
   struct cui_record *records;
   size_t record_count;
   size_t record_capacity;
+  uint32_t *unifier_heads[2];
+  size_t unifier_symbol_capacity;
   Compact_term_pool term_pool;
   const int32_t *tokens;
   BOOL owns_term_pool;
@@ -102,6 +105,9 @@ static unsigned long long index_bytes(Compact_unit_index index)
     index->node_capacity * sizeof(*index->nodes) +
     index->posting_capacity * sizeof(*index->postings) +
     index->record_capacity * sizeof(*index->records) +
+    index->unifier_symbol_capacity *
+      (sizeof(*index->unifier_heads[0]) +
+       sizeof(*index->unifier_heads[1])) +
     (index->owns_term_pool ? terms.total_bytes : 0) +
     index->hash_capacity *
       (sizeof(*index->hash_keys) + sizeof(*index->hash_values)) +
@@ -319,6 +325,30 @@ static uint32_t append_tokens(Compact_unit_index index, Topform unit,
   return offset;
 }
 
+static void ensure_unifier_symbol(Compact_unit_index index, unsigned symbol)
+{
+  size_t old_capacity;
+  if ((size_t) symbol < index->unifier_symbol_capacity)
+    return;
+  old_capacity = index->unifier_symbol_capacity;
+  while ((size_t) symbol >= index->unifier_symbol_capacity)
+    index->unifier_symbol_capacity = grow_capacity(
+      index->unifier_symbol_capacity, sizeof(*index->unifier_heads[0]),
+      "compact_unit_index: unifier root overflow");
+  index->unifier_heads[0] = safe_realloc(
+    index->unifier_heads[0], index->unifier_symbol_capacity *
+      sizeof(*index->unifier_heads[0]));
+  index->unifier_heads[1] = safe_realloc(
+    index->unifier_heads[1], index->unifier_symbol_capacity *
+      sizeof(*index->unifier_heads[1]));
+  memset(index->unifier_heads[0] + old_capacity, 0,
+         (index->unifier_symbol_capacity - old_capacity) *
+           sizeof(*index->unifier_heads[0]));
+  memset(index->unifier_heads[1] + old_capacity, 0,
+         (index->unifier_symbol_capacity - old_capacity) *
+           sizeof(*index->unifier_heads[1]));
+}
+
 static void index_record(Compact_unit_index index, uint32_t record)
 {
   struct cui_record *r = &index->records[record];
@@ -392,6 +422,14 @@ BOOL compact_unit_index_add(Compact_unit_index index, Topform unit)
   record->token_offset = append_tokens(index, unit, unit->literals->atom,
                                         &record->token_length,
                                         &record->symbol_mask);
+  if (record->token_length == 0 || index->tokens[record->token_offset] < 0)
+    fatal_error("compact_unit_index: unit atom has no fixed root");
+  {
+    unsigned root = (unsigned) index->tokens[record->token_offset];
+    ensure_unifier_symbol(index, root);
+    record->next_root = index->unifier_heads[record->sign ? 1 : 0][root];
+    index->unifier_heads[record->sign ? 1 : 0][root] = at_record;
+  }
   index_record(index, at_record);
   ensure_hash(index);
   at_hash = hash_slot(index, unit->id, TRUE);
@@ -860,7 +898,7 @@ unsigned long long *compact_unit_unifier_ids(
   unsigned long long exclude_id, size_t *count)
 {
   size_t found = 0;
-  size_t i;
+  uint32_t i;
   int query_root;
   if (count == NULL)
     return NULL;
@@ -870,7 +908,10 @@ unsigned long long *compact_unit_unifier_ids(
   index->tokens = compact_term_pool_tokens(index->term_pool);
   index->unifier_queries++;
   query_root = SYMNUM(query);
-  for (i = 1; i < index->record_count; i++) {
+  if ((size_t) query_root >= index->unifier_symbol_capacity)
+    return NULL;
+  for (i = index->unifier_heads[sign ? 1 : 0][query_root];
+       i != CUI_NONE; i = index->records[i].next_root) {
     struct cui_record *record = &index->records[i];
     if (!record->active || record->sign != (unsigned char) sign ||
         record->proof_id == exclude_id || record->token_length == 0 ||
@@ -926,6 +967,9 @@ void compact_unit_index_get_stats(Compact_unit_index index,
   stats->node_bytes = index->node_capacity * sizeof(*index->nodes);
   stats->posting_bytes = index->posting_capacity * sizeof(*index->postings);
   stats->record_bytes = index->record_capacity * sizeof(*index->records);
+  stats->root_bytes = index->unifier_symbol_capacity *
+    (sizeof(*index->unifier_heads[0]) +
+     sizeof(*index->unifier_heads[1]));
   stats->token_bytes = index->owns_term_pool ? terms.token_bytes : 0;
   stats->hash_bytes = index->hash_capacity *
     (sizeof(*index->hash_keys) + sizeof(*index->hash_values));
@@ -943,6 +987,8 @@ void compact_unit_index_free(Compact_unit_index index)
   safe_free(index->nodes);
   safe_free(index->postings);
   safe_free(index->records);
+  safe_free(index->unifier_heads[0]);
+  safe_free(index->unifier_heads[1]);
   if (index->owns_term_pool)
     compact_term_pool_free(index->term_pool);
   safe_free(index->hash_keys);
