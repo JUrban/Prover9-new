@@ -62,6 +62,7 @@ columns:
 | 1,000 | archive, shared clause term pool | 142.07 s | 156.66 s | 94,652 KiB | 19.17 MB |
 | 1,000 | archive, delta back-posting stream | 126.12 s | 140.04 s | 93,524 KiB | 19.17 MB |
 | 1,000 | archive, delta rewrite-occurrence stream | 125.53 s | 138.90 s | 92,164 KiB | 19.17 MB |
+| 1,000 | archive, 12.5% shared-token growth | 133.58 s | 147.56 s | 91,904 KiB | 19.17 MB |
 
 All compared runs have identical given, generated, kept, usable, SOS,
 demodulator, disabled, hint, and active-hint counts.  At 1,000 givens both
@@ -100,6 +101,7 @@ unchanged:
 | all four plus shared clause term pool | 7,652,792 B | 3,020,360 B | 60.5% |
 | plus delta back-posting stream | 7,652,792 B | 2,760,368 B | 63.9% |
 | plus delta rewrite-occurrence stream | 7,652,792 B | 2,663,112 B | 65.2% |
+| plus 12.5% shared-token growth | 7,652,792 B | 2,655,900 B | 65.3% |
 
 The rewrite node pool itself falls from 655,360 to 196,608 bytes (70.0%).
 The optimized rewrite traversal uses one binding trail per query; allocating
@@ -175,6 +177,15 @@ rewrite bank falls from 4,856,072 to 3,939,616 bytes (-18.9%).  Combined
 structural storage is now 16,712,392 bytes, **62.5% below** the pre-structural
 baseline.  The gate remains exact at 125.53 user seconds and 92,164 KiB peak
 RSS.
+
+The append-only shared token arena now grows by 12.5% instead of doubling.
+At 1,000 givens, 728,510 logical tokens use 3,025,656 capacity bytes rather
+than 4,194,304, saving 1,168,648 bytes.  Seventy growths imply 24,196,880
+bytes of worst-case predecessor copying.  The exact gate takes 133.58 user
+seconds and 91,904 KiB peak RSS: slower than the 125.53-second doubled-arena
+run, but below the accepted 140.45-second archived-cache gate.  The rejected
+8.33% prototype saved only another 44,528 bytes while taking 142.86 seconds.
+Combined structural storage is 15,543,760 bytes, **65.1% below** baseline.
 
 ### Next radical index reduction
 
