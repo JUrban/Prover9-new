@@ -859,6 +859,18 @@ rules plus the shared token pool.  A private owning bank retains its source
 pool only until token copying completes.  Dedicated rewrite/unit tests and
 the compact archive audit pass; the 300-given CHAT oracle remains exact.
 
+Back-demod compaction now has a bounded-memory archive path as well.  It
+snapshots only active stable proof IDs, releases every predecessor posting,
+path, occurrence, record, hash, and result array, then materializes at most
+one active clause at a time in original record order and rebuilds against the
+unchanged shared term pool.  The encoded-stream implementation remains the
+standalone fallback when no resolver is configured.  Dedicated back-demod,
+rewrite, and unit tests pass.  The actual 300-given dense CHAT path performs
+one materialized rebuild and preserves the byte-identical 132,567-event
+oracle, although user time rises from roughly 18 to 21.6 seconds; the
+2,000-given CPU/RSS gate must decide whether the eliminated old/new overlap
+justifies that archive-decode cost.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:

@@ -53,6 +53,21 @@ BOOL compact_back_demod_compaction_needed(Compact_back_demod_index index);
 
 void compact_back_demod_compact(Compact_back_demod_index index);
 
+typedef Topform (*Compact_back_demod_materializer)(unsigned long long id,
+                                                    void *context);
+typedef void (*Compact_back_demod_materialized_releaser)(Topform clause,
+                                                          void *context);
+
+/* Rebuild from stable proof IDs after releasing all predecessor arrays.
+   This is the bounded-memory path when clauses can be materialized from the
+   dense/archive store; compact_back_demod_compact() remains the standalone
+   encoded-stream fallback. */
+void compact_back_demod_compact_materialized(
+  Compact_back_demod_index index,
+  Compact_back_demod_materializer materialize,
+  Compact_back_demod_materialized_releaser release,
+  void *context);
+
 void compact_back_demod_compact_all_stale(Compact_back_demod_index index);
 
 void compact_back_demod_copy_live_clauses(

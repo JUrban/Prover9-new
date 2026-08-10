@@ -1172,6 +1172,93 @@ void compact_back_demod_compact(Compact_back_demod_index index)
   compact_back_demod_compact_internal(index, FALSE);
 }
 
+void compact_back_demod_compact_materialized(
+  Compact_back_demod_index index,
+  Compact_back_demod_materializer materialize,
+  Compact_back_demod_materialized_releaser release,
+  void *context)
+{
+  Compact_back_demod_index replacement;
+  struct compact_back_demod_index old;
+  unsigned long long *ids;
+  unsigned long long old_bytes, old_peak, old_peak_active;
+  unsigned long long retired, compactions, reclaimed;
+  unsigned long long queries, candidates, exact_tests;
+  unsigned long long groups_examined, occurrences_examined;
+  unsigned long long path_checks, path_rejects;
+  size_t i, count = 0;
+  if (index == NULL || materialize == NULL ||
+      !compact_back_demod_compaction_needed(index))
+    return;
+  if (index->active > SIZE_MAX / sizeof(*ids))
+    fatal_error("compact_back_demod: materialized ID snapshot overflow");
+  ids = index->active == 0 ? NULL :
+    safe_malloc((size_t) index->active * sizeof(*ids));
+  for (i = 1; i < index->record_count; i++)
+    if (index->records[i].active)
+      ids[count++] = index->records[i].proof_id;
+  if (count != index->active)
+    fatal_error("compact_back_demod: active ID snapshot mismatch");
+
+  old_bytes = index_bytes(index);
+  old_peak = index->peak_bytes;
+  old_peak_active = index->peak;
+  retired = index->retired;
+  compactions = index->compactions;
+  reclaimed = index->bytes_reclaimed;
+  queries = index->queries;
+  candidates = index->candidates;
+  exact_tests = index->exact_tests;
+  groups_examined = index->posting_groups_examined;
+  occurrences_examined = index->occurrences_examined;
+  path_checks = index->path_filter_checks;
+  path_rejects = index->path_filter_rejects;
+
+  /* Stable IDs plus the shared clause/term archives are the complete rebuild
+     recipe.  Drop all old posting, occurrence, record, and hash arrays before
+     the first replacement allocation, then materialize at most one clause at
+     a time in original record order. */
+  old = *index;
+  safe_free(old.posting_blocks);
+  safe_free(old.symbol_buckets);
+  safe_free(old.path_buckets);
+  safe_free(old.path_bucket_hash);
+  safe_free(old.occurrences);
+  safe_free(old.records);
+  safe_free(old.hash_keys);
+  safe_free(old.hash_values);
+  safe_free(old.results);
+  replacement = compact_back_demod_init_with_pool(old.term_pool);
+  replacement->owns_term_pool = old.owns_term_pool;
+  for (i = 0; i < count; i++) {
+    Topform clause = materialize(ids[i], context);
+    if (clause == NULL)
+      fatal_error("compact_back_demod: cannot materialize rebuild clause");
+    if (!compact_back_demod_add(replacement, clause))
+      fatal_error("compact_back_demod: cannot rebuild materialized clause");
+    if (release != NULL)
+      release(clause, context);
+  }
+  safe_free(ids);
+  *index = *replacement;
+  safe_free(replacement);
+  index->retired = retired;
+  index->compactions = compactions + 1;
+  index->bytes_reclaimed = reclaimed +
+    (old_bytes > index_bytes(index) ? old_bytes - index_bytes(index) : 0);
+  index->queries = queries;
+  index->candidates = candidates;
+  index->exact_tests = exact_tests;
+  index->posting_groups_examined = groups_examined;
+  index->occurrences_examined = occurrences_examined;
+  index->path_filter_checks = path_checks;
+  index->path_filter_rejects = path_rejects;
+  if (old_peak > index->peak_bytes)
+    index->peak_bytes = old_peak;
+  if (old_peak_active > index->peak)
+    index->peak = old_peak_active;
+}
+
 void compact_back_demod_compact_all_stale(Compact_back_demod_index index)
 {
   compact_back_demod_compact_internal(index, TRUE);

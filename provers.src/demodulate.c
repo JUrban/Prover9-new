@@ -75,6 +75,24 @@ static BOOL compact_back_demod_mode(void)
   return Compact_back_demod_audit || Compact_back_demod_authoritative;
 }
 
+static Topform compact_back_demod_materialize_clause(
+  unsigned long long id, void *context)
+{
+  Topform clause = find_clause_by_id(id);
+  (void) context;
+  if (clause == NULL && Compact_back_demod_resolve != NULL)
+    clause = Compact_back_demod_resolve(id, Compact_back_demod_context);
+  return clause;
+}
+
+static void compact_back_demod_release_materialized(Topform clause,
+                                                     void *context)
+{
+  (void) context;
+  if (Compact_back_demod_release != NULL)
+    Compact_back_demod_release(clause, Compact_back_demod_context);
+}
+
 unsigned long long compact_back_demod_active_count(void)
 {
   struct compact_back_demod_stats stats;
@@ -187,8 +205,15 @@ void index_back_demod(Topform c, Indexop operation, Clock clock, BOOL enabled)
           "index_back_demod: duplicate compact clause" :
           "index_back_demod: missing compact clause");
       if (operation == DELETE &&
-          compact_back_demod_compaction_needed(Compact_back_demod_idx))
-        compact_back_demod_compact(Compact_back_demod_idx);
+          compact_back_demod_compaction_needed(Compact_back_demod_idx)) {
+        if (Compact_back_demod_resolve != NULL)
+          compact_back_demod_compact_materialized(
+            Compact_back_demod_idx,
+            compact_back_demod_materialize_clause,
+            compact_back_demod_release_materialized, NULL);
+        else
+          compact_back_demod_compact(Compact_back_demod_idx);
+      }
     }
     if (!Compact_back_demod_authoritative)
       index_clause_back_demod(c, Back_demod_idx, operation);
