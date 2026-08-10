@@ -286,6 +286,24 @@ correctness step is a lightweight kept/given event comparison in combined
 authoritative mode; the answer-set audits rule out treating this as a known
 single-index omission.
 
+The lightweight oracle shows that all 1,501 selected clause fingerprints are
+identical and in the same order.  Local kept-clause order first permutes in
+the hyper-resolution wave after given 412, so clause IDs subsequently differ
+even though the selected formula trajectory does not.  The four standalone
+answer audits still pass; the permutation is consistent with allocation- and
+index-layout-sensitive legacy inference enumeration rather than a missing
+compact candidate.  Exact formula/given behavior is preserved, but an
+ID-identical proof remains an open acceptance item.
+
+Back-index scan instrumentation supplies the immediate CPU target.  At only
+413 givens, 7,068 back-demodulator queries yield 1,796 candidate clauses, but
+the root-symbol posting implementation decodes 21,442,169 clause groups and
+tests 41,497,798 occurrences.  The 23,100 occurrence probes per surviving
+candidate explain why the compact `back_demod` clock grows from 4.91 to
+166.24 seconds by given 1,500.  The next representation must restore bounded
+path discrimination over the compact occurrence stream; cache sizing and
+record packing cannot compensate for this loss of selectivity.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:

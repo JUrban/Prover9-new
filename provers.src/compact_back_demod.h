@@ -16,6 +16,8 @@ struct compact_back_demod_stats {
   unsigned long long exact_tests;
   unsigned long long posting_groups;
   unsigned long long symbol_occurrences;
+  unsigned long long posting_groups_examined;
+  unsigned long long occurrences_examined;
   unsigned long long posting_bytes;
   unsigned long long posting_stream_used;
   unsigned long long posting_stream_bytes;

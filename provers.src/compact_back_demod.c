@@ -64,6 +64,8 @@ struct compact_back_demod_index {
   unsigned long long candidates;
   unsigned long long exact_tests;
   unsigned long long symbol_occurrences;
+  unsigned long long posting_groups_examined;
+  unsigned long long occurrences_examined;
   unsigned long long peak_bytes;
 };
 
@@ -718,6 +720,7 @@ static BOOL posting_contains_pattern(Compact_back_demod_index index,
   end = occurrence_offset + occurrence_length;
   while (position < end) {
     uint32_t delta = decode_occurrence_delta(index, &position, end);
+    index->occurrences_examined++;
     if (delta > UINT32_MAX - relative)
       fatal_error("compact_back_demod: occurrence offset overflow");
     relative += delta;
@@ -791,6 +794,7 @@ static void collect_symbol(Compact_back_demod_index index, Term pattern,
       if (record_index == CBD_NONE || record_index >= index->record_count)
         fatal_error("compact_back_demod: corrupt posting record");
       record = &index->records[record_index];
+      index->posting_groups_examined++;
       if (record->active && record->proof_id != exclude_id &&
           record->query_stamp != index->query_stamp &&
           posting_contains_pattern(index, occurrence_offset,
@@ -864,6 +868,8 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->exact_tests = index->exact_tests;
   stats->posting_groups = index->posting_count;
   stats->symbol_occurrences = index->symbol_occurrences;
+  stats->posting_groups_examined = index->posting_groups_examined;
+  stats->occurrences_examined = index->occurrences_examined;
   stats->posting_bytes =
     index->posting_block_capacity * sizeof(*index->posting_blocks) +
     index->symbol_capacity *
