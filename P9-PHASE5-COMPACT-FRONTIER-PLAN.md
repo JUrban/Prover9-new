@@ -92,7 +92,8 @@ unchanged:
 | unit | 3,573,496 B | 1,148,664 B | 67.9% |
 | nonunit | 562,376 B | 189,664 B | 66.3% |
 | rewrite | 1,775,880 B | 1,317,128 B | 25.8% |
-| all four indexes, including unchanged back demod | 7,652,792 B | 4,396,496 B | 42.6% |
+| back demod | 1,741,040 B | 1,282,296 B | 26.4% |
+| all four indexes | 7,652,792 B | 3,937,752 B | 48.5% |
 
 The rewrite node pool itself falls from 655,360 to 196,608 bytes (70.0%).
 The optimized rewrite traversal uses one binding trail per query; allocating
@@ -100,8 +101,11 @@ a `MAX_VARS` trail in every recursive frame was measured and rejected because
 it raised the 300-given user time to 23.44--24.40 seconds.  The shared-trail
 version takes 18.51--20.08 seconds versus a controlled 19.46-second
 token-trie run, so the accepted representation has no measured CPU penalty.
-The 1,000-given compression gate remains pending until the back-demodulation
-and shared-term slices below are present.
+The grouped back-demodulation representation turns 53,028 raw symbol
+occurrences into 25,069 `(symbol, clause ID)` groups and a 53,028-byte
+delta-varint offset stream.  A same-host control took 18.52 user seconds and
+the grouped run took 18.47 seconds.  The 1,000-given compression gate remains
+pending until the shared-term slice below is present.
 
 ### Next radical index reduction
 
@@ -117,9 +121,10 @@ The next implementation slice is structural, not another cache-size tweak:
    order.  Sharing those labels through item 1 remains outstanding.
 3. **Completed:** radix-compress the fixed-length nonunit feature trie.  Its
    node pool fell by 96.1% at 300 givens without adding exact probes.
-4. Group back-demod occurrences by `(symbol, clause ID)` and delta-pack the
-   matching subterm IDs/offsets.  Keep the existing structural exact filter,
-   but eliminate the current 12-byte posting per raw symbol occurrence.
+4. **Completed:** group back-demod occurrences by `(symbol, clause ID)` and
+   delta-pack matching subterm offsets.  The existing structural exact filter
+   remains, while the 12-byte posting per raw symbol occurrence and the
+   redundant per-argument root directory are gone.
 5. Share a packed stable-ID directory across the indexes and compact inactive
    records at deterministic thresholds.  Rebuilds preserve result ordering
    and are checked against the 10/100/300 event oracle.
