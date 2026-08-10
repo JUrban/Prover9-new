@@ -666,6 +666,23 @@ The next slice therefore targets both causes: retain and rebase the live token
 intervals in place, and test an earlier bounded reclaim threshold so stale
 payload cannot regrow to the same pre-compaction high-water mark.
 
+The first half is now implemented.  A bitset marks retained source-directory
+slots, the corresponding nonoverlapping token intervals are sorted and moved
+downward in the existing array, and the directory is rebuilt before rewrite,
+unit, and back-demod offsets are rebased.  There is no replacement pool, and
+the temporary mark set is one bit per source-directory slot.  A configurable
+`compact_term_reclaim_kb` keeps the accepted 8-MiB default while allowing
+bounded earlier-trigger experiments.
+
+Parallel 300-given `chat_test.in` runs validate the actual coordinated search
+path.  The 8-MiB control performs no pool compaction; a forced 32-KiB run
+performs one in-place compaction and reclaims 45,392 bytes.  Both emit exactly
+132,567 candidate/hint/kept/given trace lines with SHA-256
+`bc38f369ef02271d9b8a00db0cd01a6ba8f890e9608e0abd947de68f763322aa`.
+User time is 18.04 versus 18.32 seconds, and every compact-index validation
+failure remains zero.  This clears the semantic gate; larger prefixes must
+now choose a useful threshold before another full proof.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:

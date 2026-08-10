@@ -107,6 +107,11 @@ void compact_unit_copy_term_clauses(Compact_term_pool destination,
   compact_unit_index_copy_live_clauses(Compact_units, destination, map);
 }
 
+void compact_unit_retain_term_clauses(Compact_term_rebase_map map)
+{
+  compact_unit_index_retain_live_clauses(Compact_units, map);
+}
+
 void compact_unit_rebase_term_pool(Compact_term_pool pool,
                                    Compact_term_rebase_map map)
 {

@@ -247,6 +247,7 @@ struct prover_options {
     report_given,  // report every N given clauses
     report_preprocessing,  // report preprocessing progress every N seconds
     compact_passive_cache, // MiB cap for decoded compact-OTTER passive bodies
+    compact_term_reclaim_kb, // minimum estimated stale token payload to compact
     fpa_depth,     // FPA index depth (higher = more selective, more memory)
     candidate_warn_limit,  // warn when candidates exceed this
     candidate_hard_limit,  // skip inference when candidates exceed this

@@ -636,6 +636,18 @@ void compact_unit_index_copy_live_clauses(Compact_unit_index index,
       fatal_error("compact_unit_index: cannot copy compacted pool clause");
 }
 
+void compact_unit_index_retain_live_clauses(Compact_unit_index index,
+                                            Compact_term_rebase_map map)
+{
+  size_t i;
+  if (index == NULL)
+    return;
+  for (i = 1; i < index->record_count; i++)
+    if (!compact_term_rebase_map_retain_clause(
+          map, index->term_pool, index->records[i].proof_id))
+      fatal_error("compact_unit_index: cannot retain term-pool clause");
+}
+
 void compact_unit_index_rebase_term_pool(Compact_unit_index index,
                                          Compact_term_pool pool,
                                          Compact_term_rebase_map map)

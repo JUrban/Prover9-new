@@ -55,6 +55,9 @@ void compact_rewrite_copy_live_clauses(Compact_rewrite_bank bank,
                                        Compact_term_pool destination,
                                        Compact_term_rebase_map map);
 
+void compact_rewrite_retain_live_clauses(Compact_rewrite_bank bank,
+                                         Compact_term_rebase_map map);
+
 void compact_rewrite_rebase_term_pool(Compact_rewrite_bank bank,
                                       Compact_term_pool pool,
                                       Compact_term_rebase_map map);

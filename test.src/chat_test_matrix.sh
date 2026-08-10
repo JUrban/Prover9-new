@@ -10,6 +10,8 @@ max_megs=${5:-2048}
 wall_seconds=${6:-$((max_seconds + 60))}
 report_seconds=${CHAT_REPORT_SECONDS:-30}
 cpu=${CHAT_CPU:-0}
+trace=${CHAT_TRACE:-0}
+compact_term_reclaim_kb=${CHAT_COMPACT_TERM_RECLAIM_KB:-8192}
 new_prover=${CHAT_NEW_PROVER:-"$repo_dir/bin/prover9"}
 old_prover=${CHAT_OLD_PROVER:-/project/Prover9-old-LADR-2026-6A/bin/prover9}
 all_cases='old_otter new_otter_fpa new_otter_packed new_otter_packed_fast new_otter_compact_full new_otter_compact_packed_fast discount_clauses_selected discount_clauses_eager collective_balanced_selected collective_balanced_legacy collective_balanced_eager'
@@ -37,6 +39,8 @@ sha256sum "$input" "$new_prover" "$old_prover" > "$output_dir/hashes.txt"
   echo "wall_seconds=$wall_seconds"
   echo "report_seconds=$report_seconds"
   echo "cpu=$cpu"
+  echo "trace=$trace"
+  echo "compact_term_reclaim_kb=$compact_term_reclaim_kb"
   echo "cases=$selected_cases"
   echo "new_prover=$new_prover"
   echo "old_prover=$old_prover"
@@ -49,6 +53,7 @@ base_input="$output_dir/base-filtered.in"
 awk '
   /^assign\((max_given|max_seconds|max_minutes|max_hours|max_days|max_megs|report|stats),/ { next }
   /^assign\((search_loop|passive_store|discount_demodulation|hint_index|inference_frontier|collective_scheduler|ancestor_store),/ { next }
+  /^assign\(compact_term_reclaim_kb,/ { next }
   /^assign\((collective_[a-z_]+|rewrite_refresh_[a-z_]+),/ { next }
   /^(set|clear)\(collective_[a-z_]+\)\./ { next }
   /^(set|clear)\(compact_otter_[a-z_]+\)\./ { next }
@@ -67,8 +72,14 @@ write_case()
   case_input="$output_dir/$name.in"
   {
     echo 'clear(print_gen).'
-    echo 'clear(print_kept).'
-    echo 'clear(print_given).'
+    if test "$trace" = 1; then
+      echo 'set(print_kept).'
+      echo 'set(print_given).'
+      echo 'set(hint_trace).'
+    else
+      echo 'clear(print_kept).'
+      echo 'clear(print_given).'
+    fi
     echo 'clear(print_initial_clauses).'
     echo 'set(clocks).'
     echo 'set(hint_match_stats).'
@@ -79,6 +90,11 @@ write_case()
     echo "assign(max_seconds,$max_seconds)."
     echo "assign(max_megs,$max_megs)."
     printf '%s\n' "$policy"
+    case "$name" in
+      new_otter_compact_*)
+        echo "assign(compact_term_reclaim_kb,$compact_term_reclaim_kb)."
+        ;;
+    esac
     cat "$base_input"
   } > "$case_input"
 }

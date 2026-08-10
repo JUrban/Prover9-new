@@ -44,6 +44,8 @@ void compact_back_demod_compact_all_stale_records(void);
 void compact_back_demod_copy_term_clauses(Compact_term_pool destination,
                                           Compact_term_rebase_map map);
 
+void compact_back_demod_retain_term_clauses(Compact_term_rebase_map map);
+
 void compact_back_demod_rebase_shared_term_pool(
   Compact_term_pool pool, Compact_term_rebase_map map);
 

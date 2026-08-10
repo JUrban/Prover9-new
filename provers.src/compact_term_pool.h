@@ -43,6 +43,18 @@ BOOL compact_term_pool_copy_clause(Compact_term_pool destination,
                                    Compact_term_rebase_map map,
                                    unsigned long long proof_id);
 
+/* Mark one source clause for an in-place compaction.  Repeated proof IDs are
+   deduplicated by their source-directory slots without allocating another
+   proof-ID hash table. */
+BOOL compact_term_rebase_map_retain_clause(Compact_term_rebase_map map,
+                                           Compact_term_pool source,
+                                           unsigned long long proof_id);
+
+/* Move every retained source interval downward in the existing token array,
+   rebuild the proof-ID directory, and finalize MAP for offset rebasing. */
+void compact_term_pool_compact_retained(Compact_term_pool pool,
+                                        Compact_term_rebase_map map);
+
 void compact_term_rebase_map_finalize(Compact_term_rebase_map map);
 
 uint32_t compact_term_rebase_offset(Compact_term_rebase_map map,

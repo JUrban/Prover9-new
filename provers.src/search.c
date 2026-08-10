@@ -2081,6 +2081,8 @@ Prover_options init_prover_options(void)
   p->report_given =     init_parm("report_given",         -1,     -1,INT_MAX);
   p->report_preprocessing = init_parm("report_preprocessing", -1, -1,INT_MAX);
   p->compact_passive_cache = init_parm("compact_passive_cache", 4, 0, 1024);
+  p->compact_term_reclaim_kb =
+    init_parm("compact_term_reclaim_kb", 8192, 1, INT_MAX);
   p->fpa_depth =        init_parm("fpa_depth",            10,      1,    100);
   p->candidate_warn_limit = init_parm("candidate_warn_limit", -1,   -1,INT_MAX);
   p->candidate_hard_limit = init_parm("candidate_hard_limit", -1,   -1,INT_MAX);
@@ -2984,7 +2986,8 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             "Compact_term_pool: clauses=%s, serializations=%s, lookups=%s, "
             "hits=%s, reused_tokens=%s, logical_tokens=%s, tokens=%s, "
             "token_growths=%s, token_copy_bytes=%s, directory=%s, bytes=%s, "
-            "peak_bytes=%s, compactions=%s, reclaimed=%s.\n",
+            "peak_bytes=%s, compactions=%s, reclaimed=%s, "
+            "reclaim_kb=%d.\n",
             comma_num(terms.clause_entries),
             comma_num(terms.serializations), comma_num(terms.lookups),
             comma_num(terms.hits), comma_num(terms.reused_tokens),
@@ -2992,7 +2995,8 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             comma_num(terms.token_growths), comma_num(terms.token_copy_bytes),
             comma_num(terms.directory_bytes), comma_num(terms.total_bytes),
             comma_num(terms.peak_bytes), comma_num(terms.compactions),
-            comma_num(terms.bytes_reclaimed));
+            comma_num(terms.bytes_reclaimed),
+            parm(Opt->compact_term_reclaim_kb));
     if (terms.sharing_profile_enabled)
       fprintf(fp,
               "Compact_term_sharing: occurrences=%s, unique=%s, "
@@ -6035,7 +6039,6 @@ static void maybe_compact_shared_term_pool(void)
   struct compact_rewrite_stats rewrite;
   unsigned long long retained, stale, threshold;
   unsigned long long stale_tokens, estimated_reclaimable_bytes;
-  Compact_term_pool replacement, old;
   Compact_term_rebase_map map;
   if (!compact_otter_passive_mode() || Compact_terms == NULL)
     return;
@@ -6060,36 +6063,33 @@ static void maybe_compact_shared_term_pool(void)
      clause-count ratio alone fires much too early on CHAT-sized prefixes:
      1,153 apparently stale clauses caused a complete rebuild to reclaim
      only 45 KiB.  Estimate just the stale token payload (and therefore err
-     on the conservative side by ignoring directory/index savings), and do
-     not coordinate a rebuild until at least 8 MiB can be recovered. */
+     on the conservative side by ignoring directory/index savings).  The
+     default waits for 8 MiB; compact_term_reclaim_kb exposes lower bounded
+     thresholds for peak-RSS experiments without changing clause semantics. */
   stale_tokens =
     (terms.logical_tokens / terms.clause_entries) * stale +
     ((terms.logical_tokens % terms.clause_entries) * stale) /
       terms.clause_entries;
   estimated_reclaimable_bytes = stale_tokens * sizeof(uint32_t);
-  if (estimated_reclaimable_bytes < 8ULL * 1024 * 1024)
+  if (estimated_reclaimable_bytes <
+      (unsigned long long) parm(Opt->compact_term_reclaim_kb) * 1024)
     return;
   compact_rewrite_compact_all_stale(Compact_rewrite_rules);
   compact_unit_compact_all_stale();
   compact_back_demod_compact_all_stale_records();
-  replacement = compact_term_pool_init();
   map = compact_term_rebase_map_init();
   /* Back-demod records cover nearly the whole retained clause population;
-     unit and rewrite records add any exceptional clauses and deduplicate by
-     stable proof ID in the destination directory. */
-  compact_back_demod_copy_term_clauses(replacement, map);
-  compact_unit_copy_term_clauses(replacement, map);
-  compact_rewrite_copy_live_clauses(Compact_rewrite_rules,
-                                    replacement, map);
-  compact_term_rebase_map_finalize(map);
+     unit and rewrite records add any exceptional clauses.  Source-directory
+     slot marks deduplicate stable proof IDs before the live token intervals
+     are moved downward in the existing pool. */
+  compact_back_demod_retain_term_clauses(map);
+  compact_unit_retain_term_clauses(map);
+  compact_rewrite_retain_live_clauses(Compact_rewrite_rules, map);
+  compact_term_pool_compact_retained(Compact_terms, map);
   compact_rewrite_rebase_term_pool(Compact_rewrite_rules,
-                                   replacement, map);
-  compact_unit_rebase_term_pool(replacement, map);
-  compact_back_demod_rebase_shared_term_pool(replacement, map);
-  old = Compact_terms;
-  compact_term_pool_finish_compaction(replacement, old);
-  Compact_terms = replacement;
-  compact_term_pool_free(old);
+                                   Compact_terms, map);
+  compact_unit_rebase_term_pool(Compact_terms, map);
+  compact_back_demod_rebase_shared_term_pool(Compact_terms, map);
   compact_term_rebase_map_free(map);
 }
 

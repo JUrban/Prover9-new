@@ -57,6 +57,9 @@ void compact_back_demod_copy_live_clauses(
   Compact_back_demod_index index, Compact_term_pool destination,
   Compact_term_rebase_map map);
 
+void compact_back_demod_retain_live_clauses(
+  Compact_back_demod_index index, Compact_term_rebase_map map);
+
 void compact_back_demod_rebase_term_pool(
   Compact_back_demod_index index, Compact_term_pool pool,
   Compact_term_rebase_map map);

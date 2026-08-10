@@ -53,6 +53,9 @@ void compact_unit_index_copy_live_clauses(Compact_unit_index index,
                                           Compact_term_pool destination,
                                           Compact_term_rebase_map map);
 
+void compact_unit_index_retain_live_clauses(Compact_unit_index index,
+                                            Compact_term_rebase_map map);
+
 void compact_unit_index_rebase_term_pool(Compact_unit_index index,
                                          Compact_term_pool pool,
                                          Compact_term_rebase_map map);

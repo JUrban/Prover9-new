@@ -89,6 +89,11 @@ void compact_back_demod_copy_term_clauses(Compact_term_pool destination,
     Compact_back_demod_idx, destination, map);
 }
 
+void compact_back_demod_retain_term_clauses(Compact_term_rebase_map map)
+{
+  compact_back_demod_retain_live_clauses(Compact_back_demod_idx, map);
+}
+
 void compact_back_demod_rebase_shared_term_pool(
   Compact_term_pool pool, Compact_term_rebase_map map)
 {

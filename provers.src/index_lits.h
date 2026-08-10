@@ -50,6 +50,8 @@ void compact_unit_compact_all_stale(void);
 void compact_unit_copy_term_clauses(Compact_term_pool destination,
                                     Compact_term_rebase_map map);
 
+void compact_unit_retain_term_clauses(Compact_term_rebase_map map);
+
 void compact_unit_rebase_term_pool(Compact_term_pool pool,
                                    Compact_term_rebase_map map);
 

@@ -117,6 +117,60 @@ int main(void)
     delete_clause(last);
   }
 
+  {
+    Compact_term_pool source = compact_term_pool_init();
+    Compact_term_rebase_map map = compact_term_rebase_map_init();
+    struct compact_term_pool_stats before, compacted;
+    Topform first = parse_clause_from_string("p(f(a)).");
+    Topform stale = parse_clause_from_string("q(g(b)).");
+    Topform last = parse_clause_from_string("r(h(c)).");
+    uint32_t first_offset, last_offset, first_length, last_length;
+    uint32_t translated_first, translated_last;
+    int32_t first_root, last_root;
+    int extra;
+    first->id = 301;
+    stale->id = 302;
+    last->id = 303;
+    first_offset = compact_term_pool_intern(
+      source, first->id, first->literals, first->literals->atom,
+      &first_length);
+    (void) compact_term_pool_intern(
+      source, stale->id, stale->literals, stale->literals->atom, &length);
+    for (extra = 0; extra < 128; extra++) {
+      stale->id = 400 + extra;
+      (void) compact_term_pool_intern(
+        source, stale->id, stale->literals, stale->literals->atom, &length);
+    }
+    last_offset = compact_term_pool_intern(
+      source, last->id, last->literals, last->literals->atom, &last_length);
+    first_root = compact_term_pool_tokens(source)[first_offset];
+    last_root = compact_term_pool_tokens(source)[last_offset];
+    compact_term_pool_get_stats(source, &before);
+    CHECK(compact_term_rebase_map_retain_clause(map, source, last->id) &&
+          compact_term_rebase_map_retain_clause(map, source, first->id) &&
+          compact_term_rebase_map_retain_clause(map, source, first->id),
+          "in-place retention deduplicates arbitrary proof-ID requests");
+    compact_term_pool_compact_retained(source, map);
+    translated_first = compact_term_rebase_offset(map, first_offset);
+    translated_last = compact_term_rebase_offset(map, last_offset);
+    compact_term_pool_get_stats(source, &compacted);
+    CHECK(translated_first == 0 && translated_last == first_length &&
+          compact_term_pool_tokens(source)[translated_first] == first_root &&
+          compact_term_pool_tokens(source)[translated_last] == last_root,
+          "in-place compaction preserves retained token intervals");
+    CHECK(compacted.clause_entries == 2 &&
+          compacted.logical_tokens == first_length + last_length &&
+          compacted.compactions == 1 &&
+          compacted.bytes_reclaimed > 0 &&
+          compacted.total_bytes < before.total_bytes,
+          "in-place compaction drops stale tokens and directory entries");
+    compact_term_rebase_map_free(map);
+    compact_term_pool_free(source);
+    delete_clause(first);
+    delete_clause(stale);
+    delete_clause(last);
+  }
+
   if (Failures != 0) {
     fprintf(stderr, "compact_term_pool_test: %d failure(s)\n", Failures);
     return 1;

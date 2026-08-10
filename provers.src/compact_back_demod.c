@@ -1181,6 +1181,18 @@ void compact_back_demod_copy_live_clauses(
       fatal_error("compact_back_demod: cannot copy compacted pool clause");
 }
 
+void compact_back_demod_retain_live_clauses(
+  Compact_back_demod_index index, Compact_term_rebase_map map)
+{
+  size_t i;
+  if (index == NULL)
+    return;
+  for (i = 1; i < index->record_count; i++)
+    if (!compact_term_rebase_map_retain_clause(
+          map, index->term_pool, index->records[i].proof_id))
+      fatal_error("compact_back_demod: cannot retain term-pool clause");
+}
+
 void compact_back_demod_rebase_term_pool(
   Compact_back_demod_index index, Compact_term_pool pool,
   Compact_term_rebase_map map)

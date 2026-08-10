@@ -831,6 +831,18 @@ void compact_rewrite_copy_live_clauses(Compact_rewrite_bank bank,
       fatal_error("compact_rewrite: cannot copy live clause to compacted pool");
 }
 
+void compact_rewrite_retain_live_clauses(Compact_rewrite_bank bank,
+                                         Compact_term_rebase_map map)
+{
+  size_t i;
+  if (bank == NULL)
+    return;
+  for (i = 1; i < bank->rule_count; i++)
+    if (!compact_term_rebase_map_retain_clause(
+          map, bank->term_pool, bank->rules[i].proof_id))
+      fatal_error("compact_rewrite: cannot retain live term-pool clause");
+}
+
 void compact_rewrite_rebase_term_pool(Compact_rewrite_bank bank,
                                       Compact_term_pool pool,
                                       Compact_term_rebase_map map)

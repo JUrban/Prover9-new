@@ -33,8 +33,11 @@ struct compact_term_pool {
 };
 
 struct compact_term_rebase_entry {
+  union {
+    unsigned long long proof_id;
+    unsigned long long new_offset;
+  } destination;
   uint32_t old_offset;
-  uint32_t new_offset;
   uint32_t length;
 };
 
@@ -42,7 +45,17 @@ struct compact_term_rebase_map {
   struct compact_term_rebase_entry *entries;
   size_t count;
   size_t capacity;
+  Compact_term_pool retained_source;
+  uint64_t *retained_slots;
+  size_t retained_slot_words;
+  unsigned mode;
   BOOL finalized;
+};
+
+enum compact_term_rebase_mode {
+  REBASE_MODE_UNSET = 0,
+  REBASE_MODE_COPY = 1,
+  REBASE_MODE_RETAINED = 2
 };
 
 static size_t grow_token_capacity(size_t current)
@@ -349,6 +362,21 @@ Compact_term_rebase_map compact_term_rebase_map_init(void)
   return safe_calloc(1, sizeof(struct compact_term_rebase_map));
 }
 
+static struct compact_term_rebase_entry *append_rebase_entry(
+  Compact_term_rebase_map map)
+{
+  if (map->count == map->capacity) {
+    size_t next = map->capacity == 0 ? 64 : map->capacity * 2;
+    if (next < map->capacity ||
+        next > SIZE_MAX / sizeof(*map->entries))
+      fatal_error("compact_term_pool: rebase map overflow");
+    map->entries = safe_realloc(
+      map->entries, next * sizeof(*map->entries));
+    map->capacity = next;
+  }
+  return &map->entries[map->count++];
+}
+
 BOOL compact_term_pool_copy_clause(Compact_term_pool destination,
                                    Compact_term_pool source,
                                    Compact_term_rebase_map map,
@@ -356,9 +384,12 @@ BOOL compact_term_pool_copy_clause(Compact_term_pool destination,
 {
   size_t source_at, destination_at;
   uint32_t old_offset, new_offset, length;
+  struct compact_term_rebase_entry *entry;
   if (destination == NULL || source == NULL || map == NULL ||
-      proof_id == 0 || map->finalized || source->directory_capacity == 0)
+      proof_id == 0 || map->finalized || source->directory_capacity == 0 ||
+      map->mode == REBASE_MODE_RETAINED)
     return FALSE;
+  map->mode = REBASE_MODE_COPY;
   source_at = directory_slot(source, proof_id);
   if (source->proof_ids[source_at] != proof_id)
     return FALSE;
@@ -378,20 +409,46 @@ BOOL compact_term_pool_copy_clause(Compact_term_pool destination,
   destination->clause_lengths[destination_at] = length;
   destination->directory_count++;
   destination->serializations++;
-  if (map->count == map->capacity) {
-    size_t next = map->capacity == 0 ? 64 : map->capacity * 2;
-    if (next < map->capacity ||
-        next > SIZE_MAX / sizeof(*map->entries))
-      fatal_error("compact_term_pool: rebase map overflow");
-    map->entries = safe_realloc(
-      map->entries, next * sizeof(*map->entries));
-    map->capacity = next;
-  }
-  map->entries[map->count].old_offset = old_offset;
-  map->entries[map->count].new_offset = new_offset;
-  map->entries[map->count].length = length;
-  map->count++;
+  entry = append_rebase_entry(map);
+  entry->destination.new_offset = new_offset;
+  entry->old_offset = old_offset;
+  entry->length = length;
   update_peak(destination);
+  return TRUE;
+}
+
+BOOL compact_term_rebase_map_retain_clause(Compact_term_rebase_map map,
+                                           Compact_term_pool source,
+                                           unsigned long long proof_id)
+{
+  size_t at, word;
+  uint64_t bit;
+  struct compact_term_rebase_entry *entry;
+  if (map == NULL || source == NULL || proof_id == 0 || map->finalized ||
+      source->directory_capacity == 0 || map->mode == REBASE_MODE_COPY)
+    return FALSE;
+  if (map->retained_source == NULL) {
+    map->retained_source = source;
+    map->retained_slot_words =
+      (source->directory_capacity + 63) / 64;
+    map->retained_slots = safe_calloc(
+      map->retained_slot_words, sizeof(*map->retained_slots));
+    map->mode = REBASE_MODE_RETAINED;
+  }
+  else if (map->retained_source != source)
+    return FALSE;
+  at = directory_slot(source, proof_id);
+  if (source->proof_ids[at] != proof_id)
+    return FALSE;
+  word = at / 64;
+  bit = UINT64_C(1) << (at % 64);
+  if ((map->retained_slots[word] & bit) != 0)
+    return TRUE;
+  map->retained_slots[word] |= bit;
+  entry = append_rebase_entry(map);
+  entry->destination.proof_id = proof_id;
+  entry->old_offset = source->clause_offsets[at];
+  entry->length = source->clause_lengths[at];
   return TRUE;
 }
 
@@ -408,12 +465,107 @@ void compact_term_rebase_map_finalize(Compact_term_rebase_map map)
   size_t i;
   if (map == NULL || map->finalized)
     return;
+  if (map->mode == REBASE_MODE_RETAINED)
+    fatal_error("compact_term_pool: retained map requires in-place compaction");
   qsort(map->entries, map->count, sizeof(*map->entries),
         increasing_old_offset);
   for (i = 1; i < map->count; i++)
     if ((uint64_t) map->entries[i-1].old_offset +
           map->entries[i-1].length > map->entries[i].old_offset)
       fatal_error("compact_term_pool: overlapping rebase intervals");
+  map->finalized = TRUE;
+}
+
+static size_t compacted_token_capacity(size_t needed)
+{
+  size_t capacity = 0;
+  while (capacity < needed)
+    capacity = grow_token_capacity(capacity);
+  return capacity;
+}
+
+static size_t compacted_directory_capacity(size_t entries)
+{
+  size_t capacity = 128;
+  while ((entries + 1) * 20 >= capacity * 17) {
+    if (capacity > SIZE_MAX / 2)
+      fatal_error("compact_term_pool: compacted directory overflow");
+    capacity *= 2;
+  }
+  return capacity;
+}
+
+void compact_term_pool_compact_retained(Compact_term_pool pool,
+                                        Compact_term_rebase_map map)
+{
+  unsigned long long old_bytes;
+  size_t i, token_count = 0, token_capacity, directory_capacity;
+  if (pool == NULL || map == NULL || map->finalized ||
+      map->mode != REBASE_MODE_RETAINED ||
+      map->retained_source != pool || map->count == 0)
+    fatal_error("compact_term_pool: invalid retained compaction");
+  qsort(map->entries, map->count, sizeof(*map->entries),
+        increasing_old_offset);
+  for (i = 0; i < map->count; i++) {
+    struct compact_term_rebase_entry *entry = &map->entries[i];
+    if ((uint64_t) entry->old_offset + entry->length > pool->token_count)
+      fatal_error("compact_term_pool: retained interval exceeds pool");
+    if (i != 0 &&
+        (uint64_t) map->entries[i-1].old_offset +
+          map->entries[i-1].length > entry->old_offset)
+      fatal_error("compact_term_pool: overlapping retained intervals");
+    if (entry->length > UINT32_MAX - token_count)
+      fatal_error("compact_term_pool: compacted offsets exceed 32 bits");
+    token_count += entry->length;
+  }
+
+  old_bytes = pool_bytes(pool);
+  directory_capacity = compacted_directory_capacity(map->count);
+  pool->proof_ids = safe_realloc(
+    pool->proof_ids, directory_capacity * sizeof(*pool->proof_ids));
+  pool->clause_offsets = safe_realloc(
+    pool->clause_offsets,
+    directory_capacity * sizeof(*pool->clause_offsets));
+  pool->clause_lengths = safe_realloc(
+    pool->clause_lengths,
+    directory_capacity * sizeof(*pool->clause_lengths));
+  memset(pool->proof_ids, 0,
+         directory_capacity * sizeof(*pool->proof_ids));
+  memset(pool->clause_offsets, 0,
+         directory_capacity * sizeof(*pool->clause_offsets));
+  memset(pool->clause_lengths, 0,
+         directory_capacity * sizeof(*pool->clause_lengths));
+  pool->directory_capacity = directory_capacity;
+  pool->directory_count = 0;
+
+  token_count = 0;
+  for (i = 0; i < map->count; i++) {
+    struct compact_term_rebase_entry *entry = &map->entries[i];
+    unsigned long long proof_id = entry->destination.proof_id;
+    size_t at;
+    if (entry->old_offset != token_count)
+      memmove(pool->tokens + token_count,
+              pool->tokens + entry->old_offset,
+              (size_t) entry->length * sizeof(*pool->tokens));
+    at = directory_slot(pool, proof_id);
+    pool->proof_ids[at] = proof_id;
+    pool->clause_offsets[at] = (uint32_t) token_count;
+    pool->clause_lengths[at] = entry->length;
+    pool->directory_count++;
+    entry->destination.new_offset = token_count;
+    token_count += entry->length;
+  }
+  pool->token_count = token_count;
+  token_capacity = compacted_token_capacity(token_count);
+  pool->tokens = safe_realloc(
+    pool->tokens, token_capacity * sizeof(*pool->tokens));
+  pool->token_capacity = token_capacity;
+  pool->compactions++;
+  if (old_bytes > pool_bytes(pool))
+    pool->bytes_reclaimed += old_bytes - pool_bytes(pool);
+  safe_free(map->retained_slots);
+  map->retained_slots = NULL;
+  map->retained_slot_words = 0;
   map->finalized = TRUE;
 }
 
@@ -438,7 +590,8 @@ uint32_t compact_term_rebase_offset(Compact_term_rebase_map map,
   if ((uint64_t) old_offset >=
       (uint64_t) entry->old_offset + entry->length)
     fatal_error("compact_term_pool: token offset is not retained");
-  return entry->new_offset + (old_offset - entry->old_offset);
+  return (uint32_t) entry->destination.new_offset +
+    (old_offset - entry->old_offset);
 }
 
 void compact_term_rebase_map_free(Compact_term_rebase_map map)
@@ -446,6 +599,7 @@ void compact_term_rebase_map_free(Compact_term_rebase_map map)
   if (map == NULL)
     return;
   safe_free(map->entries);
+  safe_free(map->retained_slots);
   safe_free(map);
 }
 

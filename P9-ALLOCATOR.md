@@ -210,3 +210,13 @@ takes 833.73 user seconds on the slower validation run, and it peaks at
 152,904 KiB.  The 288-KiB peak difference is measurement noise at this scale;
 both controls save about 18 MiB from the preceding 170,968-KiB proof.  The P9
 switch is therefore the accepted invocation for later comparisons.
+
+Compact OTTER's shared term pool uses
+`assign(compact_term_reclaim_kb,8192)` by default.  This is the conservative
+estimated stale-token payload required before coordinating rewrite, unit, and
+back-demod index compaction.  Lower values are intended for measured peak-RSS
+experiments.  The compactor retains live proof-directory slots, moves their
+token intervals downward in the existing array, rebuilds the directory, and
+then rebases all three indexes; it no longer allocates a second complete term
+pool.  `Compact_term_pool` reports both the configured `reclaim_kb` and the
+actual compaction/reclaimed-byte counts.
