@@ -949,6 +949,72 @@ at least given 2,400.  If that preserves the CPU gate while holding the
 prefix below 128,000 KiB, use the existing deterministic control; otherwise
 replace the percentage with a hysteretic sum-of-index-bytes budget.
 
+The proposed lower-staleness explanation was then tested rather than assumed.
+Rewrite, unit, and back-demod authoritative audits at 10% run through 900
+givens with zero failures.  Complete 25% and 10% runs, with both resident
+clause bodies and the dense archive, emit the same 1,100,204-event CHAT trace
+(SHA-256 `49d44f270f1b875d4cd170f026a9eca90fb047d0a8466ba5f30a9c77310644f1`).
+At the fixed 2,400-given boundary, 15% and 10% again end at the identical
+`Generated=5,932,674`, `Kept=191,527` state.  Fifteen percent takes 488.05
+user seconds and peaks at 135,120 KiB; 10% takes 483.29 seconds and peaks at
+134,260 KiB.  Thus earlier deterministic rebuilding is semantically sound
+and has no measured CPU penalty, but the extra reduction is only 860 KiB.
+Capacity quantization and the active-record floor make another percentage
+tweak incapable of closing the full-proof gap by itself.
+
+Those measurements also expose an invocation error: all of the new 512-KiB,
+guarded-2-MiB, and 10/15% runs report `compact_policy=disabled`.  The accepted
+product boundary above requires process-start `P9_COMPACT_HEAP=1`.  In the
+guarded proof, glibc's arena reaches 106,688,512 bytes with 35,352,768 free
+bytes and only 134,256 top-releasable bytes just before the peak.  The final
+arena still has 32,092,064 stranded free bytes.  Consequently the 172,024-KiB
+external result is a valid disabled-policy diagnostic, but it is not the
+current product comparison.  The next proof gate must restore
+`P9_COMPACT_HEAP=1` and verify `compact_policy=enabled` in every statistics
+snapshot.
+
+A parallel 1,000-given `chat_test.in` allocator experiment bounds the same
+effect cheaply.  Default allocation, a 64-KiB glibc mmap threshold, and a
+256-KiB threshold all reach the exact `Generated=1,268,285`, `Kept=33,909`
+state.  Their final PSS values are 71,162, 68,318, and 69,018 KiB; user times
+are 90.64, 92.41, and 89.64 seconds.  At 64 KiB the arena shrinks from
+31,346,688 to 23,064,576 bytes while total live arena-plus-mmap allocation is
+unchanged.  The prefix high-water mark remains about 90 MiB because hint
+initialization precedes the later saving.  This validates large independently
+returnable allocations as a low-CPU lever; it does not replace the required
+`P9_COMPACT_HEAP=1` full run.
+
+The implementation plan, in risk order, is now:
+
+1. Re-establish the product baseline with `P9_COMPACT_HEAP=1`, the file
+   ancestor backend, zero passive cache, guarded 2-MiB pool reclaim, and the
+   exact compact-OTTER trajectory.  Compare 25% and at most the already-audited
+   10% index policy at a bounded CHAT boundary before one full proof.
+2. Replace large `realloc`-managed compact arrays with a common Linux
+   mmap/mremap vector (portable realloc fallback), one index at a time.  This
+   makes released predecessor capacities actually leave RSS and avoids growth
+   copying, while retaining the existing flat-token matchers and their speed.
+3. Introduce one packed stable-ID directory shared by rewrite, unit,
+   back-demod, and the term pool.  At the late boundary the three private hash
+   tables alone total about 9 MiB, before counting repeated proof IDs in every
+   record and the 4-MiB pool directory.  Sharing that metadata is a plausible
+   7--10-MiB reduction without changing candidate order or exact matching.
+4. Compact, rather than shrink, the 32,768-entry packed-fast cache.  Its fixed
+   184-byte entries occupy 6,029,312 bytes but avoid about 139 million posting
+   candidates in the proof.  Variable-length exact key/candidate payloads and
+   32-bit posting-key IDs should retain the measured 35% hit rate; the rejected
+   8,192-entry experiment must not be repeated as the production design.
+5. Only if those lower-risk layers still miss the gate, implement cross-clause
+   term sharing behind a cursor abstraction.  Existing profiling shows 728,510
+   subterm occurrences but only 91,686 unique terms at 1,000 givens (87.4%
+   duplicate occurrences).  First add a flat-canonical-sequence byte estimate;
+   a full DAG matcher rewrite proceeds only if the measured net saving includes
+   its production hash table and still clears a multi-MiB gate.
+
+Every layer uses focused tests plus parallel `chat_test.in` exact traces at
+300/1,000 givens.  Only variants that retain the reference trajectory and do
+not materially regress CPU advance to 2,000/2,400 givens and then the proof.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:
