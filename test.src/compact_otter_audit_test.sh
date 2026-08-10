@@ -207,4 +207,45 @@ cmp "$test_tmp/nonunit-reference.search" "$test_tmp/nonunit-audit.search"
 cmp "$test_tmp/nonunit-reference.search" "$test_tmp/nonunit-compact.search"
 cmp "$test_tmp/nonunit-reference.search" "$test_tmp/nonunit-archive.search"
 
+# Exercise the terminal compact lifetime split with a real packed hint bank.
+# The proof is found during preprocessing, after hint matching has run but
+# before any given clause.  This catches releasing the packed index too early,
+# failing to empty it before destruction, or losing the retained hint clauses
+# needed by proof/result reconstruction.
+awk '
+BEGIN {
+  print "clear(auto)."
+  print "clear(auto_setup)."
+  print "assign(search_loop,otter)."
+  print "assign(passive_store,dense)."
+  print "assign(hint_index,packed_fast)."
+  print "assign(inference_frontier,clauses)."
+  print "assign(ancestor_store,file)."
+  print "set(compact_otter_demodulation)."
+  print "set(compact_otter_unit_index)."
+  print "set(compact_otter_back_demod_index)."
+  print "set(compact_otter_nonunit_index)."
+  print "assign(compact_passive_cache,0)."
+  print "assign(stats,all)."
+}
+/^assign\((search_loop|passive_store|hint_index|inference_frontier|ancestor_store|stats|max_seconds),/ { next }
+{ print }
+' "$repo_dir/test.src/hint_anyconst.in" > "$test_tmp/terminal-hints.in"
+
+P9_COMPACT_HEAP=1 "$repo_dir/bin/prover9" \
+  < "$test_tmp/terminal-hints.in" \
+  > "$test_tmp/terminal-hints.out" 2> "$test_tmp/terminal-hints.err"
+grep -q 'THEOREM PROVED' "$test_tmp/terminal-hints.out"
+grep -q '^Given=0\.' "$test_tmp/terminal-hints.out"
+grep -Eq 'Packed_hint_index: nodes=[1-9][0-9]*, references=[1-9][0-9]*,' \
+  "$test_tmp/terminal-hints.out"
+if grep -q 'ERROR: Hints index not empty!' "$test_tmp/terminal-hints.out"; then
+  cat "$test_tmp/terminal-hints.out" >&2
+  exit 1
+fi
+"$repo_dir/bin/prooftrans" parents_only < "$test_tmp/terminal-hints.out" | \
+  sed -n '/^% Length of proof:/,/^============================== end of proof/p' \
+  > "$test_tmp/terminal-hints.norm"
+grep -q 'label(repeated_anyconst)' "$test_tmp/terminal-hints.norm"
+
 echo 'compact_otter_audit_test: PASS'

@@ -70,6 +70,7 @@ static unsigned long long Compact_term_last_predicted_reclaim = 0;
 static FILE *Deferred_terminal_stats = NULL;
 static BOOL Terminal_stats_frozen = FALSE;
 static BOOL Terminal_compact_indexes_released = FALSE;
+static BOOL Terminal_hint_index_released = FALSE;
 static unsigned Rewrite_epoch = 1;    /* compact rewrite state seen by SOS */
 static size_t Rewrite_refresh_hot_cursor = 0;
 static size_t Rewrite_refresh_general_cursor = 0;
@@ -5397,6 +5398,25 @@ static void release_terminal_compact_indexes(void)
   Terminal_compact_indexes_released = TRUE;
 }
 
+static void release_terminal_hint_index(void)
+{
+  Clist_pos p;
+  if (Terminal_hint_index_released || Glob.hints == NULL)
+    return;
+  /* The archive stores a stable matching-hint ID, and the caller has just
+     restored those IDs to pointers into Glob.hints.  The search is terminal,
+     so no further candidate needs hint matching or hint back demodulation.
+     Keep the hint clauses themselves for proof printing and result
+     collection, but discard the search-only index before materializing the
+     proof DAG.  collect_prover_results() can restore links again with the
+     retained, linear ID lookup and does not require this index. */
+  for (p = Glob.hints->first; p != NULL; p = p->next)
+    unindex_hint(p->c);
+  done_with_hints();
+  memory_release_unused();
+  Terminal_hint_index_released = TRUE;
+}
+
 static
 void done_with_search(int return_code)
 {
@@ -6554,6 +6574,8 @@ void handle_proof_and_maybe_exit(Topform empty_clause)
 
   proof = get_clause_ancestors(empty_clause);
   restore_archive_hint_links(proof);
+  if (terminal_proof && compact_otter_passive_mode())
+    release_terminal_hint_index();
   materialized = materialize_clauses(proof);
 
   answers = get_term_attributes(empty_clause->attributes, Att.answer);
@@ -15650,6 +15672,7 @@ Prover_results search(Prover_input p)
     }
     Terminal_stats_frozen = FALSE;
     Terminal_compact_indexes_released = FALSE;
+    Terminal_hint_index_released = FALSE;
     Current_inference_source = INFER_SOURCE_OTHER;
     collective_reset_state();
     Simplifier_epoch = 1;
