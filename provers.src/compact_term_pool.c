@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #endif
 #include "compact_term_pool.h"
+#include "compact_id_map.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -16,10 +17,7 @@ struct compact_term_pool {
   size_t token_capacity;
   size_t token_mapping_bytes;
   BOOL tokens_mapped;
-  unsigned long long *proof_ids;
-  uint32_t *clause_offsets;
-  uint32_t *clause_lengths;
-  size_t directory_capacity;
+  Compact_id_map directory;
   size_t directory_count;
   unsigned long long serializations;
   unsigned long long lookups;
@@ -61,8 +59,7 @@ struct compact_term_rebase_map {
   unsigned long long growths;
   unsigned long long copy_bytes;
   Compact_term_pool retained_source;
-  uint64_t *retained_slots;
-  size_t retained_slot_words;
+  Compact_id_set retained_ids;
   unsigned mode;
   BOOL finalized;
 };
@@ -261,9 +258,7 @@ static unsigned long long pool_bytes(Compact_term_pool pool)
     return 0;
   return sizeof(*pool) +
     pool->token_capacity * sizeof(*pool->tokens) +
-    pool->directory_capacity *
-      (sizeof(*pool->proof_ids) + sizeof(*pool->clause_offsets) +
-       sizeof(*pool->clause_lengths)) +
+    compact_id_map_bytes(pool->directory) +
     pool->profile_capacity *
       (sizeof(*pool->profile_hashes) + sizeof(*pool->profile_offsets) +
        sizeof(*pool->profile_lengths));
@@ -276,51 +271,32 @@ static void update_peak(Compact_term_pool pool)
     pool->peak_bytes = bytes;
 }
 
-static size_t directory_slot(Compact_term_pool pool,
-                             unsigned long long proof_id)
+static BOOL directory_get(Compact_term_pool pool,
+                          unsigned long long proof_id,
+                          uint32_t *offset, uint32_t *length)
 {
-  size_t mask = pool->directory_capacity - 1;
-  size_t at = (size_t) hash_id(proof_id) & mask;
-  while (pool->proof_ids[at] != 0 && pool->proof_ids[at] != proof_id)
-    at = (at + 1) & mask;
-  return at;
+  uint32_t values[2];
+  if (!compact_id_map_get(pool->directory, proof_id, values))
+    return FALSE;
+  if (values[0] == 0)
+    fatal_error("compact_term_pool: invalid directory offset sentinel");
+  if (offset != NULL)
+    *offset = values[0] - 1;
+  if (length != NULL)
+    *length = values[1];
+  return TRUE;
 }
 
-static void rehash(Compact_term_pool pool, size_t capacity)
+static BOOL directory_put(Compact_term_pool pool,
+                          unsigned long long proof_id,
+                          uint32_t offset, uint32_t length)
 {
-  unsigned long long *old_ids = pool->proof_ids;
-  uint32_t *old_offsets = pool->clause_offsets;
-  uint32_t *old_lengths = pool->clause_lengths;
-  size_t old_capacity = pool->directory_capacity;
-  size_t i;
-  pool->proof_ids = safe_calloc(capacity, sizeof(*pool->proof_ids));
-  pool->clause_offsets = safe_calloc(capacity,
-                                     sizeof(*pool->clause_offsets));
-  pool->clause_lengths = safe_calloc(capacity,
-                                     sizeof(*pool->clause_lengths));
-  pool->directory_capacity = capacity;
-  for (i = 0; i < old_capacity; i++)
-    if (old_ids[i] != 0) {
-      size_t at = directory_slot(pool, old_ids[i]);
-      pool->proof_ids[at] = old_ids[i];
-      pool->clause_offsets[at] = old_offsets[i];
-      pool->clause_lengths[at] = old_lengths[i];
-    }
-  safe_free(old_ids);
-  safe_free(old_offsets);
-  safe_free(old_lengths);
-}
-
-static void ensure_directory(Compact_term_pool pool)
-{
-  if (pool->directory_capacity == 0)
-    rehash(pool, 128);
-  else if ((pool->directory_count + 1) * 20 >=
-           pool->directory_capacity * 17) {
-    if (pool->directory_capacity > SIZE_MAX / 2)
-      fatal_error("compact_term_pool: directory overflow");
-    rehash(pool, pool->directory_capacity * 2);
-  }
+  uint32_t values[2];
+  if (offset == UINT32_MAX)
+    fatal_error("compact_term_pool: directory offset exceeds sentinel");
+  values[0] = offset + 1;
+  values[1] = length;
+  return compact_id_map_put(pool->directory, proof_id, values);
 }
 
 static void ensure_tokens(Compact_term_pool pool, size_t extra)
@@ -414,7 +390,6 @@ static void serialize_clause(Compact_term_pool pool,
 {
   uint32_t offset = (uint32_t) pool->token_count;
   Literals literal;
-  size_t at;
   for (literal = literals; literal != NULL; literal = literal->next) {
     uint32_t atom_offset = (uint32_t) pool->token_count;
     append_term(pool, literal->atom);
@@ -426,14 +401,9 @@ static void serialize_clause(Compact_term_pool pool,
       pool->profile_atom_roots++;
     }
   }
-  ensure_directory(pool);
-  at = directory_slot(pool, proof_id);
-  if (pool->proof_ids[at] == 0) {
-    pool->proof_ids[at] = proof_id;
+  if (directory_put(pool, proof_id, offset,
+                    (uint32_t) pool->token_count - offset))
     pool->directory_count++;
-  }
-  pool->clause_offsets[at] = offset;
-  pool->clause_lengths[at] = (uint32_t) pool->token_count - offset;
   pool->serializations++;
   update_peak(pool);
 }
@@ -441,6 +411,7 @@ static void serialize_clause(Compact_term_pool pool,
 Compact_term_pool compact_term_pool_init(void)
 {
   Compact_term_pool pool = safe_calloc(1, sizeof(*pool));
+  pool->directory = compact_id_map_init(2);
   update_peak(pool);
   return pool;
 }
@@ -509,31 +480,21 @@ BOOL compact_term_pool_copy_clause(Compact_term_pool destination,
                                    Compact_term_rebase_map map,
                                    unsigned long long proof_id)
 {
-  size_t source_at, destination_at;
   uint32_t old_offset, new_offset, length;
   struct compact_term_rebase_entry *entry;
   if (destination == NULL || source == NULL || map == NULL ||
-      proof_id == 0 || map->finalized || source->directory_capacity == 0 ||
+      proof_id == 0 || map->finalized || source->directory_count == 0 ||
       map->mode == REBASE_MODE_RETAINED)
     return FALSE;
   map->mode = REBASE_MODE_COPY;
-  source_at = directory_slot(source, proof_id);
-  if (source->proof_ids[source_at] != proof_id)
+  if (!directory_get(source, proof_id, &old_offset, &length))
     return FALSE;
-  if (destination->directory_capacity != 0) {
-    destination_at = directory_slot(destination, proof_id);
-    if (destination->proof_ids[destination_at] == proof_id)
-      return TRUE;
-  }
-  old_offset = source->clause_offsets[source_at];
-  length = source->clause_lengths[source_at];
+  if (directory_get(destination, proof_id, NULL, NULL))
+    return TRUE;
   new_offset = compact_term_pool_append(
     destination, source->tokens + old_offset, length);
-  ensure_directory(destination);
-  destination_at = directory_slot(destination, proof_id);
-  destination->proof_ids[destination_at] = proof_id;
-  destination->clause_offsets[destination_at] = new_offset;
-  destination->clause_lengths[destination_at] = length;
+  if (!directory_put(destination, proof_id, new_offset, length))
+    fatal_error("compact_term_pool: duplicate copied clause");
   destination->directory_count++;
   destination->serializations++;
   entry = append_rebase_entry(map);
@@ -548,30 +509,21 @@ BOOL compact_term_rebase_map_retain_clause(Compact_term_rebase_map map,
                                            Compact_term_pool source,
                                            unsigned long long proof_id)
 {
-  size_t at, word;
-  uint64_t bit;
   if (map == NULL || source == NULL || proof_id == 0 || map->finalized ||
-      source->directory_capacity == 0 || map->mode == REBASE_MODE_COPY)
+      source->directory_count == 0 || map->mode == REBASE_MODE_COPY)
     return FALSE;
   if (map->retained_source == NULL) {
     map->retained_source = source;
-    map->retained_slot_words =
-      (source->directory_capacity + 63) / 64;
-    map->retained_slots = safe_calloc(
-      map->retained_slot_words, sizeof(*map->retained_slots));
+    map->retained_ids = compact_id_set_init();
     map->mode = REBASE_MODE_RETAINED;
   }
   else if (map->retained_source != source)
     return FALSE;
-  at = directory_slot(source, proof_id);
-  if (source->proof_ids[at] != proof_id)
+  if (!directory_get(source, proof_id, NULL, NULL))
     return FALSE;
-  word = at / 64;
-  bit = UINT64_C(1) << (at % 64);
-  if ((map->retained_slots[word] & bit) != 0)
+  if (!compact_id_set_add(map->retained_ids, proof_id))
     return TRUE;
-  map->retained_slots[word] |= bit;
-  /* The retained-slot bitset is already an exact first pass over the union
+  /* The retained-ID bitset is already an exact first pass over the union
      of all three indexes.  Count here and materialize the interval vector
      once at its final size in compact_term_pool_compact_retained(); growing
      a power-of-two vector retained almost 110,000 unused late-proof slots. */
@@ -611,48 +563,66 @@ static size_t compacted_token_capacity(size_t needed)
   return capacity;
 }
 
-static size_t compacted_directory_capacity(size_t entries)
+struct retained_measure_context {
+  Compact_term_pool pool;
+  size_t count;
+  size_t token_count;
+};
+
+static void measure_retained_clause(unsigned long long proof_id,
+                                    void *context)
 {
-  size_t capacity = 128;
-  while ((entries + 1) * 20 >= capacity * 17) {
-    if (capacity > SIZE_MAX / 2)
-      fatal_error("compact_term_pool: compacted directory overflow");
-    capacity *= 2;
-  }
-  return capacity;
+  struct retained_measure_context *measure = context;
+  uint32_t length;
+  if (!directory_get(measure->pool, proof_id, NULL, &length) ||
+      length > SIZE_MAX - measure->token_count)
+    fatal_error("compact_term_pool: corrupt retained size prediction");
+  measure->token_count += length;
+  measure->count++;
+}
+
+struct retained_materialize_context {
+  Compact_term_pool pool;
+  Compact_term_rebase_map map;
+  size_t count;
+};
+
+static void materialize_retained_clause(unsigned long long proof_id,
+                                        void *context)
+{
+  struct retained_materialize_context *materialize = context;
+  struct compact_term_rebase_entry *entry;
+  uint32_t offset, length;
+  if (materialize->count >= materialize->map->count ||
+      !directory_get(materialize->pool, proof_id, &offset, &length))
+    fatal_error("compact_term_pool: corrupt retained ID set");
+  entry = &materialize->map->entries[materialize->count++];
+  entry->destination.proof_id = proof_id;
+  entry->old_offset = offset;
+  entry->length = length;
 }
 
 unsigned long long compact_term_pool_retained_reclaimable_bytes(
   Compact_term_pool pool, Compact_term_rebase_map map)
 {
   unsigned long long current, compacted;
-  size_t slot, retained = 0, token_count = 0;
-  size_t token_capacity, directory_capacity;
+  struct retained_measure_context measure;
+  size_t token_capacity;
   if (pool == NULL || map == NULL || map->finalized ||
       map->mode != REBASE_MODE_RETAINED ||
       map->retained_source != pool || map->count == 0)
     return 0;
-  for (slot = 0; slot < pool->directory_capacity; slot++) {
-    size_t word = slot / 64;
-    uint64_t bit = UINT64_C(1) << (slot % 64);
-    if ((map->retained_slots[word] & bit) != 0) {
-      if (pool->proof_ids[slot] == 0 ||
-          pool->clause_lengths[slot] > SIZE_MAX - token_count)
-        fatal_error("compact_term_pool: corrupt retained size prediction");
-      token_count += pool->clause_lengths[slot];
-      retained++;
-    }
-  }
-  if (retained != map->count)
+  memset(&measure, 0, sizeof(measure));
+  measure.pool = pool;
+  compact_id_set_foreach(map->retained_ids, measure_retained_clause,
+                         &measure);
+  if (measure.count != map->count)
     fatal_error("compact_term_pool: incomplete retained size prediction");
-  token_capacity = compacted_token_capacity(token_count);
-  directory_capacity = compacted_directory_capacity(map->count);
+  token_capacity = compacted_token_capacity(measure.token_count);
   current = pool_bytes(pool);
   compacted = sizeof(*pool) +
     (unsigned long long) token_capacity * sizeof(*pool->tokens) +
-    (unsigned long long) directory_capacity *
-      (sizeof(*pool->proof_ids) + sizeof(*pool->clause_offsets) +
-       sizeof(*pool->clause_lengths)) +
+    compact_id_set_projected_map_bytes(map->retained_ids, 2) +
     (unsigned long long) pool->profile_capacity *
       (sizeof(*pool->profile_hashes) + sizeof(*pool->profile_offsets) +
        sizeof(*pool->profile_lengths));
@@ -663,8 +633,9 @@ void compact_term_pool_compact_retained(Compact_term_pool pool,
                                         Compact_term_rebase_map map)
 {
   unsigned long long old_bytes;
-  size_t i, slot, retained = 0, token_count = 0;
-  size_t token_capacity, directory_capacity;
+  struct retained_materialize_context materialize;
+  size_t i, token_count = 0;
+  size_t token_capacity;
   if (pool == NULL || map == NULL || map->finalized ||
       map->mode != REBASE_MODE_RETAINED ||
       map->retained_source != pool || map->count == 0)
@@ -672,21 +643,13 @@ void compact_term_pool_compact_retained(Compact_term_pool pool,
   if (map->entries != NULL || map->capacity != 0)
     fatal_error("compact_term_pool: retained entries already materialized");
   resize_rebase_entries(map, map->count);
-  for (slot = 0; slot < pool->directory_capacity; slot++) {
-    size_t word = slot / 64;
-    uint64_t bit = UINT64_C(1) << (slot % 64);
-    struct compact_term_rebase_entry *entry;
-    if ((map->retained_slots[word] & bit) == 0)
-      continue;
-    if (pool->proof_ids[slot] == 0 || retained >= map->count)
-      fatal_error("compact_term_pool: corrupt retained slot set");
-    entry = &map->entries[retained++];
-    entry->destination.proof_id = pool->proof_ids[slot];
-    entry->old_offset = pool->clause_offsets[slot];
-    entry->length = pool->clause_lengths[slot];
-  }
-  if (retained != map->count)
-    fatal_error("compact_term_pool: incomplete retained slot set");
+  memset(&materialize, 0, sizeof(materialize));
+  materialize.pool = pool;
+  materialize.map = map;
+  compact_id_set_foreach(map->retained_ids, materialize_retained_clause,
+                         &materialize);
+  if (materialize.count != map->count)
+    fatal_error("compact_term_pool: incomplete retained ID set");
   qsort(map->entries, map->count, sizeof(*map->entries),
         increasing_old_offset);
   for (i = 0; i < map->count; i++) {
@@ -703,37 +666,21 @@ void compact_term_pool_compact_retained(Compact_term_pool pool,
   }
 
   old_bytes = pool_bytes(pool);
-  directory_capacity = compacted_directory_capacity(map->count);
-  pool->proof_ids = safe_realloc(
-    pool->proof_ids, directory_capacity * sizeof(*pool->proof_ids));
-  pool->clause_offsets = safe_realloc(
-    pool->clause_offsets,
-    directory_capacity * sizeof(*pool->clause_offsets));
-  pool->clause_lengths = safe_realloc(
-    pool->clause_lengths,
-    directory_capacity * sizeof(*pool->clause_lengths));
-  memset(pool->proof_ids, 0,
-         directory_capacity * sizeof(*pool->proof_ids));
-  memset(pool->clause_offsets, 0,
-         directory_capacity * sizeof(*pool->clause_offsets));
-  memset(pool->clause_lengths, 0,
-         directory_capacity * sizeof(*pool->clause_lengths));
-  pool->directory_capacity = directory_capacity;
+  compact_id_map_free(pool->directory);
+  pool->directory = compact_id_map_init(2);
   pool->directory_count = 0;
 
   token_count = 0;
   for (i = 0; i < map->count; i++) {
     struct compact_term_rebase_entry *entry = &map->entries[i];
     unsigned long long proof_id = entry->destination.proof_id;
-    size_t at;
     if (entry->old_offset != token_count)
       memmove(pool->tokens + token_count,
               pool->tokens + entry->old_offset,
               (size_t) entry->length * sizeof(*pool->tokens));
-    at = directory_slot(pool, proof_id);
-    pool->proof_ids[at] = proof_id;
-    pool->clause_offsets[at] = (uint32_t) token_count;
-    pool->clause_lengths[at] = entry->length;
+    if (!directory_put(pool, proof_id, (uint32_t) token_count,
+                       entry->length))
+      fatal_error("compact_term_pool: duplicate retained proof ID");
     pool->directory_count++;
     entry->destination.new_offset = token_count;
     token_count += entry->length;
@@ -746,9 +693,8 @@ void compact_term_pool_compact_retained(Compact_term_pool pool,
   pool->compactions++;
   if (old_bytes > pool_bytes(pool))
     pool->bytes_reclaimed += old_bytes - pool_bytes(pool);
-  safe_free(map->retained_slots);
-  map->retained_slots = NULL;
-  map->retained_slot_words = 0;
+  compact_id_set_free(map->retained_ids);
+  map->retained_ids = NULL;
   map->finalized = TRUE;
 }
 
@@ -792,7 +738,7 @@ void compact_term_rebase_map_free(Compact_term_rebase_map map)
 #else
   safe_free(map->entries);
 #endif
-  safe_free(map->retained_slots);
+  compact_id_set_free(map->retained_ids);
   safe_free(map);
 }
 
@@ -835,28 +781,23 @@ uint32_t compact_term_pool_intern(Compact_term_pool pool,
                                   Literals literals, Term target,
                                   uint32_t *length)
 {
-  size_t at;
-  uint32_t offset;
+  uint32_t offset, clause_offset, clause_length;
   if (pool == NULL || proof_id == 0 || literals == NULL || target == NULL ||
       length == NULL)
     fatal_error("compact_term_pool_intern: invalid request");
   pool->lookups++;
-  if (pool->directory_capacity != 0) {
-    at = directory_slot(pool, proof_id);
-    if (pool->proof_ids[at] == proof_id) {
-      offset = find_term(pool, pool->clause_offsets[at],
-                         pool->clause_lengths[at], target, length);
-      if (offset != UINT32_MAX) {
-        pool->hits++;
-        pool->reused_tokens += *length;
-        return offset;
-      }
+  if (directory_get(pool, proof_id, &clause_offset, &clause_length)) {
+    offset = find_term(pool, clause_offset, clause_length, target, length);
+    if (offset != UINT32_MAX) {
+      pool->hits++;
+      pool->reused_tokens += *length;
+      return offset;
     }
   }
   serialize_clause(pool, proof_id, literals);
-  at = directory_slot(pool, proof_id);
-  offset = find_term(pool, pool->clause_offsets[at],
-                     pool->clause_lengths[at], target, length);
+  if (!directory_get(pool, proof_id, &clause_offset, &clause_length))
+    fatal_error("compact_term_pool_intern: missing serialized clause");
+  offset = find_term(pool, clause_offset, clause_length, target, length);
   if (offset == UINT32_MAX)
     fatal_error("compact_term_pool_intern: target is not a clause subterm");
   return offset;
@@ -907,9 +848,7 @@ void compact_term_pool_get_stats(Compact_term_pool pool,
   stats->token_copy_bytes = pool->token_copy_bytes;
   stats->rebase_growths = pool->rebase_growths;
   stats->rebase_copy_bytes = pool->rebase_copy_bytes;
-  stats->directory_bytes = pool->directory_capacity *
-    (sizeof(*pool->proof_ids) + sizeof(*pool->clause_offsets) +
-     sizeof(*pool->clause_lengths));
+  stats->directory_bytes = compact_id_map_bytes(pool->directory);
   stats->total_bytes = pool_bytes(pool);
   stats->peak_bytes = pool->peak_bytes;
   stats->compactions = pool->compactions;
@@ -932,9 +871,7 @@ void compact_term_pool_free(Compact_term_pool pool)
   if (pool == NULL)
     return;
   release_tokens(pool);
-  safe_free(pool->proof_ids);
-  safe_free(pool->clause_offsets);
-  safe_free(pool->clause_lengths);
+  compact_id_map_free(pool->directory);
   safe_free(pool->profile_hashes);
   safe_free(pool->profile_offsets);
   safe_free(pool->profile_lengths);

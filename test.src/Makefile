@@ -75,8 +75,8 @@ hyper_iterator_test: hyper_iterator_test.o ../ladr/libladr.a
 rewrite_only_store_test: rewrite_only_store_test.o ../provers.src/rewrite_only_store.o ../ladr/libladr.a
 	$(CC) $(CFLAGS) -o rewrite_only_store_test rewrite_only_store_test.o ../provers.src/rewrite_only_store.o ../ladr/libladr.a -lm
 
-compact_term_pool_test: compact_term_pool_test.o ../provers.src/compact_term_pool.o ../ladr/libladr.a
-	$(CC) $(CFLAGS) -o compact_term_pool_test compact_term_pool_test.o ../provers.src/compact_term_pool.o ../ladr/libladr.a -lm
+compact_term_pool_test: compact_term_pool_test.o ../provers.src/compact_term_pool.o ../provers.src/compact_id_map.o ../ladr/libladr.a
+	$(CC) $(CFLAGS) -o compact_term_pool_test compact_term_pool_test.o ../provers.src/compact_term_pool.o ../provers.src/compact_id_map.o ../ladr/libladr.a -lm
 
 compact_id_map_test: compact_id_map_test.o ../provers.src/compact_id_map.o ../ladr/libladr.a
 	$(CC) $(CFLAGS) -o compact_id_map_test compact_id_map_test.o ../provers.src/compact_id_map.o ../ladr/libladr.a -lm
