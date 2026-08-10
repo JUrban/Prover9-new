@@ -329,6 +329,16 @@ the unit index's physical-record scan, although the saved clock is nested in
 preprocessing and therefore changes aggregate CPU by only about half a
 second in this prefix.
 
+Rewrite and unit radix-node arenas now grow by 25% rather than doubling;
+posting arrays remain unchanged because their measured occupancy is already
+high.  At 1,000 givens the rewrite trie uses 40,355 nodes in 40,822 slots
+(979,728 bytes instead of 1,572,864), and the unit trie uses 51,163 nodes in
+63,783 slots (1,530,792 instead of 1,572,864).  The exact run takes 92.77
+user seconds and 91,076 KiB peak RSS.  Including the path signatures and unit
+root heads, the five compact structures now total 13,128,816 bytes,
+**70.53% below** the original 44,545,464-byte baseline.  The focused rewrite
+and unit tests pass, and the 300-given full CHAT trace remains byte-identical.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:

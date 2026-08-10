@@ -16,6 +16,8 @@ struct compact_unit_index_stats {
   unsigned long long instance_exact_tests;
   unsigned long long unifier_queries;
   unsigned long long unifier_exact_tests;
+  unsigned long long node_items;
+  unsigned long long posting_items;
   unsigned long long node_bytes;
   unsigned long long posting_bytes;
   unsigned long long record_bytes;

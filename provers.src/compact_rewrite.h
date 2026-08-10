@@ -15,6 +15,8 @@ struct compact_rewrite_stats {
   unsigned long long bytes_reclaimed;
   unsigned long long attempts;
   unsigned long long rewrites;
+  unsigned long long node_items;
+  unsigned long long posting_items;
   unsigned long long node_bytes;
   unsigned long long posting_bytes;
   unsigned long long occurrence_bytes;

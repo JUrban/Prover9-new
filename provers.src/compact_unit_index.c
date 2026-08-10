@@ -80,6 +80,24 @@ static size_t grow_capacity(size_t current, size_t item_size,
   return next;
 }
 
+static size_t grow_node_capacity(size_t current, size_t item_size,
+                                 const char *message)
+{
+  size_t increment;
+  size_t next;
+  if (current == 0)
+    return 64;
+  increment = current / 4;
+  if (increment < 16)
+    increment = 16;
+  if (increment > SIZE_MAX - current)
+    fatal_error((char *) message);
+  next = current + increment;
+  if (next > SIZE_MAX / item_size)
+    fatal_error((char *) message);
+  return next;
+}
+
 static uint64_t hash_id(uint64_t x)
 {
   x ^= x >> 30;
@@ -215,8 +233,13 @@ static uint32_t new_node(Compact_unit_index index,
                          uint32_t token_offset, uint32_t token_length)
 {
   uint32_t node;
-  ENSURE_ARRAY(index, nodes, node_count, node_capacity,
-               "compact_unit_index: node overflow");
+  if (index->node_count == index->node_capacity) {
+    index->node_capacity = grow_node_capacity(
+      index->node_capacity, sizeof(*index->nodes),
+      "compact_unit_index: node overflow");
+    index->nodes = safe_realloc(
+      index->nodes, index->node_capacity * sizeof(*index->nodes));
+  }
   if (index->node_count > UINT32_MAX)
     fatal_error("compact_unit_index: node offsets exceed 32 bits");
   node = (uint32_t) index->node_count++;
@@ -964,6 +987,8 @@ void compact_unit_index_get_stats(Compact_unit_index index,
   stats->instance_exact_tests = index->instance_exact_tests;
   stats->unifier_queries = index->unifier_queries;
   stats->unifier_exact_tests = index->unifier_exact_tests;
+  stats->node_items = index->node_count;
+  stats->posting_items = index->posting_count;
   stats->node_bytes = index->node_capacity * sizeof(*index->nodes);
   stats->posting_bytes = index->posting_capacity * sizeof(*index->postings);
   stats->record_bytes = index->record_capacity * sizeof(*index->records);

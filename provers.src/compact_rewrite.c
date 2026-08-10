@@ -154,6 +154,24 @@ static size_t grow_record_capacity(size_t current, size_t item_size,
   return next;
 }
 
+static size_t grow_node_capacity(size_t current, size_t item_size,
+                                 char *message)
+{
+  size_t increment;
+  size_t next;
+  if (current == 0)
+    return 64;
+  increment = current / 4;
+  if (increment < 16)
+    increment = 16;
+  if (increment > SIZE_MAX - current)
+    fatal_error(message);
+  next = current + increment;
+  if (next > SIZE_MAX / item_size)
+    fatal_error(message);
+  return next;
+}
+
 static uint64_t hash_id(uint64_t x)
 {
   x ^= x >> 30;
@@ -196,9 +214,9 @@ static void update_peak(Compact_rewrite_bank bank)
 static void ensure_nodes(Compact_rewrite_bank bank)
 {
   if (bank->node_count == bank->node_capacity) {
-    bank->node_capacity = grow_capacity(bank->node_capacity,
-                                         sizeof(*bank->nodes),
-                                         "compact_rewrite: node overflow");
+    bank->node_capacity = grow_node_capacity(
+      bank->node_capacity, sizeof(*bank->nodes),
+      "compact_rewrite: node overflow");
     bank->nodes = safe_realloc(bank->nodes,
                                 bank->node_capacity * sizeof(*bank->nodes));
   }
@@ -1313,6 +1331,8 @@ void compact_rewrite_get_stats(Compact_rewrite_bank bank,
   stats->bytes_reclaimed = bank->bytes_reclaimed;
   stats->attempts = bank->attempts;
   stats->rewrites = bank->rewrites;
+  stats->node_items = bank->node_count;
+  stats->posting_items = bank->posting_count;
   stats->node_bytes = bank->node_capacity * sizeof(*bank->nodes);
   stats->posting_bytes = bank->posting_capacity * sizeof(*bank->postings);
   stats->occurrence_bytes =
