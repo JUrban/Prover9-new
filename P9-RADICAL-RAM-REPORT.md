@@ -381,13 +381,14 @@ assign(sos_limit,-1).
 ```
 
 `P9_COMPACT_HEAP=1` is a process-start environment control, not an input-file
-assignment.  On glibc it requests a zero trim threshold before problem
-allocation and keeps large transient arrays independently returnable.  On an
-unsupported libc it is a safe no-op.  With `assign(stats,all)`, verify the
-line `Libc_heap_bytes: ... compact_policy=enabled`; a disabled value means the
-platform did not honor the policy.  The equivalent low-level glibc spelling
-is `GLIBC_TUNABLES=glibc.malloc.trim_threshold=0`, but the P9 switch is the
-portable invocation for scripts.
+assignment.  On glibc it requests a 64-KiB mmap threshold and a zero trim
+threshold before problem allocation, keeping medium and large transient
+arrays independently returnable.  On an unsupported libc it is a safe no-op.
+With `assign(stats,all)`, verify the line `Libc_heap_bytes: ...
+compact_policy=enabled`; a disabled value means the platform did not honor
+the policy.  The equivalent low-level glibc spelling is
+`GLIBC_TUNABLES=glibc.malloc.mmap_threshold=65536:glibc.malloc.trim_threshold=0`,
+but the P9 switch is the product-facing invocation for scripts.
 
 The full product validation reaches the exact historical compact boundary at
 2,945 givens.  `prooftrans parents_only` emits the same 7,051 normalized proof

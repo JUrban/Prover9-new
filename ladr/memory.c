@@ -543,6 +543,14 @@ void memory_get_process_stats(struct memory_process_stats *stats)
 BOOL memory_configure_compact_system_heap(void)
 {
 #if defined(__GLIBC__) && !defined(__EMSCRIPTEN__)
+  /* Keep medium and large compact-index arrays out of the main arena.  A
+     zero trim threshold prevents glibc from raising its dynamic mmap
+     threshold, but the default threshold can still leave 64--128-KiB growth
+     and scratch arrays stranded between long-lived objects.  These arrays
+     are large enough to amortize a private mapping and important enough that
+     munmap must return their pages after an index rebuild. */
+  if (mallopt(M_MMAP_THRESHOLD, 64 * 1024) == 0)
+    return FALSE;
   if (mallopt(M_TRIM_THRESHOLD, 0) == 0)
     return FALSE;
   Compact_system_heap_enabled = TRUE;

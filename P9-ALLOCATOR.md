@@ -193,12 +193,22 @@ reclaimable or additive to an RSS saving; only 131,824 bytes are reported as
 the top releasable block at this boundary.
 
 For long compact-frontier runs on glibc, set `P9_COMPACT_HEAP=1` in the
-process environment.  Prover9 applies `mallopt(M_TRIM_THRESHOLD, 0)` before
-building its saved command line or reading the problem.  This both lowers the
-trim threshold and prevents glibc's dynamic mmap threshold from rising, so
-large transient arrays remain independently returnable instead of leaving
-holes in the main arena.  Unsupported libcs safely leave the policy disabled;
+process environment.  Before building its saved command line or reading the
+problem, Prover9 applies a 64-KiB `M_MMAP_THRESHOLD` and a zero
+`M_TRIM_THRESHOLD`.  This keeps medium and large transient arrays in
+independently returnable mappings, prevents glibc's dynamic mmap threshold
+from rising, and avoids leaving their released capacities as holes in the
+main arena.  Unsupported libcs safely leave the policy disabled;
 `Libc_heap_bytes` reports `compact_policy=enabled|disabled` for audit.
+
+A parallel exact 1,000-given CHAT comparison measured the explicit threshold
+before it became part of the product switch.  The default allocator ended at
+71,162 KiB PSS and 90.64 user seconds; 64 KiB ended at 68,318 KiB and 92.41
+seconds.  The search state was identical, and the arena fell from 31,346,688
+to 23,064,576 bytes while total live arena-plus-mmap allocation stayed the
+same.  A 256-KiB control ended at 69,018 KiB and 89.64 seconds.  The 64-KiB
+boundary is selected because it returns the most resident memory in this
+bounded test; the exact full proof remains the acceptance gate.
 
 At 1,000 givens the P9 control and the raw
 `GLIBC_TUNABLES=glibc.malloc.trim_threshold=0` control produce identical
