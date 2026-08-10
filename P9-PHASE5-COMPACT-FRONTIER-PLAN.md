@@ -889,6 +889,20 @@ accounted safeguard for mmap deployments, but the authoritative proof gate
 uses `ancestor_store=file` and `compact_passive_cache=0`; that configuration
 must be remeasured after the predecessor-array lifetime changes.
 
+That authoritative 2,000-given remeasurement passes with substantial
+headroom.  With the file ancestor backend, zero passive cache, 512-KiB shared
+term reclaim, and all three compact indexes using the predecessor-first
+lifetime split, CHAT reaches the exact `Given=2,001`,
+`Generated=4,497,690`, `Kept=144,512` terminal state in 306.42 user, 50.14
+system, and 356.72 wall seconds.  External peak RSS is 108,356 KiB and the
+0.2-second sampler sees 108,308 KiB RSS / 106,086 KiB PSS.  This is below the
+115-MiB stretch target at the bounded boundary and leaves 19,644 KiB below
+the strict 128,000-KiB gate.  The bounded file buffer remains 4,096 bytes;
+601,145 archive materializations issue 1,202,290 reads totaling 112,038,840
+bytes, with zero validation failures.  The exact full proof is now the only
+valid measurement of whether that headroom survives from given 2,001 to the
+2,945 proof boundary.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:
