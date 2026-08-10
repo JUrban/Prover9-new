@@ -466,17 +466,36 @@ BOOL compact_id_set_contains(Compact_id_set set,
   return page != NULL && (page->bits[word] & mask) != 0;
 }
 
+static int increasing_set_page_number(const void *left, const void *right)
+{
+  const struct compact_id_set_page *const *a = left;
+  const struct compact_id_set_page *const *b = right;
+  return (*a)->number < (*b)->number ? -1 :
+         (*a)->number > (*b)->number ? 1 : 0;
+}
+
 void compact_id_set_foreach(Compact_id_set set,
                             Compact_id_set_visit_fn visit, void *context)
 {
-  size_t slot;
+  struct compact_id_set_page **ordered_pages;
+  size_t slot, page_index = 0;
   if (set == NULL || visit == NULL)
     return;
+  if (set->page_count == 0)
+    return;
+  ordered_pages = safe_malloc(set->page_count * sizeof(*ordered_pages));
   for (slot = 0; slot < set->directory_capacity; slot++) {
     struct compact_id_set_page *page = set->pages[slot];
+    if (page != NULL)
+      ordered_pages[page_index++] = page;
+  }
+  if (page_index != set->page_count)
+    fatal_error("compact_id_set_foreach: corrupt page directory");
+  qsort(ordered_pages, set->page_count, sizeof(*ordered_pages),
+        increasing_set_page_number);
+  for (page_index = 0; page_index < set->page_count; page_index++) {
+    struct compact_id_set_page *page = ordered_pages[page_index];
     size_t word;
-    if (page == NULL)
-      continue;
     for (word = 0; word < CIDS_PAGE_BYTES / sizeof(*page->bits); word++) {
       uint64_t bits = page->bits[word];
       unsigned bit;
@@ -489,6 +508,7 @@ void compact_id_set_foreach(Compact_id_set set,
         }
     }
   }
+  safe_free(ordered_pages);
 }
 
 size_t compact_id_set_count(Compact_id_set set)

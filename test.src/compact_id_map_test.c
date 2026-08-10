@@ -7,6 +7,8 @@
 struct visit_state {
   size_t count;
   unsigned long long xor_ids;
+  unsigned long long previous_id;
+  BOOL increasing;
 };
 
 static void visit(unsigned long long proof_id, const uint32_t *values,
@@ -21,6 +23,9 @@ static void visit(unsigned long long proof_id, const uint32_t *values,
 static void visit_set(unsigned long long proof_id, void *context)
 {
   struct visit_state *state = context;
+  if (state->count != 0 && proof_id <= state->previous_id)
+    state->increasing = FALSE;
+  state->previous_id = proof_id;
   state->count++;
   state->xor_ids ^= proof_id;
 }
@@ -34,7 +39,7 @@ int main(void)
     1, 2, 16383, 16384, 16385, 272786,
     (UINT64_C(1) << 40) + 17
   };
-  struct visit_state state = {0, 0};
+  struct visit_state state = {0, 0, 0, TRUE};
   unsigned long long expected_xor = 0;
   size_t i;
 
@@ -77,9 +82,12 @@ int main(void)
   assert(compact_id_map_peak_bytes(one) >= compact_id_map_bytes(one));
   state.count = 0;
   state.xor_ids = 0;
+  state.previous_id = 0;
+  state.increasing = TRUE;
   compact_id_set_foreach(set, visit_set, &state);
   assert(state.count == 7);
   assert(state.xor_ids == expected_xor);
+  assert(state.increasing);
   assert(compact_id_set_projected_map_bytes(set, 2) ==
          compact_id_map_bytes(two));
   assert(compact_id_set_bytes(set) < 6 * 4096);

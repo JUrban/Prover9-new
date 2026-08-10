@@ -166,6 +166,7 @@ int main(void)
           compacted.rebase_growths > 0 &&
 #if defined(__linux__) && !defined(__EMSCRIPTEN__)
           compacted.rebase_copy_bytes == 0 &&
+          compacted.streamed_rebases == 1 &&
 #endif
           compacted.bytes_reclaimed > 0 &&
           compacted.total_bytes < before.total_bytes,
@@ -175,6 +176,43 @@ int main(void)
     delete_clause(first);
     delete_clause(stale);
     delete_clause(last);
+  }
+
+  {
+    Compact_term_pool source = compact_term_pool_init();
+    Compact_term_rebase_map map = compact_term_rebase_map_init();
+    struct compact_term_pool_stats compacted;
+    Topform earlier = parse_clause_from_string("s(f(d)).");
+    Topform later = parse_clause_from_string("t(g(e)).");
+    uint32_t earlier_offset, later_offset, earlier_length, later_length;
+    earlier->id = 900;
+    later->id = 100;
+    earlier_offset = compact_term_pool_intern(
+      source, earlier->id, earlier->literals, earlier->literals->atom,
+      &earlier_length);
+    later_offset = compact_term_pool_intern(
+      source, later->id, later->literals, later->literals->atom,
+      &later_length);
+    CHECK(compact_term_rebase_map_retain_clause(
+            map, source, earlier->id) &&
+          compact_term_rebase_map_retain_clause(
+            map, source, later->id),
+          "retained compaction accepts non-monotone proof-ID histories");
+    compact_term_pool_compact_retained(source, map);
+    compact_term_pool_get_stats(source, &compacted);
+    CHECK(compact_term_rebase_offset(map, earlier_offset) == 0 &&
+          compact_term_rebase_offset(map, later_offset) == earlier_length &&
+          compact_term_pool_token_count(source) ==
+            earlier_length + later_length &&
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+          compacted.streamed_rebases == 0 &&
+#endif
+          compacted.compactions == 1,
+          "non-monotone proof IDs use the sorted in-memory fallback");
+    compact_term_rebase_map_free(map);
+    compact_term_pool_free(source);
+    delete_clause(earlier);
+    delete_clause(later);
   }
 
   if (Failures != 0) {

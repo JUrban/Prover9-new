@@ -5,6 +5,7 @@
 #include "compact_id_map.h"
 
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #if defined(__linux__) && !defined(__EMSCRIPTEN__)
 #include <sys/mman.h>
@@ -30,6 +31,7 @@ struct compact_term_pool {
   unsigned long long token_copy_bytes;
   unsigned long long rebase_growths;
   unsigned long long rebase_copy_bytes;
+  unsigned long long streamed_rebases;
   unsigned long long peak_bytes;
   unsigned long long compactions;
   unsigned long long bytes_reclaimed;
@@ -55,6 +57,9 @@ struct compact_term_rebase_entry {
 
 struct compact_term_rebase_map {
   struct compact_term_rebase_entry *entries;
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+  FILE *entries_file;
+#endif
   size_t count;
   size_t capacity;
   size_t entries_mapping_bytes;
@@ -619,6 +624,149 @@ static void materialize_retained_clause(unsigned long long proof_id,
   entry->length = length;
 }
 
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+
+/* Retained proof IDs normally rise in exactly the order in which their
+   immutable token intervals were appended.  Stream that already sorted
+   production case through an unlinked file so that the late 2--3 MiB rebase
+   vector is not resident while the old token pages still exist.  A caller
+   with a rewritten/non-monotone proof-ID history returns FALSE and uses the
+   established in-memory qsort path below. */
+struct retained_stream_context {
+  Compact_term_pool pool;
+  FILE *file;
+  size_t count;
+  size_t token_count;
+  uint64_t previous_end;
+  BOOL monotone;
+  BOOL write_failed;
+};
+
+static void stream_retained_clause(unsigned long long proof_id,
+                                   void *context)
+{
+  struct retained_stream_context *stream = context;
+  struct compact_term_rebase_entry entry;
+  uint32_t offset, length;
+  if (!directory_get(stream->pool, proof_id, &offset, &length) ||
+      (uint64_t) offset + length > stream->pool->token_count)
+    fatal_error("compact_term_pool: corrupt streamed retained interval");
+  if (stream->count != 0 && offset < stream->previous_end)
+    stream->monotone = FALSE;
+  if (stream->token_count > UINT32_MAX ||
+      length > UINT32_MAX - stream->token_count)
+    fatal_error("compact_term_pool: compacted offsets exceed 32 bits");
+  entry.destination.proof_id = proof_id;
+  entry.old_offset = offset;
+  entry.length = length;
+  if (!stream->write_failed &&
+      fwrite(&entry, sizeof(entry), 1, stream->file) != 1)
+    stream->write_failed = TRUE;
+  stream->previous_end = (uint64_t) offset + length;
+  stream->token_count += length;
+  stream->count++;
+}
+
+static BOOL compact_retained_streamed(Compact_term_pool pool,
+                                      Compact_term_rebase_map map)
+{
+  enum { REBASE_STREAM_ENTRIES = 256 };
+  struct compact_term_rebase_entry buffer[REBASE_STREAM_ENTRIES];
+  struct retained_stream_context stream;
+  unsigned long long old_bytes;
+  FILE *source_file, *destination_file;
+  size_t remaining, token_count, token_capacity, mapping_bytes;
+  void *entries;
+
+  source_file = tmpfile();
+  if (source_file == NULL)
+    return FALSE;
+  memset(&stream, 0, sizeof(stream));
+  stream.pool = pool;
+  stream.file = source_file;
+  stream.monotone = TRUE;
+  compact_id_set_foreach(map->retained_ids, stream_retained_clause, &stream);
+  if (stream.count != map->count)
+    fatal_error("compact_term_pool: incomplete streamed retained ID set");
+  if (stream.write_failed || fflush(source_file) != 0 || !stream.monotone) {
+    fclose(source_file);
+    return FALSE;
+  }
+  destination_file = tmpfile();
+  if (destination_file == NULL) {
+    fclose(source_file);
+    return FALSE;
+  }
+
+  old_bytes = pool_bytes(pool);
+  compact_id_map_free(pool->directory);
+  pool->directory = compact_id_map_init(2);
+  pool->directory_count = 0;
+  pool->cached_proof_id = 0;
+
+  rewind(source_file);
+  remaining = map->count;
+  token_count = 0;
+  while (remaining != 0) {
+    size_t i;
+    size_t count = remaining < REBASE_STREAM_ENTRIES ?
+      remaining : REBASE_STREAM_ENTRIES;
+    if (fread(buffer, sizeof(*buffer), count, source_file) != count)
+      fatal_error("compact_term_pool: cannot read streamed rebase map");
+    for (i = 0; i < count; i++) {
+      struct compact_term_rebase_entry *entry = &buffer[i];
+      unsigned long long proof_id = entry->destination.proof_id;
+      if (entry->old_offset != token_count)
+        memmove(pool->tokens + token_count,
+                pool->tokens + entry->old_offset,
+                (size_t) entry->length * sizeof(*pool->tokens));
+      if (!directory_put(pool, proof_id, (uint32_t) token_count,
+                         entry->length))
+        fatal_error("compact_term_pool: duplicate streamed proof ID");
+      pool->directory_count++;
+      entry->destination.new_offset = token_count;
+      token_count += entry->length;
+    }
+    if (fwrite(buffer, sizeof(*buffer), count, destination_file) != count)
+      fatal_error("compact_term_pool: cannot write streamed rebase map");
+    remaining -= count;
+  }
+  if (fflush(destination_file) != 0)
+    fatal_error("compact_term_pool: cannot flush streamed rebase map");
+  fclose(source_file);
+
+  pool->token_count = token_count;
+  token_capacity = compacted_token_capacity(token_count);
+  (void) resize_tokens(pool, token_capacity);
+
+  if (map->count > SIZE_MAX / sizeof(*map->entries))
+    fatal_error("compact_term_pool: streamed rebase map overflow");
+  mapping_bytes = map->count * sizeof(*map->entries);
+  entries = mmap(NULL, mapping_bytes, PROT_READ, MAP_PRIVATE,
+                 fileno(destination_file), 0);
+  if (entries == MAP_FAILED)
+    fatal_error("compact_term_pool: cannot map streamed rebase map");
+  map->entries = entries;
+  map->entries_file = destination_file;
+  map->entries_mapping_bytes = mapping_bytes;
+  map->entries_mapped = TRUE;
+  map->capacity = map->count;
+  map->growths++;
+
+  pool->rebase_growths += map->growths;
+  pool->rebase_copy_bytes += map->copy_bytes;
+  pool->streamed_rebases++;
+  pool->compactions++;
+  if (old_bytes > pool_bytes(pool))
+    pool->bytes_reclaimed += old_bytes - pool_bytes(pool);
+  compact_id_set_free(map->retained_ids);
+  map->retained_ids = NULL;
+  map->finalized = TRUE;
+  return TRUE;
+}
+
+#endif
+
 unsigned long long compact_term_pool_retained_reclaimable_bytes(
   Compact_term_pool pool, Compact_term_rebase_map map)
 {
@@ -659,6 +807,10 @@ void compact_term_pool_compact_retained(Compact_term_pool pool,
     fatal_error("compact_term_pool: invalid retained compaction");
   if (map->entries != NULL || map->capacity != 0)
     fatal_error("compact_term_pool: retained entries already materialized");
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+  if (compact_retained_streamed(pool, map))
+    return;
+#endif
   resize_rebase_entries(map, map->count);
   memset(&materialize, 0, sizeof(materialize));
   materialize.pool = pool;
@@ -753,6 +905,8 @@ void compact_term_rebase_map_free(Compact_term_rebase_map map)
   }
   else
     safe_free(map->entries);
+  if (map->entries_file != NULL)
+    fclose(map->entries_file);
 #else
   safe_free(map->entries);
 #endif
@@ -776,6 +930,7 @@ void compact_term_pool_finish_compaction(Compact_term_pool destination,
   destination->token_copy_bytes += source->token_copy_bytes;
   destination->rebase_growths += source->rebase_growths;
   destination->rebase_copy_bytes += source->rebase_copy_bytes;
+  destination->streamed_rebases += source->streamed_rebases;
   destination->compactions = source->compactions + 1;
   destination->bytes_reclaimed = source->bytes_reclaimed +
     (source_bytes > destination_bytes ? source_bytes - destination_bytes : 0);
@@ -866,6 +1021,7 @@ void compact_term_pool_get_stats(Compact_term_pool pool,
   stats->token_copy_bytes = pool->token_copy_bytes;
   stats->rebase_growths = pool->rebase_growths;
   stats->rebase_copy_bytes = pool->rebase_copy_bytes;
+  stats->streamed_rebases = pool->streamed_rebases;
   stats->directory_bytes = compact_id_map_bytes(pool->directory);
   stats->total_bytes = pool_bytes(pool);
   stats->peak_bytes = pool->peak_bytes;

@@ -3000,7 +3000,8 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             "Compact_term_pool: clauses=%s, serializations=%s, lookups=%s, "
             "hits=%s, reused_tokens=%s, logical_tokens=%s, tokens=%s, "
             "token_growths=%s, token_copy_bytes=%s, rebase_growths=%s, "
-            "rebase_copy_bytes=%s, directory=%s, bytes=%s, "
+            "rebase_copy_bytes=%s, streamed_rebases=%llu, directory=%s, "
+            "bytes=%s, "
             "peak_bytes=%s, compactions=%s, reclaimed=%s, "
             "reclaim_kb=%d.\n",
             comma_num(terms.clause_entries),
@@ -3010,6 +3011,7 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             comma_num(terms.token_growths), comma_num(terms.token_copy_bytes),
             comma_num(terms.rebase_growths),
             comma_num(terms.rebase_copy_bytes),
+            terms.streamed_rebases,
             comma_num(terms.directory_bytes), comma_num(terms.total_bytes),
             comma_num(terms.peak_bytes), comma_num(terms.compactions),
             comma_num(terms.bytes_reclaimed),
