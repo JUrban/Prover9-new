@@ -83,6 +83,26 @@ indexes grow with the passive population, so extrapolating the current
 representation to the historical 131,001-clause proof boundary would miss
 the final 125 MiB target even though passive bodies are cold.
 
+The first structural compression slice is now implemented.  Radix edges
+preserve the former child and posting order, and the exact 300-given trace is
+unchanged:
+
+| Index | Before | After | Reduction |
+|---|---:|---:|---:|
+| unit | 3,573,496 B | 1,148,664 B | 67.9% |
+| nonunit | 562,376 B | 189,664 B | 66.3% |
+| rewrite | 1,775,880 B | 1,317,128 B | 25.8% |
+| all four indexes, including unchanged back demod | 7,652,792 B | 4,396,496 B | 42.6% |
+
+The rewrite node pool itself falls from 655,360 to 196,608 bytes (70.0%).
+The optimized rewrite traversal uses one binding trail per query; allocating
+a `MAX_VARS` trail in every recursive frame was measured and rejected because
+it raised the 300-given user time to 23.44--24.40 seconds.  The shared-trail
+version takes 18.51--20.08 seconds versus a controlled 19.46-second
+token-trie run, so the accepted representation has no measured CPU penalty.
+The 1,000-given compression gate remains pending until the back-demodulation
+and shared-term slices below are present.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:
@@ -91,12 +111,12 @@ The next implementation slice is structural, not another cache-size tweak:
    matching, and passive redex occurrences.  Each normalized subterm is
    stored once; the three indexes retain 32-bit term IDs instead of private
    flattened token copies.
-2. Replace token-per-node unit and rewrite discrimination paths with radix
-   edges over shared term IDs.  Unary paths become one edge; child order and
-   terminal posting order remain the audited legacy order.
-3. Radix-compress the fixed-length nonunit feature trie.  Its current node
-   array is 93% of the index, so collapsing unary feature runs should remove
-   most of this cost without adding exact probes.
+2. **Completed for the existing token arenas:** replace token-per-node unit
+   and rewrite discrimination paths with radix edges.  Unary paths become one
+   edge; child order and terminal posting order remain the audited legacy
+   order.  Sharing those labels through item 1 remains outstanding.
+3. **Completed:** radix-compress the fixed-length nonunit feature trie.  Its
+   node pool fell by 96.1% at 300 givens without adding exact probes.
 4. Group back-demod occurrences by `(symbol, clause ID)` and delta-pack the
    matching subterm IDs/offsets.  Keep the existing structural exact filter,
    but eliminate the current 12-byte posting per raw symbol occurrence.
