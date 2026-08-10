@@ -304,7 +304,7 @@ static void archive_round_trip(Clause_store_archive_mode mode)
   CHECK(clause_store_sync(store), "memory or mmap backing synchronizes");
   stats = clause_store_get_stats(store);
   CHECK(stats.records == 2 && stats.record_bytes > 0 &&
-        stats.handle_bytes < 256 && stats.materializations >= 5 &&
+        stats.handle_bytes < 512 && stats.materializations >= 5 &&
         stats.validation_failures >= 4,
         "record, handle, materialization, and validation counters are exact");
 

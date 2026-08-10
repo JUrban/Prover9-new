@@ -22,6 +22,8 @@ struct clause_store_stats {
   unsigned long long logical_body_bytes;
   unsigned long long materializations;
   unsigned long long validation_failures;
+  unsigned long long mmap_eviction_passes;
+  unsigned long long mmap_eviction_bytes;
 };
 
 Clause_store clause_store_init(const char *name);

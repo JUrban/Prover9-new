@@ -433,6 +433,19 @@ compact unit/back records and the shared pool together, and make cold ancestor
 mmap pages genuinely evictable.  Further passive-body micro-tuning cannot
 recover the required roughly 150 MiB.
 
+The mmap ancestor store now maintains record/body counters incrementally,
+instead of decoding and checksumming every archived record whenever
+STATISTICS is printed.  Once the append-only file reaches 16 MiB, each
+additional 8 MiB step synchronizes newly cold complete pages and applies
+`MADV_DONTNEED` to the cold prefix, retaining an 8 MiB writable hot tail.
+Random proof and materialization reads still use the same validated
+`MAP_SHARED` records.  Memory and mmap ancestor tests pass; a 200,000-record,
+22.2-MB mmap test evicts an 8-MiB prefix and tears down with an empty ID table.
+The 1,000-given CHAT archive is below the first threshold at 7,973,611 record
+bytes, preserves the exact state, takes 71.61 user seconds, and peaks at
+91,028 KiB RSS.  The lower CPU versus 78.33 seconds reflects removal of the
+periodic full archive scan; the full proof is needed to measure RSS eviction.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:

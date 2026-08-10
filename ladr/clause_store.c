@@ -21,6 +21,8 @@
 #define ANCESTOR_VERSION 2
 #define ANCESTOR_HEADER_SIZE 96
 #define STORE_REF_TAG ((uintptr_t) 1)
+#define MMAP_EVICT_STEP (8U * 1024U * 1024U)
+#define MMAP_HOT_WINDOW (8U * 1024U * 1024U)
 
 #define AF_IS_FORMULA  0x0001U
 #define AF_NORMAL_VARS 0x0002U
@@ -42,6 +44,13 @@ struct clause_store {
   int fd;
   unsigned long long materializations;
   unsigned long long validation_failures;
+  unsigned long long archive_records;
+  unsigned long long archive_body_bytes;
+  unsigned long long archive_logical_body_bytes;
+  size_t mmap_synced_bytes;
+  size_t mmap_last_evict_size;
+  unsigned long long mmap_eviction_passes;
+  unsigned long long mmap_eviction_bytes;
 };
 
 /* The ID table stores only a tagged offset, so one archive-enabled store is
@@ -156,6 +165,47 @@ static BOOL ensure_backing(Clause_store store, size_t needed)
   }
 #endif
   return FALSE;
+}
+
+/* Keep only a bounded writable tail mapped resident.  The ancestor file is
+   still the authority: complete cold pages are synchronized before their
+   PTEs are discarded, and later random proof/materialization reads fault
+   those pages back through the ordinary MAP_SHARED mapping. */
+static void evict_cold_mmap_pages(Clause_store store)
+{
+#ifndef __EMSCRIPTEN__
+  long page_size_long;
+  size_t page_size, cold_end, sync_start;
+  if (store == NULL || store->mode != CLAUSE_STORE_ARCHIVE_MMAP ||
+      store->backing == NULL ||
+      store->backing_size <= MMAP_HOT_WINDOW)
+    return;
+  if ((store->mmap_last_evict_size == 0 &&
+       store->backing_size < MMAP_HOT_WINDOW + MMAP_EVICT_STEP) ||
+      (store->mmap_last_evict_size != 0 &&
+       store->backing_size - store->mmap_last_evict_size < MMAP_EVICT_STEP))
+    return;
+  page_size_long = sysconf(_SC_PAGESIZE);
+  if (page_size_long <= 0)
+    return;
+  page_size = (size_t) page_size_long;
+  cold_end = (store->backing_size - MMAP_HOT_WINDOW) / page_size * page_size;
+  sync_start = store->mmap_synced_bytes / page_size * page_size;
+  if (cold_end == 0)
+    return;
+  if (sync_start < cold_end &&
+      msync(store->backing + sync_start, cold_end - sync_start, MS_SYNC) != 0)
+    return;
+  store->mmap_synced_bytes = cold_end;
+  if (cold_end != 0 &&
+      madvise(store->backing, cold_end, MADV_DONTNEED) == 0) {
+    store->mmap_eviction_passes++;
+    store->mmap_eviction_bytes += cold_end;
+    store->mmap_last_evict_size = store->backing_size;
+  }
+#else
+  (void) store;
+#endif
 }
 
 static unsigned clause_flags(Topform c)
@@ -288,7 +338,11 @@ static BOOL append_record(Clause_store store, Topform c,
         c->simplifier_epoch);
   put32(record + 88, crc32_bytes(record, 88));
   store->backing_size += (size_t) total_size;
+  store->archive_records++;
+  store->archive_body_bytes += c->compressed_size;
+  store->archive_logical_body_bytes += c->uncompressed_body_bytes;
   *record_offset = offset;
+  evict_cold_mmap_pages(store);
   ok = TRUE;
 
 done:
@@ -439,6 +493,8 @@ static void release_backing(Clause_store store)
   store->backing = NULL;
   store->backing_size = 0;
   store->backing_capacity = 0;
+  store->mmap_synced_bytes = 0;
+  store->mmap_last_evict_size = 0;
   store->fd = -1;
   if (Active_archive_store == store)
     Active_archive_store = NULL;
@@ -1014,21 +1070,16 @@ struct clause_store_stats clause_store_get_stats(Clause_store store)
   struct clause_store_stats stats;
   memset(&stats, 0, sizeof(stats));
   if (store != NULL) {
-    size_t i;
-    for (i = 0; i < store->length; i++)
-      if (ref_is_archive(store->refs[i])) {
-        struct record_view v;
-        stats.records++;
-        if (record_view(store, ref_offset(store->refs[i]), &v)) {
-          stats.body_bytes += v.body_size;
-          stats.logical_body_bytes += v.logical_body;
-        }
-      }
+    stats.records = store->archive_records;
+    stats.body_bytes = store->archive_body_bytes;
+    stats.logical_body_bytes = store->archive_logical_body_bytes;
     stats.record_bytes = store->backing_size;
     stats.backing_bytes = store->backing_capacity;
     stats.handle_bytes = sizeof(*store) + store->capacity * sizeof(uintptr_t);
     stats.materializations = store->materializations;
     stats.validation_failures = store->validation_failures;
+    stats.mmap_eviction_passes = store->mmap_eviction_passes;
+    stats.mmap_eviction_bytes = store->mmap_eviction_bytes;
   }
   return stats;
 }

@@ -2654,6 +2654,8 @@ void update_memory_stats(void)
   Stats.ancestor_handle_bytes = as.handle_bytes;
   Stats.ancestor_materializations = as.materializations;
   Stats.ancestor_validation_failures = as.validation_failures;
+  Stats.ancestor_mmap_eviction_passes = as.mmap_eviction_passes;
+  Stats.ancestor_mmap_eviction_bytes = as.mmap_eviction_bytes;
 
   Stats.disabled_store_bytes = clause_store_allocated_bytes(Glob.disabled);
   Stats.disabled_legacy_clist_bytes =
@@ -3307,11 +3309,14 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
     }
   fprintf(fp,
           "Ancestor_store: records=%s, record_bytes=%s, backing_bytes=%s, "
-          "handle_bytes=%s, materialized=%s, validation_failures=%s.\n",
+          "handle_bytes=%s, materialized=%s, validation_failures=%s, "
+          "mmap_eviction_passes=%s, mmap_eviction_bytes=%s.\n",
           comma_num(s.ancestor_records), comma_num(s.ancestor_record_bytes),
           comma_num(s.ancestor_backing_bytes), comma_num(s.ancestor_handle_bytes),
           comma_num(s.ancestor_materializations),
-          comma_num(s.ancestor_validation_failures));
+          comma_num(s.ancestor_validation_failures),
+          comma_num(s.ancestor_mmap_eviction_passes),
+          comma_num(s.ancestor_mmap_eviction_bytes));
   if (compact_otter_passive_mode())
     fprintf(fp,
             "Compact_passive_cache: budget=%s, metadata_bytes=%s, "

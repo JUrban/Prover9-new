@@ -146,6 +146,12 @@ reconstructs the proof successfully.  This passes the proof and 1.25 CPU
 gates, but not the final RAM gate; CHAT remains the faster regression boundary
 for the coordinated inactive-index/term-pool compaction now required.
 
+Incremental ancestor statistics preserve the exact 1,000-given CHAT state
+and reduce user CPU from 78.33 to 71.61 seconds by removing full-record scans
+from reports.  The store has 7,973,611 record bytes at this boundary, below
+the 16-MiB first cold-page eviction threshold.  A separate 200,000-record
+mmap test exercises that path and confirms an 8-MiB synchronized eviction.
+
 ## Exact old and compatibility proof baseline
 
 | Mode | Result | Given | Generated | Kept | User CPU | Wall | Peak RSS |

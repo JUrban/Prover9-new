@@ -24,6 +24,9 @@ static size_t requested_count(int argc, char **argv)
 int main(int argc, char **argv)
 {
   size_t n = requested_count(argc, argv), i;
+  Clause_store_archive_mode mode =
+    argc > 2 && strcmp(argv[2], "mmap") == 0 ?
+      CLAUSE_STORE_ARCHIVE_MMAP : CLAUSE_STORE_ARCHIVE_MEMORY;
   Clause_store store;
   struct clause_store_stats records;
   struct clause_id_table_stats ids, final_ids;
@@ -33,7 +36,12 @@ int main(int argc, char **argv)
   clear_clause_id_tab();
   set_clause_id_count(0);
   store = clause_store_init("ancestor-scale");
-  if (!clause_store_enable_archive(store, CLAUSE_STORE_ARCHIVE_MEMORY)) {
+  if (argc > 2 && strcmp(argv[2], "memory") != 0 &&
+      strcmp(argv[2], "mmap") != 0) {
+    fprintf(stderr, "usage: %s [record_count] [memory|mmap]\n", argv[0]);
+    return 2;
+  }
+  if (!clause_store_enable_archive(store, mode)) {
     fprintf(stderr, "ancestor_store_scale_test: cannot initialize store\n");
     return 1;
   }
@@ -60,12 +68,16 @@ int main(int argc, char **argv)
          "backing_bytes=%llu handle_bytes=%llu id_bytes=%llu "
          "resident_bytes=%llu total_logical_bytes=%llu legacy_estimate=%llu "
          "resident_per_record=%.3f total_per_record=%.3f "
-         "legacy_per_record=%.3f\n",
+         "legacy_per_record=%.3f mmap_evictions=%llu "
+         "mmap_eviction_bytes=%llu\n",
          records.records, records.record_bytes, records.backing_bytes,
          records.handle_bytes, ids.allocated_bytes, resident, total, legacy,
-         (double) resident / n, (double) total / n, (double) legacy / n);
+         (double) resident / n, (double) total / n, (double) legacy / n,
+         records.mmap_eviction_passes, records.mmap_eviction_bytes);
   if (records.records != n || ids.entries != n || resident >= legacy ||
-      total >= legacy) {
+      total >= legacy ||
+      (mode == CLAUSE_STORE_ARCHIVE_MMAP && records.record_bytes >=
+         16U * 1024U * 1024U && records.mmap_eviction_passes == 0)) {
     fprintf(stderr, "ancestor_store_scale_test: accounting check failed\n");
     return 1;
   }
