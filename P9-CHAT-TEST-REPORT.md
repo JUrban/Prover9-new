@@ -52,6 +52,45 @@ Harness status `0` means normal proof termination, `4` means `max_seconds`,
 and `5` means `max_given`.  A periodic report can interrupt an inference
 batch; only terminal equal-given states support exact trajectory comparison.
 
+### Phase-5 compact-OTTER matrix cases
+
+The harness now also defines two packed-fast OTTER cases:
+
+- `new_otter_packed_fast` keeps full passive clauses and the ordinary OTTER
+  indexes;
+- `new_otter_compact_packed_fast` uses the dense ancestor-backed passive store
+  and all four authoritative compact indexes.
+
+It strips inherited `compact_otter_*` controls from the common input, so the
+generated case file is the sole authority.  Independent cases can be run in
+parallel on distinct CPUs, for example:
+
+```sh
+CHAT_CASES=new_otter_packed_fast CHAT_CPU=0 \
+  ./test.src/chat_test_matrix.sh /project/bob/chat_test.in results/full \
+  300 120 512 180 &
+CHAT_CASES=new_otter_compact_packed_fast CHAT_CPU=1 \
+  ./test.src/chat_test_matrix.sh /project/bob/chat_test.in results/compact \
+  300 120 512 180 &
+wait
+```
+
+The Phase-5 shared-term-pool build produced this equal-boundary debug result
+with the two processes running concurrently:
+
+| Mode | Given | Generated | Kept | User CPU | Peak RSS |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| packed-fast, full clauses/indexes | 301 | 120,793 | 5,737 | 18.71 s | 90,640 KiB |
+| packed-fast, dense + compact indexes | 301 | 120,793 | 5,737 | 21.75 s | 90,636 KiB |
+
+Usable, SOS, demodulator, disabled, hint, and active-hint counts also agree.
+The compact run's component statistics match the independent Osborn-prefix
+measurement.  At only 300 givens, both processes remain on the roughly 89 MiB
+packed-hint and allocator floor, so this is primarily a correctness/CPU gate;
+the 1,000-given Osborn run is the useful RSS discriminator.  A deliberately
+attempted OTTER+dense case without the compact indexes failed at startup with
+the expected authoritative-index guard, and was not added as a matrix mode.
+
 ## Exact old and compatibility proof baseline
 
 | Mode | Result | Given | Generated | Kept | User CPU | Wall | Peak RSS |

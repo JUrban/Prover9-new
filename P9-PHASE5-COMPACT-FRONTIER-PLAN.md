@@ -59,6 +59,7 @@ columns:
 | 300 | archive, 4 MiB cache | 19.32--20.34 s | 22.04--23.01 s | 90,636 KiB | 16.89 MB |
 | 1,000 | compact indexes, full bodies | 118.56 s | 133.05 s | 123,236 KiB | 45.73 MB |
 | 1,000 | archive, 4 MiB cache | 140.45 s | 156.25 s | 113,264 KiB | 19.17 MB |
+| 1,000 | archive, shared clause term pool | 142.07 s | 156.66 s | 94,652 KiB | 19.17 MB |
 
 All compared runs have identical given, generated, kept, usable, SOS,
 demodulator, disabled, hint, and active-hint counts.  At 1,000 givens both
@@ -83,7 +84,7 @@ indexes grow with the passive population, so extrapolating the current
 representation to the historical 131,001-clause proof boundary would miss
 the final 125 MiB target even though passive bodies are cold.
 
-The first structural compression slice is now implemented.  Radix edges
+The first structural compression slices are now implemented.  Radix edges
 preserve the former child and posting order, and the exact 300-given trace is
 unchanged:
 
@@ -94,6 +95,7 @@ unchanged:
 | rewrite | 1,775,880 B | 1,317,128 B | 25.8% |
 | back demod | 1,741,040 B | 1,282,296 B | 26.4% |
 | all four indexes | 7,652,792 B | 3,937,752 B | 48.5% |
+| all four plus shared clause term pool | 7,652,792 B | 3,020,360 B | 60.5% |
 
 The rewrite node pool itself falls from 655,360 to 196,608 bytes (70.0%).
 The optimized rewrite traversal uses one binding trail per query; allocating
@@ -104,17 +106,40 @@ token-trie run, so the accepted representation has no measured CPU penalty.
 The grouped back-demodulation representation turns 53,028 raw symbol
 occurrences into 25,069 `(symbol, clause ID)` groups and a 53,028-byte
 delta-varint offset stream.  A same-host control took 18.52 user seconds and
-the grouped run took 18.47 seconds.  The 1,000-given compression gate remains
-pending until the shared-term slice below is present.
+the grouped run took 18.47 seconds.
+
+Rewrite, unit, and back-demodulation terms now use one clause-coalescing term
+pool.  A clause is serialized once, and every later request from another
+index returns a stable slice in that serialization.  At 300 givens, 26,855
+term requests require only 5,737 physical clause serializations; the pool
+reuses 222,332 tokens and occupies 655,464 bytes.  The exact CHAT/Osborn
+boundary remains `Given=301`, `Generated=120,793`, and `Kept=5,737`.
+
+The 1,000-given gate exposes the remaining work.  Before these structural
+changes, the four indexes occupied 44,545,464 bytes.  Their compact metadata
+plus the shared pool now occupy 20,248,136 bytes, a **54.5%** reduction rather
+than the required 70%.  User CPU is 142.07 seconds versus 140.45 seconds for
+the pre-structural archive run (+1.2%), while peak RSS falls from 113,264 KiB
+to 94,652 KiB (-16.4%).  Search state is exact at `Given=1001`,
+`Generated=1,268,285`, `Kept=33,909`, `Usable=949`, `Sos=26,052`,
+`Demods=21,741`, and `Disabled=6,937`.
+
+The pool currently removes duplication among indexes for the same clause; it
+does not yet hash-cons equal subterms across different clauses.  Its
+1,000-given logical content is 728,510 32-bit tokens, but power-of-two backing
+holds 1,048,576 tokens and its proof-ID directory uses another 1,048,576
+bytes.  This capacity slack, per-index stable-record tables, and repeated
+posting metadata are now larger targets than private token copies.
 
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:
 
-1. Add one hash-consed compact term pool shared by rewrite rules, unit
-   matching, and passive redex occurrences.  Each normalized subterm is
-   stored once; the three indexes retain 32-bit term IDs instead of private
-   flattened token copies.
+1. **First layer completed:** rewrite rules, unit matching, and passive redex
+   occurrences share one clause serialization and retain 32-bit offsets
+   instead of private flattened token copies.  Cross-clause hash-consing of
+   equal subterms remains to be implemented and measured; its hash/directory
+   overhead is included in the reported total.
 2. **Completed for the existing token arenas:** replace token-per-node unit
    and rewrite discrimination paths with radix edges.  Unary paths become one
    edge; child order and terminal posting order remain the audited legacy
