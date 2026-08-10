@@ -37,6 +37,8 @@ uint32_t compact_term_pool_append(Compact_term_pool pool,
 
 const int32_t *compact_term_pool_tokens(Compact_term_pool pool);
 
+size_t compact_term_pool_token_count(Compact_term_pool pool);
+
 void compact_term_pool_get_stats(Compact_term_pool pool,
                                  struct compact_term_pool_stats *stats);
 

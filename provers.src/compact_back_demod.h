@@ -2,6 +2,7 @@
 #define TP_COMPACT_BACK_DEMOD_H
 
 #include "../ladr/ladr.h"
+#include "compact_term_pool.h"
 
 typedef struct compact_back_demod_index * Compact_back_demod_index;
 
@@ -28,6 +29,9 @@ struct compact_back_demod_stats {
 };
 
 Compact_back_demod_index compact_back_demod_init(void);
+
+Compact_back_demod_index compact_back_demod_init_with_pool(
+  Compact_term_pool pool);
 
 BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause);
 

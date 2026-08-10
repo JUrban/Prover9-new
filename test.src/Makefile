@@ -84,8 +84,8 @@ compact_rewrite_test: compact_rewrite_test.o ../provers.src/compact_rewrite.o ..
 compact_unit_index_test: compact_unit_index_test.o ../provers.src/compact_unit_index.o ../provers.src/compact_term_pool.o ../ladr/libladr.a
 	$(CC) $(CFLAGS) -o compact_unit_index_test compact_unit_index_test.o ../provers.src/compact_unit_index.o ../provers.src/compact_term_pool.o ../ladr/libladr.a -lm
 
-compact_back_demod_test: compact_back_demod_test.o ../provers.src/compact_back_demod.o ../ladr/libladr.a
-	$(CC) $(CFLAGS) -o compact_back_demod_test compact_back_demod_test.o ../provers.src/compact_back_demod.o ../ladr/libladr.a -lm
+compact_back_demod_test: compact_back_demod_test.o ../provers.src/compact_back_demod.o ../provers.src/compact_term_pool.o ../ladr/libladr.a
+	$(CC) $(CFLAGS) -o compact_back_demod_test compact_back_demod_test.o ../provers.src/compact_back_demod.o ../provers.src/compact_term_pool.o ../ladr/libladr.a -lm
 
 compact_feature_index_test: compact_feature_index_test.o ../provers.src/compact_feature_index.o ../ladr/libladr.a
 	$(CC) $(CFLAGS) -o compact_feature_index_test compact_feature_index_test.o ../provers.src/compact_feature_index.o ../ladr/libladr.a -lm

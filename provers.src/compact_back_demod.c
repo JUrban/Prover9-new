@@ -39,9 +39,10 @@ struct compact_back_demod_index {
   struct cbd_record *records;
   size_t record_count;
   size_t record_capacity;
-  int32_t *tokens;
-  size_t token_count;
-  size_t token_capacity;
+  Compact_term_pool term_pool;
+  const int32_t *tokens;
+  size_t token_limit;
+  BOOL owns_term_pool;
   unsigned long long *hash_keys;
   uint32_t *hash_values;
   size_t hash_capacity;
@@ -69,7 +70,6 @@ struct cbd_symbol_set {
   struct cbd_local_occurrence *occurrence_values;
   size_t occurrence_count;
   size_t occurrence_capacity;
-  uint32_t token_base;
 };
 
 static size_t grow_capacity(size_t current, size_t item_size,
@@ -102,15 +102,17 @@ static uint64_t hash_id(uint64_t x)
 
 static unsigned long long index_bytes(Compact_back_demod_index index)
 {
+  struct compact_term_pool_stats terms;
   if (index == NULL)
     return 0;
+  compact_term_pool_get_stats(index->term_pool, &terms);
   return sizeof(*index) +
     index->posting_capacity * sizeof(*index->postings) +
     index->symbol_capacity *
       (sizeof(*index->posting_heads) + sizeof(*index->posting_tails)) +
     index->occurrence_capacity * sizeof(*index->occurrences) +
     index->record_capacity * sizeof(*index->records) +
-    index->token_capacity * sizeof(*index->tokens) +
+    (index->owns_term_pool ? terms.total_bytes : 0) +
     index->hash_capacity *
       (sizeof(*index->hash_keys) + sizeof(*index->hash_values)) +
     index->result_capacity * sizeof(*index->results);
@@ -210,23 +212,6 @@ static void ensure_symbols(Compact_back_demod_index index, unsigned symbol)
            sizeof(*index->posting_tails));
 }
 
-static void ensure_tokens(Compact_back_demod_index index, size_t extra)
-{
-  size_t needed;
-  if (extra > SIZE_MAX - index->token_count)
-    fatal_error("compact_back_demod: token overflow");
-  needed = index->token_count + extra;
-  if (needed > UINT32_MAX)
-    fatal_error("compact_back_demod: token offsets exceed 32 bits");
-  while (needed > index->token_capacity) {
-    index->token_capacity = grow_capacity(
-      index->token_capacity, sizeof(*index->tokens),
-      "compact_back_demod: token capacity overflow");
-    index->tokens = safe_realloc(
-      index->tokens, index->token_capacity * sizeof(*index->tokens));
-  }
-}
-
 static void ensure_occurrence_bytes(Compact_back_demod_index index,
                                     size_t extra)
 {
@@ -323,45 +308,31 @@ static void note_symbol(struct cbd_symbol_set *set, uint32_t symbol,
   set->occurrence_count++;
 }
 
-static void append_term(Compact_back_demod_index index, Term term,
-                        struct cbd_symbol_set *symbols)
+static void collect_term_slice(Compact_back_demod_index index,
+                               uint32_t offset, uint32_t length,
+                               uint32_t base,
+                               struct cbd_symbol_set *symbols)
 {
-  size_t capacity = 128, top = 0;
-  Term fixed[128];
-  Term *stack = fixed;
-  stack[top++] = term;
-  while (top != 0) {
-    Term current = stack[--top];
-    int i;
-    int32_t code = VARIABLE(current) ?
-      -(int32_t) VARNUM(current) - 1 : (int32_t) SYMNUM(current);
-    ensure_tokens(index, 1);
-    index->tokens[index->token_count++] = code;
+  uint32_t i;
+  for (i = 0; i < length; i++) {
+    int32_t code = index->tokens[offset + i];
     if (code >= 0) {
       note_symbol(symbols, (uint32_t) code,
-                  (uint32_t) index->token_count - 1 - symbols->token_base);
+                  offset + i - base);
       index->symbol_occurrences++;
     }
-    for (i = ARITY(current) - 1; i >= 0; i--) {
-      if (top == capacity) {
-        capacity *= 2;
-        if (stack == fixed) {
-          stack = safe_malloc(capacity * sizeof(*stack));
-          memcpy(stack, fixed, top * sizeof(*stack));
-        }
-        else
-          stack = safe_realloc(stack, capacity * sizeof(*stack));
-      }
-      stack[top++] = ARG(current, i);
-    }
   }
-  if (stack != fixed)
-    safe_free(stack);
 }
 
-Compact_back_demod_index compact_back_demod_init(void)
+Compact_back_demod_index compact_back_demod_init_with_pool(
+  Compact_term_pool pool)
 {
   Compact_back_demod_index index = safe_calloc(1, sizeof(*index));
+  if (pool == NULL)
+    fatal_error("compact_back_demod_init_with_pool: null term pool");
+  index->term_pool = pool;
+  index->tokens = compact_term_pool_tokens(pool);
+  index->token_limit = compact_term_pool_token_count(pool);
   ENSURE_ARRAY(index, postings, posting_count, posting_capacity,
                "compact_back_demod: posting overflow");
   memset(&index->postings[0], 0, sizeof(index->postings[0]));
@@ -374,12 +345,24 @@ Compact_back_demod_index compact_back_demod_init(void)
   return index;
 }
 
+Compact_back_demod_index compact_back_demod_init(void)
+{
+  Compact_term_pool pool = compact_term_pool_init();
+  Compact_back_demod_index index =
+    compact_back_demod_init_with_pool(pool);
+  index->owns_term_pool = TRUE;
+  update_peak(index);
+  return index;
+}
+
 BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
 {
   uint32_t record_index;
   struct cbd_record *record;
   struct cbd_symbol_set symbols;
   Literals literal;
+  uint32_t token_end = 0;
+  BOOL have_tokens = FALSE;
   size_t at_hash;
   if (index == NULL || clause == NULL || clause->id == 0 ||
       clause->literals == NULL ||
@@ -393,7 +376,6 @@ BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
   record = &index->records[record_index];
   memset(record, 0, sizeof(*record));
   record->proof_id = clause->id;
-  record->token_offset = (uint32_t) index->token_count;
   record->active = TRUE;
   memset(&symbols, 0, sizeof(symbols));
   symbols.values = symbols.fixed;
@@ -401,14 +383,32 @@ BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
   symbols.occurrence_values = symbols.occurrence_fixed;
   symbols.occurrence_capacity = sizeof(symbols.occurrence_fixed) /
     sizeof(symbols.occurrence_fixed[0]);
-  symbols.token_base = record->token_offset;
   for (literal = clause->literals; literal != NULL; literal = literal->next) {
     Term atom = literal->atom;
     int arg;
-    for (arg = 0; arg < ARITY(atom); arg++)
-      append_term(index, ARG(atom, arg), &symbols);
+    for (arg = 0; arg < ARITY(atom); arg++) {
+      uint32_t length;
+      uint32_t offset = compact_term_pool_intern(
+        index->term_pool, clause->id, clause->literals, ARG(atom, arg),
+        &length);
+      index->tokens = compact_term_pool_tokens(index->term_pool);
+      index->token_limit = compact_term_pool_token_count(index->term_pool);
+      if (!have_tokens) {
+        record->token_offset = offset;
+        token_end = offset + length;
+        have_tokens = TRUE;
+      }
+      else {
+        if (offset < record->token_offset)
+          fatal_error("compact_back_demod: nonmonotone pooled clause slice");
+        if (offset + length > token_end)
+          token_end = offset + length;
+      }
+      collect_term_slice(index, offset, length, record->token_offset,
+                         &symbols);
+    }
   }
-  record->token_length = (uint32_t) index->token_count - record->token_offset;
+  record->token_length = have_tokens ? token_end - record->token_offset : 0;
   {
     size_t i;
     for (i = 0; i < symbols.count; i++) {
@@ -498,7 +498,7 @@ static uint32_t token_term_end(Compact_back_demod_index index,
 {
   int32_t code;
   int i, arity;
-  if ((size_t) position >= index->token_count)
+  if ((size_t) position >= index->token_limit)
     fatal_error("compact_back_demod: corrupt term token offset");
   code = index->tokens[position++];
   arity = code < 0 ? 0 : sn_to_arity(code);
@@ -519,7 +519,7 @@ static BOOL match_token_term(Compact_back_demod_index index, Term pattern,
 {
   uint32_t at = *position;
   int i;
-  if ((size_t) at >= index->token_count)
+  if ((size_t) at >= index->token_limit)
     fatal_error("compact_back_demod: corrupt match token offset");
   if (VARIABLE(pattern)) {
     int variable = VARNUM(pattern);
@@ -651,6 +651,8 @@ unsigned long long *compact_back_demod_candidate_ids(
   *count = 0;
   if (index == NULL || demod == NULL || demod->literals == NULL)
     return NULL;
+  index->tokens = compact_term_pool_tokens(index->term_pool);
+  index->token_limit = compact_term_pool_token_count(index->term_pool);
   atom = demod->literals->atom;
   alpha = ARG(atom, 0);
   beta = ARG(atom, 1);
@@ -680,9 +682,11 @@ void compact_back_demod_note_exact_tests(Compact_back_demod_index index,
 void compact_back_demod_get_stats(Compact_back_demod_index index,
                                   struct compact_back_demod_stats *stats)
 {
+  struct compact_term_pool_stats terms;
   memset(stats, 0, sizeof(*stats));
   if (index == NULL)
     return;
+  compact_term_pool_get_stats(index->term_pool, &terms);
   stats->active = index->active;
   stats->peak = index->peak;
   stats->retired = index->retired;
@@ -701,7 +705,7 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->occurrence_stream_bytes = index->occurrence_count;
   stats->record_bytes = index->record_capacity * sizeof(*index->records);
   stats->root_bytes = 0;
-  stats->token_bytes = index->token_capacity * sizeof(*index->tokens);
+  stats->token_bytes = index->owns_term_pool ? terms.token_bytes : 0;
   stats->hash_bytes = index->hash_capacity *
     (sizeof(*index->hash_keys) + sizeof(*index->hash_values));
   stats->scratch_bytes = index->result_capacity * sizeof(*index->results);
@@ -718,7 +722,8 @@ void compact_back_demod_free(Compact_back_demod_index index)
   safe_free(index->posting_tails);
   safe_free(index->occurrences);
   safe_free(index->records);
-  safe_free(index->tokens);
+  if (index->owns_term_pool)
+    compact_term_pool_free(index->term_pool);
   safe_free(index->hash_keys);
   safe_free(index->hash_values);
   safe_free(index->results);
