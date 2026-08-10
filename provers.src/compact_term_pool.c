@@ -4,6 +4,7 @@
 #include "compact_term_pool.h"
 #include "compact_id_map.h"
 
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -32,6 +33,7 @@ struct compact_term_pool {
   unsigned long long rebase_growths;
   unsigned long long rebase_copy_bytes;
   unsigned long long streamed_rebases;
+  unsigned long long file_sorted_rebases;
   unsigned long long peak_bytes;
   unsigned long long compactions;
   unsigned long long bytes_reclaimed;
@@ -629,9 +631,9 @@ static void materialize_retained_clause(unsigned long long proof_id,
 /* Retained proof IDs normally rise in exactly the order in which their
    immutable token intervals were appended.  Stream that already sorted
    production case through an unlinked file so that the late 2--3 MiB rebase
-   vector is not resident while the old token pages still exist.  A caller
-   with a rewritten/non-monotone proof-ID history returns FALSE and uses the
-   established in-memory qsort path below. */
+   vector is not resident while the old token pages still exist.  Rewritten
+   or non-monotone proof-ID histories are ordered by the bounded file radix
+   pass below; the established in-memory qsort remains the I/O fallback. */
 struct retained_stream_context {
   Compact_term_pool pool;
   FILE *file;
@@ -667,6 +669,94 @@ static void stream_retained_clause(unsigned long long proof_id,
   stream->count++;
 }
 
+static BOOL read_rebase_entries(int fd,
+                                struct compact_term_rebase_entry *entries,
+                                size_t first, size_t count)
+{
+  unsigned char *bytes = (unsigned char *) entries;
+  size_t done = 0;
+  size_t total = count * sizeof(*entries);
+  off_t offset = (off_t) (first * sizeof(*entries));
+  while (done < total) {
+    ssize_t got = pread(fd, bytes + done, total - done,
+                        offset + (off_t) done);
+    if (got < 0 && errno == EINTR)
+      continue;
+    if (got <= 0)
+      return FALSE;
+    done += (size_t) got;
+  }
+  return TRUE;
+}
+
+static BOOL write_rebase_entry(int fd,
+                               const struct compact_term_rebase_entry *entry,
+                               size_t at)
+{
+  const unsigned char *bytes = (const unsigned char *) entry;
+  size_t done = 0;
+  size_t total = sizeof(*entry);
+  off_t offset = (off_t) (at * sizeof(*entry));
+  while (done < total) {
+    ssize_t put = pwrite(fd, bytes + done, total - done,
+                         offset + (off_t) done);
+    if (put < 0 && errno == EINTR)
+      continue;
+    if (put <= 0)
+      return FALSE;
+    done += (size_t) put;
+  }
+  return TRUE;
+}
+
+/* Four stable byte-wise counting passes sort arbitrary 32-bit token offsets
+   while retaining only one 4-KiB entry buffer and two 256-counter arrays.
+   Four is even, so the final order is back in SOURCE and SCRATCH remains
+   available for the transformed old-to-new map. */
+static BOOL radix_sort_rebase_file(FILE *source, FILE *scratch, size_t count)
+{
+  enum { REBASE_RADIX = 256, REBASE_IO_ENTRIES = 256 };
+  struct compact_term_rebase_entry buffer[REBASE_IO_ENTRIES];
+  size_t counts[REBASE_RADIX], cursors[REBASE_RADIX];
+  int source_fd = fileno(source), scratch_fd = fileno(scratch);
+  unsigned pass;
+  for (pass = 0; pass < 4; pass++) {
+    int input_fd = (pass & 1) == 0 ? source_fd : scratch_fd;
+    int output_fd = (pass & 1) == 0 ? scratch_fd : source_fd;
+    unsigned shift = pass * 8;
+    size_t first, radix, total = 0;
+    memset(counts, 0, sizeof(counts));
+    for (first = 0; first < count; first += REBASE_IO_ENTRIES) {
+      size_t i;
+      size_t amount = count - first < REBASE_IO_ENTRIES ?
+        count - first : REBASE_IO_ENTRIES;
+      if (!read_rebase_entries(input_fd, buffer, first, amount))
+        return FALSE;
+      for (i = 0; i < amount; i++)
+        counts[(buffer[i].old_offset >> shift) & 0xffU]++;
+    }
+    for (radix = 0; radix < REBASE_RADIX; radix++) {
+      cursors[radix] = total;
+      total += counts[radix];
+    }
+    if (total != count)
+      return FALSE;
+    for (first = 0; first < count; first += REBASE_IO_ENTRIES) {
+      size_t i;
+      size_t amount = count - first < REBASE_IO_ENTRIES ?
+        count - first : REBASE_IO_ENTRIES;
+      if (!read_rebase_entries(input_fd, buffer, first, amount))
+        return FALSE;
+      for (i = 0; i < amount; i++) {
+        unsigned radix = (buffer[i].old_offset >> shift) & 0xffU;
+        if (!write_rebase_entry(output_fd, &buffer[i], cursors[radix]++))
+          return FALSE;
+      }
+    }
+  }
+  return TRUE;
+}
+
 static BOOL compact_retained_streamed(Compact_term_pool pool,
                                       Compact_term_rebase_map map)
 {
@@ -677,10 +767,15 @@ static BOOL compact_retained_streamed(Compact_term_pool pool,
   FILE *source_file, *destination_file;
   size_t remaining, token_count, token_capacity, mapping_bytes;
   void *entries;
+  BOOL file_sorted;
 
   source_file = tmpfile();
   if (source_file == NULL)
     return FALSE;
+  if (map->count > SIZE_MAX / sizeof(*map->entries)) {
+    fclose(source_file);
+    fatal_error("compact_term_pool: streamed rebase map overflow");
+  }
   memset(&stream, 0, sizeof(stream));
   stream.pool = pool;
   stream.file = source_file;
@@ -688,12 +783,19 @@ static BOOL compact_retained_streamed(Compact_term_pool pool,
   compact_id_set_foreach(map->retained_ids, stream_retained_clause, &stream);
   if (stream.count != map->count)
     fatal_error("compact_term_pool: incomplete streamed retained ID set");
-  if (stream.write_failed || fflush(source_file) != 0 || !stream.monotone) {
+  if (stream.write_failed || fflush(source_file) != 0) {
     fclose(source_file);
     return FALSE;
   }
   destination_file = tmpfile();
   if (destination_file == NULL) {
+    fclose(source_file);
+    return FALSE;
+  }
+  file_sorted = !stream.monotone;
+  if (file_sorted &&
+      !radix_sort_rebase_file(source_file, destination_file, map->count)) {
+    fclose(destination_file);
     fclose(source_file);
     return FALSE;
   }
@@ -705,6 +807,7 @@ static BOOL compact_retained_streamed(Compact_term_pool pool,
   pool->cached_proof_id = 0;
 
   rewind(source_file);
+  rewind(destination_file);
   remaining = map->count;
   token_count = 0;
   while (remaining != 0) {
@@ -756,6 +859,8 @@ static BOOL compact_retained_streamed(Compact_term_pool pool,
   pool->rebase_growths += map->growths;
   pool->rebase_copy_bytes += map->copy_bytes;
   pool->streamed_rebases++;
+  if (file_sorted)
+    pool->file_sorted_rebases++;
   pool->compactions++;
   if (old_bytes > pool_bytes(pool))
     pool->bytes_reclaimed += old_bytes - pool_bytes(pool);
@@ -931,6 +1036,7 @@ void compact_term_pool_finish_compaction(Compact_term_pool destination,
   destination->rebase_growths += source->rebase_growths;
   destination->rebase_copy_bytes += source->rebase_copy_bytes;
   destination->streamed_rebases += source->streamed_rebases;
+  destination->file_sorted_rebases += source->file_sorted_rebases;
   destination->compactions = source->compactions + 1;
   destination->bytes_reclaimed = source->bytes_reclaimed +
     (source_bytes > destination_bytes ? source_bytes - destination_bytes : 0);
@@ -1022,6 +1128,7 @@ void compact_term_pool_get_stats(Compact_term_pool pool,
   stats->rebase_growths = pool->rebase_growths;
   stats->rebase_copy_bytes = pool->rebase_copy_bytes;
   stats->streamed_rebases = pool->streamed_rebases;
+  stats->file_sorted_rebases = pool->file_sorted_rebases;
   stats->directory_bytes = compact_id_map_bytes(pool->directory);
   stats->total_bytes = pool_bytes(pool);
   stats->peak_bytes = pool->peak_bytes;

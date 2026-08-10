@@ -167,6 +167,7 @@ int main(void)
 #if defined(__linux__) && !defined(__EMSCRIPTEN__)
           compacted.rebase_copy_bytes == 0 &&
           compacted.streamed_rebases == 1 &&
+          compacted.file_sorted_rebases == 0 &&
 #endif
           compacted.bytes_reclaimed > 0 &&
           compacted.total_bytes < before.total_bytes,
@@ -205,10 +206,11 @@ int main(void)
           compact_term_pool_token_count(source) ==
             earlier_length + later_length &&
 #if defined(__linux__) && !defined(__EMSCRIPTEN__)
-          compacted.streamed_rebases == 0 &&
+          compacted.streamed_rebases == 1 &&
+          compacted.file_sorted_rebases == 1 &&
 #endif
           compacted.compactions == 1,
-          "non-monotone proof IDs use the sorted in-memory fallback");
+          "non-monotone proof IDs use the bounded file-sort path");
     compact_term_rebase_map_free(map);
     compact_term_pool_free(source);
     delete_clause(earlier);

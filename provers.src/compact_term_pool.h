@@ -21,6 +21,7 @@ struct compact_term_pool_stats {
   unsigned long long rebase_growths;
   unsigned long long rebase_copy_bytes;
   unsigned long long streamed_rebases;
+  unsigned long long file_sorted_rebases;
   unsigned long long directory_bytes;
   unsigned long long total_bytes;
   unsigned long long peak_bytes;
