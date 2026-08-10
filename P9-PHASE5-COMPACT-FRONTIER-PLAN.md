@@ -903,6 +903,30 @@ bytes, with zero validation failures.  The exact full proof is now the only
 valid measurement of whether that headroom survives from given 2,001 to the
 2,945 proof boundary.
 
+The corresponding 512-KiB full run rejects that extrapolation and exposes a
+trigger bug.  It follows the reference trajectory through given 2,938 but
+times out at 1,200 seconds with `Generated=8,227,656`, `Kept=269,107`, and no
+proof.  External peak RSS is 179,588 KiB (173,812 KiB in the 0.2-second
+sampler), and timing is 1,097.28 user plus 104.89 system seconds.  The cause
+of the terminal collapse is explicit in the term-pool counters: compactions
+rise from 9 to 2,032 while `bytes_reclaimed` remains fixed at 14,202,908.
+Physical tombstones in the independently managed indexes retain nearly every
+token interval, but the population-average trigger continues requesting a
+pool pass for every newly disabled clause.
+
+The trigger now constructs the exact retained-slot union before touching the
+pool, predicts the post-compaction token and directory capacities, and
+defers an attempt unless the actual allocation reduction reaches the
+configured byte threshold.  A deferred capacity boundary is not reconsidered
+until another 1,024 clause serializations, preventing per-clause rescans.
+The prediction/deferral/cooldown counters are reported.  All focused tests
+pass, and parallel normal and forced-32-KiB CHAT runs retain the exact
+132,567-event oracle; the forced case now reports one capacity deferral and
+zero compactions instead of its former zero-byte compaction.  The next full
+comparison should return to the proven 2-MiB policy with this guard, then add
+an explicit predecessor-first coordinated index trigger only if the measured
+live/stale index budget—not a population proxy—still misses 128,000 KiB.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:
