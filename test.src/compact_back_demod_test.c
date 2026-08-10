@@ -84,6 +84,10 @@ int main(void)
         stats.occurrence_stream_bytes <
           stats.symbol_occurrences * sizeof(uint32_t),
         "delta occurrence stream is smaller than raw offsets");
+  CHECK(stats.posting_stream_used > 0 &&
+        stats.posting_stream_used < stats.posting_groups * 12 &&
+        stats.posting_stream_bytes >= stats.posting_stream_used,
+        "delta posting blocks are smaller than fixed linked postings");
   CHECK(stats.total_bytes > 0 && stats.peak_bytes >= stats.total_bytes,
         "resident byte accounting is present");
 
@@ -133,6 +137,39 @@ int main(void)
     delete_clause(gap_demod);
     delete_clause(duplicate_clause);
     delete_clause(duplicate_demod);
+  }
+
+  {
+    Compact_back_demod_index block_index = compact_back_demod_init();
+    struct compact_back_demod_stats block_stats;
+    Topform block_clauses[100];
+    Topform block_demod;
+    char text[64];
+    int j;
+    for (j = 0; j < 100; j++) {
+      (void) snprintf(text, sizeof(text), "u(f(c%d)).", j);
+      block_clauses[j] = indexed_clause(text);
+      CHECK(compact_back_demod_add(block_index, block_clauses[j]),
+            "append posting across a block boundary");
+    }
+    block_demod = indexed_clause("f(x) = x.");
+    ids = compact_back_demod_candidate_ids(
+      block_index, block_demod, ORIENTED, &count);
+    CHECK(count == 100,
+          "multi-block symbol stream returns every exact candidate");
+    CHECK(ids != NULL && ids[0] == block_clauses[99]->id &&
+          ids[99] == block_clauses[0]->id,
+          "multi-block candidates retain decreasing proof-ID order");
+    safe_free(ids);
+    compact_back_demod_get_stats(block_index, &block_stats);
+    CHECK(block_stats.posting_stream_used > 0 &&
+          block_stats.posting_stream_bytes >=
+            block_stats.posting_stream_used,
+          "multi-block posting byte accounting is exact");
+    compact_back_demod_free(block_index);
+    for (j = 0; j < 100; j++)
+      delete_clause(block_clauses[j]);
+    delete_clause(block_demod);
   }
 
   delete_clause(first);

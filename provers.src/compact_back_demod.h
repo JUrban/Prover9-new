@@ -17,6 +17,8 @@ struct compact_back_demod_stats {
   unsigned long long posting_groups;
   unsigned long long symbol_occurrences;
   unsigned long long posting_bytes;
+  unsigned long long posting_stream_used;
+  unsigned long long posting_stream_bytes;
   unsigned long long occurrence_bytes;
   unsigned long long occurrence_stream_bytes;
   unsigned long long record_bytes;

@@ -6,11 +6,13 @@
 
 #define CBD_NONE 0U
 #define CBD_TOMBSTONE UINT64_MAX
+#define CBD_POSTING_BLOCK_PAYLOAD 248
 
-struct cbd_posting {
-  uint32_t record;
+struct cbd_posting_block {
   uint32_t next;
-  uint32_t occurrence_offset;
+  uint16_t used;
+  uint16_t count;
+  unsigned char data[CBD_POSTING_BLOCK_PAYLOAD];
 };
 
 struct cbd_local_occurrence {
@@ -27,11 +29,15 @@ struct cbd_record {
 };
 
 struct compact_back_demod_index {
-  struct cbd_posting *postings;
+  struct cbd_posting_block *posting_blocks;
+  size_t posting_block_count;
+  size_t posting_block_capacity;
   size_t posting_count;
-  size_t posting_capacity;
+  size_t posting_stream_used;
   uint32_t *posting_heads;
   uint32_t *posting_tails;
+  uint32_t *posting_last_records;
+  uint32_t *posting_last_occurrences;
   size_t symbol_capacity;
   unsigned char *occurrences;
   size_t occurrence_count;
@@ -107,9 +113,11 @@ static unsigned long long index_bytes(Compact_back_demod_index index)
     return 0;
   compact_term_pool_get_stats(index->term_pool, &terms);
   return sizeof(*index) +
-    index->posting_capacity * sizeof(*index->postings) +
+    index->posting_block_capacity * sizeof(*index->posting_blocks) +
     index->symbol_capacity *
-      (sizeof(*index->posting_heads) + sizeof(*index->posting_tails)) +
+      (sizeof(*index->posting_heads) + sizeof(*index->posting_tails) +
+       sizeof(*index->posting_last_records) +
+       sizeof(*index->posting_last_occurrences)) +
     index->occurrence_capacity * sizeof(*index->occurrences) +
     index->record_capacity * sizeof(*index->records) +
     (index->owns_term_pool ? terms.total_bytes : 0) +
@@ -204,12 +212,24 @@ static void ensure_symbols(Compact_back_demod_index index, unsigned symbol)
   index->posting_tails = safe_realloc(
     index->posting_tails,
     index->symbol_capacity * sizeof(*index->posting_tails));
+  index->posting_last_records = safe_realloc(
+    index->posting_last_records,
+    index->symbol_capacity * sizeof(*index->posting_last_records));
+  index->posting_last_occurrences = safe_realloc(
+    index->posting_last_occurrences,
+    index->symbol_capacity * sizeof(*index->posting_last_occurrences));
   memset(index->posting_heads + old_capacity, 0,
          (index->symbol_capacity - old_capacity) *
            sizeof(*index->posting_heads));
   memset(index->posting_tails + old_capacity, 0,
          (index->symbol_capacity - old_capacity) *
            sizeof(*index->posting_tails));
+  memset(index->posting_last_records + old_capacity, 0,
+         (index->symbol_capacity - old_capacity) *
+           sizeof(*index->posting_last_records));
+  memset(index->posting_last_occurrences + old_capacity, 0,
+         (index->symbol_capacity - old_capacity) *
+           sizeof(*index->posting_last_occurrences));
 }
 
 static void ensure_occurrence_bytes(Compact_back_demod_index index,
@@ -244,25 +264,77 @@ static void append_occurrence_delta(Compact_back_demod_index index,
   } while (delta != 0);
 }
 
-static void append_symbol_record(Compact_back_demod_index index,
-                                 uint32_t record, unsigned symbol)
+static size_t encode_u32(unsigned char *destination, uint32_t value)
 {
-  uint32_t posting;
+  size_t count = 0;
+  do {
+    unsigned char byte = (unsigned char) (value & 0x7fU);
+    value >>= 7;
+    if (value != 0)
+      byte |= 0x80U;
+    destination[count++] = byte;
+  } while (value != 0);
+  return count;
+}
+
+static uint32_t new_posting_block(Compact_back_demod_index index)
+{
+  uint32_t block;
+  ENSURE_ARRAY(index, posting_blocks, posting_block_count,
+               posting_block_capacity,
+               "compact_back_demod: posting block overflow");
+  if (index->posting_block_count > UINT32_MAX)
+    fatal_error("compact_back_demod: posting block offsets exceed 32 bits");
+  block = (uint32_t) index->posting_block_count++;
+  memset(&index->posting_blocks[block], 0,
+         sizeof(index->posting_blocks[block]));
+  return block;
+}
+
+static void append_symbol_record(Compact_back_demod_index index,
+                                 uint32_t record, unsigned symbol,
+                                 uint32_t occurrence_offset,
+                                 uint32_t occurrence_length)
+{
+  unsigned char encoded[15];
+  size_t length = 0;
+  uint32_t block;
+  struct cbd_posting_block *tail;
   ensure_symbols(index, symbol);
-  ENSURE_ARRAY(index, postings, posting_count, posting_capacity,
-               "compact_back_demod: posting overflow");
-  if (index->posting_count > UINT32_MAX)
-    fatal_error("compact_back_demod: posting offsets exceed 32 bits");
-  posting = (uint32_t) index->posting_count++;
-  index->postings[posting].record = record;
-  index->postings[posting].next = CBD_NONE;
-  index->postings[posting].occurrence_offset =
-    (uint32_t) index->occurrence_count;
-  if (index->posting_heads[symbol] == CBD_NONE)
-    index->posting_heads[symbol] = posting;
-  else
-    index->postings[index->posting_tails[symbol]].next = posting;
-  index->posting_tails[symbol] = posting;
+  if (record <= index->posting_last_records[symbol])
+    fatal_error("compact_back_demod: nonmonotone posting record");
+  if (occurrence_offset < index->posting_last_occurrences[symbol])
+    fatal_error("compact_back_demod: nonmonotone posting occurrence");
+  if (occurrence_length == 0)
+    fatal_error("compact_back_demod: empty posting occurrence list");
+  length += encode_u32(encoded + length,
+                       record - index->posting_last_records[symbol]);
+  length += encode_u32(
+    encoded + length,
+    occurrence_offset - index->posting_last_occurrences[symbol]);
+  length += encode_u32(encoded + length, occurrence_length);
+  if (length > CBD_POSTING_BLOCK_PAYLOAD)
+    fatal_error("compact_back_demod: oversized posting entry");
+  block = index->posting_tails[symbol];
+  if (block == CBD_NONE ||
+      index->posting_blocks[block].used + length >
+        CBD_POSTING_BLOCK_PAYLOAD) {
+    uint32_t added = new_posting_block(index);
+    if (block == CBD_NONE)
+      index->posting_heads[symbol] = added;
+    else
+      index->posting_blocks[block].next = added;
+    index->posting_tails[symbol] = added;
+    block = added;
+  }
+  tail = &index->posting_blocks[block];
+  memcpy(tail->data + tail->used, encoded, length);
+  tail->used += (uint16_t) length;
+  tail->count++;
+  index->posting_last_records[symbol] = record;
+  index->posting_last_occurrences[symbol] = occurrence_offset;
+  index->posting_count++;
+  index->posting_stream_used += length;
 }
 
 static void note_symbol(struct cbd_symbol_set *set, uint32_t symbol,
@@ -342,10 +414,8 @@ Compact_back_demod_index compact_back_demod_init_with_pool(
   index->term_pool = pool;
   index->tokens = compact_term_pool_tokens(pool);
   index->token_limit = compact_term_pool_token_count(pool);
-  ENSURE_ARRAY(index, postings, posting_count, posting_capacity,
-               "compact_back_demod: posting overflow");
-  memset(&index->postings[0], 0, sizeof(index->postings[0]));
-  index->posting_count = 1;
+  if (new_posting_block(index) != CBD_NONE)
+    fatal_error("compact_back_demod: invalid posting block sentinel");
   ENSURE_ARRAY(index, records, record_count, record_capacity,
                "compact_back_demod: record overflow");
   memset(&index->records[0], 0, sizeof(index->records[0]));
@@ -425,8 +495,8 @@ BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
     for (i = 0; i < symbols.count; i++) {
       size_t j;
       uint32_t previous = 0;
+      uint32_t occurrence_offset = (uint32_t) index->occurrence_count;
       BOOL first = TRUE;
-      append_symbol_record(index, record_index, symbols.values[i]);
       for (j = 0; j < symbols.occurrence_count; j++)
         if (symbols.occurrence_values[j].symbol == symbols.values[i]) {
           uint32_t offset = symbols.occurrence_values[j].offset;
@@ -436,6 +506,9 @@ BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
           previous = offset;
           first = FALSE;
         }
+      append_symbol_record(
+        index, record_index, symbols.values[i], occurrence_offset,
+        (uint32_t) index->occurrence_count - occurrence_offset);
     }
   }
   if (symbols.values != symbols.fixed)
@@ -599,15 +672,18 @@ static uint32_t decode_occurrence_delta(Compact_back_demod_index index,
    just the matching subterm offsets, so exact probes avoid rescanning the
    rest of a large equational clause. */
 static BOOL posting_contains_pattern(Compact_back_demod_index index,
-                                     uint32_t posting,
+                                     uint32_t occurrence_offset,
+                                     uint32_t occurrence_length,
                                      struct cbd_record *record,
                                      Term pattern, int32_t symbol)
 {
-  uint32_t position = index->postings[posting].occurrence_offset;
-  uint32_t end = posting + 1 < index->posting_count ?
-    index->postings[posting + 1].occurrence_offset :
-    (uint32_t) index->occurrence_count;
+  uint32_t position = occurrence_offset;
+  uint32_t end;
   uint32_t relative = 0;
+  if (occurrence_length > UINT32_MAX - occurrence_offset ||
+      occurrence_offset + occurrence_length > index->occurrence_count)
+    fatal_error("compact_back_demod: corrupt posting occurrence range");
+  end = occurrence_offset + occurrence_length;
   while (position < end) {
     uint32_t delta = decode_occurrence_delta(index, &position, end);
     if (delta > UINT32_MAX - relative)
@@ -623,10 +699,32 @@ static BOOL posting_contains_pattern(Compact_back_demod_index index,
   return FALSE;
 }
 
+static uint32_t decode_posting_value(const struct cbd_posting_block *block,
+                                     uint16_t *position)
+{
+  uint32_t value = 0;
+  unsigned shift = 0;
+  while (*position < block->used) {
+    unsigned char byte = block->data[(*position)++];
+    if (shift == 28 && (byte & 0xf0U) != 0)
+      fatal_error("compact_back_demod: corrupt posting value");
+    value |= (uint32_t) (byte & 0x7fU) << shift;
+    if ((byte & 0x80U) == 0)
+      return value;
+    shift += 7;
+    if (shift > 28)
+      fatal_error("compact_back_demod: corrupt posting value");
+  }
+  fatal_error("compact_back_demod: truncated posting value");
+  return 0;
+}
+
 static void collect_symbol(Compact_back_demod_index index, Term pattern,
                            unsigned long long exclude_id, size_t *count)
 {
-  uint32_t posting;
+  uint32_t block;
+  uint32_t record_index = 0;
+  uint32_t occurrence_offset = 0;
   unsigned symbol;
   if (VARIABLE(pattern)) {
     size_t at;
@@ -637,15 +735,40 @@ static void collect_symbol(Compact_back_demod_index index, Term pattern,
   symbol = (unsigned) SYMNUM(pattern);
   if ((size_t) symbol >= index->symbol_capacity)
     return;
-  for (posting = index->posting_heads[symbol]; posting != CBD_NONE;
-       posting = index->postings[posting].next) {
-    struct cbd_posting *candidate = &index->postings[posting];
-    struct cbd_record *record = &index->records[candidate->record];
-    if (record->active && record->proof_id != exclude_id &&
-        record->query_stamp != index->query_stamp &&
-        posting_contains_pattern(index, posting, record, pattern,
-                                 (int32_t) symbol))
-      collect_record(index, candidate->record, exclude_id, count);
+  for (block = index->posting_heads[symbol]; block != CBD_NONE;
+       block = index->posting_blocks[block].next) {
+    const struct cbd_posting_block *current;
+    uint16_t position = 0;
+    uint16_t entries = 0;
+    if (block >= index->posting_block_count)
+      fatal_error("compact_back_demod: corrupt posting block");
+    current = &index->posting_blocks[block];
+    while (position < current->used) {
+      uint32_t delta = decode_posting_value(current, &position);
+      uint32_t occurrence_delta;
+      uint32_t occurrence_length;
+      struct cbd_record *record;
+      if (delta > UINT32_MAX - record_index)
+        fatal_error("compact_back_demod: posting record overflow");
+      record_index += delta;
+      occurrence_delta = decode_posting_value(current, &position);
+      if (occurrence_delta > UINT32_MAX - occurrence_offset)
+        fatal_error("compact_back_demod: posting occurrence overflow");
+      occurrence_offset += occurrence_delta;
+      occurrence_length = decode_posting_value(current, &position);
+      if (record_index == CBD_NONE || record_index >= index->record_count)
+        fatal_error("compact_back_demod: corrupt posting record");
+      record = &index->records[record_index];
+      if (record->active && record->proof_id != exclude_id &&
+          record->query_stamp != index->query_stamp &&
+          posting_contains_pattern(index, occurrence_offset,
+                                   occurrence_length, record, pattern,
+                                   (int32_t) symbol))
+        collect_record(index, record_index, exclude_id, count);
+      entries++;
+    }
+    if (position != current->used || entries != current->count)
+      fatal_error("compact_back_demod: corrupt posting block contents");
   }
 }
 
@@ -707,12 +830,18 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->queries = index->queries;
   stats->candidates = index->candidates;
   stats->exact_tests = index->exact_tests;
-  stats->posting_groups = index->posting_count - 1;
+  stats->posting_groups = index->posting_count;
   stats->symbol_occurrences = index->symbol_occurrences;
-  stats->posting_bytes = index->posting_capacity * sizeof(*index->postings) +
+  stats->posting_bytes =
+    index->posting_block_capacity * sizeof(*index->posting_blocks) +
     index->symbol_capacity *
-      (sizeof(*index->posting_heads) + sizeof(*index->posting_tails)) +
+      (sizeof(*index->posting_heads) + sizeof(*index->posting_tails) +
+       sizeof(*index->posting_last_records) +
+       sizeof(*index->posting_last_occurrences)) +
     index->occurrence_capacity * sizeof(*index->occurrences);
+  stats->posting_stream_used = index->posting_stream_used;
+  stats->posting_stream_bytes =
+    index->posting_block_capacity * sizeof(*index->posting_blocks);
   stats->occurrence_bytes =
     index->occurrence_capacity * sizeof(*index->occurrences);
   stats->occurrence_stream_bytes = index->occurrence_count;
@@ -730,9 +859,11 @@ void compact_back_demod_free(Compact_back_demod_index index)
 {
   if (index == NULL)
     return;
-  safe_free(index->postings);
+  safe_free(index->posting_blocks);
   safe_free(index->posting_heads);
   safe_free(index->posting_tails);
+  safe_free(index->posting_last_records);
+  safe_free(index->posting_last_occurrences);
   safe_free(index->occurrences);
   safe_free(index->records);
   if (index->owns_term_pool)
