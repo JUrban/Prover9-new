@@ -432,6 +432,7 @@ BOOL compact_unit_index_contains(Compact_unit_index index,
 static void copy_live_record(Compact_unit_index destination,
                              const struct cui_record *old)
 {
+  struct cui_record saved = *old;
   struct cui_record *record;
   uint32_t at_record;
   ENSURE_ARRAY(destination, records, record_count, record_capacity,
@@ -440,7 +441,7 @@ static void copy_live_record(Compact_unit_index destination,
     fatal_error("compact_unit_index: compacted record offsets exceed 32 bits");
   at_record = (uint32_t) destination->record_count++;
   record = &destination->records[at_record];
-  *record = *old;
+  *record = saved;
   record->next_root = CUI_NONE;
   {
     unsigned root = (unsigned)
@@ -506,10 +507,10 @@ static void compact_unit_index_compact_internal(Compact_unit_index index,
   unifier_exact_tests = index->unifier_exact_tests;
 
   /* Records contain the complete immutable recipe for rebuilding nodes,
-     postings, roots, and the ID hash.  Pack live records downward first,
-     release every other predecessor array, and only then allocate the
-     replacement.  This changes the peak from old-index + new-index to one
-     record array + new-index without changing insertion order. */
+     postings, roots, and the ID map.  Pack live records downward first,
+     release every other predecessor array, then shrink and reuse the packed
+     array while rebuilding its secondary indexes.  This avoids overlapping
+     predecessor and replacement records without changing insertion order. */
   packed = 1;
   for (i = 1; i < index->record_count; i++)
     if (index->records[i].active) {
@@ -525,14 +526,21 @@ static void compact_unit_index_compact_internal(Compact_unit_index index,
   compact_id_map_free(old.id_map);
   safe_free(old.query);
   safe_free(old.result_ids);
+  old.records = safe_realloc(
+    old.records, packed * sizeof(*old.records));
+  old.record_capacity = packed;
+  old.record_count = packed;
   replacement = compact_unit_index_init_with_pool(old.term_pool);
   replacement->owns_term_pool = old.owns_term_pool;
   replacement->tokens = compact_term_pool_tokens(old.term_pool);
+  safe_free(replacement->records);
+  replacement->records = old.records;
+  replacement->record_capacity = packed;
+  replacement->record_count = 1;
   for (i = 1; i < packed; i++)
     copy_live_record(replacement, &old.records[i]);
   *index = *replacement;
   safe_free(replacement);
-  safe_free(old.records);
   index->retired = retired;
   index->compactions = compactions + 1;
   index->bytes_reclaimed = reclaimed +

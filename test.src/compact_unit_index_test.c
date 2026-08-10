@@ -98,6 +98,17 @@ int main(void)
         "lifecycle counters are exact");
   CHECK(stats.total_bytes > 0 && stats.peak_bytes >= stats.total_bytes,
         "resident byte accounting is present");
+  {
+    unsigned long long bloated_bytes = stats.total_bytes;
+    compact_unit_index_compact_all_stale(index);
+    compact_unit_index_get_stats(index, &stats);
+    CHECK(stats.active == 5 && stats.physical == 5 &&
+          stats.compactions == 1 && stats.total_bytes < bloated_bytes,
+          "forced compaction reuses only live records");
+    CHECK(compact_unit_index_contains(index, general->id) &&
+          !compact_unit_index_contains(index, exact->id),
+          "forced compaction preserves live ID membership");
+  }
 
   compact_unit_index_free(index);
   delete_clause(general);

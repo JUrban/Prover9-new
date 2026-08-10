@@ -592,29 +592,30 @@ static void copy_live_rule(Compact_rewrite_bank destination,
                            Compact_rewrite_bank source,
                            const struct cr_rule *old)
 {
+  struct cr_rule saved = *old;
   struct cr_rule *rule;
   uint32_t index;
-  uint32_t right_length = rule_right_length(old);
-  int type = rule_type(old);
+  uint32_t right_length = rule_right_length(&saved);
+  int type = rule_type(&saved);
   ensure_rules(destination);
   if (destination->rule_count > UINT32_MAX)
     fatal_error("compact_rewrite: compacted rule offsets exceed 32 bits");
   index = (uint32_t) destination->rule_count++;
   rule = &destination->rules[index];
   memset(rule, 0, sizeof(*rule));
-  rule->proof_id = old->proof_id;
-  rule->left_length = old->left_length;
+  rule->proof_id = saved.proof_id;
+  rule->left_length = saved.left_length;
   set_rule_metadata(rule, right_length, type, TRUE);
   if (destination->term_pool == source->term_pool) {
-    rule->left_offset = old->left_offset;
-    rule->right_offset = old->right_offset;
+    rule->left_offset = saved.left_offset;
+    rule->right_offset = saved.right_offset;
   }
   else {
     rule->left_offset = compact_term_pool_append(
-      destination->term_pool, source->tokens + old->left_offset,
-      old->left_length);
+      destination->term_pool, source->tokens + saved.left_offset,
+      saved.left_length);
     rule->right_offset = compact_term_pool_append(
-      destination->term_pool, source->tokens + old->right_offset,
+      destination->term_pool, source->tokens + saved.right_offset,
       right_length);
   }
   destination->tokens = compact_term_pool_tokens(destination->term_pool);
@@ -674,8 +675,9 @@ static void compact_rewrite_compact_internal(Compact_rewrite_bank bank,
 
   /* A rule record plus the shared token pool is a complete rebuild recipe.
      Pack live records in predecessor order, release all search structures,
-     and construct the replacement while retaining only that record array.
-     A standalone owning bank keeps its source pool until token copying ends. */
+     shrink and reuse that record array as the replacement, and rebuild its
+     secondary indexes in place.  A standalone owning bank keeps its source
+     pool until token copying ends. */
   packed = 1;
   for (i = 1; i < bank->rule_count; i++)
     if (rule_active(&bank->rules[i])) {
@@ -693,13 +695,19 @@ static void compact_rewrite_compact_internal(Compact_rewrite_bank bank,
   safe_free(old.occurrence_last_rules);
   compact_id_map_free(old.id_map);
   safe_free(old.query);
+  old.rules = safe_realloc(old.rules, packed * sizeof(*old.rules));
+  old.rule_capacity = packed;
+  old.rule_count = packed;
   replacement = old.owns_term_pool ? compact_rewrite_init() :
     compact_rewrite_init_with_pool(old.term_pool);
+  safe_free(replacement->rules);
+  replacement->rules = old.rules;
+  replacement->rule_capacity = packed;
+  replacement->rule_count = 1;
   for (i = 1; i < packed; i++)
     copy_live_rule(replacement, &old, &old.rules[i]);
   *bank = *replacement;
   safe_free(replacement);
-  safe_free(old.rules);
   if (old.owns_term_pool)
     compact_term_pool_free(old.term_pool);
   bank->attempts = attempts;
