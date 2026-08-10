@@ -12,7 +12,7 @@ report_seconds=${CHAT_REPORT_SECONDS:-30}
 cpu=${CHAT_CPU:-0}
 new_prover=${CHAT_NEW_PROVER:-"$repo_dir/bin/prover9"}
 old_prover=${CHAT_OLD_PROVER:-/project/Prover9-old-LADR-2026-6A/bin/prover9}
-all_cases='old_otter new_otter_fpa new_otter_packed new_otter_packed_fast new_otter_compact_packed_fast discount_clauses_selected discount_clauses_eager collective_balanced_selected collective_balanced_legacy collective_balanced_eager'
+all_cases='old_otter new_otter_fpa new_otter_packed new_otter_packed_fast new_otter_compact_full new_otter_compact_packed_fast discount_clauses_selected discount_clauses_eager collective_balanced_selected collective_balanced_legacy collective_balanced_eager'
 selected_cases=${CHAT_CASES:-$all_cases}
 
 if test ! -f "$input"; then
@@ -105,6 +105,17 @@ assign(passive_store,full).
 assign(hint_index,packed_fast).
 assign(inference_frontier,clauses).
 assign(ancestor_store,off).'
+
+write_case new_otter_compact_full '
+assign(search_loop,otter).
+assign(passive_store,full).
+assign(hint_index,packed_fast).
+assign(inference_frontier,clauses).
+assign(ancestor_store,off).
+set(compact_otter_demodulation).
+set(compact_otter_unit_index).
+set(compact_otter_back_demod_index).
+set(compact_otter_nonunit_index).'
 
 write_case new_otter_compact_packed_fast '
 assign(search_loop,otter).

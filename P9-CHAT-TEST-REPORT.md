@@ -54,10 +54,12 @@ batch; only terminal equal-given states support exact trajectory comparison.
 
 ### Phase-5 compact-OTTER matrix cases
 
-The harness now also defines two packed-fast OTTER cases:
+The harness now also defines three packed-fast OTTER cases:
 
 - `new_otter_packed_fast` keeps full passive clauses and the ordinary OTTER
   indexes;
+- `new_otter_compact_full` keeps full passive clauses but uses all four
+  authoritative compact indexes, isolating index cost from body archiving;
 - `new_otter_compact_packed_fast` uses the dense ancestor-backed passive store
   and all four authoritative compact indexes.
 
