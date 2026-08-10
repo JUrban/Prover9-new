@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include <string.h>
 
+static unsigned Compaction_stale_pct = 25;
+
 #define CR_NONE 0U
 #define CR_TOMBSTONE UINT64_MAX
 #define CR_OCCURRENCE_BLOCK_PAYLOAD 248
@@ -705,10 +707,18 @@ BOOL compact_rewrite_compaction_needed(Compact_rewrite_bank bank)
     return FALSE;
   physical = bank->rule_count - 1;
   stale = physical - bank->active_rules;
-  threshold = bank->active_rules / 4;
+  threshold = (bank->active_rules / 100) * Compaction_stale_pct +
+    ((bank->active_rules % 100) * Compaction_stale_pct + 99) / 100;
   if (threshold < 1024)
     threshold = 1024;
   return stale >= threshold;
+}
+
+void compact_rewrite_set_compaction_stale_pct(unsigned percentage)
+{
+  if (percentage == 0 || percentage > 1000)
+    fatal_error("compact_rewrite: invalid stale percentage");
+  Compaction_stale_pct = percentage;
 }
 
 static void compact_rewrite_compact_internal(Compact_rewrite_bank bank,

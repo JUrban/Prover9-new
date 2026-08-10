@@ -2086,6 +2086,8 @@ Prover_options init_prover_options(void)
   p->compact_passive_cache = init_parm("compact_passive_cache", 4, 0, 1024);
   p->compact_term_reclaim_kb =
     init_parm("compact_term_reclaim_kb", 8192, 1, INT_MAX);
+  p->compact_index_stale_pct =
+    init_parm("compact_index_stale_pct", 25, 1, 1000);
   p->fpa_depth =        init_parm("fpa_depth",            10,      1,    100);
   p->candidate_warn_limit = init_parm("candidate_warn_limit", -1,   -1,INT_MAX);
   p->candidate_hard_limit = init_parm("candidate_hard_limit", -1,   -1,INT_MAX);
@@ -3003,6 +3005,8 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             comma_num(terms.peak_bytes), comma_num(terms.compactions),
             comma_num(terms.bytes_reclaimed),
             parm(Opt->compact_term_reclaim_kb));
+    fprintf(fp, "Compact_index_policy: stale_pct=%d.\n",
+            parm(Opt->compact_index_stale_pct));
     if (terms.sharing_profile_enabled)
       fprintf(fp,
               "Compact_term_sharing: occurrences=%s, unique=%s, "
@@ -10553,6 +10557,12 @@ void index_and_process_initial_clauses(void)
   set_discrim_hash_threshold(parm(Opt->discrim_hash_threshold));
 
   int fpa_depth = parm(Opt->fpa_depth);
+  compact_rewrite_set_compaction_stale_pct(
+    (unsigned) parm(Opt->compact_index_stale_pct));
+  configure_compact_unit_stale_pct(
+    (unsigned) parm(Opt->compact_index_stale_pct));
+  configure_compact_back_demod_stale_pct(
+    (unsigned) parm(Opt->compact_index_stale_pct));
   configure_compact_unit_term_pool(Compact_terms);
   configure_compact_unit_index(
     flag(Opt->compact_unit_subsumption_audit),

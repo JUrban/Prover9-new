@@ -6,6 +6,8 @@
 #define CUI_NONE 0U
 #define CUI_TOMBSTONE UINT64_MAX
 
+static unsigned Compaction_stale_pct = 25;
+
 struct cui_node {
   uint32_t token_offset;
   uint32_t token_length;
@@ -548,10 +550,18 @@ BOOL compact_unit_index_compaction_needed(Compact_unit_index index)
     return FALSE;
   physical = index->record_count - 1;
   stale = physical - index->active;
-  threshold = index->active / 4;
+  threshold = (index->active / 100) * Compaction_stale_pct +
+    ((index->active % 100) * Compaction_stale_pct + 99) / 100;
   if (threshold < 1024)
     threshold = 1024;
   return stale >= threshold;
+}
+
+void compact_unit_index_set_compaction_stale_pct(unsigned percentage)
+{
+  if (percentage == 0 || percentage > 1000)
+    fatal_error("compact_unit_index: invalid stale percentage");
+  Compaction_stale_pct = percentage;
 }
 
 static void compact_unit_index_compact_internal(Compact_unit_index index,

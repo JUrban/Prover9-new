@@ -84,6 +84,11 @@ void configure_compact_unit_term_pool(Compact_term_pool pool)
   Compact_unit_terms = pool;
 }
 
+void configure_compact_unit_stale_pct(unsigned percentage)
+{
+  compact_unit_index_set_compaction_stale_pct(percentage);
+}
+
 static BOOL compact_unit_index_mode(void)
 {
   return Compact_unit_subsumption_audit || Compact_unit_authoritative;

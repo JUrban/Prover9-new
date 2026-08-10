@@ -9,6 +9,8 @@
 #define CBD_POSTING_BLOCK_PAYLOAD 56
 #define CBD_PATH_DEPTH 3
 
+static unsigned Compaction_stale_pct = 25;
+
 typedef uint8_t cbd_path_mask;
 
 struct cbd_posting_block {
@@ -1010,10 +1012,18 @@ BOOL compact_back_demod_compaction_needed(Compact_back_demod_index index)
     return FALSE;
   physical = index->record_count - 1;
   stale = physical - index->active;
-  threshold = index->active / 4;
+  threshold = (index->active / 100) * Compaction_stale_pct +
+    ((index->active % 100) * Compaction_stale_pct + 99) / 100;
   if (threshold < 1024)
     threshold = 1024;
   return stale >= threshold;
+}
+
+void compact_back_demod_set_compaction_stale_pct(unsigned percentage)
+{
+  if (percentage == 0 || percentage > 1000)
+    fatal_error("compact_back_demod: invalid stale percentage");
+  Compaction_stale_pct = percentage;
 }
 
 static unsigned long long occurrence_items(

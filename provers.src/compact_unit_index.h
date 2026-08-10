@@ -35,6 +35,8 @@ Compact_unit_index compact_unit_index_init(void);
 
 Compact_unit_index compact_unit_index_init_with_pool(Compact_term_pool pool);
 
+void compact_unit_index_set_compaction_stale_pct(unsigned percentage);
+
 BOOL compact_unit_index_add(Compact_unit_index index, Topform unit);
 
 BOOL compact_unit_index_remove(Compact_unit_index index,

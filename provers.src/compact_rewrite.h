@@ -36,6 +36,8 @@ Compact_rewrite_bank compact_rewrite_init(void);
 
 Compact_rewrite_bank compact_rewrite_init_with_pool(Compact_term_pool pool);
 
+void compact_rewrite_set_compaction_stale_pct(unsigned percentage);
+
 BOOL compact_rewrite_add(Compact_rewrite_bank bank, Topform clause, int type);
 
 BOOL compact_rewrite_remove(Compact_rewrite_bank bank,

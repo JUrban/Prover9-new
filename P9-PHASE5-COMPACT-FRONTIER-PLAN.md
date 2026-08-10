@@ -814,6 +814,23 @@ within the same token/directory size classes.  The next 2,000-given run must
 measure whether removing the forced replacement overlap closes the transient
 gap while retaining the selected 512-KiB policy.
 
+That decoupled 2,000-given run remains exact and takes 316.80 user seconds,
+but it does not lower the peak: external RSS is 136,448 KiB and the
+0.2-second sampler observes 136,764 KiB.  Final PSS is only 125,229 KiB.  The
+high-frequency trace rises gradually for several seconds and then drops by
+about 30 MiB at an index-replacement commit; the remaining high-water mark is
+therefore the old/new replacement overlap inside an independently required
+stale-index compaction, not the term pool transaction.
+
+`compact_index_stale_pct` now makes the rebuild point measurable instead of
+hard-coding 25%.  It applies the same inactive/active percentage to compact
+rewrite, unit, and back-demod indexes and is reported as
+`Compact_index_policy`.  Higher values trade bounded inactive postings and
+extra exact-filter traversal for fewer replacement transactions.  At 100%,
+the 300-given CHAT trace remains the byte-identical 132,567-event oracle and
+performs no index rebuild; bounded 50%/100% runs must determine whether the
+larger steady state is still below the avoided replacement peak.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:

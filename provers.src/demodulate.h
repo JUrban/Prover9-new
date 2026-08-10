@@ -37,6 +37,8 @@ void configure_compact_back_demod(BOOL audit, BOOL authoritative);
 
 void configure_compact_back_demod_term_pool(Compact_term_pool pool);
 
+void configure_compact_back_demod_stale_pct(unsigned percentage);
+
 unsigned long long compact_back_demod_active_count(void);
 
 unsigned long long compact_back_demod_physical_count(void);

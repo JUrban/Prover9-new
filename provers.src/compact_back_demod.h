@@ -42,6 +42,8 @@ Compact_back_demod_index compact_back_demod_init(void);
 Compact_back_demod_index compact_back_demod_init_with_pool(
   Compact_term_pool pool);
 
+void compact_back_demod_set_compaction_stale_pct(unsigned percentage);
+
 BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause);
 
 BOOL compact_back_demod_remove(Compact_back_demod_index index,

@@ -65,6 +65,11 @@ void configure_compact_back_demod_term_pool(Compact_term_pool pool)
   Compact_back_demod_terms = pool;
 }
 
+void configure_compact_back_demod_stale_pct(unsigned percentage)
+{
+  compact_back_demod_set_compaction_stale_pct(percentage);
+}
+
 static BOOL compact_back_demod_mode(void)
 {
   return Compact_back_demod_audit || Compact_back_demod_authoritative;
