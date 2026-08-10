@@ -48,6 +48,7 @@ struct dense_passive_view {
   unsigned simplifier_epoch;
   unsigned rewrite_epoch;
   int semantics;
+  BOOL used;
   BOOL delayed_demodulator;
   BOOL rewrite_rule_dirty;
 };
@@ -67,6 +68,11 @@ BOOL dense_passive_enabled(void);
 int dense_passive_size(void);
 
 BOOL dense_passive_contains_id(unsigned long long id);
+
+BOOL dense_passive_view_id(unsigned long long id,
+                           struct dense_passive_view *view);
+
+BOOL dense_passive_mark_used(unsigned long long id);
 
 void dense_passive_foreach(Dense_passive_visit_fn visit, void *context);
 
