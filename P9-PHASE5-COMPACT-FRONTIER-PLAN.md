@@ -1,6 +1,6 @@
 # Phase 5: compact OTTER-compatible frontier
 
-Date: 2026-08-10 (Europe/Berlin)
+Date: 2026-08-11 (Europe/Berlin)
 
 ## Objective
 
@@ -17,24 +17,74 @@ assign(search_loop,otter).
 assign(passive_store,dense).
 assign(hint_index,packed_fast).
 assign(inference_frontier,clauses).
-assign(ancestor_store,mmap).
+assign(ancestor_store,file).
 assign(sos_limit,-1).
 set(back_demod_hints).
 set(compact_otter_demodulation).
 set(compact_otter_unit_index).
 set(compact_otter_back_demod_index).
 set(compact_otter_nonunit_index).
-assign(compact_passive_cache,4).
+assign(compact_passive_cache,0).
+assign(compact_index_stale_pct,10).
+assign(compact_term_reclaim_kb,2048).
 ```
+
+Start this configuration with `P9_COMPACT_HEAP=1`; the environment switch is
+part of the measured product boundary, not an input assignment.
+
+## Final Phase-5 acceptance (2026-08-11)
+
+Phase 5 is accepted at commit `dcbfc5d`.  The final run in
+`/project/phase5-results/phase5-final-proof-accepted` reaches the historical
+given/proof boundary and exactly replays the current full-body `packed_fast`
+OTTER control:
+
+| Measurement | Old P9 OTTER | Accepted compact OTTER | Result |
+|---|---:|---:|---:|
+| Given | 2,945 | 2,945 | same proof boundary |
+| Generated / Kept | 8,248,034 / 272,789 | 8,248,032 / 272,787 | two fewer `other` clauses |
+| SOS / Demodulators | 131,001 / 109,987 | same | exact |
+| External user CPU | 765.69 s | 715.10 s | 6.6% faster |
+| Wall time | — | 13:35.67 | below 18 min |
+| External peak RSS | 550,400 KiB | 127,548 KiB | 76.83% less; 4.32x smaller |
+| Frozen terminal PSS | — | 112,834 KiB | steady state |
+
+`prooftrans parents_only` accepts both runs and emits 7,051 proof clauses
+with 3,231 new hints.  The compact run's normalized 7,059-line section is
+byte-identical to the accepted full-body `packed_fast` reference and has SHA-256
+`9d7c9a12894c1c11ede6aeae08d1cec658ccee66a47fb9663859347a5413fd07`.
+It is not raw-byte-identical to the archived FPA output: two fewer generated
+and retained `other` clauses shift later IDs and reorder some independent
+proof steps.  The inference-rule totals, SOS and demodulator populations,
+given boundary, proof length, and proof success agree.  Exact 300- and
+1,000-given event/state comparisons use the current full-body `packed_fast`
+control, so the representation change itself remains isolated.
+The run passes the 128,000-KiB hard peak gate by 452 KiB.  It does not pass
+the optional 115-MiB peak stretch target, and the narrow hard-gate margin
+should be stated when transferring the binary to another libc or machine.
+
+The final reduction is structural rather than a reporting artifact.  All
+five shared-term compactions use streamed file rebasing and the bounded file
+radix sorter.  All 24 materialized back-demod rebuilds stream stable IDs in
+4,096-ID batches.  The exact packed-fast cache retains 16,384 slots at 136
+bytes each (2,228,224 bytes); its final hit rate is 35.08%, and profiles wider
+than eight exact keys take the unchanged authoritative intersection path.
+
+Frozen terminal accounting names 111,996,283 resident bytes (106.81 MiB):
+the four compact indexes, shared term pool, dense selector, packed hint
+index/bodies, ancestor and clause-ID handles, reserved P9 slabs, and non-anon
+process pages.  Against 112,834-KiB PSS (110.19 MiB), this explains **96.93%**
+of resident memory.  The 84,404,096-byte ancestor file is logical backing,
+not RAM, and is therefore reported separately.
 
 `search_loop=otter` without all four authoritative compact flags remains the
 unchanged compatibility reference.  OTTER `passive_store=dense` fails at
 startup unless every pointer-free index is authoritative; it never silently
 falls back to DISCOUNT timing or a resident passive index.
 
-## Implementation and measured status (2026-08-10)
+## Implementation and measured status (2026-08-11)
 
-Stages 1--4 are implemented on `phase5-compact-frontier`.  Compact rewrite,
+Stages 1--5 are implemented on `phase5-compact-frontier`.  Compact rewrite,
 unit, back-demodulation, and nonunit indexes first passed differential audit
 at 10, 100, and 300 givens and are now authoritative.  A retained OTTER
 clause completes the ordinary eager backward transaction before its body is
@@ -1076,6 +1126,76 @@ unit, nonunit, and redex-index bytes at 1,000 givens, with the exact 300 trace
 unchanged and 1,000-given CPU no worse than the current archive run.  That is
 large enough to matter at the proof boundary; 5--10% container tuning is not
 accepted as completion.
+
+### Uploaded 11,000-given stress comparison
+
+The completed runs in `../bob/chat_test.new.out1.gz` and
+`../bob/chat_test.new.out2.gz` provide a useful larger-scale profile without
+rerunning the expensive problem locally.  The second output used compact
+OTTER, dense passives, `packed_fast` hints, all four authoritative compact
+indexes, a zero passive cache, and the old mmap ancestor backend.  It predates
+the current file backend and the latest ID-map, term-pool, rebuild-lifetime,
+and terminal-release work.
+
+After removing only those experiment-level controls from the captured INPUT
+sections, the two 18,378-line base inputs are byte-identical (SHA-256
+`fb3c4188628f88e4ee877f99f4e32a175409af804f3b49bffc4d8ffc4874835e`).
+The comparison therefore changes the implementation controls, not the
+problem or hint bank.
+
+| Measurement | Normal P9 | Uploaded compact build | Change |
+|---|---:|---:|---:|
+| Given | 11,368 | 11,369 | +1 |
+| Generated | 253,338,893 | 253,302,129 | -0.015% |
+| Kept | 2,216,836 | 2,207,014 | -0.44% |
+| Process RSS peak reported by P9 | 3,603,800 KiB | 1,492,656 KiB | -58.58% |
+| User CPU | 5,110.38 s | 15,144.10 s | 2.963x |
+| Ancestor records | 0 | 2,853,768 | archived |
+
+The historical `Megabytes` lines, 3,354.28 versus 355.86, must not be used as
+the RAM ratio.  The compact value omits most mmap and pointer-free storage;
+the process-RSS counters show the actual 58.58% saving.
+
+The CPU failure has two explicit billion-scale candidate paths rather than an
+unexplained general slowdown.  The old compact unit index performs
+19,190,246,832 conflict exact tests.  The compact back-demod index examines
+24,503,003,218 posting groups and 21,341,961,958 occurrences, followed by
+494,439,718 path checks.  Both modes also make about 6.10 billion
+demodulation attempts, so even a small extra compact-rewrite lookup cost is
+multiplied at that scale.  These are the older paths that motivated the
+successor unit-root/radix filters, back-demod path buckets, ordered radix
+selection, grouped occurrence stream, and bounded predecessor-first rebuilds.
+The uploaded output is therefore a strong stress case for those fixes, but
+not a measurement of their current speed.
+
+Several large RAM costs in the uploaded compact run are also obsolete:
+
+- the three private ID hashes occupy 75,497,472 bytes; at this run's ID range,
+  the current sparse direct maps are projected at about 25.3 MiB in total;
+- the old term directory occupies 67,108,864 bytes; the current two-word
+  sparse directory projects to about 16.9 MiB at the same maximum ID;
+- those two changes alone project about 93.8 MiB of steady-state saving;
+- `token_copy_bytes=2,252,294,644` records repeated growth copying that Linux
+  `mremap` now eliminates;
+- `Bookkeeping_bytes` attributes 1,107,296,448 bytes to the disabled store:
+  this includes the same 1-GiB mmap ancestor allocation plus its 32-MiB
+  handle table, not a second independent 1.1-GiB object; the current
+  `ancestor_store=file` backend retains the handle table but replaces the
+  process mapping with a 4-KiB I/O buffer;
+- current compactions release predecessor arrays before rebuilding and reuse
+  packed records, avoiding old/new-array overlap.
+
+These are projections from the uploaded counters, not a substitute for a
+current large run.  In particular, file-backed ancestor reads may add CPU,
+and only a rerun can show how the successor back-demod filters scale through
+11,000 givens.  The two uploaded proofs are both accepted by
+`prooftrans parents_only`, but they are not the same derivation: normal P9 has
+21,857 proof clauses (SHA-256 `935273d141c8ad5872bd6683303430d388201827e68abee386f418335f4b4a74`),
+while the compact run has 22,865
+(`c64f380875b67934a1019c5560a33c0e29f8990b365fa7c6cb2489ca4a4a6ffb`).
+Thus this pair is a performance/profile comparison, not evidence of exact
+trajectory compatibility.  The bounded byte-identical `chat_test.in` trace
+remains the local semantic gate for current changes.
 
 ## Why selected DISCOUNT did not solve Osborn
 

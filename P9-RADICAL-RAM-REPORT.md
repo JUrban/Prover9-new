@@ -2,7 +2,7 @@
 
 ## A DISCOUNT loop, compact state, and Waldmeister-style collective inference
 
-**Engineering report, updated 8 August 2026**
+**Engineering report, updated 11 August 2026**
 
 ## Executive summary
 
@@ -54,6 +54,17 @@ The prudent whole-process forecast is **80–95% less RAM**, with **90% as a
 reasonable planning midpoint**.  Passive-dominated runs may do better, but
 deployment should initially be sized against the 80% case until long runs on a
 large-memory host close the acceptance gate.
+
+For the trajectory-sensitive Osborn proof, Phase 5 now provides a second
+product mode: eager compact OTTER.  It reaches the same 2,945-given boundary
+with the same 7,051-clause proof length and exactly replays the current
+full-body packed-fast control.  It takes
+715.10 user seconds and peaks at 127,548 KiB versus old P9's 550,400 KiB.
+That is a measured **76.83% whole-process reduction (4.32x smaller)** while
+being 6.6% faster.  This trajectory-sensitive problem has a large fixed
+88,494-hint floor, so it does not quite reach the report's 80% planning case;
+the much larger passive-dominated AIM searches remain the workloads where the
+80–95% forecast is expected to apply.
 
 ## 1. What was wrong with the old architecture
 
@@ -373,6 +384,8 @@ assign(hint_index,packed_fast).
 assign(inference_frontier,clauses).
 assign(ancestor_store,file).
 assign(compact_passive_cache,0).
+assign(compact_index_stale_pct,10).
+assign(compact_term_reclaim_kb,2048).
 set(compact_otter_demodulation).
 set(compact_otter_unit_index).
 set(compact_otter_back_demod_index).
@@ -390,14 +403,27 @@ the policy.  The equivalent low-level glibc spelling is
 `GLIBC_TUNABLES=glibc.malloc.mmap_threshold=65536:glibc.malloc.trim_threshold=0`,
 but the P9 switch is the product-facing invocation for scripts.
 
-The full product validation reaches the exact historical compact boundary at
-2,945 givens.  `prooftrans parents_only` emits the same 7,051 normalized proof
-clauses byte for byte.  On that run the switch takes 833.73 user seconds and
-peaks at 152,904 KiB, versus 788.08 seconds and 152,616 KiB for the raw glibc
-control on a faster run.  The essentially identical memory result validates
-the P9 switch; the remaining roughly 24 MiB above the 125-MiB Phase-5 gate is
-now concentrated around coordinated term-pool compaction and subsequent pool
-regrowth.
+The accepted full product validation reaches the historical boundary at
+2,945 givens (`Generated=8,248,032`, `Kept=272,787`, `Sos=131,001`).
+`prooftrans parents_only` accepts the 7,051-clause proof; the normalized
+section is byte-identical to the current full-body `packed_fast` reference
+and has SHA-256
+`9d7c9a12894c1c11ede6aeae08d1cec658ccee66a47fb9663859347a5413fd07`.
+The archived FPA run generated and kept two additional `other` clauses, so
+its later raw IDs and some independent proof-line order differ; its given,
+inference-rule, SOS, demodulator, and proof-length boundaries agree.
+It takes 715.10 user seconds and 13:35.67 wall time.  External peak RSS is
+127,548 KiB, passing the 128,000-KiB hard gate by 452 KiB; frozen terminal PSS
+is 112,834 KiB.
+
+The final transient controls matter for long runs: retained shared terms are
+rebased through unlinked files with a bounded radix sorter, materialized
+back-demod rebuilds stream IDs in 4,096-ID batches, and the packed-fast cache
+uses 16,384 exact 136-byte entries.  Component accounting explains 96.93% of
+terminal PSS.  The 84,404,096-byte ancestor file is disk backing, not resident
+memory.  Because the peak-gate margin is narrow and libc behavior can vary,
+remeasure `/usr/bin/time -v` RSS on a deployment host rather than relying on
+Prover9's historical `Megabytes` line.
 
 ### 4.4 Tighter-memory and legacy-order experiments
 

@@ -1,5 +1,13 @@
 # `chat_test.in` compatibility and radical-memory evaluation
 
+> **Phase-5 update (2026-08-11):** eager compact OTTER is now the recommended
+> proof/replay mode.  It reaches the old 2,945-given boundary with a valid
+> 7,051-clause proof at 127,548 KiB peak RSS and 715.10 user seconds.  The
+> complete configuration is in `P9-RADICAL-RAM-REPORT.md` section 4.3 and the
+> acceptance history is in `P9-PHASE5-COMPACT-FRONTIER-PLAN.md`.  The older
+> scheduler and hint-index measurements below remain useful historical
+> evidence.
+
 ## Scope and reproducibility
 
 This report evaluates old Prover9 compatibility, the packed hint index,
@@ -176,6 +184,31 @@ proof boundary.  CPU is essentially flat on this machine: current P9 is 1.6%
 slower in the complete run, within the mixture of allocator wins and changed
 low-level costs.  This is a useful compatibility improvement but not the
 radical 80--90% memory target.
+
+## Accepted Phase-5 compact-OTTER proof
+
+The final file-backed run is the proof-producing radical-memory result:
+
+| Mode | Result | Given | Generated | Kept | User CPU | Wall | Peak RSS |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Old P9 OTTER/FPA | proof | 2,945 | 8,248,034 | 272,789 | 765.69 s | 14:16.20 | 550,400 KiB |
+| Compact OTTER/packed-fast | proof | 2,945 | 8,248,032 | 272,787 | 715.10 s | 13:35.67 | 127,548 KiB |
+
+This is **76.83% less whole-process peak RSS (4.32x smaller)** and 6.6%
+less user CPU.  Both proofs have 7,051 clauses and 3,231 new hints, and both
+are accepted by `prooftrans parents_only`.  The compact run exactly replays
+the current full-body `packed_fast` OTTER control.  It is not raw-byte-identical
+to the archived FPA output: that run retained two additional `other` clauses,
+which shifts later IDs and changes the order of some independent proof lines.
+The compact proof's normalized SHA-256 is
+`9d7c9a12894c1c11ede6aeae08d1cec658ccee66a47fb9663859347a5413fd07`.
+The measured binary SHA-256 is
+`07996d988203c8b4951db3b95cd111aae60e774cb7d0eede6b7104a05c09a161`.
+
+The run passes the 128,000-KiB hard RSS gate by only 452 KiB, so the exact
+number should be remeasured after changing libc or machine.  Frozen terminal
+accounting explains 96.93% of PSS; the 84,404,096-byte ancestor file is disk
+backing, not RAM.
 
 ## Full-hint guarded policy runs before the fingerprint optimization
 
@@ -451,9 +484,44 @@ colder passive-selector access, not hint matching.
 
 ## Current operational recommendation
 
-For compatibility-sensitive `chat_test` work, use current FPA OTTER.  It has
-the same search/proof, essentially the same proof-boundary RSS as packed, and
-is 2.72 times faster here:
+For proof-producing Osborn/`chat_test` comparisons, use the accepted eager
+compact-OTTER mode.  Put these controls after automatic settings and any
+older experimental controls so they are the final assignments:
+
+```text
+assign(search_loop,otter).
+assign(passive_store,dense).
+assign(hint_index,packed_fast).
+assign(inference_frontier,clauses).
+assign(ancestor_store,file).
+assign(sos_limit,-1).
+set(back_demod_hints).
+set(compact_otter_demodulation).
+set(compact_otter_unit_index).
+set(compact_otter_back_demod_index).
+set(compact_otter_nonunit_index).
+assign(compact_passive_cache,0).
+assign(compact_index_stale_pct,10).
+assign(compact_term_reclaim_kb,2048).
+```
+
+Start the process with the measured heap policy, for example:
+
+```sh
+P9_COMPACT_HEAP=1 /usr/bin/time -v bin/prover9 \
+  -f chat_test.compact.in > chat_test.compact.out \
+  2> chat_test.compact.time
+```
+
+Here `chat_test.compact.in` is a complete copy of the problem with the block
+above placed after its automatic/legacy option assignments.
+
+Use `/usr/bin/time -v` or a cgroup for the comparison; the historical
+`Megabytes` counter omits important mmap/file-backed state.  Put `TMPDIR` on
+a local filesystem with enough space.  The accepted proof used about 84.4 MB
+of logical ancestor backing.
+
+For a raw old-P9 compatibility control, keep the full/FPA configuration:
 
 ```text
 assign(search_loop,otter).
@@ -464,26 +532,9 @@ assign(ancestor_store,off).
 set(back_demod_hints).
 ```
 
-Use packed OTTER only when a larger hint bank demonstrably dominates FPA RAM;
-run a bounded prefix first because `chat_test` shows its remaining CPU cost.
-
-FPA can also be combined with dense DISCOUNT if packed matching is the
-bottleneck and roughly 60 MiB of additional RAM is affordable on this hint
-bank:
-
-```text
-assign(search_loop,discount).
-assign(passive_store,dense).
-assign(discount_demodulation,selected).
-assign(hint_index,fpa).
-assign(inference_frontier,clauses).
-assign(ancestor_store,mmap).
-assign(sos_limit,-1).
-set(back_demod_hints).
-```
-
-For the best radical-memory/hint throughput measured so far on `chat_test`, use
-clause-frontier DISCOUNT with selected demodulation:
+Use clause-frontier DISCOUNT only when changing the historical search
+trajectory is acceptable.  It remains a useful bounded-memory AIM mode, but
+matching more hints does not imply replaying the OTTER proof:
 
 ```text
 assign(search_loop,discount).
