@@ -36,7 +36,7 @@ static size_t grow_token_capacity(size_t current)
   size_t next;
   if (current == 0)
     return 64;
-  increment = current / 12;
+  increment = current / 8;
   if (increment < 64)
     increment = 64;
   if (increment > SIZE_MAX - current)
