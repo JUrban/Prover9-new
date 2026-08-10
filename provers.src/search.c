@@ -1889,6 +1889,7 @@ Prover_options init_prover_options(void)
   p->hint_match_stats       = init_flag("hint_match_stats",       FALSE);
   p->hint_match_once        = init_flag("hint_match_once",        FALSE);
   p->hint_trace             = init_flag("hint_trace",             FALSE);
+  p->search_event_trace     = init_flag("search_event_trace",     FALSE);
   p->compact_otter_audit    = init_flag("compact_otter_audit",    FALSE);
   p->compact_otter_demodulation =
     init_flag("compact_otter_demodulation", FALSE);
@@ -7200,6 +7201,11 @@ void cl_process_keep(Topform c)
   }
   if (flag(Opt->hint_trace))
     print_hint_trace(c);
+  if (flag(Opt->search_event_trace))
+    printf("%sKEPT_TRACE kept=%llu generated=%llu clause=%llu "
+           "fingerprint=%016llx\n",
+           TPTP_PFX, Stats.kept, Stats.generated, c->id,
+           hint_trace_clause_hash(c));
 
   if (flag(Opt->print_clause_properties))
       c->attributes = set_term_attribute(c->attributes,
@@ -9687,6 +9693,12 @@ void make_inferences(void)
     Stats.given++;
     given_clause->was_given = TRUE;
     set_hints_given_count(Stats.given);
+    if (flag(Opt->search_event_trace))
+      printf("%sGIVEN_TRACE given=%llu clause=%llu fingerprint=%016llx "
+             "generated=%llu kept=%llu\n",
+             TPTP_PFX, Stats.given, given_clause->id,
+             hint_trace_clause_hash(given_clause), Stats.generated,
+             Stats.kept);
     if (collective_frontier_mode() && given_clause->matching_hint != NULL) {
       Stats.collective_hint_selected_total++;
       if (strcmp(selection_type, "Hha") == 0)

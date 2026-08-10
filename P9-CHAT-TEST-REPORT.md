@@ -93,6 +93,12 @@ the 1,000-given Osborn run is the useful RSS discriminator.  A deliberately
 attempted OTTER+dense case without the compact indexes failed at startup with
 the expected authoritative-index guard, and was not added as a matrix mode.
 
+For longer exactness checks where `hint_trace` would emit one candidate line
+for every generated clause, `set(search_event_trace)` emits only compact
+`KEPT_TRACE` and `GIVEN_TRACE` identity/fingerprint records.  It is disabled
+by default and does not affect selection.  At 100 givens the ordinary and
+full-body compact-index CHAT cases produce 1,336 byte-identical event lines.
+
 ## Exact old and compatibility proof baseline
 
 | Mode | Result | Given | Generated | Kept | User CPU | Wall | Peak RSS |

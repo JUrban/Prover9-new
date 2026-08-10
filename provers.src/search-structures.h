@@ -86,6 +86,7 @@ struct prover_options {
     hint_match_stats,        // print hint match count stats at end of search
     hint_match_once,         // unindex hint immediately after first match
     hint_trace,              // exact committed-candidate hint tuple
+    search_event_trace,      // lightweight kept/given identity oracle
     compact_otter_audit,     // dual-run legacy/compact OTTER demodulation
     compact_otter_demodulation, // compact bank is authoritative in OTTER
     compact_unit_subsumption_audit, // compare stable-ID/legacy unit answers
