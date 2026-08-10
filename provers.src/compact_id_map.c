@@ -11,6 +11,7 @@
 
 #define CIDM_PAGE_BYTES (64U * 1024U)
 #define CIDM_BASE_SHIFT 14U
+#define CIDM_LOW_PAGES 64U
 #define CIDS_PAGE_BYTES (4U * 1024U)
 #define CIDS_PAGE_SHIFT 15U
 #define CIDS_WORD_BITS 64U
@@ -22,9 +23,11 @@ struct compact_id_page {
 };
 
 struct compact_id_map {
+  struct compact_id_page *low_pages[CIDM_LOW_PAGES];
   uint64_t *page_keys;
   struct compact_id_page **pages;
   size_t directory_capacity;
+  size_t directory_page_count;
   size_t page_count;
   size_t count;
   unsigned value_words;
@@ -46,6 +49,7 @@ struct compact_id_set {
   size_t directory_capacity;
   size_t page_count;
   size_t count;
+  struct compact_id_set_page *cached_page;
 };
 
 static uint64_t hash_id(uint64_t x)
@@ -149,6 +153,17 @@ static struct compact_id_page *find_page(Compact_id_map map,
   size_t at;
   if (map->cached_page != NULL && map->cached_page->number == page_number)
     return map->cached_page;
+  if (page_number < CIDM_LOW_PAGES) {
+    struct compact_id_page *page = map->low_pages[page_number];
+    if (page == NULL && create) {
+      page = new_page(page_number);
+      map->low_pages[page_number] = page;
+      map->page_count++;
+      update_peak(map);
+    }
+    map->cached_page = page;
+    return page;
+  }
   if (map->directory_capacity == 0) {
     if (!create)
       return NULL;
@@ -156,7 +171,8 @@ static struct compact_id_page *find_page(Compact_id_map map,
   }
   at = directory_slot(map, page_number);
   if (map->page_keys[at] == 0 && create) {
-    if ((map->page_count + 1) * 20 >= map->directory_capacity * 17) {
+    if ((map->directory_page_count + 1) * 20 >=
+        map->directory_capacity * 17) {
       if (map->directory_capacity > SIZE_MAX / 2)
         fatal_error("compact_id_map: page directory overflow");
       resize_directory(map, map->directory_capacity * 2);
@@ -166,6 +182,7 @@ static struct compact_id_page *find_page(Compact_id_map map,
     map->page_keys[at] = page_number + 1;
     map->pages[at] = page;
     map->page_count++;
+    map->directory_page_count++;
     update_peak(map);
   }
   map->cached_page = map->page_keys[at] == 0 ? NULL : map->pages[at];
@@ -250,6 +267,20 @@ void compact_id_map_foreach(Compact_id_map map,
   size_t slot;
   if (map == NULL || visit == NULL)
     return;
+  for (slot = 0; slot < CIDM_LOW_PAGES; slot++) {
+    struct compact_id_page *page = map->low_pages[slot];
+    size_t entry;
+    if (page == NULL)
+      continue;
+    for (entry = 0; entry < map->entries_per_page; entry++) {
+      const uint32_t *values = page->values + entry * map->value_words;
+      if (values[0] != 0) {
+        unsigned long long proof_id =
+          (page->number << map->page_shift) | entry;
+        visit(proof_id, values, context);
+      }
+    }
+  }
   for (slot = 0; slot < map->directory_capacity; slot++) {
     struct compact_id_page *page = map->pages[slot];
     size_t entry;
@@ -287,6 +318,8 @@ void compact_id_map_free(Compact_id_map map)
   size_t i;
   if (map == NULL)
     return;
+  for (i = 0; i < CIDM_LOW_PAGES; i++)
+    free_page(map->low_pages[i]);
   for (i = 0; i < map->directory_capacity; i++)
     free_page(map->pages[i]);
   safe_free(map->page_keys);
@@ -364,6 +397,9 @@ static struct compact_id_set_page *find_set_page(Compact_id_set set,
                                                   BOOL create)
 {
   size_t at;
+  if (set->cached_page != NULL &&
+      set->cached_page->number == page_number)
+    return set->cached_page;
   if (set->directory_capacity == 0) {
     if (!create)
       return NULL;
@@ -381,7 +417,8 @@ static struct compact_id_set_page *find_set_page(Compact_id_set set,
     set->pages[at] = new_set_page(page_number);
     set->page_count++;
   }
-  return set->page_keys[at] == 0 ? NULL : set->pages[at];
+  set->cached_page = set->page_keys[at] == 0 ? NULL : set->pages[at];
+  return set->cached_page;
 }
 
 Compact_id_set compact_id_set_init(void)
@@ -473,7 +510,8 @@ unsigned long long compact_id_set_bytes(Compact_id_set set)
 unsigned long long compact_id_set_projected_map_bytes(Compact_id_set set,
                                                        unsigned value_words)
 {
-  size_t slot, page_count = 0, directory_capacity;
+  size_t slot, page_count = 0, high_page_count = 0;
+  size_t directory_capacity = 0;
   unsigned shift = CIDM_BASE_SHIFT, words = value_words;
   unsigned subdivisions, subdivision;
   if (value_words == 0 || value_words > 8 ||
@@ -499,16 +537,22 @@ unsigned long long compact_id_set_projected_map_bytes(Compact_id_set set,
       for (word = first_bit / CIDS_WORD_BITS;
            word < last_bit / CIDS_WORD_BITS; word++)
         if (page->bits[word] != 0) {
+          uint64_t map_page_number =
+            page->number * subdivisions + subdivision;
           page_count++;
+          if (map_page_number >= CIDM_LOW_PAGES)
+            high_page_count++;
           break;
         }
     }
   }
-  directory_capacity = 16;
-  while (page_count * 20 >= directory_capacity * 17) {
-    if (directory_capacity > SIZE_MAX / 2)
-      fatal_error("compact_id_set: projected directory overflow");
-    directory_capacity *= 2;
+  if (high_page_count != 0) {
+    directory_capacity = 16;
+    while (high_page_count * 20 >= directory_capacity * 17) {
+      if (directory_capacity > SIZE_MAX / 2)
+        fatal_error("compact_id_set: projected directory overflow");
+      directory_capacity *= 2;
+    }
   }
   return sizeof(struct compact_id_map) +
     (unsigned long long) directory_capacity *
