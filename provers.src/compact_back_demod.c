@@ -1176,6 +1176,7 @@ void compact_back_demod_compact_materialized(
   Compact_back_demod_index index,
   Compact_back_demod_materializer materialize,
   Compact_back_demod_materialized_releaser release,
+  Compact_back_demod_materialized_batch_adviser advise,
   void *context)
 {
   Compact_back_demod_index replacement;
@@ -1186,7 +1187,7 @@ void compact_back_demod_compact_materialized(
   unsigned long long queries, candidates, exact_tests;
   unsigned long long groups_examined, occurrences_examined;
   unsigned long long path_checks, path_rejects;
-  size_t i, count = 0;
+  size_t i, batch_start = 0, count = 0;
   if (index == NULL || materialize == NULL ||
       !compact_back_demod_compaction_needed(index))
     return;
@@ -1238,6 +1239,11 @@ void compact_back_demod_compact_materialized(
       fatal_error("compact_back_demod: cannot rebuild materialized clause");
     if (release != NULL)
       release(clause, context);
+    if (advise != NULL &&
+        (i + 1 - batch_start == 4096 || i + 1 == count)) {
+      advise(ids + batch_start, i + 1 - batch_start, context);
+      batch_start = i + 1;
+    }
   }
   safe_free(ids);
   *index = *replacement;

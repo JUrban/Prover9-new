@@ -55,6 +55,8 @@ struct clause_store {
   size_t mmap_last_evict_size;
   unsigned long long mmap_eviction_passes;
   unsigned long long mmap_eviction_bytes;
+  unsigned long long mmap_scan_eviction_passes;
+  unsigned long long mmap_scan_eviction_bytes;
   unsigned long long file_reads;
   unsigned long long file_read_bytes;
   unsigned long long file_writes;
@@ -1222,6 +1224,66 @@ BOOL clause_store_sync(Clause_store store)
 }
 
 /* PUBLIC */
+void clause_store_advise_mmap_range_cold(Clause_store store,
+                                         size_t first_position,
+                                         size_t last_position)
+{
+#ifndef __EMSCRIPTEN__
+  uintptr_t first_ref, last_ref;
+  struct record_view last_view;
+  long page_size_long;
+  size_t page_size, begin, end, last_offset, sync_start;
+  if (store == NULL || store->mode != CLAUSE_STORE_ARCHIVE_MMAP ||
+      store->backing == NULL || first_position > last_position ||
+      last_position >= store->length)
+    return;
+  first_ref = store->refs[first_position];
+  last_ref = store->refs[last_position];
+  if (!ref_is_archive(first_ref) || !ref_is_archive(last_ref))
+    return;
+  page_size_long = sysconf(_SC_PAGESIZE);
+  if (page_size_long <= 0)
+    return;
+  page_size = (size_t) page_size_long;
+  last_offset = (size_t) ref_offset(last_ref);
+  if (!record_view(store, ref_offset(last_ref), &last_view) ||
+      last_view.total > SIZE_MAX - last_offset)
+    return;
+  begin = (size_t) ref_offset(first_ref) / page_size * page_size;
+  end = last_offset + (size_t) last_view.total;
+  if (end % page_size != 0) {
+    if (end > SIZE_MAX - (page_size - end % page_size))
+      return;
+    end += page_size - end % page_size;
+  }
+  if (end > store->backing_capacity)
+    end = store->backing_capacity;
+  if (begin >= end)
+    return;
+
+  /* MADV_DONTNEED on a shared mapping must not be allowed to race ahead of
+     dirty archive bytes.  mmap_synced_bytes names the contiguous durable
+     prefix, so synchronize any newly covered suffix exactly once. */
+  if (store->mmap_synced_bytes < end) {
+    sync_start = store->mmap_synced_bytes / page_size * page_size;
+    if (msync(store->backing + sync_start, end - sync_start, MS_SYNC) != 0)
+      return;
+    store->mmap_synced_bytes = end;
+  }
+  if (madvise(store->backing + begin, end - begin, MADV_DONTNEED) == 0) {
+    store->mmap_eviction_passes++;
+    store->mmap_eviction_bytes += end - begin;
+    store->mmap_scan_eviction_passes++;
+    store->mmap_scan_eviction_bytes += end - begin;
+  }
+#else
+  (void) store;
+  (void) first_position;
+  (void) last_position;
+#endif
+}
+
+/* PUBLIC */
 struct clause_store_stats clause_store_get_stats(Clause_store store)
 {
   struct clause_store_stats stats;
@@ -1238,6 +1300,8 @@ struct clause_store_stats clause_store_get_stats(Clause_store store)
     stats.validation_failures = store->validation_failures;
     stats.mmap_eviction_passes = store->mmap_eviction_passes;
     stats.mmap_eviction_bytes = store->mmap_eviction_bytes;
+    stats.mmap_scan_eviction_passes = store->mmap_scan_eviction_passes;
+    stats.mmap_scan_eviction_bytes = store->mmap_scan_eviction_bytes;
     stats.io_buffer_bytes = store->io_capacity;
     stats.file_reads = store->file_reads;
     stats.file_read_bytes = store->file_read_bytes;

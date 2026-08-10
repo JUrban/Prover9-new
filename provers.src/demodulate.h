@@ -56,10 +56,13 @@ void compact_back_demod_rebase_shared_term_pool(
 typedef Topform (*Compact_back_demod_resolver)(unsigned long long id,
                                                void *context);
 typedef void (*Compact_back_demod_releaser)(Topform clause, void *context);
+typedef void (*Compact_back_demod_batch_adviser)(
+  const unsigned long long *ids, size_t count, void *context);
 
 void configure_compact_back_demod_access(
   Compact_back_demod_resolver resolver,
   Compact_back_demod_releaser releaser,
+  Compact_back_demod_batch_adviser adviser,
   void *context);
 
 void init_back_demod_index(Mindextype mtype, Uniftype utype, int fpa_depth);

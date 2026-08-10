@@ -571,6 +571,8 @@ struct prover_stats {
     ancestor_validation_failures,
     ancestor_mmap_eviction_passes,
     ancestor_mmap_eviction_bytes,
+    ancestor_mmap_scan_eviction_passes,
+    ancestor_mmap_scan_eviction_bytes,
     ancestor_io_buffer_bytes,
     ancestor_file_reads,
     ancestor_file_read_bytes,

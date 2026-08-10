@@ -28,6 +28,8 @@ struct clause_store_stats {
   unsigned long long validation_failures;
   unsigned long long mmap_eviction_passes;
   unsigned long long mmap_eviction_bytes;
+  unsigned long long mmap_scan_eviction_passes;
+  unsigned long long mmap_scan_eviction_bytes;
   unsigned long long io_buffer_bytes;
   unsigned long long file_reads;
   unsigned long long file_read_bytes;
@@ -100,6 +102,13 @@ void clause_store_release_materialized_plist(Plist clauses);
 void clause_store_sort_by_id(Clause_store store);
 
 BOOL clause_store_sync(Clause_store store);
+
+/* Discard mmap pages covering an already-consumed inclusive range of
+   immutable archive records.  Other archive modes are harmless no-ops.
+   This bounds resident file pages during ordered reconstruction scans. */
+void clause_store_advise_mmap_range_cold(Clause_store store,
+                                         size_t first_position,
+                                         size_t last_position);
 
 struct clause_store_stats clause_store_get_stats(Clause_store store);
 

@@ -114,6 +114,8 @@ static void update_rewrite_only_stats(void);
 static void current_demodulate_clause(Topform, int, int, BOOL, BOOL);
 static Topform compact_otter_resolve_clause(unsigned long long, void *);
 static void compact_otter_release_clause(Topform, void *);
+static void compact_otter_advise_rebuild_batch(
+  const unsigned long long *, size_t, void *);
 
 /* Progress callback for shared-memory IPC (set by -cores scheduler) */
 static Search_progress_fn Progress_callback = NULL;
@@ -2666,6 +2668,8 @@ void update_memory_stats(void)
   Stats.ancestor_validation_failures = as.validation_failures;
   Stats.ancestor_mmap_eviction_passes = as.mmap_eviction_passes;
   Stats.ancestor_mmap_eviction_bytes = as.mmap_eviction_bytes;
+  Stats.ancestor_mmap_scan_eviction_passes = as.mmap_scan_eviction_passes;
+  Stats.ancestor_mmap_scan_eviction_bytes = as.mmap_scan_eviction_bytes;
   Stats.ancestor_io_buffer_bytes = as.io_buffer_bytes;
   Stats.ancestor_file_reads = as.file_reads;
   Stats.ancestor_file_read_bytes = as.file_read_bytes;
@@ -3351,6 +3355,7 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
           "Ancestor_store: records=%s, record_bytes=%s, backing_bytes=%s, "
           "handle_bytes=%s, materialized=%s, validation_failures=%s, "
           "mmap_eviction_passes=%s, mmap_eviction_bytes=%s, "
+          "mmap_scan_eviction_passes=%s, mmap_scan_eviction_bytes=%s, "
           "io_buffer=%s, file_reads=%s (%s bytes), "
           "file_writes=%s (%s bytes).\n",
           comma_num(s.ancestor_records), comma_num(s.ancestor_record_bytes),
@@ -3359,6 +3364,8 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
           comma_num(s.ancestor_validation_failures),
           comma_num(s.ancestor_mmap_eviction_passes),
           comma_num(s.ancestor_mmap_eviction_bytes),
+          comma_num(s.ancestor_mmap_scan_eviction_passes),
+          comma_num(s.ancestor_mmap_scan_eviction_bytes),
           comma_num(s.ancestor_io_buffer_bytes),
           comma_num(s.ancestor_file_reads),
           comma_num(s.ancestor_file_read_bytes),
@@ -6060,6 +6067,29 @@ static void compact_otter_release_clause(Topform c, void *context)
     else
       clause_store_release_materialized(c);
   }
+}
+
+/* Back-demod reconstruction visits records in stable insertion order.  Once
+   a bounded batch has been decoded and copied into the replacement index,
+   its immutable ancestor pages no longer need process residency. */
+static void compact_otter_advise_rebuild_batch(
+  const unsigned long long *ids, size_t count, void *context)
+{
+  size_t i, first = SIZE_MAX, last = 0;
+  (void) context;
+  if (!compact_otter_passive_mode() || ids == NULL)
+    return;
+  for (i = 0; i < count; i++) {
+    struct dense_passive_view view;
+    if (dense_passive_view_id(ids[i], &view)) {
+      if (view.store_position < first)
+        first = view.store_position;
+      if (view.store_position > last)
+        last = view.store_position;
+    }
+  }
+  if (first != SIZE_MAX)
+    clause_store_advise_mmap_range_cold(Glob.disabled, first, last);
 }
 
 static
@@ -10581,7 +10611,9 @@ void index_and_process_initial_clauses(void)
     flag(Opt->compact_otter_back_demod_index));
   configure_compact_back_demod_term_pool(Compact_terms);
   configure_compact_back_demod_access(compact_otter_resolve_clause,
-                                      compact_otter_release_clause, NULL);
+                                      compact_otter_release_clause,
+                                      compact_otter_advise_rebuild_batch,
+                                      NULL);
   init_back_demod_index(FPA, ORDINARY_UNIF, fpa_depth);
 
   Glob.clashable_idx = lindex_init(FPA, ORDINARY_UNIF, fpa_depth,

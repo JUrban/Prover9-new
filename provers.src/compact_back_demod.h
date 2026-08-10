@@ -57,6 +57,8 @@ typedef Topform (*Compact_back_demod_materializer)(unsigned long long id,
                                                     void *context);
 typedef void (*Compact_back_demod_materialized_releaser)(Topform clause,
                                                           void *context);
+typedef void (*Compact_back_demod_materialized_batch_adviser)(
+  const unsigned long long *ids, size_t count, void *context);
 
 /* Rebuild from stable proof IDs after releasing all predecessor arrays.
    This is the bounded-memory path when clauses can be materialized from the
@@ -66,6 +68,7 @@ void compact_back_demod_compact_materialized(
   Compact_back_demod_index index,
   Compact_back_demod_materializer materialize,
   Compact_back_demod_materialized_releaser release,
+  Compact_back_demod_materialized_batch_adviser advise,
   void *context);
 
 void compact_back_demod_compact_all_stale(Compact_back_demod_index index);

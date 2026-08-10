@@ -33,16 +33,19 @@ static BOOL Compact_back_demod_authoritative;
 static unsigned long long Compact_back_demod_failures;
 static Compact_back_demod_resolver Compact_back_demod_resolve;
 static Compact_back_demod_releaser Compact_back_demod_release;
+static Compact_back_demod_batch_adviser Compact_back_demod_advise;
 static void *Compact_back_demod_context;
 
 /* PUBLIC */
 void configure_compact_back_demod_access(
   Compact_back_demod_resolver resolver,
   Compact_back_demod_releaser releaser,
+  Compact_back_demod_batch_adviser adviser,
   void *context)
 {
   Compact_back_demod_resolve = resolver;
   Compact_back_demod_release = releaser;
+  Compact_back_demod_advise = adviser;
   Compact_back_demod_context = context;
 }
 
@@ -91,6 +94,14 @@ static void compact_back_demod_release_materialized(Topform clause,
   (void) context;
   if (Compact_back_demod_release != NULL)
     Compact_back_demod_release(clause, Compact_back_demod_context);
+}
+
+static void compact_back_demod_advise_materialized_batch(
+  const unsigned long long *ids, size_t count, void *context)
+{
+  (void) context;
+  if (Compact_back_demod_advise != NULL)
+    Compact_back_demod_advise(ids, count, Compact_back_demod_context);
 }
 
 unsigned long long compact_back_demod_active_count(void)
@@ -210,7 +221,8 @@ void index_back_demod(Topform c, Indexop operation, Clock clock, BOOL enabled)
           compact_back_demod_compact_materialized(
             Compact_back_demod_idx,
             compact_back_demod_materialize_clause,
-            compact_back_demod_release_materialized, NULL);
+            compact_back_demod_release_materialized,
+            compact_back_demod_advise_materialized_batch, NULL);
         else
           compact_back_demod_compact(Compact_back_demod_idx);
       }

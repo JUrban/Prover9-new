@@ -271,6 +271,17 @@ static void archive_round_trip(Clause_store_archive_mode mode)
   clause_store_release_materialized(ma);
   clause_store_release_materialized(mb);
 
+  clause_store_advise_mmap_range_cold(store, 0, 1);
+  stats = clause_store_get_stats(store);
+  if (mode == CLAUSE_STORE_ARCHIVE_MMAP)
+    CHECK(stats.mmap_scan_eviction_passes == 1 &&
+          stats.mmap_scan_eviction_bytes > 0,
+          "ordered mmap scan ranges are released and accounted");
+  else
+    CHECK(stats.mmap_scan_eviction_passes == 0 &&
+          stats.mmap_scan_eviction_bytes == 0,
+          "scan eviction is a no-op for non-mmap archives");
+
   CHECK(clause_id_archive_offset(a_id, &a_offset),
         "archive offset is discoverable for validation");
   CHECK(clause_store_test_corrupt(store, a_offset + 4, 0x40),
