@@ -389,6 +389,15 @@ platform did not honor the policy.  The equivalent low-level glibc spelling
 is `GLIBC_TUNABLES=glibc.malloc.trim_threshold=0`, but the P9 switch is the
 portable invocation for scripts.
 
+The full product validation reaches the exact historical compact boundary at
+2,945 givens.  `prooftrans parents_only` emits the same 7,051 normalized proof
+clauses byte for byte.  On that run the switch takes 833.73 user seconds and
+peaks at 152,904 KiB, versus 788.08 seconds and 152,616 KiB for the raw glibc
+control on a faster run.  The essentially identical memory result validates
+the P9 switch; the remaining roughly 24 MiB above the 125-MiB Phase-5 gate is
+now concentrated around coordinated term-pool compaction and subsequent pool
+regrowth.
+
 ### 4.4 Tighter-memory and legacy-order experiments
 
 To make the balanced hard count agree with its default 64-entry ranked

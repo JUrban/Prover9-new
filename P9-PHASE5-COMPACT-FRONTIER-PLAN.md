@@ -649,9 +649,22 @@ rather than growing past 100 MB with tens of megabytes stranded free.
 start of `prover9` and reports `compact_policy=enabled` when honored.  At the
 exact 1,000-given CHAT boundary, the P9 switch, raw glibc tunable, and both
 together have identical search states and essentially identical memory
-breakdowns.  The full P9-switch proof remains to be run before replacing the
-raw-tunable result as the product acceptance boundary.  Even the measured
-152,616-KiB result remains 24,616 KiB above the 125-MiB gate.
+breakdowns.  The full P9-switch proof is also exact: it reaches
+`Given=2,945`, `Generated=8,248,032`, and `Kept=272,787`, and all 7,051
+normalized proof clauses are byte-identical to the accepted reference.  On
+the slower validation run it takes 833.73 user, 103.30 system, and 937.35 wall
+seconds and peaks at 152,904 KiB.  That is only 288 KiB above the raw-tunable
+peak and remains below the 957-second CPU gate, so `P9_COMPACT_HEAP=1` replaces
+the raw tunable as the product acceptance boundary.  It is still 24,904 KiB
+above the 125-MiB gate.
+
+The 2-second sampler catches 141,156 KiB while the external high-water mark
+catches 152,904 KiB.  Immediately before the one coordinated term-pool
+compaction, resident memory has already grown to roughly 140 MiB; the
+replacement pool/rebase transaction then creates the short additional peak.
+The next slice therefore targets both causes: retain and rebase the live token
+intervals in place, and test an earlier bounded reclaim threshold so stale
+payload cannot regrow to the same pre-compaction high-water mark.
 
 ### Next radical index reduction
 

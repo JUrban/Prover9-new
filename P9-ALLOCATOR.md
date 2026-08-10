@@ -204,6 +204,9 @@ At 1,000 givens the P9 control and the raw
 `GLIBC_TUNABLES=glibc.malloc.trim_threshold=0` control produce identical
 search state and essentially identical arena/mmap/RSS values.  The raw-tunable
 full proof is exact at 2,945 givens and takes 788.08 user seconds, 886.05 wall
-seconds, and 152,616 KiB peak RSS.  This is 18,352 KiB below the preceding
-170,968-KiB proof with no CPU regression.  A full run through the P9-specific
-environment switch remains the final product-validation boundary.
+seconds, and 152,616 KiB peak RSS.  The product-facing P9 switch has now passed
+the same full proof: its 7,051 normalized proof clauses are byte-identical, it
+takes 833.73 user seconds on the slower validation run, and it peaks at
+152,904 KiB.  The 288-KiB peak difference is measurement noise at this scale;
+both controls save about 18 MiB from the preceding 170,968-KiB proof.  The P9
+switch is therefore the accepted invocation for later comparisons.
