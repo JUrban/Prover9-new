@@ -30,6 +30,7 @@ struct compact_id_map {
   unsigned value_words;
   unsigned page_shift;
   size_t entries_per_page;
+  struct compact_id_page *cached_page;
   unsigned long long peak_bytes;
 };
 
@@ -146,6 +147,8 @@ static struct compact_id_page *find_page(Compact_id_map map,
                                          BOOL create)
 {
   size_t at;
+  if (map->cached_page != NULL && map->cached_page->number == page_number)
+    return map->cached_page;
   if (map->directory_capacity == 0) {
     if (!create)
       return NULL;
@@ -165,7 +168,8 @@ static struct compact_id_page *find_page(Compact_id_map map,
     map->page_count++;
     update_peak(map);
   }
-  return map->page_keys[at] == 0 ? NULL : map->pages[at];
+  map->cached_page = map->page_keys[at] == 0 ? NULL : map->pages[at];
+  return map->cached_page;
 }
 
 static uint32_t *value_address(Compact_id_map map,

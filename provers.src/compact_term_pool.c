@@ -19,6 +19,9 @@ struct compact_term_pool {
   BOOL tokens_mapped;
   Compact_id_map directory;
   size_t directory_count;
+  unsigned long long cached_proof_id;
+  uint32_t cached_clause_offset;
+  uint32_t cached_clause_length;
   unsigned long long serializations;
   unsigned long long lookups;
   unsigned long long hits;
@@ -276,10 +279,19 @@ static BOOL directory_get(Compact_term_pool pool,
                           uint32_t *offset, uint32_t *length)
 {
   uint32_t values[2];
-  if (!compact_id_map_get(pool->directory, proof_id, values))
-    return FALSE;
-  if (values[0] == 0)
-    fatal_error("compact_term_pool: invalid directory offset sentinel");
+  if (pool->cached_proof_id == proof_id) {
+    values[0] = pool->cached_clause_offset + 1;
+    values[1] = pool->cached_clause_length;
+  }
+  else {
+    if (!compact_id_map_get(pool->directory, proof_id, values))
+      return FALSE;
+    if (values[0] == 0)
+      fatal_error("compact_term_pool: invalid directory offset sentinel");
+    pool->cached_proof_id = proof_id;
+    pool->cached_clause_offset = values[0] - 1;
+    pool->cached_clause_length = values[1];
+  }
   if (offset != NULL)
     *offset = values[0] - 1;
   if (length != NULL)
@@ -292,11 +304,16 @@ static BOOL directory_put(Compact_term_pool pool,
                           uint32_t offset, uint32_t length)
 {
   uint32_t values[2];
+  BOOL inserted;
   if (offset == UINT32_MAX)
     fatal_error("compact_term_pool: directory offset exceeds sentinel");
   values[0] = offset + 1;
   values[1] = length;
-  return compact_id_map_put(pool->directory, proof_id, values);
+  inserted = compact_id_map_put(pool->directory, proof_id, values);
+  pool->cached_proof_id = proof_id;
+  pool->cached_clause_offset = offset;
+  pool->cached_clause_length = length;
+  return inserted;
 }
 
 static void ensure_tokens(Compact_term_pool pool, size_t extra)
@@ -669,6 +686,7 @@ void compact_term_pool_compact_retained(Compact_term_pool pool,
   compact_id_map_free(pool->directory);
   pool->directory = compact_id_map_init(2);
   pool->directory_count = 0;
+  pool->cached_proof_id = 0;
 
   token_count = 0;
   for (i = 0; i < map->count; i++) {
