@@ -45,9 +45,9 @@ struct compact_unit_index {
   struct cui_record *records;
   size_t record_count;
   size_t record_capacity;
-  int32_t *tokens;
-  size_t token_count;
-  size_t token_capacity;
+  Compact_term_pool term_pool;
+  const int32_t *tokens;
+  BOOL owns_term_pool;
   unsigned long long *hash_keys;
   uint32_t *hash_values;
   size_t hash_capacity;
@@ -94,13 +94,15 @@ static uint64_t symbol_bit(unsigned symbol)
 
 static unsigned long long index_bytes(Compact_unit_index index)
 {
+  struct compact_term_pool_stats terms;
   if (index == NULL)
     return 0;
+  compact_term_pool_get_stats(index->term_pool, &terms);
   return sizeof(*index) +
     index->node_capacity * sizeof(*index->nodes) +
     index->posting_capacity * sizeof(*index->postings) +
     index->record_capacity * sizeof(*index->records) +
-    index->token_capacity * sizeof(*index->tokens) +
+    (index->owns_term_pool ? terms.total_bytes : 0) +
     index->hash_capacity *
       (sizeof(*index->hash_keys) + sizeof(*index->hash_values)) +
     index->query_capacity * sizeof(*index->query) +
@@ -124,23 +126,6 @@ static void update_peak(Compact_unit_index index)
       (index)->capacity * sizeof(*(index)->field));                     \
   }                                                                    \
 } while (0)
-
-static void ensure_tokens(Compact_unit_index index, size_t extra)
-{
-  size_t needed;
-  if (extra > SIZE_MAX - index->token_count)
-    fatal_error("compact_unit_index: token overflow");
-  needed = index->token_count + extra;
-  if (needed > UINT32_MAX)
-    fatal_error("compact_unit_index: token offsets exceed 32 bits");
-  while (needed > index->token_capacity) {
-    index->token_capacity = grow_capacity(
-      index->token_capacity, sizeof(*index->tokens),
-      "compact_unit_index: token capacity overflow");
-    index->tokens = safe_realloc(
-      index->tokens, index->token_capacity * sizeof(*index->tokens));
-  }
-}
 
 static size_t hash_slot(Compact_unit_index index, uint64_t id,
                         BOOL inserting)
@@ -309,41 +294,21 @@ static uint32_t insert_token_path(Compact_unit_index index, uint32_t root,
   return parent;
 }
 
-static uint32_t append_tokens(Compact_unit_index index, Term atom,
+static uint32_t append_tokens(Compact_unit_index index, Topform unit,
+                              Term atom,
                               uint32_t *length, uint64_t *symbol_mask)
 {
-  size_t offset = index->token_count;
-  size_t capacity = 128, top = 0;
-  Term fixed[128];
-  Term *stack = fixed;
+  uint32_t offset = compact_term_pool_intern(
+    index->term_pool, unit->id, unit->literals, atom, length);
+  uint32_t i;
+  index->tokens = compact_term_pool_tokens(index->term_pool);
   *symbol_mask = 0;
-  stack[top++] = atom;
-  while (top != 0) {
-    Term current = stack[--top];
-    int i;
-    int32_t code = VARIABLE(current) ?
-      -(int32_t) VARNUM(current) - 1 : (int32_t) SYMNUM(current);
-    ensure_tokens(index, 1);
-    index->tokens[index->token_count++] = code;
+  for (i = 0; i < *length; i++) {
+    int32_t code = index->tokens[offset + i];
     if (code >= 0)
       *symbol_mask |= symbol_bit((unsigned) code);
-    for (i = ARITY(current) - 1; i >= 0; i--) {
-      if (top == capacity) {
-        capacity *= 2;
-        if (stack == fixed) {
-          stack = safe_malloc(capacity * sizeof(*stack));
-          memcpy(stack, fixed, top * sizeof(*stack));
-        }
-        else
-          stack = safe_realloc(stack, capacity * sizeof(*stack));
-      }
-      stack[top++] = ARG(current, i);
-    }
   }
-  if (stack != fixed)
-    safe_free(stack);
-  *length = (uint32_t) (index->token_count - offset);
-  return (uint32_t) offset;
+  return offset;
 }
 
 static void index_record(Compact_unit_index index, uint32_t record)
@@ -366,9 +331,13 @@ static void index_record(Compact_unit_index index, uint32_t record)
   index->nodes[node].last_posting = posting;
 }
 
-Compact_unit_index compact_unit_index_init(void)
+Compact_unit_index compact_unit_index_init_with_pool(Compact_term_pool pool)
 {
   Compact_unit_index index = safe_calloc(1, sizeof(*index));
+  if (pool == NULL)
+    fatal_error("compact_unit_index_init_with_pool: null term pool");
+  index->term_pool = pool;
+  index->tokens = compact_term_pool_tokens(pool);
   (void) new_node(index, 0, 0);  /* reserved null node */
   index->roots[0] = new_node(index, 0, 0);
   index->roots[1] = new_node(index, 0, 0);
@@ -380,6 +349,15 @@ Compact_unit_index compact_unit_index_init(void)
                "compact_unit_index: record overflow");
   memset(&index->records[0], 0, sizeof(index->records[0]));
   index->record_count = 1;
+  update_peak(index);
+  return index;
+}
+
+Compact_unit_index compact_unit_index_init(void)
+{
+  Compact_term_pool pool = compact_term_pool_init();
+  Compact_unit_index index = compact_unit_index_init_with_pool(pool);
+  index->owns_term_pool = TRUE;
   update_peak(index);
   return index;
 }
@@ -403,7 +381,7 @@ BOOL compact_unit_index_add(Compact_unit_index index, Topform unit)
   record->proof_id = unit->id;
   record->sign = unit->literals->sign;
   record->active = TRUE;
-  record->token_offset = append_tokens(index, unit->literals->atom,
+  record->token_offset = append_tokens(index, unit, unit->literals->atom,
                                         &record->token_length,
                                         &record->symbol_mask);
   index_record(index, at_record);
@@ -550,6 +528,7 @@ unsigned long long compact_unit_generalization_first(
   Term bindings[MAX_VARS];
   if (index == NULL || target == NULL)
     return 0;
+  index->tokens = compact_term_pool_tokens(index->term_pool);
   index->generalization_queries++;
   memset(bindings, 0, sizeof(bindings));
   flatten_query(index, target, &count);
@@ -650,6 +629,7 @@ unsigned long long *compact_unit_instance_ids(
   *count = 0;
   if (index == NULL || pattern == NULL)
     return NULL;
+  index->tokens = compact_term_pool_tokens(index->term_pool);
   index->instance_queries++;
   wanted = resident_symbol_mask(pattern);
   for (i = 1; i < index->record_count; i++) {
@@ -879,6 +859,7 @@ unsigned long long *compact_unit_unifier_ids(
   *count = 0;
   if (index == NULL || query == NULL || VARIABLE(query))
     return NULL;
+  index->tokens = compact_term_pool_tokens(index->term_pool);
   index->unifier_queries++;
   query_root = SYMNUM(query);
   for (i = 1; i < index->record_count; i++) {
@@ -918,11 +899,13 @@ unsigned long long *compact_unit_unifier_ids(
 void compact_unit_index_get_stats(Compact_unit_index index,
                                   struct compact_unit_index_stats *stats)
 {
+  struct compact_term_pool_stats terms;
   if (stats == NULL)
     return;
   memset(stats, 0, sizeof(*stats));
   if (index == NULL)
     return;
+  compact_term_pool_get_stats(index->term_pool, &terms);
   stats->active = index->active;
   stats->peak = index->peak;
   stats->retired = index->retired;
@@ -935,7 +918,7 @@ void compact_unit_index_get_stats(Compact_unit_index index,
   stats->node_bytes = index->node_capacity * sizeof(*index->nodes);
   stats->posting_bytes = index->posting_capacity * sizeof(*index->postings);
   stats->record_bytes = index->record_capacity * sizeof(*index->records);
-  stats->token_bytes = index->token_capacity * sizeof(*index->tokens);
+  stats->token_bytes = index->owns_term_pool ? terms.token_bytes : 0;
   stats->hash_bytes = index->hash_capacity *
     (sizeof(*index->hash_keys) + sizeof(*index->hash_values));
   stats->scratch_bytes =
@@ -952,7 +935,8 @@ void compact_unit_index_free(Compact_unit_index index)
   safe_free(index->nodes);
   safe_free(index->postings);
   safe_free(index->records);
-  safe_free(index->tokens);
+  if (index->owns_term_pool)
+    compact_term_pool_free(index->term_pool);
   safe_free(index->hash_keys);
   safe_free(index->hash_values);
   safe_free(index->query);

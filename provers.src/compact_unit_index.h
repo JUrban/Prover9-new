@@ -2,6 +2,7 @@
 #define TP_COMPACT_UNIT_INDEX_H
 
 #include "../ladr/ladr.h"
+#include "compact_term_pool.h"
 
 typedef struct compact_unit_index * Compact_unit_index;
 
@@ -26,6 +27,8 @@ struct compact_unit_index_stats {
 };
 
 Compact_unit_index compact_unit_index_init(void);
+
+Compact_unit_index compact_unit_index_init_with_pool(Compact_term_pool pool);
 
 BOOL compact_unit_index_add(Compact_unit_index index, Topform unit);
 
