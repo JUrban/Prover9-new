@@ -63,6 +63,7 @@ columns:
 | 1,000 | archive, delta back-posting stream | 126.12 s | 140.04 s | 93,524 KiB | 19.17 MB |
 | 1,000 | archive, delta rewrite-occurrence stream | 125.53 s | 138.90 s | 92,164 KiB | 19.17 MB |
 | 1,000 | archive, 12.5% shared-token growth | 133.58 s | 147.56 s | 91,904 KiB | 19.17 MB |
+| 1,000 | archive, dense stable-ID hashes | 131.09 s | 145.37 s | 91,760 KiB | 19.17 MB |
 
 All compared runs have identical given, generated, kept, usable, SOS,
 demodulator, disabled, hint, and active-hint counts.  At 1,000 givens both
@@ -102,6 +103,7 @@ unchanged:
 | plus delta back-posting stream | 7,652,792 B | 2,760,368 B | 63.9% |
 | plus delta rewrite-occurrence stream | 7,652,792 B | 2,663,112 B | 65.2% |
 | plus 12.5% shared-token growth | 7,652,792 B | 2,655,900 B | 65.3% |
+| plus dense stable-ID hashes | 7,652,792 B | 2,606,748 B | 65.9% |
 
 The rewrite node pool itself falls from 655,360 to 196,608 bytes (70.0%).
 The optimized rewrite traversal uses one binding trail per query; allocating
@@ -186,6 +188,14 @@ seconds and 91,904 KiB peak RSS: slower than the 125.53-second doubled-arena
 run, but below the accepted 140.45-second archived-cache gate.  The rejected
 8.33% prototype saved only another 44,528 bytes while taking 142.86 seconds.
 Combined structural storage is 15,543,760 bytes, **65.1% below** baseline.
+
+The four stable-ID maps now use an 85% live-load threshold and rehash at the
+same capacity when tombstones alone create pressure.  At 300 givens, the
+rewrite map stays at 4,096 slots (49,152 rather than 98,304 bytes), and the
+full CHAT trace remains identical.  At 1,000 givens, rewrite, unit, and
+back-demodulation each stay at 32,768 slots, saving 393,216 bytes apiece.
+Combined structural storage is 14,364,112 bytes, **67.8% below** baseline;
+the exact gate takes 131.09 user seconds and 91,760 KiB peak RSS.
 
 ### Next radical index reduction
 
