@@ -410,6 +410,29 @@ falls from 78.61 to 53.60 seconds.  Relative to the 154.79-second ordinary
 packed-fast baseline, full-body compact is now 1.08 times and the radical
 archive is 1.14 times ordinary CPU, inside the Phase 5 1.25 throughput gate.
 
+The first bounded full proof with all accepted compact features succeeds at
+given 2,945.  It generates 8,248,032 clauses, keeps 272,787, and produces the
+same 7,051-step proof with 3,231 new hints as ordinary OTTER; the two-count
+difference from the ordinary cumulative generated/kept totals is the already
+audited transient kept-order permutation.  `prooftrans parents_only` exits
+successfully and reconstructs the final `$F` clause.  End-to-end time is
+919.70 user seconds, 92.24 system seconds, and 1,012.62 wall seconds, with
+277,160 KiB peak RSS.  This is 1.20 times the old 765.69-second proof and
+therefore passes the 1.25 CPU gate, but it saves only 49.6% of the old
+550,400-KiB RSS and does not pass the radical final memory target.
+
+The final statistics make the remaining RAM concrete.  Rewrite, unit,
+back-demod, nonunit, and shared term-pool structures total 109,582,648 bytes
+(104.5 MiB).  The unit index retains 266,794 physical records for 128,653
+active clauses, while back-demod retains 272,486 for 132,801 active clauses;
+the shared pool still contains all 272,786 serialized clauses.  The ancestor
+store has 84,404,096 logical record bytes in a 134,217,728-byte mmap, packed
+hints retain their roughly 29-MB tables/cache/postings, and the allocator has
+35,658,048 bytes currently reserved.  The next RAM pass must therefore
+compact unit/back records and the shared pool together, and make cold ancestor
+mmap pages genuinely evictable.  Further passive-body micro-tuning cannot
+recover the required roughly 150 MiB.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:

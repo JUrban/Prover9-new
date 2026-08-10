@@ -139,6 +139,13 @@ CPU is 167.73/176.85 seconds with the exact state and unchanged
 154.79-second ordinary packed-fast baseline and therefore passes the Phase 5
 1.25 throughput gate at this CHAT boundary.
 
+The corresponding bounded full archive run proves Osborn at given 2,945 in
+919.70 user seconds with 277,160 KiB peak RSS.  It has the same 7,051 proof
+steps and 3,231 new hints as ordinary OTTER, and `prooftrans parents_only`
+reconstructs the proof successfully.  This passes the proof and 1.25 CPU
+gates, but not the final RAM gate; CHAT remains the faster regression boundary
+for the coordinated inactive-index/term-pool compaction now required.
+
 ## Exact old and compatibility proof baseline
 
 | Mode | Result | Given | Generated | Kept | User CPU | Wall | Peak RSS |
