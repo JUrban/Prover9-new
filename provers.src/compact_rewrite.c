@@ -7,6 +7,10 @@
 #define CR_NONE 0U
 #define CR_TOMBSTONE UINT64_MAX
 #define CR_OCCURRENCE_BLOCK_PAYLOAD 248
+#define CR_RULE_LENGTH_MASK UINT32_C(0x0fffffff)
+#define CR_RULE_TYPE_SHIFT 28
+#define CR_RULE_TYPE_MASK UINT32_C(0x70000000)
+#define CR_RULE_ACTIVE UINT32_C(0x80000000)
 
 struct cr_node {
   uint32_t token_offset;
@@ -35,9 +39,7 @@ struct cr_rule {
   uint32_t left_offset;
   uint32_t left_length;
   uint32_t right_offset;
-  uint32_t right_length;
-  unsigned char type;
-  unsigned char active;
+  uint32_t right_length_flags;
 };
 
 struct compact_rewrite_bank {
@@ -91,11 +93,63 @@ struct cr_match_result {
   int direction;
 };
 
+static uint32_t rule_right_length(const struct cr_rule *rule)
+{
+  return rule->right_length_flags & CR_RULE_LENGTH_MASK;
+}
+
+static int rule_type(const struct cr_rule *rule)
+{
+  return (int) ((rule->right_length_flags & CR_RULE_TYPE_MASK) >>
+                CR_RULE_TYPE_SHIFT);
+}
+
+static BOOL rule_active(const struct cr_rule *rule)
+{
+  return (rule->right_length_flags & CR_RULE_ACTIVE) != 0;
+}
+
+static void set_rule_metadata(struct cr_rule *rule, uint32_t right_length,
+                              int type, BOOL active)
+{
+  if (right_length > CR_RULE_LENGTH_MASK || type < 0 || type > 7)
+    fatal_error("compact_rewrite: rule metadata overflow");
+  rule->right_length_flags = right_length |
+    ((uint32_t) type << CR_RULE_TYPE_SHIFT) |
+    (active ? CR_RULE_ACTIVE : 0);
+}
+
+static void set_rule_active(struct cr_rule *rule, BOOL active)
+{
+  if (active)
+    rule->right_length_flags |= CR_RULE_ACTIVE;
+  else
+    rule->right_length_flags &= ~CR_RULE_ACTIVE;
+}
+
 static size_t grow_capacity(size_t current, size_t item_size,
                             char *message)
 {
   size_t next = current == 0 ? 64 : current * 2;
   if (next < current || next > SIZE_MAX / item_size)
+    fatal_error(message);
+  return next;
+}
+
+static size_t grow_record_capacity(size_t current, size_t item_size,
+                                   char *message)
+{
+  size_t increment;
+  size_t next;
+  if (current == 0)
+    return 64;
+  increment = current / 4;
+  if (increment < 64)
+    increment = 64;
+  if (increment > SIZE_MAX - current)
+    fatal_error(message);
+  next = current + increment;
+  if (next > SIZE_MAX / item_size)
     fatal_error(message);
   return next;
 }
@@ -211,9 +265,9 @@ static void ensure_occurrence_symbol(Compact_rewrite_bank bank,
 static void ensure_rules(Compact_rewrite_bank bank)
 {
   if (bank->rule_count == bank->rule_capacity) {
-    bank->rule_capacity = grow_capacity(bank->rule_capacity,
-                                         sizeof(*bank->rules),
-                                         "compact_rewrite: rule overflow");
+    bank->rule_capacity = grow_record_capacity(
+      bank->rule_capacity, sizeof(*bank->rules),
+      "compact_rewrite: rule overflow");
     bank->rules = safe_realloc(bank->rules,
                                 bank->rule_capacity * sizeof(*bank->rules));
   }
@@ -492,16 +546,17 @@ static void append_rule_occurrence(Compact_rewrite_bank bank,
 static void index_rule_occurrences(Compact_rewrite_bank bank, uint32_t index)
 {
   struct cr_rule *rule = &bank->rules[index];
-  size_t capacity = (size_t) rule->left_length + rule->right_length;
+  uint32_t right_length = rule_right_length(rule);
+  int type = rule_type(rule);
+  size_t capacity = (size_t) rule->left_length + right_length;
   int32_t *symbols = capacity == 0 ? NULL :
     safe_malloc(capacity * sizeof(*symbols));
   size_t count = 0, i;
-  if (rule->type == ORIENTED || rule->type == LEX_DEP_LR ||
-      rule->type == LEX_DEP_BOTH)
+  if (type == ORIENTED || type == LEX_DEP_LR || type == LEX_DEP_BOTH)
     collect_occurrence_symbols(bank, rule->left_offset, rule->left_length,
                                symbols, &count);
-  if (rule->type == LEX_DEP_RL || rule->type == LEX_DEP_BOTH)
-    collect_occurrence_symbols(bank, rule->right_offset, rule->right_length,
+  if (type == LEX_DEP_RL || type == LEX_DEP_BOTH)
+    collect_occurrence_symbols(bank, rule->right_offset, right_length,
                                symbols, &count);
   for (i = 0; i < count; i++) {
     unsigned symbol = (unsigned) symbols[i];
@@ -543,6 +598,7 @@ BOOL compact_rewrite_add(Compact_rewrite_bank bank, Topform clause, int type)
 {
   struct cr_rule *rule;
   uint32_t index;
+  uint32_t right_length;
   Term atom;
   size_t at;
   if (bank == NULL || clause == NULL || clause->id == 0 ||
@@ -555,18 +611,17 @@ BOOL compact_rewrite_add(Compact_rewrite_bank bank, Topform clause, int type)
   rule = &bank->rules[index];
   memset(rule, 0, sizeof(*rule));
   rule->proof_id = clause->id;
-  rule->type = (unsigned char) type;
-  rule->active = TRUE;
   atom = clause->literals->atom;
   rule->left_offset = append_term_tokens(bank, clause, ARG(atom, 0),
                                           &rule->left_length);
   rule->right_offset = append_term_tokens(bank, clause, ARG(atom, 1),
-                                           &rule->right_length);
+                                           &right_length);
+  set_rule_metadata(rule, right_length, type, TRUE);
   bank->tokens = compact_term_pool_tokens(bank->term_pool);
   if (type == ORIENTED || type == LEX_DEP_LR || type == LEX_DEP_BOTH)
     index_side(bank, index, rule->left_offset, rule->left_length, 1);
   if (type == LEX_DEP_RL || type == LEX_DEP_BOTH)
-    index_side(bank, index, rule->right_offset, rule->right_length, 2);
+    index_side(bank, index, rule->right_offset, right_length, 2);
   index_rule_occurrences(bank, index);
   ensure_hash(bank);
   at = hash_slot(bank, clause->id, TRUE);
@@ -586,6 +641,8 @@ static void copy_live_rule(Compact_rewrite_bank destination,
 {
   struct cr_rule *rule;
   uint32_t index;
+  uint32_t right_length = rule_right_length(old);
+  int type = rule_type(old);
   size_t at;
   ensure_rules(destination);
   if (destination->rule_count > UINT32_MAX)
@@ -594,10 +651,8 @@ static void copy_live_rule(Compact_rewrite_bank destination,
   rule = &destination->rules[index];
   memset(rule, 0, sizeof(*rule));
   rule->proof_id = old->proof_id;
-  rule->type = old->type;
-  rule->active = TRUE;
   rule->left_length = old->left_length;
-  rule->right_length = old->right_length;
+  set_rule_metadata(rule, right_length, type, TRUE);
   if (destination->term_pool == source->term_pool) {
     rule->left_offset = old->left_offset;
     rule->right_offset = old->right_offset;
@@ -608,14 +663,13 @@ static void copy_live_rule(Compact_rewrite_bank destination,
       old->left_length);
     rule->right_offset = compact_term_pool_append(
       destination->term_pool, source->tokens + old->right_offset,
-      old->right_length);
+      right_length);
   }
   destination->tokens = compact_term_pool_tokens(destination->term_pool);
-  if (rule->type == ORIENTED || rule->type == LEX_DEP_LR ||
-      rule->type == LEX_DEP_BOTH)
+  if (type == ORIENTED || type == LEX_DEP_LR || type == LEX_DEP_BOTH)
     index_side(destination, index, rule->left_offset, rule->left_length, 1);
-  if (rule->type == LEX_DEP_RL || rule->type == LEX_DEP_BOTH)
-    index_side(destination, index, rule->right_offset, rule->right_length, 2);
+  if (type == LEX_DEP_RL || type == LEX_DEP_BOTH)
+    index_side(destination, index, rule->right_offset, right_length, 2);
   index_rule_occurrences(destination, index);
   ensure_hash(destination);
   at = hash_slot(destination, rule->proof_id, TRUE);
@@ -660,7 +714,7 @@ void compact_rewrite_compact(Compact_rewrite_bank bank)
   replacement = bank->owns_term_pool ? compact_rewrite_init() :
     compact_rewrite_init_with_pool(bank->term_pool);
   for (i = 1; i < bank->rule_count; i++)
-    if (bank->rules[i].active)
+    if (rule_active(&bank->rules[i]))
       copy_live_rule(replacement, bank, &bank->rules[i]);
 
   old = *bank;
@@ -695,9 +749,9 @@ static BOOL remove_rule(Compact_rewrite_bank bank,
 {
   uint32_t index = lookup_rule(bank, proof_id);
   size_t at;
-  if (index == CR_NONE || !bank->rules[index].active)
+  if (index == CR_NONE || !rule_active(&bank->rules[index]))
     return FALSE;
-  bank->rules[index].active = FALSE;
+  set_rule_active(&bank->rules[index], FALSE);
   at = hash_slot(bank, proof_id, FALSE);
   bank->hash_keys[at] = CR_TOMBSTONE;
   bank->hash_values[at] = 0;
@@ -830,17 +884,16 @@ static BOOL rule_contains_pattern(Compact_rewrite_bank bank,
                                   uint32_t pattern_offset,
                                   uint32_t pattern_length)
 {
-  if ((candidate->type == ORIENTED ||
-       candidate->type == LEX_DEP_LR ||
-       candidate->type == LEX_DEP_BOTH) &&
+  int type = rule_type(candidate);
+  if ((type == ORIENTED || type == LEX_DEP_LR ||
+       type == LEX_DEP_BOTH) &&
       source_contains_pattern(bank, candidate->left_offset,
                               candidate->left_length,
                               pattern_offset, pattern_length))
     return TRUE;
-  return (candidate->type == LEX_DEP_RL ||
-          candidate->type == LEX_DEP_BOTH) &&
+  return (type == LEX_DEP_RL || type == LEX_DEP_BOTH) &&
     source_contains_pattern(bank, candidate->right_offset,
-                            candidate->right_length,
+                            rule_right_length(candidate),
                             pattern_offset, pattern_length);
 }
 
@@ -877,14 +930,14 @@ void compact_rewrite_visit_overlaps(Compact_rewrite_bank bank,
     return;
   bank->tokens = compact_term_pool_tokens(bank->term_pool);
   rule = &bank->rules[new_index];
-  if (rule->type == ORIENTED || rule->type == LEX_DEP_LR ||
-      rule->type == LEX_DEP_BOTH) {
+  if (rule_type(rule) == ORIENTED || rule_type(rule) == LEX_DEP_LR ||
+      rule_type(rule) == LEX_DEP_BOTH) {
     pattern_offsets[pattern_count] = rule->left_offset;
     pattern_lengths[pattern_count++] = rule->left_length;
   }
-  if (rule->type == LEX_DEP_RL || rule->type == LEX_DEP_BOTH) {
+  if (rule_type(rule) == LEX_DEP_RL || rule_type(rule) == LEX_DEP_BOTH) {
     pattern_offsets[pattern_count] = rule->right_offset;
-    pattern_lengths[pattern_count++] = rule->right_length;
+    pattern_lengths[pattern_count++] = rule_right_length(rule);
   }
   for (i = 0; i < pattern_count; i++) {
     uint32_t block;
@@ -913,7 +966,7 @@ void compact_rewrite_visit_overlaps(Compact_rewrite_bank bank,
         if (rule_index == CR_NONE || rule_index >= bank->rule_count)
           fatal_error("compact_rewrite: corrupt occurrence rule");
         candidate = &bank->rules[rule_index];
-        if (candidate->active && candidate->proof_id != new_proof_id &&
+        if (rule_active(candidate) && candidate->proof_id != new_proof_id &&
             rule_contains_pattern(bank, candidate,
                                   pattern_offsets[i], pattern_lengths[i]))
           visit(candidate->proof_id, context);
@@ -934,9 +987,9 @@ unsigned long long compact_rewrite_identity_hash(Compact_rewrite_bank bank)
   /* Commutative across pool growth and tombstone placement.  Checkpoint
      identity is the live set of stable proof IDs and rule directions. */
   for (i = 1; i < bank->rule_count; i++)
-    if (bank->rules[i].active)
+    if (rule_active(&bank->rules[i]))
       hash ^= hash_id(bank->rules[i].proof_id ^
-                      ((uint64_t) bank->rules[i].type << 56));
+                      ((uint64_t) rule_type(&bank->rules[i]) << 56));
   return hash;
 }
 
@@ -1044,11 +1097,11 @@ static BOOL try_leaf(Compact_rewrite_bank bank, uint32_t node, Term target,
     struct cr_rule *rule = &bank->rules[p->rule];
     uint32_t position, end;
     Term contractum;
-    if (!rule->active)
+    if (!rule_active(rule))
       continue;
     if (p->direction == 1) {
       position = rule->right_offset;
-      end = position + rule->right_length;
+      end = position + rule_right_length(rule);
     }
     else {
       position = rule->left_offset;
@@ -1058,7 +1111,7 @@ static BOOL try_leaf(Compact_rewrite_bank bank, uint32_t node, Term target,
                                   reduced_flag);
     if (position != end)
       fatal_error("compact_rewrite: incomplete RHS consumption");
-    if (rule->type == ORIENTED ||
+    if (rule_type(rule) == ORIENTED ||
         term_greater(target, contractum, lex_order_vars)) {
       result->found = TRUE;
       result->contractum = contractum;

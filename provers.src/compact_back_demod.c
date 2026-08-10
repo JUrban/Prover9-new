@@ -87,6 +87,24 @@ static size_t grow_capacity(size_t current, size_t item_size,
   return next;
 }
 
+static size_t grow_record_capacity(size_t current, size_t item_size,
+                                   const char *message)
+{
+  size_t increment;
+  size_t next;
+  if (current == 0)
+    return 64;
+  increment = current / 4;
+  if (increment < 64)
+    increment = 64;
+  if (increment > SIZE_MAX - current)
+    fatal_error((char *) message);
+  next = current + increment;
+  if (next > SIZE_MAX / item_size)
+    fatal_error((char *) message);
+  return next;
+}
+
 #define ENSURE_ARRAY(index, field, count, capacity, message) do {       \
   if ((index)->count == (index)->capacity) {                            \
     (index)->capacity = grow_capacity((index)->capacity,                \
@@ -95,6 +113,17 @@ static size_t grow_capacity(size_t current, size_t item_size,
       (index)->capacity * sizeof(*(index)->field));                     \
   }                                                                    \
 } while (0)
+
+static void ensure_records(Compact_back_demod_index index)
+{
+  if (index->record_count == index->record_capacity) {
+    index->record_capacity = grow_record_capacity(
+      index->record_capacity, sizeof(*index->records),
+      "compact_back_demod: record overflow");
+    index->records = safe_realloc(
+      index->records, index->record_capacity * sizeof(*index->records));
+  }
+}
 
 static uint64_t hash_id(uint64_t x)
 {
@@ -421,8 +450,7 @@ Compact_back_demod_index compact_back_demod_init_with_pool(
   index->token_limit = compact_term_pool_token_count(pool);
   if (new_posting_block(index) != CBD_NONE)
     fatal_error("compact_back_demod: invalid posting block sentinel");
-  ENSURE_ARRAY(index, records, record_count, record_capacity,
-               "compact_back_demod: record overflow");
+  ensure_records(index);
   memset(&index->records[0], 0, sizeof(index->records[0]));
   index->record_count = 1;
   update_peak(index);
@@ -452,8 +480,7 @@ BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
       clause->literals == NULL ||
       lookup_record(index, clause->id) != CBD_NONE)
     return FALSE;
-  ENSURE_ARRAY(index, records, record_count, record_capacity,
-               "compact_back_demod: record overflow");
+  ensure_records(index);
   if (index->record_count > UINT32_MAX)
     fatal_error("compact_back_demod: record offsets exceed 32 bits");
   record_index = (uint32_t) index->record_count++;
