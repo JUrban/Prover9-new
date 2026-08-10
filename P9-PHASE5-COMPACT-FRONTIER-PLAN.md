@@ -683,6 +683,27 @@ User time is 18.04 versus 18.32 seconds, and every compact-index validation
 failure remains zero.  This clears the semantic gate; larger prefixes must
 now choose a useful threshold before another full proof.
 
+At 1,000 givens the same parallel 8-MiB/32-KiB pair ends at the identical
+`Generated=1,268,285`, `Kept=33,909` state.  The forced run retains its one
+early compaction and takes 85.10 user seconds versus 87.17 for the control;
+in-place rebasing has no measurable continuation penalty.
+
+The threshold separates at a bounded 2,000-given comparison:
+
+| Reclaim threshold | Pool compactions | Pool bytes reclaimed | User | Peak RSS |
+|---:|---:|---:|---:|---:|
+| 8 MiB | 0 | 0 | 320.72 s | 142,892 KiB |
+| 4 MiB | 1 | 4,982,388 | 312.87 s | 137,472 KiB |
+| 2 MiB | 3 | 9,252,684 | 314.31 s | 137,604 KiB |
+
+All three finish at `Generated=4,497,690`, `Kept=144,512` with the same rule
+counters.  Four MiB removes about 5.3 MiB of peak RSS without a CPU penalty.
+Two MiB leaves a smaller final pool but its two extra coordinated rebuilds do
+not lower the external high-water mark at this boundary.  The full-proof gate
+must compare 8, 4, and 2 MiB directly: 4 MiB is the bounded-prefix leader,
+while 2 MiB remains useful for determining whether later pool regrowth, rather
+than the first compaction, sets the final high-water mark.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:
