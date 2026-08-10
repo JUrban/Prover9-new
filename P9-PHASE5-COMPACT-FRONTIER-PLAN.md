@@ -629,6 +629,14 @@ The 300-given full trace and 1,000-given terminal state are exact; isolated
 from 84.33 to 84.07 seconds.  This exact reduction is accepted for a full
 proof measurement; it cannot by itself close the remaining RSS gap.
 
+The full proof rejects that cache reduction.  Although the exact proof and
+all 7,051 normalized clauses remain unchanged, the 8,192-entry run takes
+816.35 user seconds versus 796.01 and peaks at 170,372 versus 170,968 KiB:
+only 596 KiB is saved.  Its final glibc arena contains 41,995,552 free bytes,
+showing that extra miss/materialization churn turns the nominal 4.52-MiB
+table saving into persistent heap fragmentation.  The cache is restored to
+32,768 entries; this is a measured rejection, not an accepted Phase-5 gain.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:

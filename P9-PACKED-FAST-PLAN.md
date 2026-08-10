@@ -368,6 +368,15 @@ RSS falls from 73,496 to 69,140 KiB, and user CPU changes from 84.33 to 84.07
 seconds.  The exact terminal state and hint preview/trace/checkpoint tests
 pass.  A full proof remains the acceptance boundary for this capacity change.
 
+That full boundary rejects the 8,192-entry cache.  The proof and all 7,051
+normalized clauses remain exact, but user CPU rises from 796.01 to 816.35
+seconds while peak RSS falls only from 170,968 to 170,372 KiB (-596 KiB).
+At exit glibc reports a 114,892,800-byte arena with 41,995,552 free bytes;
+the extra cache misses/materialization churn therefore consumes almost all of
+the nominal 4.52-MiB table saving as long-lived allocator fragmentation.
+The fixed capacity is restored to 32,768.  Prefix RSS alone is not sufficient
+evidence for cache sizing on this workload.
+
 ### Guarded full-run result
 
 The 900-CPU-second/512-MiB guarded selected-DISCOUNT run did not prove the

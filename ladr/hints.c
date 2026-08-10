@@ -120,7 +120,7 @@ static unsigned Preview_key_scratch_capacity = 0;
    invalidate possible additions, so neither hash collisions nor unrelated
    hint mutations can cause an unsafe omission. */
 
-#define FAST_MATCH_CACHE_CAPACITY 8192U
+#define FAST_MATCH_CACHE_CAPACITY 32768U
 #define FAST_MATCH_CACHE_KEYS 12U
 #define FAST_MATCH_CACHE_CANDIDATES 8U
 #define FAST_DENSE_MIN_POSTING 512U
