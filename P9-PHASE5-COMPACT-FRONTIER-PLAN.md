@@ -750,6 +750,24 @@ performs one compaction, takes 17.95 user seconds, and reports
 `token_copy_bytes=0`.  The terminal release plus the 2-MiB policy now require
 one final exact full-proof/RSS measurement.
 
+That combined 2-MiB measurement is logically exact and fast, but it rejects
+the current peak policy.  It reaches `Given=2,945`,
+`Generated=8,248,032`, and `Kept=272,787`; all 7,051 normalized proof clauses
+are byte-identical to the accepted reference.  It takes 736.77 user, 98.82
+system, and 836.27 wall seconds, so it is faster than old OTTER's 765.69 user
+seconds and comfortably inside both time gates.  The terminal lifetime split
+also works: sampled RSS falls from 131,684 to 74,788 KiB before archived proof
+materialization begins.
+
+Peak RSS nevertheless reaches 151,080 KiB externally and 147,124 KiB in the
+0.2-second sampler.  The sampled maximum lasts for only three observations
+inside the fifth coordinated term-pool compaction: its surrounding resident
+set is about 139,032 KiB, temporary rebase/directory work raises it above 147
+MiB, and compaction then lowers it to 132,600 KiB.  Thus terminal proof overlap
+is no longer the maximum.  The remaining work is precisely bounded: trigger
+reclaim before the 139-MiB pre-compaction state and eliminate growth copies in
+the temporary rebase-entry vector, then repeat the exact full gate.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:
