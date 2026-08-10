@@ -250,6 +250,19 @@ pipeline if cache misses are not responsible for most of the gap.  In
 parallel, inactive unit/back records and shared term-pool slices must be
 reclaimed, and cold proof/archive pages must cease being permanently resident.
 
+A three-way full-hint CHAT replay to exactly 1,500 givens rejects cache
+capacity as the explanation.  With 0, 4, and 32 MiB configured, all runs end
+at `Generated=2,947,136`, `Kept=66,933`, `Sos=42,583`, and `Demods=36,145`.
+Their user times are respectively 366.96, 379.28, and 367.32 seconds, with
+peak RSS of 114,468, 115,400, and 115,944 KiB.  The cached runs perform
+50,644 ancestor materializations versus 148,691 with no cache, avoiding
+98,047 decodes, yet are not faster.  Both nonzero settings reach only about
+3.65 MB peak cache charge; the identical 328 evictions are set-associative
+collisions, not exhaustion of either byte budget.  Thus increasing this
+cache cannot repair proof throughput.  `compact_passive_cache=0` is the
+current minimum-RAM setting, while the next diagnostic separates compact
+index matching from the cost of retaining and reprocessing rewritten bodies.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:
