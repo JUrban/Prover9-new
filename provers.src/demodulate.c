@@ -494,6 +494,7 @@ void fprint_compact_back_demod(FILE *fp)
           "Compact_back_demod: mode=%s, failures=%llu, active=%llu, "
           "peak=%llu, retired=%llu, physical=%llu, queries=%llu, "
           "candidates=%llu, exact_tests=%llu, posting_groups=%llu, "
+          "path_buckets=%llu, "
           "symbol_occurrences=%llu, groups_examined=%llu, "
           "occurrences_examined=%llu, path_checks=%llu, "
           "path_rejects=%llu, posting_stream_used=%llu, "
@@ -503,7 +504,8 @@ void fprint_compact_back_demod(FILE *fp)
           Compact_back_demod_authoritative ? "authoritative" : "audit",
           Compact_back_demod_failures, stats.active, stats.peak,
           stats.retired, stats.physical, stats.queries, stats.candidates,
-          stats.exact_tests, stats.posting_groups, stats.symbol_occurrences,
+          stats.exact_tests, stats.posting_groups, stats.path_buckets,
+          stats.symbol_occurrences,
           stats.posting_groups_examined, stats.occurrences_examined,
           stats.path_filter_checks, stats.path_filter_rejects,
           stats.posting_stream_used, stats.posting_stream_bytes,

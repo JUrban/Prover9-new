@@ -109,6 +109,16 @@ turnaround: each process is pinned to a different physical CPU, and all
 reported CPU times and states are per process.  This replay confirms that
 dense clause materialization is not the remaining speed problem.
 
+The successor back index is checked with the same workflow.  Sparse
+root/path-signature buckets pass the focused test and compact-vs-legacy audit
+in parallel with a 300-given full-hint replay; all 126,530 CHAT oracle lines
+remain byte-identical.  Parallel full-body and zero-cache archive runs to
+1,000 givens both end at `Generated=1,268,285`, `Kept=33,909`,
+`Sos=26,052`, and `Demods=21,741`.  The archive case uses 103.31 user seconds
+and 91,048 KiB peak RSS.  This makes `chat_test.in`, rather than a synthetic
+microbenchmark alone, the acceptance oracle for both the signature filter and
+its memory/CPU tradeoff.
+
 ## Exact old and compatibility proof baseline
 
 | Mode | Result | Given | Generated | Kept | User CPU | Wall | Peak RSS |

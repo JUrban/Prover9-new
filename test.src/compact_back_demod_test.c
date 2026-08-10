@@ -89,6 +89,8 @@ int main(void)
         "path filter accounts for a safe fixed-symbol rejection");
   CHECK(stats.posting_groups == 14 && stats.symbol_occurrences == 15,
         "repeated clause symbols share one posting group");
+  CHECK(stats.path_buckets > 0,
+        "root/path posting directory contains sparse buckets");
   CHECK(stats.occurrence_stream_bytes > 0 &&
         stats.occurrence_stream_bytes <
           stats.symbol_occurrences * (sizeof(uint32_t) + sizeof(uint32_t)),
@@ -126,13 +128,14 @@ int main(void)
           "multi-byte occurrence delta retrieves distant occurrence");
     safe_free(ids);
     compact_back_demod_get_stats(gap_index, &gap_stats);
-    CHECK(gap_stats.posting_groups == 4 &&
+    CHECK(gap_stats.posting_groups >= 4 &&
+          gap_stats.posting_groups < gap_stats.symbol_occurrences &&
           gap_stats.symbol_occurrences == 144 &&
           gap_stats.occurrence_stream_bytes > gap_stats.symbol_occurrences &&
           gap_stats.occurrence_stream_bytes <
             gap_stats.symbol_occurrences *
               (sizeof(uint32_t) + sizeof(uint32_t)),
-          "multi-byte deltas plus masks beat fixed offset/mask records");
+          "bucketed multi-byte deltas beat fixed offset records");
     duplicate_clause = indexed_clause("d(n(a),n(a)).");
     duplicate_demod = indexed_clause("n(x) = x.");
     CHECK(compact_back_demod_add(gap_index, duplicate_clause),

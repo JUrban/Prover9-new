@@ -15,6 +15,7 @@ struct compact_back_demod_stats {
   unsigned long long candidates;
   unsigned long long exact_tests;
   unsigned long long posting_groups;
+  unsigned long long path_buckets;
   unsigned long long symbol_occurrences;
   unsigned long long posting_groups_examined;
   unsigned long long occurrences_examined;

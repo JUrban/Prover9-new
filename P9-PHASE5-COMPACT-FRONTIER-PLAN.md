@@ -304,7 +304,8 @@ candidate explain why the compact `back_demod` clock grows from 4.91 to
 path discrimination over the compact occurrence stream; cache sizing and
 record packing cannot compensate for this loss of selectivity.
 
-A 16-bit fixed-path Bloom signature is now stored beside each delta-packed
+The first selective version stored a 16-bit fixed-path Bloom signature beside
+each delta-packed
 occurrence.  It encodes fixed `(path, symbol)` features through depth three;
 pattern variables contribute no required bits, and every filter survivor is
 still checked by the existing exact matcher, so collisions can produce only
@@ -354,6 +355,27 @@ CPU.  Compact `back_demod` remains 63.66 seconds versus 4.91 seconds in the
 ordinary index, and compact `demod` is 79.36 versus 43.99 seconds.  Those two
 measured paths, rather than archive materialization or unit conflict lookup,
 are the remaining throughput targets.
+
+The next back-index layout moves the shallow signature in front of the
+posting scan.  Occurrences are partitioned into sparse `(root symbol,
+8-bit path signature)` buckets, and a query visits only buckets whose exact
+stored signature contains every bit required by its fixed paths.  Bloom
+collisions remain one-sided: they can admit extra work, but the unchanged
+structural matcher checks every survivor, so no candidate can be lost.  Each
+occurrence is stored in exactly one bucket, its signature byte is no longer
+repeated in the occurrence stream, and 64-byte posting chunks grow by 25%.
+
+The full-hint `chat_test.in` oracle is byte-identical across all 126,530
+candidate/hint/kept/given lines at 300 givens, and the focused and
+compact-vs-legacy audit suites pass.  At that boundary the back index is
+610,440 bytes and `back_demod` is 0.19 seconds.  At 1,000 givens the
+zero-cache dense archive again has the exact terminal state; it takes 103.31
+user seconds, peaks at 91,048 KiB RSS, and spends 3.99 seconds in
+`back_demod`.  The back index is 2,961,192 bytes.  The five compact structures
+now total 13,286,080 bytes, **70.17% below** the 44,545,464-byte baseline,
+while this complete prefix remains 21.1% faster than the earlier 131.01-second
+packed-record archive.  A parallel full-body replay reaches the same state in
+101.87 seconds and 103,572 KiB peak RSS.
 
 ### Next radical index reduction
 
