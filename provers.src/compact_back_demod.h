@@ -23,6 +23,8 @@ struct compact_back_demod_stats {
   unsigned long long occurrences_examined;
   unsigned long long path_filter_checks;
   unsigned long long path_filter_rejects;
+  unsigned long long materialized_file_snapshots;
+  unsigned long long materialized_snapshot_ids;
   unsigned long long posting_bytes;
   unsigned long long posting_stream_used;
   unsigned long long posting_stream_bytes;

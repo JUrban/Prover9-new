@@ -2,6 +2,7 @@
 #include "compact_id_map.h"
 
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -88,6 +89,8 @@ struct compact_back_demod_index {
   unsigned long long occurrences_examined;
   unsigned long long path_filter_checks;
   unsigned long long path_filter_rejects;
+  unsigned long long materialized_file_snapshots;
+  unsigned long long materialized_snapshot_ids;
   unsigned long long peak_bytes;
 };
 
@@ -1102,25 +1105,57 @@ void compact_back_demod_compact_materialized(
   Compact_back_demod_materialized_batch_adviser advise,
   void *context)
 {
+  enum { MATERIALIZED_ID_BATCH = 4096 };
   Compact_back_demod_index replacement;
   struct compact_back_demod_index old;
-  unsigned long long *ids;
+  unsigned long long id_batch[MATERIALIZED_ID_BATCH];
+  unsigned long long *ids = NULL;
   unsigned long long old_bytes, old_peak, old_peak_active;
   unsigned long long retired, compactions, reclaimed;
   unsigned long long queries, candidates, exact_tests;
   unsigned long long groups_examined, occurrences_examined;
   unsigned long long path_checks, path_rejects;
-  size_t i, batch_start = 0, count = 0;
+  unsigned long long file_snapshots, snapshot_ids;
+  FILE *id_file = NULL;
+  size_t i, buffered = 0, count = 0, rebuilt = 0;
+  BOOL file_snapshot = FALSE;
   if (index == NULL || materialize == NULL ||
       !compact_back_demod_compaction_needed(index))
     return;
   if (index->active > SIZE_MAX / sizeof(*ids))
     fatal_error("compact_back_demod: materialized ID snapshot overflow");
-  ids = index->active == 0 ? NULL :
-    safe_malloc((size_t) index->active * sizeof(*ids));
-  for (i = 1; i < index->record_count; i++)
-    if (index->records[i].active)
-      ids[count++] = index->records[i].proof_id;
+  if (index->active != 0)
+    id_file = tmpfile();
+  if (id_file != NULL) {
+    for (i = 1; i < index->record_count; i++)
+      if (index->records[i].active) {
+        id_batch[buffered++] = index->records[i].proof_id;
+        count++;
+        if (buffered == MATERIALIZED_ID_BATCH) {
+          if (fwrite(id_batch, sizeof(*id_batch), buffered, id_file) !=
+              buffered)
+            break;
+          buffered = 0;
+        }
+      }
+    if (i == index->record_count &&
+        (buffered == 0 ||
+         fwrite(id_batch, sizeof(*id_batch), buffered, id_file) == buffered) &&
+        fflush(id_file) == 0 && fseek(id_file, 0, SEEK_SET) == 0)
+      file_snapshot = TRUE;
+    else {
+      fclose(id_file);
+      id_file = NULL;
+      count = 0;
+    }
+  }
+  if (!file_snapshot) {
+    ids = index->active == 0 ? NULL :
+      safe_malloc((size_t) index->active * sizeof(*ids));
+    for (i = 1; i < index->record_count; i++)
+      if (index->records[i].active)
+        ids[count++] = index->records[i].proof_id;
+  }
   if (count != index->active)
     fatal_error("compact_back_demod: active ID snapshot mismatch");
 
@@ -1137,6 +1172,8 @@ void compact_back_demod_compact_materialized(
   occurrences_examined = index->occurrences_examined;
   path_checks = index->path_filter_checks;
   path_rejects = index->path_filter_rejects;
+  file_snapshots = index->materialized_file_snapshots;
+  snapshot_ids = index->materialized_snapshot_ids;
 
   /* Stable IDs plus the shared clause/term archives are the complete rebuild
      recipe.  Drop all old posting, occurrence, record, and hash arrays before
@@ -1153,20 +1190,32 @@ void compact_back_demod_compact_materialized(
   safe_free(old.results);
   replacement = compact_back_demod_init_with_pool(old.term_pool);
   replacement->owns_term_pool = old.owns_term_pool;
-  for (i = 0; i < count; i++) {
-    Topform clause = materialize(ids[i], context);
-    if (clause == NULL)
-      fatal_error("compact_back_demod: cannot materialize rebuild clause");
-    if (!compact_back_demod_add(replacement, clause))
-      fatal_error("compact_back_demod: cannot rebuild materialized clause");
-    if (release != NULL)
-      release(clause, context);
-    if (advise != NULL &&
-        (i + 1 - batch_start == 4096 || i + 1 == count)) {
-      advise(ids + batch_start, i + 1 - batch_start, context);
-      batch_start = i + 1;
+  while (rebuilt < count) {
+    unsigned long long *batch;
+    size_t amount = count - rebuilt < MATERIALIZED_ID_BATCH ?
+      count - rebuilt : MATERIALIZED_ID_BATCH;
+    if (file_snapshot) {
+      if (fread(id_batch, sizeof(*id_batch), amount, id_file) != amount)
+        fatal_error("compact_back_demod: cannot read materialized ID batch");
+      batch = id_batch;
     }
+    else
+      batch = ids + rebuilt;
+    for (i = 0; i < amount; i++) {
+      Topform clause = materialize(batch[i], context);
+      if (clause == NULL)
+        fatal_error("compact_back_demod: cannot materialize rebuild clause");
+      if (!compact_back_demod_add(replacement, clause))
+        fatal_error("compact_back_demod: cannot rebuild materialized clause");
+      if (release != NULL)
+        release(clause, context);
+    }
+    if (advise != NULL)
+      advise(batch, amount, context);
+    rebuilt += amount;
   }
+  if (id_file != NULL)
+    fclose(id_file);
   safe_free(ids);
   *index = *replacement;
   safe_free(replacement);
@@ -1181,6 +1230,9 @@ void compact_back_demod_compact_materialized(
   index->occurrences_examined = occurrences_examined;
   index->path_filter_checks = path_checks;
   index->path_filter_rejects = path_rejects;
+  index->materialized_file_snapshots =
+    file_snapshots + (file_snapshot ? 1 : 0);
+  index->materialized_snapshot_ids = snapshot_ids + count;
   if (old_peak > index->peak_bytes)
     index->peak_bytes = old_peak;
   if (old_peak_active > index->peak)
@@ -1258,6 +1310,8 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->occurrences_examined = index->occurrences_examined;
   stats->path_filter_checks = index->path_filter_checks;
   stats->path_filter_rejects = index->path_filter_rejects;
+  stats->materialized_file_snapshots = index->materialized_file_snapshots;
+  stats->materialized_snapshot_ids = index->materialized_snapshot_ids;
   stats->posting_bytes =
     index->posting_block_capacity * sizeof(*index->posting_blocks) +
     index->occurrence_capacity * sizeof(*index->occurrences);
