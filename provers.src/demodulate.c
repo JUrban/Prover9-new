@@ -77,6 +77,13 @@ unsigned long long compact_back_demod_active_count(void)
   return stats.active;
 }
 
+unsigned long long compact_back_demod_physical_count(void)
+{
+  struct compact_back_demod_stats stats;
+  compact_back_demod_get_stats(Compact_back_demod_idx, &stats);
+  return stats.physical;
+}
+
 void compact_back_demod_compact_all_stale_records(void)
 {
   compact_back_demod_compact_all_stale(Compact_back_demod_idx);

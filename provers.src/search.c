@@ -6154,11 +6154,15 @@ static void maybe_compact_shared_term_pool(void)
   if (terms.sharing_profile_enabled)
     return;
   compact_rewrite_get_stats(Compact_rewrite_rules, &rewrite);
-  retained = compact_back_demod_active_count();
-  if (compact_unit_active_count() > retained)
-    retained = compact_unit_active_count();
-  if (rewrite.rules_current > retained)
-    retained = rewrite.rules_current;
+  /* Every physical record still owns a valid term slice even when it is
+     inactive.  The index-specific 25%-stale policies rebuild those records
+     independently; count the physical populations here so a pool reclaim is
+     delayed until it can drop clauses absent from every current index. */
+  retained = compact_back_demod_physical_count();
+  if (compact_unit_physical_count() > retained)
+    retained = compact_unit_physical_count();
+  if (rewrite.rules_physical > retained)
+    retained = rewrite.rules_physical;
   if (terms.clause_entries <= retained)
     return;
   stale = terms.clause_entries - retained;
@@ -6178,14 +6182,11 @@ static void maybe_compact_shared_term_pool(void)
   if (estimated_reclaimable_bytes <
       (unsigned long long) parm(Opt->compact_term_reclaim_kb) * 1024)
     return;
-  compact_rewrite_compact_all_stale(Compact_rewrite_rules);
-  compact_unit_compact_all_stale();
-  compact_back_demod_compact_all_stale_records();
   map = compact_term_rebase_map_init();
   /* Back-demod records cover nearly the whole retained clause population;
-     unit and rewrite records add any exceptional clauses.  Source-directory
-     slot marks deduplicate stable proof IDs before the live token intervals
-     are moved downward in the existing pool. */
+     unit and rewrite records add any exceptional clauses.  Preserve inactive
+     physical records too: their posting paths can still refer to the shared
+     token slice until the index's own bounded compaction removes them. */
   compact_back_demod_retain_term_clauses(map);
   compact_unit_retain_term_clauses(map);
   compact_rewrite_retain_live_clauses(Compact_rewrite_rules, map);

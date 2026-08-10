@@ -795,6 +795,25 @@ seconds with 101,952-KiB peak RSS.  Neither adds CPU cost, but this boundary
 does not distinguish their peaks; a 2,000-given comparison is the last
 bounded filter before choosing the full-proof policy.
 
+That 2,000-given filter selects 512 KiB: both policies finish at the exact
+`Generated=4,497,690`, `Kept=144,512` state, but 512 KiB takes 320.93 user
+seconds and peaks at 136,476 KiB versus 329.59 seconds and 138,628 KiB for one
+MiB.  Its final PSS is only 122,393 KiB.  Inspection shows why the external
+peak remains higher: every pool reclaim first forced replacement rebuilds of
+all three compact indexes even though each index already has its own bounded
+25%-stale policy.
+
+Pool reclamation now counts physical—not merely active—index records and
+preserves all of their shared token intervals.  Rewrite, unit, and back-demod
+indexes compact independently at their existing deterministic thresholds;
+the pool no longer rebuilds all three merely to discard unrelated token
+clauses.  A 32-KiB 300-given CHAT replay remains byte-identical to the
+132,567-event oracle, the compact archive audit passes, and the one pool
+compaction reports zero reclaimed capacity because this small prefix stays
+within the same token/directory size classes.  The next 2,000-given run must
+measure whether removing the forced replacement overlap closes the transient
+gap while retaining the selected 512-KiB policy.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:

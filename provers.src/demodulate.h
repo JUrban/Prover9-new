@@ -39,6 +39,8 @@ void configure_compact_back_demod_term_pool(Compact_term_pool pool);
 
 unsigned long long compact_back_demod_active_count(void);
 
+unsigned long long compact_back_demod_physical_count(void);
+
 void compact_back_demod_compact_all_stale_records(void);
 
 void compact_back_demod_copy_term_clauses(Compact_term_pool destination,

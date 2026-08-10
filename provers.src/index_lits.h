@@ -45,6 +45,8 @@ void release_compact_index_clause(Topform clause);
 
 unsigned long long compact_unit_active_count(void);
 
+unsigned long long compact_unit_physical_count(void);
+
 void compact_unit_compact_all_stale(void);
 
 void compact_unit_copy_term_clauses(Compact_term_pool destination,

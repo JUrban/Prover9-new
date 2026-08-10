@@ -96,6 +96,13 @@ unsigned long long compact_unit_active_count(void)
   return stats.active;
 }
 
+unsigned long long compact_unit_physical_count(void)
+{
+  struct compact_unit_index_stats stats;
+  compact_unit_index_get_stats(Compact_units, &stats);
+  return stats.physical;
+}
+
 void compact_unit_compact_all_stale(void)
 {
   compact_unit_index_compact_all_stale(Compact_units);
