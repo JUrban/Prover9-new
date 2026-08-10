@@ -871,6 +871,24 @@ oracle, although user time rises from roughly 18 to 21.6 seconds; the
 2,000-given CPU/RSS gate must decide whether the eliminated old/new overlap
 justifies that archive-decode cost.
 
+The mmap-only follow-up separates reconstruction pages from replacement-index
+memory.  Materialized back-index rebuilds now report each completed 4,096-ID
+batch to the search layer, which releases the corresponding immutable
+ancestor-record span with `MADV_DONTNEED`; newly covered dirty bytes are
+synchronized once before release.  Normal and forced-32-KiB 300-given CHAT
+runs both retain the exact 132,567-event oracle and perform two scan
+evictions covering 1,118,208 bytes.  At 2,000 givens the mechanism performs
+72 scan evictions covering 142,389,248 cumulative bytes, but it does **not**
+improve the process peak: the run reaches the exact terminal state in 327.59
+user seconds and peaks at 142,172 KiB, compared with 389.87 seconds and
+137,552 KiB for the preceding mmap measurement.  The late 28-MiB rise and
+drop survives incremental page release, and final anonymous residency varies
+by about 9 MiB while logical allocator/index accounting is identical.  This
+rejects mmap scan eviction as the final gate fix.  It remains a bounded,
+accounted safeguard for mmap deployments, but the authoritative proof gate
+uses `ancestor_store=file` and `compact_passive_cache=0`; that configuration
+must be remeasured after the predecessor-array lifetime changes.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:
