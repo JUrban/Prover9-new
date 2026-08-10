@@ -339,6 +339,22 @@ root heads, the five compact structures now total 13,128,816 bytes,
 **70.53% below** the original 44,545,464-byte baseline.  The focused rewrite
 and unit tests pass, and the 300-given full CHAT trace remains byte-identical.
 
+The combined fixes were then replayed to 1,500 givens with the full Osborn
+hint set from `bob/chat_test.in`.  The full-body and zero-cache dense-archive
+cases ran in parallel on separate physical CPUs.  Both stop normally at
+`max_given` with the same compact terminal state: `Generated=2,947,136`,
+`Kept=66,933`, `Sos=42,583`, `Demods=36,145`, and `Disabled=23,089`.  The
+full-body case takes 254.36 user seconds and 143,480 KiB peak RSS; the dense
+archive takes 256.53 seconds and 117,940 KiB.  Thus archiving adds only 0.9%
+CPU at this boundary while saving another 25,540 KiB.  Relative to the
+pre-filter full-body compact run, user CPU falls from 370.47 to 254.36
+seconds (31.3%).  The ordinary packed-fast OTTER baseline is still much
+faster at 154.79 seconds, however: the optimized archive is 1.66 times that
+CPU.  Compact `back_demod` remains 63.66 seconds versus 4.91 seconds in the
+ordinary index, and compact `demod` is 79.36 versus 43.99 seconds.  Those two
+measured paths, rather than archive materialization or unit conflict lookup,
+are the remaining throughput targets.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:

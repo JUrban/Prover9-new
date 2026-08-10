@@ -99,6 +99,16 @@ for every generated clause, `set(search_event_trace)` emits only compact
 by default and does not affect selection.  At 100 givens the ordinary and
 full-body compact-index CHAT cases produce 1,336 byte-identical event lines.
 
+The same `chat_test.in` workload is also the performance/debug boundary for
+the compact indexes.  Running `new_otter_compact_full` and the zero-cache
+dense archive in parallel to 1,500 givens after the path-filter, unit-root,
+and tight-arena fixes gives 254.36 and 256.53 user seconds, respectively.
+Both have the same terminal search state; their peak RSS values are 143,480
+and 117,940 KiB.  The parallel execution is used only to reduce experiment
+turnaround: each process is pinned to a different physical CPU, and all
+reported CPU times and states are per process.  This replay confirms that
+dense clause materialization is not the remaining speed problem.
+
 ## Exact old and compatibility proof baseline
 
 | Mode | Result | Given | Generated | Kept | User CPU | Wall | Peak RSS |
