@@ -26,7 +26,9 @@ int main(int argc, char **argv)
   size_t n = requested_count(argc, argv), i;
   Clause_store_archive_mode mode =
     argc > 2 && strcmp(argv[2], "mmap") == 0 ?
-      CLAUSE_STORE_ARCHIVE_MMAP : CLAUSE_STORE_ARCHIVE_MEMORY;
+      CLAUSE_STORE_ARCHIVE_MMAP :
+    argc > 2 && strcmp(argv[2], "file") == 0 ?
+      CLAUSE_STORE_ARCHIVE_FILE : CLAUSE_STORE_ARCHIVE_MEMORY;
   Clause_store store;
   struct clause_store_stats records;
   struct clause_id_table_stats ids, final_ids;
@@ -37,8 +39,8 @@ int main(int argc, char **argv)
   set_clause_id_count(0);
   store = clause_store_init("ancestor-scale");
   if (argc > 2 && strcmp(argv[2], "memory") != 0 &&
-      strcmp(argv[2], "mmap") != 0) {
-    fprintf(stderr, "usage: %s [record_count] [memory|mmap]\n", argv[0]);
+      strcmp(argv[2], "mmap") != 0 && strcmp(argv[2], "file") != 0) {
+    fprintf(stderr, "usage: %s [record_count] [memory|mmap|file]\n", argv[0]);
     return 2;
   }
   if (!clause_store_enable_archive(store, mode)) {
@@ -69,15 +71,22 @@ int main(int argc, char **argv)
          "resident_bytes=%llu total_logical_bytes=%llu legacy_estimate=%llu "
          "resident_per_record=%.3f total_per_record=%.3f "
          "legacy_per_record=%.3f mmap_evictions=%llu "
-         "mmap_eviction_bytes=%llu\n",
+         "mmap_eviction_bytes=%llu io_buffer=%llu "
+         "file_reads=%llu file_read_bytes=%llu "
+         "file_writes=%llu file_write_bytes=%llu\n",
          records.records, records.record_bytes, records.backing_bytes,
          records.handle_bytes, ids.allocated_bytes, resident, total, legacy,
          (double) resident / n, (double) total / n, (double) legacy / n,
-         records.mmap_eviction_passes, records.mmap_eviction_bytes);
+         records.mmap_eviction_passes, records.mmap_eviction_bytes,
+         records.io_buffer_bytes, records.file_reads, records.file_read_bytes,
+         records.file_writes, records.file_write_bytes);
   if (records.records != n || ids.entries != n || resident >= legacy ||
       total >= legacy ||
       (mode == CLAUSE_STORE_ARCHIVE_MMAP && records.record_bytes >=
-         16U * 1024U * 1024U && records.mmap_eviction_passes == 0)) {
+         16U * 1024U * 1024U && records.mmap_eviction_passes == 0) ||
+      (mode == CLAUSE_STORE_ARCHIVE_FILE &&
+       (records.io_buffer_bytes == 0 || records.file_writes != n ||
+        records.file_write_bytes != records.record_bytes))) {
     fprintf(stderr, "ancestor_store_scale_test: accounting check failed\n");
     return 1;
   }

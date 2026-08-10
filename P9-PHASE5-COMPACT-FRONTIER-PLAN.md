@@ -504,6 +504,23 @@ experiment must move the ancestor archive to bounded `pread`/`pwrite` I/O (or
 measure and eliminate coordinated-compaction transient peaks); mapped cold
 pages cannot be treated as nonresident merely because they were advised once.
 
+`ancestor_store=file` implements that experiment without changing the record
+format or archived-ID contract.  Appends use `pwrite`; materialization uses
+`pread` through one grow-on-demand record buffer; and the anonymous temporary
+file is never mapped into the process.  The current disabled-record count is
+also maintained incrementally, and teardown reads only fixed headers instead
+of complete obsolete records.  Memory, mmap, and file 200,000-record scale
+tests pass; file mode stores 22,200,000 logical record bytes with a 4,096-byte
+I/O buffer and the same roughly 3.8-MB resident handle/ID accounting.
+
+Parallel 300/1,000-given CHAT replays and the compact-vs-legacy audit pass, with
+byte-identical candidate, hint, kept, and given traces.  A controlled
+1,000-given file run takes 74.63 user seconds and peaks at 90,632 KiB, versus
+71.95 seconds and 92,068 KiB for mmap: +3.7% CPU while the archive is still
+only 7.97 MB.  It performs 40,819 record writes and 154,834 bounded reads with
+zero validation failures.  The full proof is required to measure the intended
+benefit once mmap would otherwise retain/refault an 84.4-MB logical archive.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:

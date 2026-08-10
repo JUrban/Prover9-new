@@ -2182,10 +2182,11 @@ Prover_options init_prover_options(void)
 					    "legacy",
 					    "balanced_hint");
 
-  p->ancestor_store = init_stringparm("ancestor_store", 3,
+  p->ancestor_store = init_stringparm("ancestor_store", 4,
 			      "off",
 			      "memory",
-			      "mmap");
+			      "mmap",
+			      "file");
 
   /* Keep the historical coupling by default.  `file` is a genuinely cold
      passive-body backend; it does not change the proof ancestor backend. */
@@ -2656,6 +2657,11 @@ void update_memory_stats(void)
   Stats.ancestor_validation_failures = as.validation_failures;
   Stats.ancestor_mmap_eviction_passes = as.mmap_eviction_passes;
   Stats.ancestor_mmap_eviction_bytes = as.mmap_eviction_bytes;
+  Stats.ancestor_io_buffer_bytes = as.io_buffer_bytes;
+  Stats.ancestor_file_reads = as.file_reads;
+  Stats.ancestor_file_read_bytes = as.file_read_bytes;
+  Stats.ancestor_file_writes = as.file_writes;
+  Stats.ancestor_file_write_bytes = as.file_write_bytes;
 
   Stats.disabled_store_bytes = clause_store_allocated_bytes(Glob.disabled);
   Stats.disabled_legacy_clist_bytes =
@@ -3262,7 +3268,9 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             "allocated_bytes_per_active=%.2f.\n",
             compact_otter_passive_mode() ?
               (str_ident(stringparm1(Opt->ancestor_store), "mmap") ?
-               "ancestor-mmap" : "ancestor-memory") :
+                 "ancestor-mmap" :
+               str_ident(stringparm1(Opt->ancestor_store), "file") ?
+                 "ancestor-file" : "ancestor-memory") :
               cold_passive_store_mode_name(
                 cold_passive_store_get_stats(Dense_body_store).mode),
             comma_num(s.dense_passive_records),
@@ -3311,13 +3319,20 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
   fprintf(fp,
           "Ancestor_store: records=%s, record_bytes=%s, backing_bytes=%s, "
           "handle_bytes=%s, materialized=%s, validation_failures=%s, "
-          "mmap_eviction_passes=%s, mmap_eviction_bytes=%s.\n",
+          "mmap_eviction_passes=%s, mmap_eviction_bytes=%s, "
+          "io_buffer=%s, file_reads=%s (%s bytes), "
+          "file_writes=%s (%s bytes).\n",
           comma_num(s.ancestor_records), comma_num(s.ancestor_record_bytes),
           comma_num(s.ancestor_backing_bytes), comma_num(s.ancestor_handle_bytes),
           comma_num(s.ancestor_materializations),
           comma_num(s.ancestor_validation_failures),
           comma_num(s.ancestor_mmap_eviction_passes),
-          comma_num(s.ancestor_mmap_eviction_bytes));
+          comma_num(s.ancestor_mmap_eviction_bytes),
+          comma_num(s.ancestor_io_buffer_bytes),
+          comma_num(s.ancestor_file_reads),
+          comma_num(s.ancestor_file_read_bytes),
+          comma_num(s.ancestor_file_writes),
+          comma_num(s.ancestor_file_write_bytes));
   if (compact_otter_passive_mode())
     fprintf(fp,
             "Compact_passive_cache: budget=%s, metadata_bytes=%s, "
@@ -5373,6 +5388,10 @@ Clause_store new_disabled_store(void)
     if (!clause_store_enable_archive(store, CLAUSE_STORE_ARCHIVE_MMAP))
       fatal_error("new_disabled_store: cannot initialize mmap backing");
   }
+  else if (str_ident(stringparm1(Opt->ancestor_store), "file")) {
+    if (!clause_store_enable_archive(store, CLAUSE_STORE_ARCHIVE_FILE))
+      fatal_error("new_disabled_store: cannot initialize file backing");
+  }
   return store;
 }  /* new_disabled_store */
 
@@ -5388,7 +5407,9 @@ static Cold_passive_store new_dense_body_store(void)
     mode = COLD_PASSIVE_MEMORY;
   else
     mode = str_ident(stringparm1(Opt->ancestor_store), "mmap") ?
-      COLD_PASSIVE_MMAP : COLD_PASSIVE_MEMORY;
+      COLD_PASSIVE_MMAP :
+      str_ident(stringparm1(Opt->ancestor_store), "file") ?
+        COLD_PASSIVE_FILE : COLD_PASSIVE_MEMORY;
   Cold_passive_store store = cold_passive_store_init(mode);
   if (store == NULL)
     fatal_error("new_dense_body_store: cannot initialize compact arena");
@@ -15472,7 +15493,7 @@ Prover_results search(Prover_input p)
       if (!compact_otter_passive_mode())
         fatal_error("OTTER passive_store=dense requires all four authoritative compact indexes");
       if (str_ident(stringparm1(Opt->ancestor_store), "off"))
-        fatal_error("compact OTTER passive_store=dense requires ancestor_store=memory or mmap");
+        fatal_error("compact OTTER passive_store=dense requires an ancestor store");
       if (parm(Opt->sos_limit) != -1)
         fatal_error("compact OTTER passive_store=dense requires sos_limit=-1");
       if (!flag(Opt->process_initial_sos))
@@ -15502,7 +15523,7 @@ Prover_results search(Prover_input p)
       if (!discount_mode())
 	fatal_error("inference_frontier=collective requires search_loop=discount");
       if (str_ident(stringparm1(Opt->ancestor_store), "off"))
-	fatal_error("inference_frontier=collective requires ancestor_store=memory or mmap");
+	fatal_error("inference_frontier=collective requires an ancestor store");
       if (flag(Opt->collective_promising_scheduler) &&
           !flag(Opt->collective_promising_candidates))
         fatal_error("collective_promising_scheduler requires collective_promising_candidates");
@@ -15631,7 +15652,7 @@ Prover_results search(Prover_input p)
     Dense_arena_bytes_reclaimed = 0;
     if (dense_passive_mode()) {
       if (str_ident(stringparm1(Opt->ancestor_store), "off"))
-        fatal_error("passive_store=dense requires ancestor_store=memory or mmap");
+        fatal_error("passive_store=dense requires an ancestor store");
       if (parm(Opt->sos_limit) != -1)
         fatal_error("passive_store=dense currently requires sos_limit=-1");
       if (compact_otter_passive_mode())

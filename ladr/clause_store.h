@@ -10,7 +10,11 @@ typedef struct clause_store * Clause_store;
 typedef enum {
   CLAUSE_STORE_ARCHIVE_OFF,
   CLAUSE_STORE_ARCHIVE_MEMORY,
-  CLAUSE_STORE_ARCHIVE_MMAP
+  CLAUSE_STORE_ARCHIVE_MMAP,
+  /* Anonymous temporary-file storage accessed through one bounded scratch
+     record.  The file remains in the kernel page cache, but never becomes a
+     process mapping and therefore is not charged wholesale to process RSS. */
+  CLAUSE_STORE_ARCHIVE_FILE
 } Clause_store_archive_mode;
 
 struct clause_store_stats {
@@ -24,6 +28,11 @@ struct clause_store_stats {
   unsigned long long validation_failures;
   unsigned long long mmap_eviction_passes;
   unsigned long long mmap_eviction_bytes;
+  unsigned long long io_buffer_bytes;
+  unsigned long long file_reads;
+  unsigned long long file_read_bytes;
+  unsigned long long file_writes;
+  unsigned long long file_write_bytes;
 };
 
 Clause_store clause_store_init(const char *name);

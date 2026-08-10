@@ -7,6 +7,7 @@
 #include "compress.h"
 #include "just.h"
 #include "memory.h"
+#include <errno.h>
 #include <limits.h>
 #include <stdint.h>
 #include <string.h>
@@ -42,6 +43,9 @@ struct clause_store {
   size_t backing_size;
   size_t backing_capacity;
   int fd;
+  unsigned char *io_buffer;
+  size_t io_capacity;
+  size_t current_records;
   unsigned long long materializations;
   unsigned long long validation_failures;
   unsigned long long archive_records;
@@ -51,6 +55,10 @@ struct clause_store {
   size_t mmap_last_evict_size;
   unsigned long long mmap_eviction_passes;
   unsigned long long mmap_eviction_bytes;
+  unsigned long long file_reads;
+  unsigned long long file_read_bytes;
+  unsigned long long file_writes;
+  unsigned long long file_write_bytes;
 };
 
 /* The ID table stores only a tagged offset, so one archive-enabled store is
@@ -130,6 +138,60 @@ static uint32_t crc32_bytes(const unsigned char *data, size_t size)
   return ~crc;
 }
 
+#ifndef __EMSCRIPTEN__
+static BOOL file_read_exact(Clause_store store, void *buffer,
+                            size_t size, size_t position)
+{
+  size_t done = 0;
+  while (done < size) {
+    ssize_t n = pread(store->fd, (unsigned char *) buffer + done,
+                      size - done, (off_t) (position + done));
+    if (n < 0 && errno == EINTR)
+      continue;
+    if (n <= 0)
+      return FALSE;
+    done += (size_t) n;
+  }
+  store->file_reads++;
+  store->file_read_bytes += size;
+  return TRUE;
+}
+
+static BOOL file_write_exact(Clause_store store, const void *buffer,
+                             size_t size, size_t position)
+{
+  size_t done = 0;
+  while (done < size) {
+    ssize_t n = pwrite(store->fd, (const unsigned char *) buffer + done,
+                       size - done, (off_t) (position + done));
+    if (n < 0 && errno == EINTR)
+      continue;
+    if (n <= 0)
+      return FALSE;
+    done += (size_t) n;
+  }
+  store->file_writes++;
+  store->file_write_bytes += size;
+  return TRUE;
+}
+#endif
+
+static BOOL ensure_io_buffer(Clause_store store, size_t needed)
+{
+  size_t capacity = store->io_capacity == 0 ? 4096 : store->io_capacity;
+  if (needed <= store->io_capacity)
+    return TRUE;
+  while (capacity < needed) {
+    size_t grown = capacity + capacity / 2;
+    if (grown <= capacity)
+      return FALSE;
+    capacity = grown;
+  }
+  store->io_buffer = safe_realloc(store->io_buffer, capacity);
+  store->io_capacity = capacity;
+  return TRUE;
+}
+
 static BOOL ensure_backing(Clause_store store, size_t needed)
 {
   size_t capacity;
@@ -147,6 +209,12 @@ static BOOL ensure_backing(Clause_store store, size_t needed)
     return TRUE;
   }
 #ifndef __EMSCRIPTEN__
+  if (store->mode == CLAUSE_STORE_ARCHIVE_FILE) {
+    /* pwrite extends the file at commit time.  Track only its logical
+       capacity; no process-resident arena is reserved here. */
+    store->backing_capacity = needed;
+    return TRUE;
+  }
   if (store->mode == CLAUSE_STORE_ARCHIVE_MMAP) {
     void *mapping;
     if (ftruncate(store->fd, (off_t) capacity) != 0)
@@ -286,7 +354,15 @@ static BOOL append_record(Clause_store store, Topform c,
   offset = store->backing_size;
   if (!ensure_backing(store, store->backing_size + (size_t) total_size))
     goto done;
-  record = store->backing + store->backing_size;
+#ifndef __EMSCRIPTEN__
+  if (store->mode == CLAUSE_STORE_ARCHIVE_FILE) {
+    if (!ensure_io_buffer(store, (size_t) total_size))
+      goto done;
+    record = store->io_buffer;
+  }
+  else
+#endif
+    record = store->backing + store->backing_size;
   memset(record, 0, ANCESTOR_HEADER_SIZE);
   memcpy(record, ANCESTOR_MAGIC, 4);
   put16(record + 4, ANCESTOR_VERSION);
@@ -337,6 +413,12 @@ static BOOL append_record(Clause_store store, Topform c,
         crc32_bytes(record + ANCESTOR_HEADER_SIZE, (size_t) payload_size) ^
         c->simplifier_epoch);
   put32(record + 88, crc32_bytes(record, 88));
+#ifndef __EMSCRIPTEN__
+  if (store->mode == CLAUSE_STORE_ARCHIVE_FILE &&
+      !file_write_exact(store, record, (size_t) total_size,
+                        store->backing_size))
+    goto done;
+#endif
   store->backing_size += (size_t) total_size;
   store->archive_records++;
   store->archive_body_bytes += c->compressed_size;
@@ -379,16 +461,84 @@ struct record_view {
   uint32_t simplifier_epoch;
 };
 
+/* Teardown needs only the stable ID.  Do not read and checksum an entire
+   file-backed record merely to decide whether its ID-table entry is still
+   current; long searches retain many superseded archive versions. */
+static BOOL record_identity(Clause_store store, unsigned long long offset,
+                            unsigned long long *id)
+{
+  const unsigned char *r;
+  unsigned char header[ANCESTOR_HEADER_SIZE];
+  uint64_t total;
+  unsigned version;
+  if (store == NULL || id == NULL || offset > store->backing_size ||
+      store->backing_size - (size_t) offset < ANCESTOR_HEADER_SIZE)
+    goto bad;
+#ifndef __EMSCRIPTEN__
+  if (store->mode == CLAUSE_STORE_ARCHIVE_FILE) {
+    if (!file_read_exact(store, header, sizeof(header), (size_t) offset))
+      goto bad;
+    r = header;
+  }
+  else
+#endif
+    r = store->backing + (size_t) offset;
+  version = get16(r + 4);
+  total = get64(r + 8);
+  if (memcmp(r, ANCESTOR_MAGIC, 4) != 0 ||
+      (version != 1 && version != ANCESTOR_VERSION) ||
+      get16(r + 6) != ANCESTOR_HEADER_SIZE ||
+      get32(r + 88) != crc32_bytes(r, 88) ||
+      (version == 1 && get32(r + 92) != 0) ||
+      total < ANCESTOR_HEADER_SIZE ||
+      total > store->backing_size - (size_t) offset || get64(r + 16) == 0)
+    goto bad;
+  *id = get64(r + 16);
+  return TRUE;
+bad:
+  if (store != NULL)
+    store->validation_failures++;
+  return FALSE;
+}
+
 static BOOL record_view(Clause_store store, unsigned long long offset,
                         struct record_view *v)
 {
   const unsigned char *r;
+  unsigned char header[ANCESTOR_HEADER_SIZE];
   uint64_t payload, sum;
   unsigned version;
   if (store == NULL || v == NULL || offset > store->backing_size ||
       store->backing_size - (size_t) offset < ANCESTOR_HEADER_SIZE)
     goto bad;
-  r = store->backing + (size_t) offset;
+#ifndef __EMSCRIPTEN__
+  if (store->mode == CLAUSE_STORE_ARCHIVE_FILE) {
+    uint64_t total;
+    if (!file_read_exact(store, header, sizeof(header), (size_t) offset))
+      goto bad;
+    version = get16(header + 4);
+    if (memcmp(header, ANCESTOR_MAGIC, 4) != 0 ||
+        (version != 1 && version != ANCESTOR_VERSION) ||
+        get16(header + 6) != ANCESTOR_HEADER_SIZE ||
+        get32(header + 88) != crc32_bytes(header, 88) ||
+        (version == 1 && get32(header + 92) != 0))
+      goto bad;
+    total = get64(header + 8);
+    if (total < ANCESTOR_HEADER_SIZE || total > SIZE_MAX ||
+        total > store->backing_size - (size_t) offset ||
+        !ensure_io_buffer(store, (size_t) total))
+      goto bad;
+    memcpy(store->io_buffer, header, sizeof(header));
+    if (total > sizeof(header) &&
+        !file_read_exact(store, store->io_buffer + sizeof(header),
+                         (size_t) total - sizeof(header),
+                         (size_t) offset + sizeof(header)))
+      goto bad;
+    r = store->io_buffer;
+  }
+  else
+#endif
+    r = store->backing + (size_t) offset;
   version = get16(r + 4);
   if (memcmp(r, ANCESTOR_MAGIC, 4) != 0 ||
       (version != 1 && version != ANCESTOR_VERSION) ||
@@ -462,7 +612,8 @@ BOOL clause_store_enable_archive(Clause_store store,
     return TRUE;
   }
 #ifndef __EMSCRIPTEN__
-  if (mode == CLAUSE_STORE_ARCHIVE_MMAP) {
+  if (mode == CLAUSE_STORE_ARCHIVE_MMAP ||
+      mode == CLAUSE_STORE_ARCHIVE_FILE) {
     char path[] = "/tmp/prover9-ancestors-XXXXXX";
     store->fd = mkstemp(path);
     if (store->fd < 0) {
@@ -489,12 +640,17 @@ static void release_backing(Clause_store store)
     if (store->fd >= 0)
       close(store->fd);
   }
+  else if (store->mode == CLAUSE_STORE_ARCHIVE_FILE && store->fd >= 0)
+    close(store->fd);
 #endif
+  safe_free(store->io_buffer);
   store->backing = NULL;
   store->backing_size = 0;
   store->backing_capacity = 0;
   store->mmap_synced_bytes = 0;
   store->mmap_last_evict_size = 0;
+  store->io_buffer = NULL;
+  store->io_capacity = 0;
   store->fd = -1;
   if (Active_archive_store == store)
     Active_archive_store = NULL;
@@ -509,13 +665,13 @@ void clause_store_free(Clause_store store)
   for (i = 0; i < store->length; i++) {
     uintptr_t ref = store->refs[i];
     if (ref_is_archive(ref)) {
-      struct record_view v;
+      unsigned long long id;
       unsigned long long current;
-      if (!record_view(store, ref_offset(ref), &v))
+      if (!record_identity(store, ref_offset(ref), &id))
         fatal_error("clause_store_free: corrupt ancestor record");
-      if (clause_id_archive_offset(v.id, &current) &&
+      if (clause_id_archive_offset(id, &current) &&
           current == ref_offset(ref))
-        unassign_archived_clause_id(v.id, ref_offset(ref));
+        unassign_archived_clause_id(id, ref_offset(ref));
     }
     else
       ((Topform) ref)->disabled = 0;
@@ -534,13 +690,13 @@ void clause_store_delete_clauses(Clause_store store)
   for (i = 0; i < store->length; i++) {
     uintptr_t ref = store->refs[i];
     if (ref_is_archive(ref)) {
-      struct record_view v;
+      unsigned long long id;
       unsigned long long current;
-      if (!record_view(store, ref_offset(ref), &v))
+      if (!record_identity(store, ref_offset(ref), &id))
         fatal_error("clause_store_delete_clauses: corrupt ancestor record");
-      if (clause_id_archive_offset(v.id, &current) &&
+      if (clause_id_archive_offset(id, &current) &&
           current == ref_offset(ref))
-        unassign_archived_clause_id(v.id, ref_offset(ref));
+        unassign_archived_clause_id(id, ref_offset(ref));
     }
     else {
       Topform c = (Topform) ref;
@@ -550,6 +706,7 @@ void clause_store_delete_clauses(Clause_store store)
     }
   }
   store->length = 0;
+  store->current_records = 0;
   safe_free(store->refs);
   store->refs = NULL;
   store->capacity = 0;
@@ -574,6 +731,7 @@ void clause_store_append(Clause_store store, Topform c)
     store->capacity = new_capacity;
   }
   store->refs[store->length++] = (uintptr_t) c;
+  store->current_records++;
   c->disabled = 1;
 }
 
@@ -657,13 +815,7 @@ size_t clause_store_length(Clause_store store)
 /* PUBLIC */
 size_t clause_store_current_length(Clause_store store)
 {
-  size_t i, count = 0;
-  if (store == NULL)
-    return 0;
-  for (i = 0; i < store->length; i++)
-    if (clause_store_position_is_current(store, i))
-      count++;
-  return count;
+  return store == NULL ? 0 : store->current_records;
 }
 
 /* PUBLIC */
@@ -889,6 +1041,9 @@ Topform clause_store_activate(Clause_store store, size_t position)
     clause_store_release_materialized(c);
     return NULL;
   }
+  if (store->current_records == 0)
+    fatal_error("clause_store_activate: current-record underflow");
+  store->current_records--;
   c->archive_materialized = 0;
   c->disabled = 0;
   return c;
@@ -1060,6 +1215,8 @@ BOOL clause_store_sync(Clause_store store)
 #ifndef __EMSCRIPTEN__
   if (store->mode == CLAUSE_STORE_ARCHIVE_MMAP && store->backing != NULL)
     return msync(store->backing, store->backing_size, MS_SYNC) == 0;
+  if (store->mode == CLAUSE_STORE_ARCHIVE_FILE)
+    return fsync(store->fd) == 0;
 #endif
   return TRUE;
 }
@@ -1075,11 +1232,17 @@ struct clause_store_stats clause_store_get_stats(Clause_store store)
     stats.logical_body_bytes = store->archive_logical_body_bytes;
     stats.record_bytes = store->backing_size;
     stats.backing_bytes = store->backing_capacity;
-    stats.handle_bytes = sizeof(*store) + store->capacity * sizeof(uintptr_t);
+    stats.handle_bytes = sizeof(*store) + store->capacity * sizeof(uintptr_t) +
+      store->io_capacity;
     stats.materializations = store->materializations;
     stats.validation_failures = store->validation_failures;
     stats.mmap_eviction_passes = store->mmap_eviction_passes;
     stats.mmap_eviction_bytes = store->mmap_eviction_bytes;
+    stats.io_buffer_bytes = store->io_capacity;
+    stats.file_reads = store->file_reads;
+    stats.file_read_bytes = store->file_read_bytes;
+    stats.file_writes = store->file_writes;
+    stats.file_write_bytes = store->file_write_bytes;
   }
   return stats;
 }
@@ -1087,10 +1250,13 @@ struct clause_store_stats clause_store_get_stats(Clause_store store)
 /* PUBLIC */
 unsigned long long clause_store_allocated_bytes(Clause_store store)
 {
-  return store == NULL ? 0 :
-    (unsigned long long) sizeof(struct clause_store) +
-    (unsigned long long) store->capacity * sizeof(uintptr_t) +
-    (unsigned long long) store->backing_capacity;
+  unsigned long long backing;
+  if (store == NULL)
+    return 0;
+  backing = store->mode == CLAUSE_STORE_ARCHIVE_FILE ?
+    store->io_capacity : store->backing_capacity;
+  return (unsigned long long) sizeof(struct clause_store) +
+    (unsigned long long) store->capacity * sizeof(uintptr_t) + backing;
 }
 
 /* PUBLIC */
@@ -1106,8 +1272,17 @@ BOOL clause_store_test_corrupt(Clause_store store,
                                unsigned long long absolute_offset,
                                unsigned char mask)
 {
+  unsigned char byte;
   if (store == NULL || absolute_offset >= store->backing_size || mask == 0)
     return FALSE;
+#ifndef __EMSCRIPTEN__
+  if (store->mode == CLAUSE_STORE_ARCHIVE_FILE) {
+    if (!file_read_exact(store, &byte, 1, (size_t) absolute_offset))
+      return FALSE;
+    byte ^= mask;
+    return file_write_exact(store, &byte, 1, (size_t) absolute_offset);
+  }
+#endif
   store->backing[(size_t) absolute_offset] ^= mask;
   return TRUE;
 }

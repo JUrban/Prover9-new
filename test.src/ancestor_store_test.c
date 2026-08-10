@@ -301,12 +301,19 @@ static void archive_round_trip(Clause_store_archive_mode mode)
   CHECK(ma != NULL, "valid record remains readable after rejected corruption");
   clause_store_release_materialized(ma);
 
-  CHECK(clause_store_sync(store), "memory or mmap backing synchronizes");
+  CHECK(clause_store_sync(store), "memory, mmap, or file backing synchronizes");
   stats = clause_store_get_stats(store);
   CHECK(stats.records == 2 && stats.record_bytes > 0 &&
-        stats.handle_bytes < 512 && stats.materializations >= 5 &&
+        stats.handle_bytes <
+          (mode == CLAUSE_STORE_ARCHIVE_FILE ? 8192 : 512) &&
+        stats.materializations >= 5 &&
         stats.validation_failures >= 4,
         "record, handle, materialization, and validation counters are exact");
+  if (mode == CLAUSE_STORE_ARCHIVE_FILE)
+    CHECK(stats.io_buffer_bytes > 0 && stats.file_reads > 0 &&
+          stats.file_read_bytes > 0 && stats.file_writes > 0 &&
+          stats.file_write_bytes >= stats.record_bytes,
+          "file archive reports bounded-buffer I/O counters");
 
   zap_topform(expected_a);
   zap_just(expected_b->justification);
@@ -320,7 +327,7 @@ static void archive_round_trip(Clause_store_archive_mode mode)
 static void archive_preserve_body_test(Clause_store_archive_mode mode)
 {
   Clause_store store = clause_store_init("ancestor-preserve-test");
-  Topform original, expected, materialized;
+  Topform original, expected, materialized, activated;
   Literals original_body;
   unsigned long long id;
   int attr = attribute_name_to_id("ancestor_payload");
@@ -371,6 +378,13 @@ static void archive_preserve_body_test(Clause_store_archive_mode mode)
         "preserve-body archive retains proof and attribute metadata");
 
   clause_store_release_materialized(materialized);
+  CHECK(clause_store_current_length(store) == 1,
+        "archived public record is counted as current");
+  activated = clause_store_activate(store, 0);
+  CHECK(activated != NULL && activated->id == id &&
+        clause_store_current_length(store) == 0,
+        "activation decrements the incremental current-record count");
+  delete_clause(activated);
   delete_clause(original);
   zap_just(expected->justification);
   expected->justification = NULL;
@@ -394,10 +408,12 @@ int main(void)
 #ifndef __EMSCRIPTEN__
   archive_round_trip(CLAUSE_STORE_ARCHIVE_MMAP);
   archive_preserve_body_test(CLAUSE_STORE_ARCHIVE_MMAP);
+  archive_round_trip(CLAUSE_STORE_ARCHIVE_FILE);
+  archive_preserve_body_test(CLAUSE_STORE_ARCHIVE_FILE);
 #endif
   ids = clause_id_table_get_stats();
   CHECK(ids.entries == 0 && ids.pages == 0,
-        "all memory and mmap ID pages return to baseline");
+        "all memory, mmap, and file ID pages return to baseline");
   set_clause_id_count(0);
   if (Failures != 0) {
     fprintf(stderr, "ancestor_store_test: %d failure(s)\n", Failures);

@@ -288,7 +288,7 @@ struct prover_options {
     hint_index,          // fpa, compact, shallow, packed/hybrid, packed_legacy
     inference_frontier,  // clauses, collective
     collective_scheduler, // legacy, balanced_hint
-    ancestor_store,      // off, memory, mmap
+    ancestor_store,      // off, memory, mmap, file
     passive_backing;     // auto, memory, mmap, file
 };
 
@@ -569,6 +569,11 @@ struct prover_stats {
     ancestor_validation_failures,
     ancestor_mmap_eviction_passes,
     ancestor_mmap_eviction_bytes,
+    ancestor_io_buffer_bytes,
+    ancestor_file_reads,
+    ancestor_file_read_bytes,
+    ancestor_file_writes,
+    ancestor_file_write_bytes,
     disabled_store_bytes,
     disabled_legacy_clist_bytes,
     clause_id_entries,

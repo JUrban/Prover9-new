@@ -3,10 +3,10 @@
 Date: 2026-08-07 (Europe/Berlin)
 
 This document specifies the exact, internal store used by
-`assign(ancestor_store, memory).` and `assign(ancestor_store, mmap).`.  The
-default is `off`.  The feature changes representation and ownership only; it
-does not remove proof ancestors, relax inference, or create an incomplete
-search mode.
+`assign(ancestor_store, memory).`, `assign(ancestor_store, mmap).`, and
+`assign(ancestor_store, file).`.  The default is `off`.  The feature changes
+representation and ownership only; it does not remove proof ancestors, relax
+inference, or create an incomplete search mode.
 
 ## Ownership and references
 
@@ -109,28 +109,40 @@ cannot silently turn a prover crash into an accepted proof.
   `realloc`.
 - `mmap`: grow a private temporary file geometrically from 4 KiB with
   `ftruncate` and `MAP_SHARED`; sync it before checkpoint output.  The name is
-  unlinked immediately, and close/crash removes the backing.
+  unlinked immediately, and close/crash removes the backing.  Complete cold
+  pages are synchronized and advised `MADV_DONTNEED` in 8-MiB steps, but later
+  random reads can fault them resident again.
+- `file`: append complete records to the same kind of unlinked temporary file
+  with `pwrite`, and retrieve them with `pread` through one grow-on-demand
+  record buffer.  Logical file bytes and kernel page-cache bytes are not a
+  process mapping and are therefore excluded from process RSS.  The resident
+  store cost is the stable-offset vector plus that bounded buffer.  This is
+  the recommended radical-RAM mode for long compact-OTTER searches.
 
-The mmap mode bounds resident pressure through the operating system's page
-cache, but it is not itself a restart file.  Format-3 checkpoint writing
-materializes each archived clause, emits the unchanged textual clause, atom
-flags, and justification records in disabled-store order, and validates/syncs
-the backing first.  Resume reads old or new format-3 checkpoints through the
-existing loader, verifies all hashes, rebuilds active indexes, and archives
-cold clauses again according to the restored `ancestor_store` option.  Old
-checkpoints that do not name the option use the default `off` mode.
+Neither temporary-file mode is itself a restart file.  Format-3 checkpoint
+writing materializes each archived clause, emits the unchanged textual clause,
+atom flags, and justification records in disabled-store order, and
+validates/syncs the backing first.  Resume reads old or new format-3
+checkpoints through the existing loader, verifies all hashes, rebuilds active
+indexes, and archives cold clauses again according to the restored
+`ancestor_store` option.  Old checkpoints that do not name the option use the
+default `off` mode.
 
 ## Instrumentation and tests
 
 The normal statistics line reports record count and used bytes, backing
-capacity, disabled-handle allocation, materialization count, and validation
-failures.  Body statistics continue to report compressed and estimated full
-bytes so Phase 2 and Phase 4 are comparable.
+capacity, disabled-handle allocation, materialization count, validation
+failures, mmap eviction counters, bounded I/O-buffer bytes, and file read/write
+operations and bytes.  The count of current (nonsuperseded) disabled records is
+maintained incrementally, so periodic statistics do not scan the file.  Body
+statistics continue to report compressed and estimated full bytes so Phase 2
+and Phase 4 are comparable.
 
-`ancestor_store_test` exercises memory and mmap round trips, all scalar and
-term flags, attributes, compact parents and justifications (including IVY and
-INSTANCE), final-DAG reconstruction, synchronization, unknown versions,
+`ancestor_store_test` exercises memory, mmap, and file round trips, all scalar
+and term flags, attributes, compact parents and justifications (including IVY
+and INSTANCE), final-DAG reconstruction, synchronization, unknown versions,
 malformed bounds, payload corruption, counters, and complete ID/store teardown.
-`ancestor_store_scale_test` measures bounded record/handle/ID accounting.
+`ancestor_store_scale_test` measures bounded record/handle/ID accounting in all
+three modes.
 Integrated x2 proof checks, capped AIM runs, and format-3 checkpoint
 verification cover the search-level consumers.
