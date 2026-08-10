@@ -60,6 +60,7 @@ columns:
 | 1,000 | compact indexes, full bodies | 118.56 s | 133.05 s | 123,236 KiB | 45.73 MB |
 | 1,000 | archive, 4 MiB cache | 140.45 s | 156.25 s | 113,264 KiB | 19.17 MB |
 | 1,000 | archive, shared clause term pool | 142.07 s | 156.66 s | 94,652 KiB | 19.17 MB |
+| 1,000 | archive, delta back-posting stream | 126.12 s | 140.04 s | 93,524 KiB | 19.17 MB |
 
 All compared runs have identical given, generated, kept, usable, SOS,
 demodulator, disabled, hint, and active-hint counts.  At 1,000 givens both
@@ -96,6 +97,7 @@ unchanged:
 | back demod | 1,741,040 B | 1,282,296 B | 26.4% |
 | all four indexes | 7,652,792 B | 3,937,752 B | 48.5% |
 | all four plus shared clause term pool | 7,652,792 B | 3,020,360 B | 60.5% |
+| plus delta back-posting stream | 7,652,792 B | 2,760,368 B | 63.9% |
 
 The rewrite node pool itself falls from 655,360 to 196,608 bytes (70.0%).
 The optimized rewrite traversal uses one binding trail per query; allocating
@@ -150,6 +152,17 @@ per-symbol block stream can delta-varint the monotonically increasing record
 and occurrence positions while retaining insertion traversal.  This avoids
 coupling the first production reduction to the much broader DAG matcher
 rewrite.
+
+That stream is now implemented and accepted.  At 300 givens its logical
+75,654-byte posting stream occupies 131,072 bytes of blocks; complete
+back-demod storage falls from 758,016 to 497,952 bytes, and all 132,267 CHAT
+candidate/hint/kept/given trace lines remain byte-identical.  At 1,000 givens
+the 152,909 posting groups encode into 461,366 logical bytes and 524,288
+allocated block bytes.  Complete back-demod storage falls from 6,033,664 to
+3,414,304 bytes (-43.4%), making the four indexes plus shared pool
+17,628,848 bytes: **60.4% below** the pre-structural 44,545,464 bytes.  The
+exact gate takes 126.12 user seconds and 93,524 KiB peak RSS, improvements
+over the preceding shared-pool run's 142.07 seconds and 94,652 KiB.
 
 ### Next radical index reduction
 
