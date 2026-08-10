@@ -13,7 +13,8 @@ int main(void)
 {
   Compact_feature_index index;
   struct compact_feature_index_stats stats;
-  int a[] = {1, 2}, b[] = {1, 2}, c[] = {0, 3}, d[] = {2, 2};
+  int a[] = {1, 2}, b[] = {1, 2}, c[] = {0, 3}, d[] = {2, 2},
+      e[] = {1, 1};
   int forward[] = {1, 3}, back[] = {1, 2};
   unsigned long long *ids;
   size_t count;
@@ -24,11 +25,14 @@ int main(void)
   CHECK(compact_feature_index_add(index, 20, b), "add duplicate vector");
   CHECK(compact_feature_index_add(index, 30, c), "add lower vector");
   CHECK(compact_feature_index_add(index, 40, d), "add higher vector");
+  CHECK(compact_feature_index_add(index, 50, e),
+        "split a radix edge at the second feature");
   CHECK(!compact_feature_index_add(index, 20, b), "reject duplicate ID");
 
   ids = compact_feature_forward_candidates(index, forward, &count);
-  CHECK(count == 3, "forward componentwise filter returns three vectors");
-  CHECK(ids != NULL && ids[0] == 30 && ids[1] == 20 && ids[2] == 10,
+  CHECK(count == 4, "forward componentwise filter returns four vectors");
+  CHECK(ids != NULL && ids[0] == 30 && ids[1] == 50 &&
+        ids[2] == 20 && ids[3] == 10,
         "forward order is ascending trie traversal then newest leaf first");
   safe_free(ids);
 
@@ -41,16 +45,17 @@ int main(void)
   CHECK(compact_feature_index_remove(index, 20), "remove live ID");
   CHECK(!compact_feature_index_remove(index, 20), "reject double remove");
   ids = compact_feature_forward_candidates(index, forward, &count);
-  CHECK(count == 2 && ids[0] == 30 && ids[1] == 10,
+  CHECK(count == 3 && ids[0] == 30 && ids[1] == 50 && ids[2] == 10,
         "retired leaf postings are ignored");
   safe_free(ids);
 
   compact_feature_index_get_stats(index, &stats);
-  CHECK(stats.active == 3 && stats.retired == 1 && stats.physical == 4,
+  CHECK(stats.active == 4 && stats.retired == 1 && stats.physical == 5,
         "lifecycle counters are exact");
   CHECK(stats.forward_queries == 2 && stats.back_queries == 1,
         "query counters are exact");
-  CHECK(stats.total_bytes > 0 && stats.peak_bytes >= stats.total_bytes,
+  CHECK(stats.label_bytes > 0 && stats.total_bytes > 0 &&
+        stats.peak_bytes >= stats.total_bytes,
         "resident byte accounting is present");
   compact_feature_index_free(index);
 

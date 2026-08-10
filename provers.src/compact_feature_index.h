@@ -15,6 +15,7 @@ struct compact_feature_index_stats {
   unsigned long long back_queries;
   unsigned long long back_candidates;
   unsigned long long node_bytes;
+  unsigned long long label_bytes;
   unsigned long long posting_bytes;
   unsigned long long record_bytes;
   unsigned long long hash_bytes;

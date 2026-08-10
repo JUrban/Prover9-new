@@ -110,7 +110,7 @@ void fprint_compact_nonunit_index(FILE *fp)
           "peak=%llu, retired=%llu, physical=%llu, forward_queries=%llu, "
           "forward_candidates=%llu, forward_exact_tests=%llu, "
           "back_queries=%llu, back_candidates=%llu, back_exact_tests=%llu, "
-          "nodes=%llu, postings=%llu, records=%llu, hash=%llu, "
+          "nodes=%llu, labels=%llu, postings=%llu, records=%llu, hash=%llu, "
           "scratch=%llu, bytes=%llu, peak_bytes=%llu.\n",
           Compact_nonunit_authoritative ? "authoritative" : "audit",
           Compact_nonunit_audit_failures, stats.active, stats.peak,
@@ -118,7 +118,7 @@ void fprint_compact_nonunit_index(FILE *fp)
           stats.forward_candidates, Compact_nonunit_forward_exact_tests,
           stats.back_queries, stats.back_candidates,
           Compact_nonunit_back_exact_tests, stats.node_bytes,
-          stats.posting_bytes, stats.record_bytes, stats.hash_bytes,
+          stats.label_bytes, stats.posting_bytes, stats.record_bytes, stats.hash_bytes,
           stats.scratch_bytes, stats.total_bytes,
           stats.peak_bytes);
 }

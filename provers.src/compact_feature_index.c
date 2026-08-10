@@ -8,7 +8,8 @@
 #define CFI_TOMBSTONE UINT64_MAX
 
 struct cfi_node {
-  int32_t label;
+  uint32_t label_offset;
+  uint32_t label_length;
   uint32_t first_child;
   uint32_t next_sibling;
   uint32_t first_posting;
@@ -28,6 +29,9 @@ struct compact_feature_index {
   struct cfi_node *nodes;
   size_t node_count;
   size_t node_capacity;
+  int32_t *labels;
+  size_t label_count;
+  size_t label_capacity;
   struct cfi_posting *postings;
   size_t posting_count;
   size_t posting_capacity;
@@ -87,6 +91,7 @@ static unsigned long long index_bytes(Compact_feature_index index)
     return 0;
   return sizeof(*index) +
     index->node_capacity * sizeof(*index->nodes) +
+    index->label_capacity * sizeof(*index->labels) +
     index->posting_capacity * sizeof(*index->postings) +
     index->record_capacity * sizeof(*index->records) +
     index->hash_capacity *
@@ -164,7 +169,36 @@ static uint32_t lookup_record(Compact_feature_index index,
     index->hash_values[at] : CFI_NONE;
 }
 
-static uint32_t new_node(Compact_feature_index index, int32_t label)
+static void ensure_labels(Compact_feature_index index, size_t extra)
+{
+  size_t needed;
+  if (extra > SIZE_MAX - index->label_count)
+    fatal_error("compact_feature_index: label overflow");
+  needed = index->label_count + extra;
+  if (needed > UINT32_MAX)
+    fatal_error("compact_feature_index: label offsets exceed 32 bits");
+  while (needed > index->label_capacity) {
+    index->label_capacity = grow_capacity(
+      index->label_capacity, sizeof(*index->labels),
+      "compact_feature_index: label capacity overflow");
+    index->labels = safe_realloc(
+      index->labels, index->label_capacity * sizeof(*index->labels));
+  }
+}
+
+static uint32_t append_labels(Compact_feature_index index,
+                              const int *features, int start, int length)
+{
+  uint32_t offset = (uint32_t) index->label_count;
+  ensure_labels(index, (size_t) length);
+  memcpy(index->labels + index->label_count, features + start,
+         (size_t) length * sizeof(*index->labels));
+  index->label_count += (size_t) length;
+  return offset;
+}
+
+static uint32_t new_node(Compact_feature_index index,
+                         uint32_t label_offset, uint32_t label_length)
 {
   uint32_t node;
   ENSURE_ARRAY(index, nodes, node_count, node_capacity,
@@ -173,32 +207,90 @@ static uint32_t new_node(Compact_feature_index index, int32_t label)
     fatal_error("compact_feature_index: node offsets exceed 32 bits");
   node = (uint32_t) index->node_count++;
   memset(&index->nodes[node], 0, sizeof(index->nodes[node]));
-  index->nodes[node].label = label;
+  index->nodes[node].label_offset = label_offset;
+  index->nodes[node].label_length = label_length;
   return node;
 }
 
-static uint32_t child_for_label(Compact_feature_index index,
-                                uint32_t parent, int32_t label)
+static int32_t first_label(Compact_feature_index index, uint32_t node)
 {
-  uint32_t current = index->nodes[parent].first_child;
-  uint32_t previous = CFI_NONE;
-  while (current != CFI_NONE && index->nodes[current].label < label) {
-    previous = current;
-    current = index->nodes[current].next_sibling;
+  struct cfi_node *n = &index->nodes[node];
+  if (n->label_length == 0)
+    fatal_error("compact_feature_index: empty nonroot radix edge");
+  return index->labels[n->label_offset];
+}
+
+static uint32_t insert_vector(Compact_feature_index index,
+                              const int *features)
+{
+  uint32_t parent = index->root;
+  int level = 0;
+  while (level < index->feature_length) {
+    uint32_t current = index->nodes[parent].first_child;
+    uint32_t previous = CFI_NONE;
+    int32_t wanted = features[level];
+    while (current != CFI_NONE && first_label(index, current) < wanted) {
+      previous = current;
+      current = index->nodes[current].next_sibling;
+    }
+    if (current == CFI_NONE || first_label(index, current) != wanted) {
+      uint32_t offset = append_labels(
+        index, features, level, index->feature_length - level);
+      uint32_t added = new_node(
+        index, offset, (uint32_t) (index->feature_length - level));
+      if (previous == CFI_NONE) {
+        index->nodes[added].next_sibling =
+          index->nodes[parent].first_child;
+        index->nodes[parent].first_child = added;
+      }
+      else {
+        index->nodes[added].next_sibling =
+          index->nodes[previous].next_sibling;
+        index->nodes[previous].next_sibling = added;
+      }
+      return added;
+    }
+    else {
+      uint32_t offset = index->nodes[current].label_offset;
+      uint32_t length = index->nodes[current].label_length;
+      uint32_t common = 0;
+      while (common < length &&
+             index->labels[offset + common] == features[level + common])
+        common++;
+      if (common == length) {
+        level += (int) length;
+        parent = current;
+      }
+      else {
+        uint32_t old_next = index->nodes[current].next_sibling;
+        uint32_t split = new_node(index, offset, common);
+        uint32_t added_offset, added;
+        index->nodes[split].next_sibling = old_next;
+        if (previous == CFI_NONE)
+          index->nodes[parent].first_child = split;
+        else
+          index->nodes[previous].next_sibling = split;
+        index->nodes[current].label_offset += common;
+        index->nodes[current].label_length -= common;
+        index->nodes[current].next_sibling = CFI_NONE;
+        index->nodes[split].first_child = current;
+        level += (int) common;
+        added_offset = append_labels(
+          index, features, level, index->feature_length - level);
+        added = new_node(
+          index, added_offset,
+          (uint32_t) (index->feature_length - level));
+        if (first_label(index, added) < first_label(index, current)) {
+          index->nodes[added].next_sibling = current;
+          index->nodes[split].first_child = added;
+        }
+        else
+          index->nodes[current].next_sibling = added;
+        return added;
+      }
+    }
   }
-  if (current != CFI_NONE && index->nodes[current].label == label)
-    return current;
-  current = new_node(index, label);
-  if (previous == CFI_NONE) {
-    index->nodes[current].next_sibling = index->nodes[parent].first_child;
-    index->nodes[parent].first_child = current;
-  }
-  else {
-    index->nodes[current].next_sibling =
-      index->nodes[previous].next_sibling;
-    index->nodes[previous].next_sibling = current;
-  }
-  return current;
+  return parent;
 }
 
 Compact_feature_index compact_feature_index_init(int feature_length)
@@ -208,8 +300,8 @@ Compact_feature_index compact_feature_index_init(int feature_length)
     fatal_error("compact_feature_index_init: feature length must be positive");
   index = safe_calloc(1, sizeof(*index));
   index->feature_length = feature_length;
-  (void) new_node(index, 0);  /* reserved null node */
-  index->root = new_node(index, 0);
+  (void) new_node(index, 0, 0);  /* reserved null node */
+  index->root = new_node(index, 0, 0);
   ENSURE_ARRAY(index, postings, posting_count, posting_capacity,
                "compact_feature_index: posting overflow");
   memset(&index->postings[0], 0, sizeof(index->postings[0]));
@@ -229,7 +321,6 @@ BOOL compact_feature_index_add(Compact_feature_index index,
   uint32_t record_index, node, posting;
   struct cfi_record *record;
   size_t at_hash;
-  int i;
   if (index == NULL || proof_id == 0 || features == NULL ||
       lookup_record(index, proof_id) != CFI_NONE)
     return FALSE;
@@ -242,9 +333,7 @@ BOOL compact_feature_index_add(Compact_feature_index index,
   memset(record, 0, sizeof(*record));
   record->proof_id = proof_id;
   record->active = TRUE;
-  node = index->root;
-  for (i = 0; i < index->feature_length; i++)
-    node = child_for_label(index, node, features[i]);
+  node = insert_vector(index, features);
   ENSURE_ARRAY(index, postings, posting_count, posting_capacity,
                "compact_feature_index: posting overflow");
   if (index->posting_count > UINT32_MAX)
@@ -320,11 +409,22 @@ static void collect_candidates(Compact_feature_index index, uint32_t node,
   }
   child = index->nodes[node].first_child;
   if (!forward)
-    while (child != CFI_NONE && index->nodes[child].label < query[level])
+    while (child != CFI_NONE && first_label(index, child) < query[level])
       child = index->nodes[child].next_sibling;
   while (child != CFI_NONE &&
-         (!forward || index->nodes[child].label <= query[level])) {
-    collect_candidates(index, child, level + 1, query, forward, count);
+         (!forward || first_label(index, child) <= query[level])) {
+    struct cfi_node *edge = &index->nodes[child];
+    uint32_t i;
+    BOOL eligible = level + (int) edge->label_length <=
+                    index->feature_length;
+    for (i = 0; eligible && i < edge->label_length; i++) {
+      int32_t label = index->labels[edge->label_offset + i];
+      int32_t bound = query[level + (int) i];
+      eligible = forward ? label <= bound : label >= bound;
+    }
+    if (eligible)
+      collect_candidates(index, child, level + (int) edge->label_length,
+                         query, forward, count);
     child = index->nodes[child].next_sibling;
   }
 }
@@ -380,6 +480,7 @@ void compact_feature_index_get_stats(Compact_feature_index index,
   stats->back_queries = index->back_queries;
   stats->back_candidates = index->back_candidates;
   stats->node_bytes = index->node_capacity * sizeof(*index->nodes);
+  stats->label_bytes = index->label_capacity * sizeof(*index->labels);
   stats->posting_bytes = index->posting_capacity * sizeof(*index->postings);
   stats->record_bytes = index->record_capacity * sizeof(*index->records);
   stats->hash_bytes = index->hash_capacity *
@@ -394,6 +495,7 @@ void compact_feature_index_free(Compact_feature_index index)
   if (index == NULL)
     return;
   safe_free(index->nodes);
+  safe_free(index->labels);
   safe_free(index->postings);
   safe_free(index->records);
   safe_free(index->hash_keys);
