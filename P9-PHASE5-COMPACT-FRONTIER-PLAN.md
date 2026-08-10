@@ -64,6 +64,7 @@ columns:
 | 1,000 | archive, delta rewrite-occurrence stream | 125.53 s | 138.90 s | 92,164 KiB | 19.17 MB |
 | 1,000 | archive, 12.5% shared-token growth | 133.58 s | 147.56 s | 91,904 KiB | 19.17 MB |
 | 1,000 | archive, dense stable-ID hashes | 131.09 s | 145.37 s | 91,760 KiB | 19.17 MB |
+| 1,000 | archive, packed/tightly-grown records | 131.01 s | 145.64 s | 90,712 KiB | 19.17 MB |
 
 All compared runs have identical given, generated, kept, usable, SOS,
 demodulator, disabled, hint, and active-hint counts.  At 1,000 givens both
@@ -104,6 +105,7 @@ unchanged:
 | plus delta rewrite-occurrence stream | 7,652,792 B | 2,663,112 B | 65.2% |
 | plus 12.5% shared-token growth | 7,652,792 B | 2,655,900 B | 65.3% |
 | plus dense stable-ID hashes | 7,652,792 B | 2,606,748 B | 65.9% |
+| plus packed/tightly-grown records | 7,652,792 B | 2,399,132 B | 68.7% |
 
 The rewrite node pool itself falls from 655,360 to 196,608 bytes (70.0%).
 The optimized rewrite traversal uses one binding trail per query; allocating
@@ -196,6 +198,21 @@ full CHAT trace remains identical.  At 1,000 givens, rewrite, unit, and
 back-demodulation each stay at 32,768 slots, saving 393,216 bytes apiece.
 Combined structural storage is 14,364,112 bytes, **67.8% below** baseline;
 the exact gate takes 131.09 user seconds and 91,760 KiB peak RSS.
+
+Rewrite rule records now pack the rule kind and active bit into the guarded
+length word, reducing each record from 32 to 24 bytes without narrowing the
+64-bit proof ID or 32-bit term offsets.  Rewrite and back-demod record arenas
+also grow by 25% instead of doubling.  At 300 givens the five compact
+structures occupy 2,399,132 bytes, **68.7% below** the original four-index
+baseline, and all 132,267 candidate/hint/kept/given trace lines remain
+byte-identical.  At 1,000 givens the rewrite bank is 3,162,936 bytes and the
+back-demod bank is 2,279,608 bytes.  Together with the unit and nonunit
+indexes and shared term pool, the structural total is 13,239,168 bytes,
+**70.28% below** the 44,545,464-byte pre-structural baseline.  The exact
+search state remains `Given=1001`, `Generated=1,268,285`, `Kept=33,909`,
+`Usable=949`, `Sos=26,052`, `Demods=21,741`, and `Disabled=6,937`; the gate
+takes 131.01 user seconds and 90,712 KiB peak RSS.  This completes the
+radical index-reduction gate while retaining the old OTTER trajectory.
 
 ### Next radical index reduction
 
