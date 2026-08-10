@@ -927,6 +927,28 @@ comparison should return to the proven 2-MiB policy with this guard, then add
 an explicit predecessor-first coordinated index trigger only if the measured
 live/stale index budget—not a population proxy—still misses 128,000 KiB.
 
+The guarded 2-MiB full comparison proves the theorem at the exact boundary:
+`Given=2,945`, `Generated=8,248,032`, `Kept=272,787`, and `Sos=131,001`.
+Both the normalized 7,051-clause `prooftrans parents_only` output and the
+formula-only proof are byte-identical to the accepted reference.  It takes
+819.86 user, 103.66 system, and 924.24 wall seconds, so both CPU and wall
+gates pass.  The guard keeps shared-pool compaction bounded at four passes
+with 14,007,164 bytes reclaimed; there is no terminal retry storm.
+
+Memory still fails: external peak RSS is 172,024 KiB and the sampler sees
+172,060 KiB RSS / 169,879 KiB PSS.  The maximum occurs immediately before
+the late independent index compactions, not during old/new copying.  At
+given 2,183, before RSS crosses the gate, rewrite and unit physical
+tombstones are already about 20% of their active populations and back-demod
+tombstones about 15%, but the default 25% policy deliberately waits.  By
+given 2,935 the three compact structures occupy about 49.1 MB and RSS/PSS is
+about 166/164 MB; their predecessor-first rebuilds then reduce residency,
+but too late to erase the process high-water mark.  The next bounded
+experiment should therefore compare 10--15% index-stale thresholds through
+at least given 2,400.  If that preserves the CPU gate while holding the
+prefix below 128,000 KiB, use the existing deterministic control; otherwise
+replace the percentage with a hysteretic sum-of-index-bytes budget.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:
