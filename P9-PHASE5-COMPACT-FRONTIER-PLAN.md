@@ -984,6 +984,33 @@ initialization precedes the later saving.  This validates large independently
 returnable allocations as a low-CPU lever; it does not replace the required
 `P9_COMPACT_HEAP=1` full run.
 
+The corrected 25% product baseline is now exact.  With
+`P9_COMPACT_HEAP=1`, the file ancestor backend, zero passive cache, and the
+guarded 2-MiB pool policy, it proves Osborn at `Given=2,945`,
+`Generated=8,248,032`, and `Kept=272,787`.  Its normalized 7,051-clause proof
+has SHA-256 `9d7c9a12894c1c11ede6aeae08d1cec658ccee66a47fb9663859347a5413fd07`
+and is byte-identical to the accepted reference.  Time is 788.25 user, 103.67
+system, and 892.38 wall seconds, essentially old-OTTER speed.  Peak RSS is
+145,228 KiB and final PSS is 128,129 KiB.  The startup policy therefore saves
+26,796 KiB from the otherwise identical disabled-policy proof, but the
+external high-water mark still misses the formal gate by 17,228 KiB.
+
+The already-audited 10% index policy is materially better under the correct
+heap policy.  At 2,400 givens it reaches the identical
+`Generated=5,932,674`, `Kept=191,527` state in 469.03 user seconds and peaks
+at 115,792 KiB, versus 134,260 KiB when the heap policy was accidentally
+omitted.  This leaves 12,208 KiB of bounded headroom and selects 10% for the
+next proof; lowering the threshold further remains unjustified by the earlier
+15%/10% comparison.
+
+The product switch now also sets the experimentally selected 64-KiB mmap
+threshold explicitly.  With that implementation, a 300-given run reproduces
+the accepted 132,567-event trace byte for byte (SHA-256
+`bc38f369ef02271d9b8a00db0cd01a6ba8f890e9608e0abd947de68f763322aa`),
+and a 1,000-given run reaches the exact `Generated=1,268,285`, `Kept=33,909`
+state at 68,343 KiB final PSS.  The full 10% proof is the decisive remaining
+memory measurement for this combined policy.
+
 The implementation plan, in risk order, is now:
 
 1. Re-establish the product baseline with `P9_COMPACT_HEAP=1`, the file
