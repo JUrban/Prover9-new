@@ -601,6 +601,16 @@ checkpoint, collective scheduler, hint-postings, and compact audit tests all
 pass.  Full-proof RSS remains to be measured before counting the saving at
 the acceptance boundary.
 
+The full packed-cleanup proof reaches the exact 2,945-given state, and all
+7,051 normalized proof clauses are byte-identical to the accepted proof.
+It takes 796.01 user, 105.39 system, and 901.71 wall seconds.  Peak RSS is
+170,968 KiB, 7,736 KiB below the preceding 178,704-KiB result and 68.9% below
+old OTTER's 550,400 KiB, while user CPU is only 1.012 times the accepted
+786.23-second file-backed boundary.  The result still exceeds the 125-MiB
+gate by 42,968 KiB.  A two-second sample peaks at 166,512 KiB and therefore
+also confirms that the external maximum includes a shorter allocation or
+rebuild transient.  The packed cleanup is accepted, but Phase 5 remains open.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:

@@ -349,6 +349,16 @@ hint checkpoint, collective balanced/frontier, hint-postings, and compact
 OTTER audit suites pass.  Startup peak RSS remains about 90.4 MiB because the
 initial full hint parsing wave, not the persistent packed bank, sets it.
 
+The exact full Osborn proof confirms the late-boundary saving.  It reaches
+the accepted 2,945-given state, and all 7,051 normalized proof clauses are
+byte-identical.  Time is 796.01 user, 105.39 system, and 901.71 wall seconds;
+peak RSS is 170,968 KiB.  This is 7,736 KiB below the immediately preceding
+178,704-KiB proof and only 1.012 times the accepted 786.23-second user CPU.
+At the final report the persistent packed bank has 2,658,640 reference bytes
+and 14,156,800 table bytes, with no preview workspace.  The 125-MiB Phase-5
+gate remains open by 42,968 KiB, so this cleanup is an accepted component,
+not a completed radical-memory result.
+
 ### Guarded full-run result
 
 The 900-CPU-second/512-MiB guarded selected-DISCOUNT run did not prove the
