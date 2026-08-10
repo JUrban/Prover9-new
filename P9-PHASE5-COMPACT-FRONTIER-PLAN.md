@@ -457,6 +457,30 @@ All 126,530 CHAT oracle lines remain byte-identical, and focused plus
 compact-vs-legacy audit tests pass.  Shared pool tokens are deliberately not
 reclaimed by this commit; offset rebasing is the next isolated layer.
 
+Shared-pool compaction now coordinates that missing layer.  Before replacing
+the append-only pool it forces rewrite, unit, and back-demod records to their
+live subsets, copies every retained clause serialization exactly once, builds
+an old-to-new token-interval map, and rebases rule sides, radix labels, and
+record offsets before freeing the old pool.  The operation is proof-ID based;
+no archived clause is materialized and all index insertion order is preserved.
+`Compact_term_pool` statistics report cumulative compaction and reclaimed-byte
+counts.
+
+The first clause-ratio trigger was measured and rejected: it rebuilt all
+three indexes at 300 givens to reclaim only 45,392 pool bytes, raising the
+1,000-given user time from 71.61 to 88.02 seconds without reducing peak RSS.
+The accepted trigger still requires at least 25% apparently stale clauses,
+but additionally estimates their serialized token payload and requires a
+conservative 8-MiB recovery (directory and index savings are not counted).
+Consequently the exact 1,000-given CHAT replay performs no coordinated
+compaction and takes 71.95 user seconds, 13.18 system seconds, and 85.22 wall
+seconds at 92,068 KiB peak RSS.  This is +0.5% user CPU versus the 71.61-second
+accepted ancestor-eviction baseline.  Its candidate, hint, kept, and given
+trace is byte-identical, and the focused pool/rewrite/unit/back tests plus the
+compact-vs-legacy audit pass.  The full proof boundary is the intended
+measurement: only there does the previous 33.6-MB pool contain enough stale
+payload to justify a global rebuild.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:
@@ -476,13 +500,15 @@ The next implementation slice is structural, not another cache-size tweak:
    delta-pack matching subterm offsets.  The existing structural exact filter
    remains, while the 12-byte posting per raw symbol occurrence and the
    redundant per-argument root directory are gone.
-5. Share a packed stable-ID directory across the indexes and compact inactive
-   records at deterministic thresholds.  Rebuilds preserve result ordering
-   and are checked against the 10/100/300 event oracle.
-6. Reclaim immutable archive pages behind the bounded cache (or add a true
-   file-I/O clause-store backend).  The old 13 GB deleted mmap retaining
-   roughly 10 GB RSS demonstrates that logical archive bytes cannot be
-   assumed nonresident.
+5. **Partly completed:** compact inactive rewrite, unit, and back-demod records
+   at deterministic thresholds and coordinate their shared-token offset
+   rebasing.  Rebuilds preserve result ordering and pass the CHAT event oracle.
+   A single packed stable-ID directory shared by all indexes remains optional
+   future work.
+6. **Completed for mmap:** synchronize newly cold archive pages and advise the
+   kernel to discard cold prefixes while preserving an 8-MiB writable hot
+   tail.  A true `pread`/`pwrite` backend remains a fallback if full-proof RSS
+   shows that the kernel does not honor the advice adequately.
 
 The gate for this slice is at least a 70% reduction of combined rewrite,
 unit, nonunit, and redex-index bytes at 1,000 givens, with the exact 300 trace

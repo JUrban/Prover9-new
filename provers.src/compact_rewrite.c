@@ -711,14 +711,17 @@ BOOL compact_rewrite_compaction_needed(Compact_rewrite_bank bank)
   return stale >= threshold;
 }
 
-void compact_rewrite_compact(Compact_rewrite_bank bank)
+static void compact_rewrite_compact_internal(Compact_rewrite_bank bank,
+                                             BOOL force)
 {
   Compact_rewrite_bank replacement;
   struct compact_rewrite_bank old;
   unsigned long long old_bytes, old_peak, old_peak_rules;
   unsigned long long attempts, rewrites, retired, compactions, reclaimed;
   size_t i;
-  if (bank == NULL || !compact_rewrite_compaction_needed(bank))
+  if (bank == NULL ||
+      (!force && !compact_rewrite_compaction_needed(bank)) ||
+      (force && bank->rule_count - 1 == bank->active_rules))
     return;
   old_bytes = bank_bytes(bank);
   old_peak = bank->peak_bytes;
@@ -762,6 +765,16 @@ void compact_rewrite_compact(Compact_rewrite_bank bank)
     bank->peak_rules = old_peak_rules;
 }
 
+void compact_rewrite_compact(Compact_rewrite_bank bank)
+{
+  compact_rewrite_compact_internal(bank, FALSE);
+}
+
+void compact_rewrite_compact_all_stale(Compact_rewrite_bank bank)
+{
+  compact_rewrite_compact_internal(bank, TRUE);
+}
+
 static BOOL remove_rule(Compact_rewrite_bank bank,
                         unsigned long long proof_id, BOOL retirement)
 {
@@ -803,6 +816,41 @@ BOOL compact_rewrite_contains(Compact_rewrite_bank bank,
                               unsigned long long proof_id)
 {
   return lookup_rule(bank, proof_id) != CR_NONE;
+}
+
+void compact_rewrite_copy_live_clauses(Compact_rewrite_bank bank,
+                                       Compact_term_pool destination,
+                                       Compact_term_rebase_map map)
+{
+  size_t i;
+  if (bank == NULL)
+    return;
+  for (i = 1; i < bank->rule_count; i++)
+    if (!compact_term_pool_copy_clause(
+          destination, bank->term_pool, map, bank->rules[i].proof_id))
+      fatal_error("compact_rewrite: cannot copy live clause to compacted pool");
+}
+
+void compact_rewrite_rebase_term_pool(Compact_rewrite_bank bank,
+                                      Compact_term_pool pool,
+                                      Compact_term_rebase_map map)
+{
+  size_t i;
+  if (bank == NULL)
+    return;
+  for (i = 1; i < bank->rule_count; i++) {
+    bank->rules[i].left_offset = compact_term_rebase_offset(
+      map, bank->rules[i].left_offset);
+    bank->rules[i].right_offset = compact_term_rebase_offset(
+      map, bank->rules[i].right_offset);
+  }
+  for (i = 1; i < bank->node_count; i++)
+    if (bank->nodes[i].token_length != 0)
+      bank->nodes[i].token_offset = compact_term_rebase_offset(
+        map, bank->nodes[i].token_offset);
+  bank->term_pool = pool;
+  bank->tokens = compact_term_pool_tokens(pool);
+  update_peak(bank);
 }
 
 static uint32_t token_term_end(Compact_rewrite_bank bank, uint32_t position,

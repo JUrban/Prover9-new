@@ -70,6 +70,32 @@ static BOOL compact_back_demod_mode(void)
   return Compact_back_demod_audit || Compact_back_demod_authoritative;
 }
 
+unsigned long long compact_back_demod_active_count(void)
+{
+  struct compact_back_demod_stats stats;
+  compact_back_demod_get_stats(Compact_back_demod_idx, &stats);
+  return stats.active;
+}
+
+void compact_back_demod_compact_all_stale_records(void)
+{
+  compact_back_demod_compact_all_stale(Compact_back_demod_idx);
+}
+
+void compact_back_demod_copy_term_clauses(Compact_term_pool destination,
+                                          Compact_term_rebase_map map)
+{
+  compact_back_demod_copy_live_clauses(
+    Compact_back_demod_idx, destination, map);
+}
+
+void compact_back_demod_rebase_shared_term_pool(
+  Compact_term_pool pool, Compact_term_rebase_map map)
+{
+  compact_back_demod_rebase_term_pool(Compact_back_demod_idx, pool, map);
+  Compact_back_demod_terms = pool;
+}
+
 /*************
  *
  *   init_demodulator_index()

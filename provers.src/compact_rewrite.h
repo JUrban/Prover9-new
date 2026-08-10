@@ -51,6 +51,14 @@ void compact_rewrite_note_suspended_retirement(Compact_rewrite_bank bank);
 BOOL compact_rewrite_contains(Compact_rewrite_bank bank,
                               unsigned long long proof_id);
 
+void compact_rewrite_copy_live_clauses(Compact_rewrite_bank bank,
+                                       Compact_term_pool destination,
+                                       Compact_term_rebase_map map);
+
+void compact_rewrite_rebase_term_pool(Compact_rewrite_bank bank,
+                                      Compact_term_pool pool,
+                                      Compact_term_rebase_map map);
+
 /* Visit live rules whose rewrite source side contains a root symbol used by
    the newly admitted rule.  This is a conservative redex filter: callers
    perform the exact normalization, and may coalesce duplicate visits. */
@@ -79,6 +87,8 @@ void compact_rewrite_get_stats(Compact_rewrite_bank bank,
 BOOL compact_rewrite_compaction_needed(Compact_rewrite_bank bank);
 
 void compact_rewrite_compact(Compact_rewrite_bank bank);
+
+void compact_rewrite_compact_all_stale(Compact_rewrite_bank bank);
 
 void compact_rewrite_free(Compact_rewrite_bank bank);
 

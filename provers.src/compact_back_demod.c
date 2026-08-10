@@ -1029,7 +1029,8 @@ static unsigned long long occurrence_items(
   return count;
 }
 
-void compact_back_demod_compact(Compact_back_demod_index index)
+static void compact_back_demod_compact_internal(
+  Compact_back_demod_index index, BOOL force)
 {
   Compact_back_demod_index replacement;
   struct compact_back_demod_index old;
@@ -1040,7 +1041,9 @@ void compact_back_demod_compact(Compact_back_demod_index index)
   unsigned long long groups_examined, occurrences_examined;
   unsigned long long path_checks, path_rejects;
   size_t i;
-  if (!compact_back_demod_compaction_needed(index))
+  if (index == NULL ||
+      (!force && !compact_back_demod_compaction_needed(index)) ||
+      (force && index->record_count - 1 == index->active))
     return;
   old_bytes = index_bytes(index);
   old_peak = index->peak_bytes;
@@ -1152,6 +1155,46 @@ void compact_back_demod_compact(Compact_back_demod_index index)
     index->peak_bytes = old_peak;
   if (old_peak_active > index->peak)
     index->peak = old_peak_active;
+}
+
+void compact_back_demod_compact(Compact_back_demod_index index)
+{
+  compact_back_demod_compact_internal(index, FALSE);
+}
+
+void compact_back_demod_compact_all_stale(Compact_back_demod_index index)
+{
+  compact_back_demod_compact_internal(index, TRUE);
+}
+
+void compact_back_demod_copy_live_clauses(
+  Compact_back_demod_index index, Compact_term_pool destination,
+  Compact_term_rebase_map map)
+{
+  size_t i;
+  if (index == NULL)
+    return;
+  for (i = 1; i < index->record_count; i++)
+    if (!compact_term_pool_copy_clause(
+          destination, index->term_pool, map,
+          index->records[i].proof_id))
+      fatal_error("compact_back_demod: cannot copy compacted pool clause");
+}
+
+void compact_back_demod_rebase_term_pool(
+  Compact_back_demod_index index, Compact_term_pool pool,
+  Compact_term_rebase_map map)
+{
+  size_t i;
+  if (index == NULL)
+    return;
+  for (i = 1; i < index->record_count; i++)
+    index->records[i].token_offset = compact_term_rebase_offset(
+      map, index->records[i].token_offset);
+  index->term_pool = pool;
+  index->tokens = compact_term_pool_tokens(pool);
+  index->token_limit = compact_term_pool_token_count(pool);
+  update_peak(index);
 }
 
 void compact_back_demod_get_stats(Compact_back_demod_index index,

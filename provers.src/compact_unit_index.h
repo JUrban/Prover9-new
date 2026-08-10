@@ -47,6 +47,16 @@ BOOL compact_unit_index_compaction_needed(Compact_unit_index index);
 
 void compact_unit_index_compact(Compact_unit_index index);
 
+void compact_unit_index_compact_all_stale(Compact_unit_index index);
+
+void compact_unit_index_copy_live_clauses(Compact_unit_index index,
+                                          Compact_term_pool destination,
+                                          Compact_term_rebase_map map);
+
+void compact_unit_index_rebase_term_pool(Compact_unit_index index,
+                                         Compact_term_pool pool,
+                                         Compact_term_rebase_map map);
+
 /* Return the first live unit, in legacy discrimination-tree order, whose
    literal has SIGN and whose atom matches TARGET.  EXCLUDE_ID may be zero. */
 unsigned long long compact_unit_generalization_first(

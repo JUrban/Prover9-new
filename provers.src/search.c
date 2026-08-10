@@ -2961,14 +2961,15 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             "Compact_term_pool: clauses=%s, serializations=%s, lookups=%s, "
             "hits=%s, reused_tokens=%s, logical_tokens=%s, tokens=%s, "
             "token_growths=%s, token_copy_bytes=%s, directory=%s, bytes=%s, "
-            "peak_bytes=%s.\n",
+            "peak_bytes=%s, compactions=%s, reclaimed=%s.\n",
             comma_num(terms.clause_entries),
             comma_num(terms.serializations), comma_num(terms.lookups),
             comma_num(terms.hits), comma_num(terms.reused_tokens),
             comma_num(terms.logical_tokens), comma_num(terms.token_bytes),
             comma_num(terms.token_growths), comma_num(terms.token_copy_bytes),
             comma_num(terms.directory_bytes), comma_num(terms.total_bytes),
-            comma_num(terms.peak_bytes));
+            comma_num(terms.peak_bytes), comma_num(terms.compactions),
+            comma_num(terms.bytes_reclaimed));
     if (terms.sharing_profile_enabled)
       fprintf(fp,
               "Compact_term_sharing: occurrences=%s, unique=%s, "
@@ -5971,6 +5972,70 @@ void compress_retained_store(Clause_store store)
   }
 }  /* compress_retained_store */
 
+static void maybe_compact_shared_term_pool(void)
+{
+  struct compact_term_pool_stats terms;
+  struct compact_rewrite_stats rewrite;
+  unsigned long long retained, stale, threshold;
+  unsigned long long stale_tokens, estimated_reclaimable_bytes;
+  Compact_term_pool replacement, old;
+  Compact_term_rebase_map map;
+  if (!compact_otter_passive_mode() || Compact_terms == NULL)
+    return;
+  compact_term_pool_get_stats(Compact_terms, &terms);
+  if (terms.sharing_profile_enabled)
+    return;
+  compact_rewrite_get_stats(Compact_rewrite_rules, &rewrite);
+  retained = compact_back_demod_active_count();
+  if (compact_unit_active_count() > retained)
+    retained = compact_unit_active_count();
+  if (rewrite.rules_current > retained)
+    retained = rewrite.rules_current;
+  if (terms.clause_entries <= retained)
+    return;
+  stale = terms.clause_entries - retained;
+  threshold = retained / 4;
+  if (threshold < 1024)
+    threshold = 1024;
+  if (stale < threshold)
+    return;
+  /* Rebuilding all three indexes is deliberately a cold operation.  A
+     clause-count ratio alone fires much too early on CHAT-sized prefixes:
+     1,153 apparently stale clauses caused a complete rebuild to reclaim
+     only 45 KiB.  Estimate just the stale token payload (and therefore err
+     on the conservative side by ignoring directory/index savings), and do
+     not coordinate a rebuild until at least 8 MiB can be recovered. */
+  stale_tokens =
+    (terms.logical_tokens / terms.clause_entries) * stale +
+    ((terms.logical_tokens % terms.clause_entries) * stale) /
+      terms.clause_entries;
+  estimated_reclaimable_bytes = stale_tokens * sizeof(uint32_t);
+  if (estimated_reclaimable_bytes < 8ULL * 1024 * 1024)
+    return;
+  compact_rewrite_compact_all_stale(Compact_rewrite_rules);
+  compact_unit_compact_all_stale();
+  compact_back_demod_compact_all_stale_records();
+  replacement = compact_term_pool_init();
+  map = compact_term_rebase_map_init();
+  /* Back-demod records cover nearly the whole retained clause population;
+     unit and rewrite records add any exceptional clauses and deduplicate by
+     stable proof ID in the destination directory. */
+  compact_back_demod_copy_term_clauses(replacement, map);
+  compact_unit_copy_term_clauses(replacement, map);
+  compact_rewrite_copy_live_clauses(Compact_rewrite_rules,
+                                    replacement, map);
+  compact_term_rebase_map_finalize(map);
+  compact_rewrite_rebase_term_pool(Compact_rewrite_rules,
+                                   replacement, map);
+  compact_unit_rebase_term_pool(replacement, map);
+  compact_back_demod_rebase_shared_term_pool(replacement, map);
+  old = Compact_terms;
+  compact_term_pool_finish_compaction(replacement, old);
+  Compact_terms = replacement;
+  compact_term_pool_free(old);
+  compact_term_rebase_map_free(map);
+}
+
 /*************
  *
  *   disable_clause()
@@ -6020,6 +6085,7 @@ void disable_clause(Topform c)
     }
     index_literals(c, DELETE, Clocks.index, FALSE);
     index_back_demod(c, DELETE, Clocks.index, flag(Opt->back_demod));
+    maybe_compact_shared_term_pool();
     retain_disabled_clause(c);
     clock_stop(Clocks.disable);
     return;
@@ -6070,6 +6136,7 @@ void disable_clause(Topform c)
     clist_remove(c, Glob.limbo);
   }
 
+  maybe_compact_shared_term_pool();
   retain_disabled_clause(c);
   clock_stop(Clocks.disable);
 }  // disable_clause

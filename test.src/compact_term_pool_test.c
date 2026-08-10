@@ -73,6 +73,50 @@ int main(void)
   delete_clause(clause);
   delete_clause(changed);
 
+  {
+    Compact_term_pool source = compact_term_pool_init();
+    Compact_term_pool destination = compact_term_pool_init();
+    Compact_term_rebase_map map = compact_term_rebase_map_init();
+    struct compact_term_pool_stats compacted;
+    Topform first = parse_clause_from_string("p(f(a)).");
+    Topform stale = parse_clause_from_string("q(g(b)).");
+    Topform last = parse_clause_from_string("r(h(c)).");
+    uint32_t first_offset, last_offset, translated, first_length;
+    const int32_t *source_tokens, *destination_tokens;
+    first->id = 201;
+    stale->id = 202;
+    last->id = 203;
+    first_offset = compact_term_pool_intern(
+      source, first->id, first->literals, first->literals->atom,
+      &first_length);
+    (void) compact_term_pool_intern(
+      source, stale->id, stale->literals, stale->literals->atom, &length);
+    last_offset = compact_term_pool_intern(
+      source, last->id, last->literals, last->literals->atom, &length);
+    CHECK(compact_term_pool_copy_clause(destination, source, map, last->id) &&
+          compact_term_pool_copy_clause(destination, source, map, first->id) &&
+          compact_term_pool_copy_clause(destination, source, map, first->id),
+          "rebase copy deduplicates retained clauses in arbitrary order");
+    compact_term_rebase_map_finalize(map);
+    translated = compact_term_rebase_offset(map, first_offset + 1);
+    source_tokens = compact_term_pool_tokens(source);
+    destination_tokens = compact_term_pool_tokens(destination);
+    CHECK(destination_tokens[translated] == source_tokens[first_offset + 1] &&
+          compact_term_rebase_offset(map, last_offset) != translated,
+          "sorted rebase map translates root and interior token offsets");
+    compact_term_pool_finish_compaction(destination, source);
+    compact_term_pool_get_stats(destination, &compacted);
+    CHECK(compacted.clause_entries == 2 && compacted.logical_tokens == 6 &&
+          compacted.compactions == 1,
+          "compacted pool drops an unretained clause and records reclamation");
+    compact_term_rebase_map_free(map);
+    compact_term_pool_free(destination);
+    compact_term_pool_free(source);
+    delete_clause(first);
+    delete_clause(stale);
+    delete_clause(last);
+  }
+
   if (Failures != 0) {
     fprintf(stderr, "compact_term_pool_test: %d failure(s)\n", Failures);
     return 1;

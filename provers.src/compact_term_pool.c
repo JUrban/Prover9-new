@@ -19,6 +19,8 @@ struct compact_term_pool {
   unsigned long long token_growths;
   unsigned long long token_copy_bytes;
   unsigned long long peak_bytes;
+  unsigned long long compactions;
+  unsigned long long bytes_reclaimed;
   BOOL sharing_profile_enabled;
   uint64_t *profile_hashes;
   uint32_t *profile_offsets;
@@ -28,6 +30,19 @@ struct compact_term_pool {
   unsigned long long profile_term_occurrences;
   unsigned long long profile_child_references;
   unsigned long long profile_atom_roots;
+};
+
+struct compact_term_rebase_entry {
+  uint32_t old_offset;
+  uint32_t new_offset;
+  uint32_t length;
+};
+
+struct compact_term_rebase_map {
+  struct compact_term_rebase_entry *entries;
+  size_t count;
+  size_t capacity;
+  BOOL finalized;
 };
 
 static size_t grow_token_capacity(size_t current)
@@ -329,6 +344,132 @@ Compact_term_pool compact_term_pool_init(void)
   return pool;
 }
 
+Compact_term_rebase_map compact_term_rebase_map_init(void)
+{
+  return safe_calloc(1, sizeof(struct compact_term_rebase_map));
+}
+
+BOOL compact_term_pool_copy_clause(Compact_term_pool destination,
+                                   Compact_term_pool source,
+                                   Compact_term_rebase_map map,
+                                   unsigned long long proof_id)
+{
+  size_t source_at, destination_at;
+  uint32_t old_offset, new_offset, length;
+  if (destination == NULL || source == NULL || map == NULL ||
+      proof_id == 0 || map->finalized || source->directory_capacity == 0)
+    return FALSE;
+  source_at = directory_slot(source, proof_id);
+  if (source->proof_ids[source_at] != proof_id)
+    return FALSE;
+  if (destination->directory_capacity != 0) {
+    destination_at = directory_slot(destination, proof_id);
+    if (destination->proof_ids[destination_at] == proof_id)
+      return TRUE;
+  }
+  old_offset = source->clause_offsets[source_at];
+  length = source->clause_lengths[source_at];
+  new_offset = compact_term_pool_append(
+    destination, source->tokens + old_offset, length);
+  ensure_directory(destination);
+  destination_at = directory_slot(destination, proof_id);
+  destination->proof_ids[destination_at] = proof_id;
+  destination->clause_offsets[destination_at] = new_offset;
+  destination->clause_lengths[destination_at] = length;
+  destination->directory_count++;
+  destination->serializations++;
+  if (map->count == map->capacity) {
+    size_t next = map->capacity == 0 ? 64 : map->capacity * 2;
+    if (next < map->capacity ||
+        next > SIZE_MAX / sizeof(*map->entries))
+      fatal_error("compact_term_pool: rebase map overflow");
+    map->entries = safe_realloc(
+      map->entries, next * sizeof(*map->entries));
+    map->capacity = next;
+  }
+  map->entries[map->count].old_offset = old_offset;
+  map->entries[map->count].new_offset = new_offset;
+  map->entries[map->count].length = length;
+  map->count++;
+  update_peak(destination);
+  return TRUE;
+}
+
+static int increasing_old_offset(const void *left, const void *right)
+{
+  const struct compact_term_rebase_entry *a = left;
+  const struct compact_term_rebase_entry *b = right;
+  return a->old_offset < b->old_offset ? -1 :
+         a->old_offset > b->old_offset ? 1 : 0;
+}
+
+void compact_term_rebase_map_finalize(Compact_term_rebase_map map)
+{
+  size_t i;
+  if (map == NULL || map->finalized)
+    return;
+  qsort(map->entries, map->count, sizeof(*map->entries),
+        increasing_old_offset);
+  for (i = 1; i < map->count; i++)
+    if ((uint64_t) map->entries[i-1].old_offset +
+          map->entries[i-1].length > map->entries[i].old_offset)
+      fatal_error("compact_term_pool: overlapping rebase intervals");
+  map->finalized = TRUE;
+}
+
+uint32_t compact_term_rebase_offset(Compact_term_rebase_map map,
+                                    uint32_t old_offset)
+{
+  size_t low = 0, high;
+  struct compact_term_rebase_entry *entry;
+  if (map == NULL || !map->finalized || map->count == 0)
+    fatal_error("compact_term_pool: unfinished or empty rebase map");
+  high = map->count;
+  while (low < high) {
+    size_t middle = low + (high - low) / 2;
+    if (map->entries[middle].old_offset <= old_offset)
+      low = middle + 1;
+    else
+      high = middle;
+  }
+  if (low == 0)
+    fatal_error("compact_term_pool: token offset precedes rebase map");
+  entry = &map->entries[low - 1];
+  if ((uint64_t) old_offset >=
+      (uint64_t) entry->old_offset + entry->length)
+    fatal_error("compact_term_pool: token offset is not retained");
+  return entry->new_offset + (old_offset - entry->old_offset);
+}
+
+void compact_term_rebase_map_free(Compact_term_rebase_map map)
+{
+  if (map == NULL)
+    return;
+  safe_free(map->entries);
+  safe_free(map);
+}
+
+void compact_term_pool_finish_compaction(Compact_term_pool destination,
+                                         Compact_term_pool source)
+{
+  unsigned long long source_bytes, destination_bytes;
+  if (destination == NULL || source == NULL)
+    fatal_error("compact_term_pool_finish_compaction: null pool");
+  source_bytes = pool_bytes(source);
+  destination_bytes = pool_bytes(destination);
+  destination->serializations = source->serializations;
+  destination->lookups = source->lookups;
+  destination->hits = source->hits;
+  destination->reused_tokens = source->reused_tokens;
+  destination->token_growths += source->token_growths;
+  destination->token_copy_bytes += source->token_copy_bytes;
+  destination->compactions = source->compactions + 1;
+  destination->bytes_reclaimed = source->bytes_reclaimed +
+    (source_bytes > destination_bytes ? source_bytes - destination_bytes : 0);
+  if (source->peak_bytes > destination->peak_bytes)
+    destination->peak_bytes = source->peak_bytes;
+}
+
 void compact_term_pool_enable_sharing_profile(Compact_term_pool pool)
 {
   if (pool == NULL)
@@ -420,6 +561,8 @@ void compact_term_pool_get_stats(Compact_term_pool pool,
      sizeof(*pool->clause_lengths));
   stats->total_bytes = pool_bytes(pool);
   stats->peak_bytes = pool->peak_bytes;
+  stats->compactions = pool->compactions;
+  stats->bytes_reclaimed = pool->bytes_reclaimed;
   stats->sharing_profile_enabled = pool->sharing_profile_enabled;
   stats->profile_term_occurrences = pool->profile_term_occurrences;
   stats->profile_unique_terms = pool->profile_count;

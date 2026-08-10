@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 typedef struct compact_term_pool * Compact_term_pool;
+typedef struct compact_term_rebase_map * Compact_term_rebase_map;
 
 struct compact_term_pool_stats {
   unsigned long long clause_entries;
@@ -20,6 +21,8 @@ struct compact_term_pool_stats {
   unsigned long long directory_bytes;
   unsigned long long total_bytes;
   unsigned long long peak_bytes;
+  unsigned long long compactions;
+  unsigned long long bytes_reclaimed;
   BOOL sharing_profile_enabled;
   unsigned long long profile_term_occurrences;
   unsigned long long profile_unique_terms;
@@ -30,6 +33,25 @@ struct compact_term_pool_stats {
 };
 
 Compact_term_pool compact_term_pool_init(void);
+
+Compact_term_rebase_map compact_term_rebase_map_init(void);
+
+/* Copy one complete clause serialization at most once and remember how its
+   old token interval maps into DESTINATION. */
+BOOL compact_term_pool_copy_clause(Compact_term_pool destination,
+                                   Compact_term_pool source,
+                                   Compact_term_rebase_map map,
+                                   unsigned long long proof_id);
+
+void compact_term_rebase_map_finalize(Compact_term_rebase_map map);
+
+uint32_t compact_term_rebase_offset(Compact_term_rebase_map map,
+                                    uint32_t old_offset);
+
+void compact_term_rebase_map_free(Compact_term_rebase_map map);
+
+void compact_term_pool_finish_compaction(Compact_term_pool destination,
+                                         Compact_term_pool source);
 
 /* Enable exact cross-clause subterm accounting.  This diagnostic allocates
    its own hash table and is deliberately off during ordinary measurements. */

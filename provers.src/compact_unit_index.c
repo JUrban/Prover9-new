@@ -537,7 +537,8 @@ BOOL compact_unit_index_compaction_needed(Compact_unit_index index)
   return stale >= threshold;
 }
 
-void compact_unit_index_compact(Compact_unit_index index)
+static void compact_unit_index_compact_internal(Compact_unit_index index,
+                                                BOOL force)
 {
   Compact_unit_index replacement;
   struct compact_unit_index old;
@@ -547,7 +548,9 @@ void compact_unit_index_compact(Compact_unit_index index)
   unsigned long long instance_exact_tests, unifier_queries;
   unsigned long long unifier_exact_tests;
   size_t i;
-  if (!compact_unit_index_compaction_needed(index))
+  if (index == NULL ||
+      (!force && !compact_unit_index_compaction_needed(index)) ||
+      (force && index->record_count - 1 == index->active))
     return;
   old_bytes = index_bytes(index);
   old_peak = index->peak_bytes;
@@ -590,6 +593,49 @@ void compact_unit_index_compact(Compact_unit_index index)
     index->peak_bytes = old_peak;
   if (old_peak_active > index->peak)
     index->peak = old_peak_active;
+}
+
+void compact_unit_index_compact(Compact_unit_index index)
+{
+  compact_unit_index_compact_internal(index, FALSE);
+}
+
+void compact_unit_index_compact_all_stale(Compact_unit_index index)
+{
+  compact_unit_index_compact_internal(index, TRUE);
+}
+
+void compact_unit_index_copy_live_clauses(Compact_unit_index index,
+                                          Compact_term_pool destination,
+                                          Compact_term_rebase_map map)
+{
+  size_t i;
+  if (index == NULL)
+    return;
+  for (i = 1; i < index->record_count; i++)
+    if (!compact_term_pool_copy_clause(
+          destination, index->term_pool, map,
+          index->records[i].proof_id))
+      fatal_error("compact_unit_index: cannot copy compacted pool clause");
+}
+
+void compact_unit_index_rebase_term_pool(Compact_unit_index index,
+                                         Compact_term_pool pool,
+                                         Compact_term_rebase_map map)
+{
+  size_t i;
+  if (index == NULL)
+    return;
+  for (i = 1; i < index->record_count; i++)
+    index->records[i].token_offset = compact_term_rebase_offset(
+      map, index->records[i].token_offset);
+  for (i = 1; i < index->node_count; i++)
+    if (index->nodes[i].token_length != 0)
+      index->nodes[i].token_offset = compact_term_rebase_offset(
+        map, index->nodes[i].token_offset);
+  index->term_pool = pool;
+  index->tokens = compact_term_pool_tokens(pool);
+  update_peak(index);
 }
 
 static void flatten_query(Compact_unit_index index, Term term,

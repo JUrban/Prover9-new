@@ -89,6 +89,31 @@ static BOOL compact_unit_index_mode(void)
   return Compact_unit_subsumption_audit || Compact_unit_authoritative;
 }
 
+unsigned long long compact_unit_active_count(void)
+{
+  struct compact_unit_index_stats stats;
+  compact_unit_index_get_stats(Compact_units, &stats);
+  return stats.active;
+}
+
+void compact_unit_compact_all_stale(void)
+{
+  compact_unit_index_compact_all_stale(Compact_units);
+}
+
+void compact_unit_copy_term_clauses(Compact_term_pool destination,
+                                    Compact_term_rebase_map map)
+{
+  compact_unit_index_copy_live_clauses(Compact_units, destination, map);
+}
+
+void compact_unit_rebase_term_pool(Compact_term_pool pool,
+                                   Compact_term_rebase_map map)
+{
+  compact_unit_index_rebase_term_pool(Compact_units, pool, map);
+  Compact_unit_terms = pool;
+}
+
 void configure_compact_nonunit_index(BOOL audit, BOOL authoritative)
 {
   if (Compact_nonunits != NULL)
