@@ -779,6 +779,22 @@ and the compact archive proof audit passes.  Parallel 1-MiB and 2-MiB CHAT
 runs also reach the exact 1,000-given state without firing; the reclaim
 threshold therefore needs a later bounded prefix to choose between them.
 
+The retained-slot bitset now serves as an exact first pass over the union of
+the three compact indexes.  Instead of doubling the rebase vector to the next
+power of two while that union is discovered, compaction counts marked slots
+and maps the vector once at its final size.  The forced CHAT replay remains
+the same 132,567-event oracle and its real compaction now needs one rebase
+growth rather than eight, still with zero copied bytes.
+
+At 1,500 givens, parallel 512-KiB and 1-MiB `chat_test.in` runs finish at the
+identical `Generated=2,947,136`, `Kept=66,933` state and exact rule/demodulation
+counters.  The 512-KiB policy performs three compactions, reclaims 2,046,068
+pool bytes, and takes 177.67 user seconds with 101,788-KiB peak RSS.  One MiB
+performs one compaction, reclaims 1,017,164 bytes, and takes 181.34 user
+seconds with 101,952-KiB peak RSS.  Neither adds CPU cost, but this boundary
+does not distinguish their peaks; a 2,000-given comparison is the last
+bounded filter before choosing the full-proof policy.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:

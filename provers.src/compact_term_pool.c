@@ -550,7 +550,6 @@ BOOL compact_term_rebase_map_retain_clause(Compact_term_rebase_map map,
 {
   size_t at, word;
   uint64_t bit;
-  struct compact_term_rebase_entry *entry;
   if (map == NULL || source == NULL || proof_id == 0 || map->finalized ||
       source->directory_capacity == 0 || map->mode == REBASE_MODE_COPY)
     return FALSE;
@@ -572,10 +571,11 @@ BOOL compact_term_rebase_map_retain_clause(Compact_term_rebase_map map,
   if ((map->retained_slots[word] & bit) != 0)
     return TRUE;
   map->retained_slots[word] |= bit;
-  entry = append_rebase_entry(map);
-  entry->destination.proof_id = proof_id;
-  entry->old_offset = source->clause_offsets[at];
-  entry->length = source->clause_lengths[at];
+  /* The retained-slot bitset is already an exact first pass over the union
+     of all three indexes.  Count here and materialize the interval vector
+     once at its final size in compact_term_pool_compact_retained(); growing
+     a power-of-two vector retained almost 110,000 unused late-proof slots. */
+  map->count++;
   return TRUE;
 }
 
@@ -626,11 +626,30 @@ void compact_term_pool_compact_retained(Compact_term_pool pool,
                                         Compact_term_rebase_map map)
 {
   unsigned long long old_bytes;
-  size_t i, token_count = 0, token_capacity, directory_capacity;
+  size_t i, slot, retained = 0, token_count = 0;
+  size_t token_capacity, directory_capacity;
   if (pool == NULL || map == NULL || map->finalized ||
       map->mode != REBASE_MODE_RETAINED ||
       map->retained_source != pool || map->count == 0)
     fatal_error("compact_term_pool: invalid retained compaction");
+  if (map->entries != NULL || map->capacity != 0)
+    fatal_error("compact_term_pool: retained entries already materialized");
+  resize_rebase_entries(map, map->count);
+  for (slot = 0; slot < pool->directory_capacity; slot++) {
+    size_t word = slot / 64;
+    uint64_t bit = UINT64_C(1) << (slot % 64);
+    struct compact_term_rebase_entry *entry;
+    if ((map->retained_slots[word] & bit) == 0)
+      continue;
+    if (pool->proof_ids[slot] == 0 || retained >= map->count)
+      fatal_error("compact_term_pool: corrupt retained slot set");
+    entry = &map->entries[retained++];
+    entry->destination.proof_id = pool->proof_ids[slot];
+    entry->old_offset = pool->clause_offsets[slot];
+    entry->length = pool->clause_lengths[slot];
+  }
+  if (retained != map->count)
+    fatal_error("compact_term_pool: incomplete retained slot set");
   qsort(map->entries, map->count, sizeof(*map->entries),
         increasing_old_offset);
   for (i = 0; i < map->count; i++) {
