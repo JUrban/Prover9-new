@@ -305,6 +305,11 @@ static int Bf_level = 0;             /* breadth-first level counter */
 static int Bf_last_of_level = 0;     /* last clause ID of current level */
 static int Nohints_count = 0;        /* consecutive givens without hint match */
 static unsigned Simplifier_epoch = 1; /* active state visible to DISCOUNT SOS */
+/* Format 3 deliberately omits disabled pre-elimination scratch clauses with
+   ID 0.  They can never be proof ancestors, but they still contributed to
+   the uninterrupted Disabled statistic.  Preserve only that count across a
+   resume so statistics remain deterministic without retaining dead bodies. */
+static unsigned long long Disabled_checkpoint_omitted = 0;
 
 enum inference_source {
   INFER_SOURCE_OTHER,
@@ -2761,6 +2766,7 @@ void update_stats(void)
       fatal_error("update_stats: archived passive count exceeds archive size");
     Stats.disabled_size -= passive;
   }
+  Stats.disabled_size += Disabled_checkpoint_omitted;
   Stats.hints_size = Glob.hints ? Glob.hints->length : 0;
   Stats.active_indexed_clauses = Stats.usable_size;
   Stats.passive_indexed_clauses = discount_mode() ? 0 : Stats.sos_size;
@@ -11356,6 +11362,18 @@ unsigned long long checkpointed_clause_store_count(Clause_store store)
   return count;
 }
 
+static
+unsigned long long checkpoint_omitted_disabled_count(Clause_store store)
+{
+  unsigned long long physical = clause_store_current_length(store);
+  unsigned long long passive = compact_otter_passive_mode() ?
+    dense_passive_size() : 0;
+  unsigned long long written = checkpointed_clause_store_count(store);
+  if (physical < passive || physical - passive < written)
+    fatal_error("checkpoint disabled-count accounting underflow");
+  return Disabled_checkpoint_omitted + physical - passive - written;
+}
+
 struct dense_hash_context {
   unsigned long long hash;
 };
@@ -13191,6 +13209,8 @@ void write_checkpoint(void)
     fprintf(fp, "generated_other %llu\n", Stats.generated_other);
     fprintf(fp, "kept %llu\n", Stats.kept);
     fprintf(fp, "proofs %llu\n", Stats.proofs);
+    fprintf(fp, "disabled_checkpoint_omitted %llu\n",
+            checkpoint_omitted_disabled_count(Glob.disabled));
     fprintf(fp, "back_subsumed %llu\n", Stats.back_subsumed);
     fprintf(fp, "anc_subsume_blocked %llu\n", Stats.anc_subsume_blocked);
     fprintf(fp, "back_demodulated %llu\n", Stats.back_demodulated);
@@ -14170,6 +14190,9 @@ void resume_load_clauses(const char *dir)
   rewind(fp); Stats.generated_other = read_metadata_ull(fp, "generated_other");
   rewind(fp); Stats.kept = read_metadata_ull(fp, "kept");
   rewind(fp); Stats.proofs = read_metadata_ull(fp, "proofs");
+  Disabled_checkpoint_omitted = 0;
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "disabled_checkpoint_omitted", &Disabled_checkpoint_omitted);
   rewind(fp); Stats.back_subsumed = read_metadata_ull(fp, "back_subsumed");
   rewind(fp); Stats.anc_subsume_blocked = read_metadata_ull(fp, "anc_subsume_blocked");
   rewind(fp); Stats.back_demodulated = read_metadata_ull(fp, "back_demodulated");
@@ -15933,6 +15956,7 @@ Prover_results search(Prover_input p)
 
     Glob.limbo    = clist_init("limbo");
     Glob.disabled = new_disabled_store();
+    Disabled_checkpoint_omitted = 0;
     if (Rewrite_only_rules != NULL)
       fatal_error("search: previous rewrite-only store was not released");
     Rewrite_only_rules = maximum_discount_demod_mode() ?

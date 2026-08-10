@@ -31,7 +31,7 @@ set(paramodulation).\\
 assign(search_loop,otter).\\
 assign(inference_frontier,clauses).\\
 assign(passive_store,dense).\\
-assign(ancestor_store,mmap).\\
+assign(ancestor_store,file).\\
 assign(sos_limit,-1).\\
 set(compact_otter_demodulation).\\
 set(compact_otter_unit_index).\\
@@ -47,6 +47,10 @@ make_input -1 | "$prover" > "$test_tmp/control.out" \
 grep -q 'THEOREM PROVED' "$test_tmp/control.out"
 grep -E '^(CANDIDATE_TRACE|KEPT_TRACE|given #)' \
   "$test_tmp/control.out" > "$test_tmp/control.trace"
+{
+  grep '^Given=' "$test_tmp/control.out" | tail -n 1
+  grep '^Usable=' "$test_tmp/control.out" | tail -n 1
+} > "$test_tmp/control.search"
 "$repo_dir/bin/prooftrans" parents_only < "$test_tmp/control.out" | \
   sed -n '/^% Length of proof:/,/^============================== end of proof/p' \
   > "$test_tmp/control.proof"
@@ -87,6 +91,15 @@ for checkpoint_given in 0 2; do
       "$case_dir/resumed.out" || true
   } > "$case_dir/combined.trace"
   cmp "$test_tmp/control.trace" "$case_dir/combined.trace"
+
+  {
+    grep '^Given=' "$case_dir/resumed.out" | tail -n 1
+    grep '^Usable=' "$case_dir/resumed.out" | tail -n 1
+  } > "$case_dir/resumed.search"
+  if ! cmp "$test_tmp/control.search" "$case_dir/resumed.search"; then
+    diff -u "$test_tmp/control.search" "$case_dir/resumed.search" >&2 || true
+    exit 1
+  fi
 
   "$repo_dir/bin/prooftrans" parents_only < "$case_dir/resumed.out" | \
     sed -n '/^% Length of proof:/,/^============================== end of proof/p' \
