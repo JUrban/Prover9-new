@@ -1197,14 +1197,28 @@ static BOOL retrieve_rec(Compact_rewrite_bank bank, uint32_t node,
                          struct cr_match_result *result)
 {
   uint32_t child;
+  Term query_term;
+  int32_t query_code;
   if (position == end)
     return try_leaf(bank, node, target, bindings, lex_order_vars,
                     reduced_flag, result);
+  query_term = query[position].term;
+  query_code = VARIABLE(query_term) ? INT32_MIN : SYMNUM(query_term);
   for (child = bank->nodes[node].first_child; child != CR_NONE;
        child = bank->nodes[child].next_sibling) {
+    int32_t edge_code = first_code(bank, child);
     unsigned trail_mark = *trail_count;
     uint32_t next_position = position;
     BOOL found = FALSE;
+    /* Siblings are ordered with variables first and rigid symbols in symbol
+       order.  A variable edge can match any subject subterm; among rigid
+       edges only the subject's root symbol can match. */
+    if (edge_code >= 0) {
+      if (query_code == INT32_MIN || edge_code > query_code)
+        break;
+      if (edge_code < query_code)
+        continue;
+    }
     if (match_rewrite_edge(bank, child, query, position, end, bindings,
                            binding_trail, trail_count, &next_position))
       found = retrieve_rec(bank, child, query, next_position, end,

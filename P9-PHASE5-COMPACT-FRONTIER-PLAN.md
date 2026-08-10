@@ -390,6 +390,18 @@ from 63.66 to 16.03 seconds.  Ordinary packed-fast OTTER still takes only
 gap: the archive spends 78.61 seconds there versus 43.99 in the ordinary
 baseline.
 
+Compact rewrite retrieval now uses the ordering already maintained by the
+radix trie.  At each node, variable-leading siblings are tried in their
+existing order, rigid siblings below the subject root are skipped, the one
+equal rigid edge is tried, and traversal stops before larger roots.  Skipped
+edges cannot match their first token, so posting order and rewrite semantics
+are unchanged.  The compact component suites, compact-vs-legacy audit, and
+the full 300-given CHAT oracle pass.  At 1,000 givens the full-body and dense
+archive cases retain the exact state and take 75.54/78.33 user seconds,
+versus 101.87/103.31 before the change.  Their `demod` clocks fall from
+35.74/35.48 to 19.48/19.32 seconds, with peak RSS unchanged at 103,572/91,024
+KiB.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:

@@ -126,6 +126,13 @@ buckets.  The remaining comparison against ordinary OTTER is therefore a
 compact-rewrite problem, not evidence that dense passive materialization has
 undone the back-index gain.
 
+Ordered radix-sibling selection is accepted by the same oracle.  It passes
+all compact component tests and the compact-vs-legacy audit, and the 300-given
+full-hint trace remains byte-identical.  At 1,000 givens the paired full-body
+and archive cases finish in 75.54/78.33 user seconds with the exact terminal
+state; their compact `demod` clocks are 19.48/19.32 seconds, down from
+35.74/35.48.  Peak RSS is unchanged.
+
 ## Exact old and compatibility proof baseline
 
 | Mode | Result | Given | Generated | Kept | User CPU | Wall | Peak RSS |
