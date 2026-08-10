@@ -6,6 +6,7 @@
 
 #define CR_NONE 0U
 #define CR_TOMBSTONE UINT64_MAX
+#define CR_OCCURRENCE_BLOCK_PAYLOAD 248
 
 struct cr_node {
   uint32_t token_offset;
@@ -22,9 +23,11 @@ struct cr_posting {
   unsigned char direction;
 };
 
-struct cr_occurrence {
-  uint32_t rule;
+struct cr_occurrence_block {
   uint32_t next;
+  uint16_t used;
+  uint16_t count;
+  unsigned char data[CR_OCCURRENCE_BLOCK_PAYLOAD];
 };
 
 struct cr_rule {
@@ -44,11 +47,14 @@ struct compact_rewrite_bank {
   struct cr_posting *postings;
   size_t posting_count;
   size_t posting_capacity;
-  struct cr_occurrence *occurrences;
+  struct cr_occurrence_block *occurrence_blocks;
+  size_t occurrence_block_count;
+  size_t occurrence_block_capacity;
   size_t occurrence_count;
-  size_t occurrence_capacity;
+  size_t occurrence_stream_used;
   uint32_t *occurrence_heads;
   uint32_t *occurrence_tails;
+  uint32_t *occurrence_last_rules;
   size_t occurrence_symbol_capacity;
   struct cr_rule *rules;
   size_t rule_count;
@@ -113,9 +119,10 @@ static unsigned long long bank_bytes(Compact_rewrite_bank bank)
   return sizeof(*bank) +
     bank->node_capacity * sizeof(*bank->nodes) +
     bank->posting_capacity * sizeof(*bank->postings) +
-    bank->occurrence_capacity * sizeof(*bank->occurrences) +
+    bank->occurrence_block_capacity * sizeof(*bank->occurrence_blocks) +
     bank->occurrence_symbol_capacity *
-      (sizeof(*bank->occurrence_heads) + sizeof(*bank->occurrence_tails)) +
+      (sizeof(*bank->occurrence_heads) + sizeof(*bank->occurrence_tails) +
+       sizeof(*bank->occurrence_last_rules)) +
     bank->rule_capacity * sizeof(*bank->rules) +
     (bank->owns_term_pool ? terms.total_bytes : 0) +
     bank->hash_capacity *
@@ -154,16 +161,23 @@ static void ensure_postings(Compact_rewrite_bank bank)
   }
 }
 
-static void ensure_occurrences(Compact_rewrite_bank bank)
+static uint32_t new_occurrence_block(Compact_rewrite_bank bank)
 {
-  if (bank->occurrence_count == bank->occurrence_capacity) {
-    bank->occurrence_capacity = grow_capacity(
-      bank->occurrence_capacity, sizeof(*bank->occurrences),
-      "compact_rewrite: occurrence overflow");
-    bank->occurrences = safe_realloc(
-      bank->occurrences,
-      bank->occurrence_capacity * sizeof(*bank->occurrences));
+  uint32_t block;
+  if (bank->occurrence_block_count == bank->occurrence_block_capacity) {
+    bank->occurrence_block_capacity = grow_capacity(
+      bank->occurrence_block_capacity, sizeof(*bank->occurrence_blocks),
+      "compact_rewrite: occurrence block overflow");
+    bank->occurrence_blocks = safe_realloc(
+      bank->occurrence_blocks,
+      bank->occurrence_block_capacity * sizeof(*bank->occurrence_blocks));
   }
+  if (bank->occurrence_block_count > UINT32_MAX)
+    fatal_error("compact_rewrite: occurrence block offsets exceed 32 bits");
+  block = (uint32_t) bank->occurrence_block_count++;
+  memset(&bank->occurrence_blocks[block], 0,
+         sizeof(bank->occurrence_blocks[block]));
+  return block;
 }
 
 static void ensure_occurrence_symbol(Compact_rewrite_bank bank,
@@ -181,10 +195,15 @@ static void ensure_occurrence_symbol(Compact_rewrite_bank bank,
       bank->occurrence_heads, capacity * sizeof(*bank->occurrence_heads));
     bank->occurrence_tails = safe_realloc(
       bank->occurrence_tails, capacity * sizeof(*bank->occurrence_tails));
+    bank->occurrence_last_rules = safe_realloc(
+      bank->occurrence_last_rules,
+      capacity * sizeof(*bank->occurrence_last_rules));
     memset(bank->occurrence_heads + old, 0,
            (capacity - old) * sizeof(*bank->occurrence_heads));
     memset(bank->occurrence_tails + old, 0,
            (capacity - old) * sizeof(*bank->occurrence_tails));
+    memset(bank->occurrence_last_rules + old, 0,
+           (capacity - old) * sizeof(*bank->occurrence_last_rules));
     bank->occurrence_symbol_capacity = capacity;
   }
 }
@@ -416,6 +435,52 @@ static void collect_occurrence_symbols(Compact_rewrite_bank bank,
   }
 }
 
+static size_t encode_rule_delta(unsigned char *destination, uint32_t value)
+{
+  size_t count = 0;
+  do {
+    unsigned char byte = (unsigned char) (value & 0x7fU);
+    value >>= 7;
+    if (value != 0)
+      byte |= 0x80U;
+    destination[count++] = byte;
+  } while (value != 0);
+  return count;
+}
+
+static void append_rule_occurrence(Compact_rewrite_bank bank,
+                                   unsigned symbol, uint32_t rule)
+{
+  unsigned char encoded[5];
+  size_t length;
+  uint32_t block;
+  struct cr_occurrence_block *tail;
+  ensure_occurrence_symbol(bank, symbol);
+  if (rule <= bank->occurrence_last_rules[symbol])
+    fatal_error("compact_rewrite: nonmonotone occurrence rule");
+  length = encode_rule_delta(
+    encoded, rule - bank->occurrence_last_rules[symbol]);
+  block = bank->occurrence_tails[symbol];
+  if (block == CR_NONE ||
+      bank->occurrence_blocks[block].used + length >
+        CR_OCCURRENCE_BLOCK_PAYLOAD) {
+    uint32_t added = new_occurrence_block(bank);
+    if (block == CR_NONE)
+      bank->occurrence_heads[symbol] = added;
+    else
+      bank->occurrence_blocks[block].next = added;
+    bank->occurrence_tails[symbol] = added;
+    block = added;
+  }
+  tail = &bank->occurrence_blocks[block];
+  memcpy(tail->data + tail->used, encoded, length);
+  tail->used += (uint16_t) length;
+  tail->count++;
+  bank->occurrence_last_rules[symbol] = rule;
+  bank->occurrence_count++;
+  bank->occurrence_stream_used += length;
+}
+
 /* Index each function symbol at most once per rule.  The postings answer the
    reverse question needed by interreduction: which old source sides might
    contain a redex for a new rule with this root symbol? */
@@ -435,19 +500,7 @@ static void index_rule_occurrences(Compact_rewrite_bank bank, uint32_t index)
                                symbols, &count);
   for (i = 0; i < count; i++) {
     unsigned symbol = (unsigned) symbols[i];
-    uint32_t occurrence;
-    ensure_occurrence_symbol(bank, symbol);
-    ensure_occurrences(bank);
-    if (bank->occurrence_count > UINT32_MAX)
-      fatal_error("compact_rewrite: occurrence offsets exceed 32 bits");
-    occurrence = (uint32_t) bank->occurrence_count++;
-    bank->occurrences[occurrence].rule = index;
-    bank->occurrences[occurrence].next = CR_NONE;
-    if (bank->occurrence_heads[symbol] == CR_NONE)
-      bank->occurrence_heads[symbol] = occurrence;
-    else
-      bank->occurrences[bank->occurrence_tails[symbol]].next = occurrence;
-    bank->occurrence_tails[symbol] = occurrence;
+    append_rule_occurrence(bank, symbol, index);
   }
   safe_free(symbols);
 }
@@ -463,9 +516,8 @@ Compact_rewrite_bank compact_rewrite_init_with_pool(Compact_term_pool pool)
   ensure_postings(bank);
   memset(&bank->postings[0], 0, sizeof(bank->postings[0]));
   bank->posting_count = 1;
-  ensure_occurrences(bank);
-  memset(&bank->occurrences[0], 0, sizeof(bank->occurrences[0]));
-  bank->occurrence_count = 1;
+  if (new_occurrence_block(bank) != CR_NONE)
+    fatal_error("compact_rewrite: invalid occurrence block sentinel");
   ensure_rules(bank);
   memset(&bank->rules[0], 0, sizeof(bank->rules[0]));
   bank->rule_count = 1;
@@ -611,9 +663,10 @@ void compact_rewrite_compact(Compact_rewrite_bank bank)
   safe_free(replacement);
   safe_free(old.nodes);
   safe_free(old.postings);
-  safe_free(old.occurrences);
+  safe_free(old.occurrence_blocks);
   safe_free(old.occurrence_heads);
   safe_free(old.occurrence_tails);
+  safe_free(old.occurrence_last_rules);
   safe_free(old.rules);
   if (old.owns_term_pool)
     compact_term_pool_free(old.term_pool);
@@ -786,6 +839,26 @@ static BOOL rule_contains_pattern(Compact_rewrite_bank bank,
                             pattern_offset, pattern_length);
 }
 
+static uint32_t decode_rule_delta(const struct cr_occurrence_block *block,
+                                  uint16_t *position)
+{
+  uint32_t value = 0;
+  unsigned shift = 0;
+  while (*position < block->used) {
+    unsigned char byte = block->data[(*position)++];
+    if (shift == 28 && (byte & 0xf0U) != 0)
+      fatal_error("compact_rewrite: corrupt occurrence delta");
+    value |= (uint32_t) (byte & 0x7fU) << shift;
+    if ((byte & 0x80U) == 0)
+      return value;
+    shift += 7;
+    if (shift > 28)
+      fatal_error("compact_rewrite: corrupt occurrence delta");
+  }
+  fatal_error("compact_rewrite: truncated occurrence delta");
+  return 0;
+}
+
 void compact_rewrite_visit_overlaps(Compact_rewrite_bank bank,
                                     unsigned long long new_proof_id,
                                     Compact_rewrite_overlap_fn visit,
@@ -809,7 +882,8 @@ void compact_rewrite_visit_overlaps(Compact_rewrite_bank bank,
     pattern_lengths[pattern_count++] = rule->right_length;
   }
   for (i = 0; i < pattern_count; i++) {
-    uint32_t occurrence;
+    uint32_t block;
+    uint32_t rule_index = 0;
     unsigned symbol;
     int32_t root = bank->tokens[pattern_offsets[i]];
     if (root < 0)
@@ -817,15 +891,31 @@ void compact_rewrite_visit_overlaps(Compact_rewrite_bank bank,
     symbol = (unsigned) root;
     if (symbol >= bank->occurrence_symbol_capacity)
       continue;
-    for (occurrence = bank->occurrence_heads[symbol];
-         occurrence != CR_NONE;
-         occurrence = bank->occurrences[occurrence].next) {
-      struct cr_rule *candidate =
-        &bank->rules[bank->occurrences[occurrence].rule];
-      if (candidate->active && candidate->proof_id != new_proof_id &&
-          rule_contains_pattern(bank, candidate,
-                                pattern_offsets[i], pattern_lengths[i]))
-        visit(candidate->proof_id, context);
+    for (block = bank->occurrence_heads[symbol]; block != CR_NONE;
+         block = bank->occurrence_blocks[block].next) {
+      const struct cr_occurrence_block *current;
+      uint16_t position = 0;
+      uint16_t entries = 0;
+      if (block >= bank->occurrence_block_count)
+        fatal_error("compact_rewrite: corrupt occurrence block");
+      current = &bank->occurrence_blocks[block];
+      while (position < current->used) {
+        uint32_t delta = decode_rule_delta(current, &position);
+        struct cr_rule *candidate;
+        if (delta > UINT32_MAX - rule_index)
+          fatal_error("compact_rewrite: occurrence rule overflow");
+        rule_index += delta;
+        if (rule_index == CR_NONE || rule_index >= bank->rule_count)
+          fatal_error("compact_rewrite: corrupt occurrence rule");
+        candidate = &bank->rules[rule_index];
+        if (candidate->active && candidate->proof_id != new_proof_id &&
+            rule_contains_pattern(bank, candidate,
+                                  pattern_offsets[i], pattern_lengths[i]))
+          visit(candidate->proof_id, context);
+        entries++;
+      }
+      if (position != current->used || entries != current->count)
+        fatal_error("compact_rewrite: corrupt occurrence block contents");
     }
   }
 }
@@ -1168,9 +1258,13 @@ void compact_rewrite_get_stats(Compact_rewrite_bank bank,
   stats->node_bytes = bank->node_capacity * sizeof(*bank->nodes);
   stats->posting_bytes = bank->posting_capacity * sizeof(*bank->postings);
   stats->occurrence_bytes =
-    bank->occurrence_capacity * sizeof(*bank->occurrences) +
+    bank->occurrence_block_capacity * sizeof(*bank->occurrence_blocks) +
     bank->occurrence_symbol_capacity *
-      (sizeof(*bank->occurrence_heads) + sizeof(*bank->occurrence_tails));
+      (sizeof(*bank->occurrence_heads) + sizeof(*bank->occurrence_tails) +
+       sizeof(*bank->occurrence_last_rules));
+  stats->occurrence_stream_used = bank->occurrence_stream_used;
+  stats->occurrence_stream_bytes =
+    bank->occurrence_block_capacity * sizeof(*bank->occurrence_blocks);
   stats->rule_bytes = bank->rule_capacity * sizeof(*bank->rules);
   stats->term_bytes = bank->owns_term_pool ? terms.token_bytes : 0;
   stats->hash_bytes = bank->hash_capacity *
@@ -1185,9 +1279,10 @@ void compact_rewrite_free(Compact_rewrite_bank bank)
     return;
   safe_free(bank->nodes);
   safe_free(bank->postings);
-  safe_free(bank->occurrences);
+  safe_free(bank->occurrence_blocks);
   safe_free(bank->occurrence_heads);
   safe_free(bank->occurrence_tails);
+  safe_free(bank->occurrence_last_rules);
   safe_free(bank->rules);
   if (bank->owns_term_pool)
     compact_term_pool_free(bank->term_pool);

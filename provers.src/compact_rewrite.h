@@ -18,6 +18,8 @@ struct compact_rewrite_stats {
   unsigned long long node_bytes;
   unsigned long long posting_bytes;
   unsigned long long occurrence_bytes;
+  unsigned long long occurrence_stream_used;
+  unsigned long long occurrence_stream_bytes;
   unsigned long long rule_bytes;
   unsigned long long term_bytes;
   unsigned long long hash_bytes;

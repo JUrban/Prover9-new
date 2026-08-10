@@ -118,6 +118,9 @@ int main(void)
         stats.rule_bytes > 0 && stats.term_bytes > 0 &&
         stats.hash_bytes > 0 && stats.total_bytes > 0,
         "compact byte attribution");
+  CHECK(stats.occurrence_stream_used > 0 &&
+        stats.occurrence_stream_bytes >= stats.occurrence_stream_used,
+        "delta occurrence block accounting is present");
 
   {
     unsigned long long identity = compact_rewrite_identity_hash(bank);
@@ -177,6 +180,41 @@ int main(void)
   }
   destroy_demodulation_index();
   compact_rewrite_free(bank);
+
+  {
+    Compact_rewrite_bank block_bank = compact_rewrite_init();
+    Topform block_rules[300];
+    Topform block_root;
+    struct overlap_result overlap;
+    char text[64];
+    for (i = 0; i < 300; i++) {
+      (void) snprintf(text, sizeof(text), "z%d(f(x)) = x.", i);
+      block_rules[i] = parse_clause_from_string(text);
+      block_rules[i]->id = 10000 + (unsigned long long) i;
+      mark_oriented_eq(block_rules[i]->literals->atom);
+      CHECK(compact_rewrite_add(block_bank, block_rules[i], ORIENTED),
+            "append rewrite occurrence across a block boundary");
+    }
+    block_root = parse_clause_from_string("f(x) = x.");
+    block_root->id = 20000;
+    mark_oriented_eq(block_root->literals->atom);
+    CHECK(compact_rewrite_add(block_bank, block_root, ORIENTED),
+          "add overlap query rule");
+    memset(&overlap, 0, sizeof(overlap));
+    overlap.expected = block_rules[299]->id;
+    compact_rewrite_visit_overlaps(
+      block_bank, block_root->id, note_overlap, &overlap);
+    CHECK(overlap.count == 300 && overlap.found,
+          "multi-block occurrence stream visits every exact overlap");
+    compact_rewrite_get_stats(block_bank, &stats);
+    CHECK(stats.occurrence_stream_used > 0 &&
+          stats.occurrence_stream_bytes >= stats.occurrence_stream_used,
+          "multi-block occurrence byte accounting is exact");
+    compact_rewrite_free(block_bank);
+    for (i = 0; i < 300; i++)
+      delete_clause(block_rules[i]);
+    delete_clause(block_root);
+  }
   free_clock(Index_clock);
 
   if (Failures != 0) {

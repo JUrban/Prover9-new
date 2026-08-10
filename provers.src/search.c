@@ -2842,6 +2842,10 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
               comma_num(s.compact_rewrite_rule_bytes),
               comma_num(s.compact_rewrite_term_bytes),
               comma_num(s.compact_rewrite_hash_bytes));
+      fprintf(fp,
+              "Compact_rewrite_occurrence_stream: used=%s, bytes=%s.\n",
+              comma_num(s.compact_rewrite_occurrence_stream_used),
+              comma_num(s.compact_rewrite_occurrence_stream_bytes));
     }
     fprintf(fp,
             "Passive_refresh: epoch=%u, checks=%s, requeued=%s, "
@@ -2929,6 +2933,10 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             comma_num(s.compact_rewrite_rule_bytes),
             comma_num(s.compact_rewrite_term_bytes),
             comma_num(s.compact_rewrite_hash_bytes));
+    fprintf(fp,
+            "Compact_rewrite_occurrence_stream: used=%s, bytes=%s.\n",
+            comma_num(s.compact_rewrite_occurrence_stream_used),
+            comma_num(s.compact_rewrite_occurrence_stream_bytes));
   }
   if (flag(Opt->compact_unit_subsumption_audit) ||
       flag(Opt->compact_otter_unit_index))
@@ -5447,6 +5455,10 @@ static void update_rewrite_only_stats(void)
   Stats.compact_rewrite_node_bytes = compact.node_bytes;
   Stats.compact_rewrite_posting_bytes = compact.posting_bytes;
   Stats.compact_rewrite_occurrence_bytes = compact.occurrence_bytes;
+  Stats.compact_rewrite_occurrence_stream_used =
+    compact.occurrence_stream_used;
+  Stats.compact_rewrite_occurrence_stream_bytes =
+    compact.occurrence_stream_bytes;
   Stats.compact_rewrite_rule_bytes = compact.rule_bytes;
   Stats.compact_rewrite_term_bytes = compact.term_bytes;
   Stats.compact_rewrite_hash_bytes = compact.hash_bytes;
