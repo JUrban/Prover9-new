@@ -481,6 +481,29 @@ compact-vs-legacy audit pass.  The full proof boundary is the intended
 measurement: only there does the previous 33.6-MB pool contain enough stale
 payload to justify a global rebuild.
 
+That bounded full proof succeeds at the unchanged boundary and validates the
+transaction under real pressure.  It reaches `Given=2,945`,
+`Generated=8,248,032`, and `Kept=272,787`; `prooftrans parents_only`
+reconstructs the same 7,051-step proof through clause `272791 $F`.  One
+coordinated pool compaction fires near given 2,700 and reports 8,865,168 bytes
+reclaimed.  The final rewrite, unit, back-demod, nonunit, and shared-pool
+structures occupy 67,621,976 bytes (64.49 MiB), down 38.3% from the preceding
+proof's 109,582,648 bytes.  All compact-index and archive validation failure
+counts remain zero.
+
+End-to-end time improves to 807.22 user seconds, 95.66 system seconds, and
+903.20 wall seconds.  That is 1.054 times the 765.69-second ordinary proof and
+0.878 times the preceding 919.70-second compact proof.  Peak RSS, however, is
+271,684 KiB: only 2.0% below the preceding 277,160 KiB, and a 50.6% saving
+from old OTTER's 550,400 KiB rather than the required 80--90%.  The ancestor
+store reports nine eviction passes and 377,487,360 cumulative advised bytes,
+but 641,248 later materializations can fault cold MAP_SHARED pages resident
+again.  The small peak-RSS response despite 42.0 MB less final compact
+metadata rejects further index packing as the next radical lever.  The next
+experiment must move the ancestor archive to bounded `pread`/`pwrite` I/O (or
+measure and eliminate coordinated-compaction transient peaks); mapped cold
+pages cannot be treated as nonresident merely because they were advised once.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:
