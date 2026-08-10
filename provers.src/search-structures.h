@@ -90,6 +90,8 @@ struct prover_options {
     compact_otter_demodulation, // compact bank is authoritative in OTTER
     compact_unit_subsumption_audit, // compare stable-ID/legacy unit answers
     compact_otter_unit_index, // pointer-free unit index is authoritative
+    compact_back_demod_audit, // compare stable-ID/legacy redex answers
+    compact_otter_back_demod_index, // pointer-free redex index authoritative
     collective_trace,        // one line per collective batch expansion
     collective_hint_probes,  // one bounded early expansion for hinted givens
     collective_promising_candidates, // raw-weight order within inference set

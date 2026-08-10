@@ -32,6 +32,8 @@
 
 void init_demodulator_index(Mindextype mtype, Uniftype utype, int fpa_depth);
 
+void configure_compact_back_demod(BOOL audit, BOOL authoritative);
+
 void init_back_demod_index(Mindextype mtype, Uniftype utype, int fpa_depth);
 
 void index_demodulator(Topform c, int type, Indexop operation, Clock clock);
@@ -60,6 +62,8 @@ void demodulate_clause_preview(Topform c, int step_limit, int increase_limit,
 Plist back_demodulatable(Topform demod, int type, BOOL lex_order_vars);
 
 void back_demod_idx_report(void);
+
+void fprint_compact_back_demod(FILE *fp);
 
 void write_fpa_back_demod_index(const char *dir);
 

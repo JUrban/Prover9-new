@@ -17,6 +17,7 @@
 */
 
 #include "demodulate.h"
+#include "compact_back_demod.h"
 
 /* Private definitions and types */
 
@@ -25,6 +26,27 @@
 
 static Mindex Demod_idx;
 static Mindex Back_demod_idx;
+static Compact_back_demod_index Compact_back_demod_idx;
+static BOOL Compact_back_demod_audit;
+static BOOL Compact_back_demod_authoritative;
+static unsigned long long Compact_back_demod_failures;
+
+/* PUBLIC */
+void configure_compact_back_demod(BOOL audit, BOOL authoritative)
+{
+  if (Back_demod_idx != NULL || Compact_back_demod_idx != NULL)
+    fatal_error("configure_compact_back_demod: index is live");
+  if (audit && authoritative)
+    fatal_error("configure_compact_back_demod: audit and authoritative modes conflict");
+  Compact_back_demod_audit = audit;
+  Compact_back_demod_authoritative = authoritative;
+  Compact_back_demod_failures = 0;
+}
+
+static BOOL compact_back_demod_mode(void)
+{
+  return Compact_back_demod_audit || Compact_back_demod_authoritative;
+}
 
 /*************
  *
@@ -53,7 +75,10 @@ void init_demodulator_index(Mindextype mtype, Uniftype utype, int fpa_depth)
 /* PUBLIC */
 void init_back_demod_index(Mindextype mtype, Uniftype utype, int fpa_depth)
 {
-  Back_demod_idx = mindex_init(mtype, utype, fpa_depth);
+  Back_demod_idx = Compact_back_demod_authoritative ? NULL :
+    mindex_init(mtype, utype, fpa_depth);
+  Compact_back_demod_idx = compact_back_demod_mode() ?
+    compact_back_demod_init() : NULL;
 }  /* init_back_demod_index */
 
 /*************
@@ -87,7 +112,17 @@ void index_back_demod(Topform c, Indexop operation, Clock clock, BOOL enabled)
 {
   if (enabled) {
     clock_start(clock);
-    index_clause_back_demod(c, Back_demod_idx, operation);
+    if (compact_back_demod_mode()) {
+      BOOL ok = operation == INSERT ?
+        compact_back_demod_add(Compact_back_demod_idx, c) :
+        compact_back_demod_remove(Compact_back_demod_idx, c->id);
+      if (!ok)
+        fatal_error(operation == INSERT ?
+          "index_back_demod: duplicate compact clause" :
+          "index_back_demod: missing compact clause");
+    }
+    if (!Compact_back_demod_authoritative)
+      index_clause_back_demod(c, Back_demod_idx, operation);
     clock_stop(clock);
   }
 }  /* index_back_demod */
@@ -270,8 +305,11 @@ void destroy_demodulation_index(void)
 /* PUBLIC */
 void destroy_back_demod_index(void)
 {
-  mindex_destroy(Back_demod_idx);
+  if (Back_demod_idx != NULL)
+    mindex_destroy(Back_demod_idx);
   Back_demod_idx = NULL;
+  compact_back_demod_free(Compact_back_demod_idx);
+  Compact_back_demod_idx = NULL;
 }  /* destroy_back_demod_index */
 
 /*************
@@ -346,10 +384,93 @@ void demodulate_clause_preview(Topform c, int step_limit, int increase_limit,
 */
 
 /* PUBLIC */
+static Plist compact_back_demodulatable(Topform demod, int type,
+                                        BOOL lex_order_vars)
+{
+  unsigned long long *ids;
+  size_t count = 0, i;
+  Plist answer = NULL, tail = NULL;
+  ids = compact_back_demod_candidate_ids(
+    Compact_back_demod_idx, demod, type, &count);
+  compact_back_demod_note_exact_tests(Compact_back_demod_idx, count);
+  for (i = 0; i < count; i++) {
+    Topform candidate = find_clause_by_id(ids[i]);
+    if (candidate == NULL)
+      fatal_error("compact_back_demodulatable: candidate is not resident");
+    if (rewritable_clause_type(demod, candidate, type, lex_order_vars)) {
+      Plist cell = get_plist();
+      cell->v = candidate;
+      cell->next = NULL;
+      if (tail == NULL)
+        answer = cell;
+      else
+        tail->next = cell;
+      tail = cell;
+    }
+  }
+  safe_free(ids);
+  return answer;
+}
+
+static void audit_back_demod_answer(Topform demod, Plist legacy,
+                                    Plist compact)
+{
+  Plist left = legacy, right = compact;
+  size_t position = 0;
+  while (left != NULL && right != NULL && left->v == right->v) {
+    left = left->next;
+    right = right->next;
+    position++;
+  }
+  if (left != NULL || right != NULL) {
+    Topform lc = left == NULL ? NULL : left->v;
+    Topform cc = right == NULL ? NULL : right->v;
+    Compact_back_demod_failures++;
+    fprintf(stderr,
+            "compact_back_demod_audit: mismatch for demodulator %llu at "
+            "position %lu (legacy=%llu, compact=%llu)\n",
+            demod->id, (unsigned long) position,
+            lc == NULL ? 0 : lc->id, cc == NULL ? 0 : cc->id);
+    fwrite_clause(stderr, demod, CL_FORM_STD);
+    fatal_error("compact back-demodulation audit failed");
+  }
+}
+
+/* PUBLIC */
 Plist back_demodulatable(Topform demod, int type, BOOL lex_order_vars)
 {
-  return back_demod_indexed(demod, type, Back_demod_idx, lex_order_vars);
+  if (Compact_back_demod_authoritative)
+    return compact_back_demodulatable(demod, type, lex_order_vars);
+  else {
+    Plist legacy = back_demod_indexed(
+      demod, type, Back_demod_idx, lex_order_vars);
+    if (Compact_back_demod_audit) {
+      Plist compact = compact_back_demodulatable(
+        demod, type, lex_order_vars);
+      audit_back_demod_answer(demod, legacy, compact);
+      zap_plist(compact);
+    }
+    return legacy;
+  }
 }  /* back_demodulatable */
+
+/* PUBLIC */
+void fprint_compact_back_demod(FILE *fp)
+{
+  struct compact_back_demod_stats stats;
+  if (!compact_back_demod_mode())
+    return;
+  compact_back_demod_get_stats(Compact_back_demod_idx, &stats);
+  fprintf(fp,
+          "Compact_back_demod: mode=%s, failures=%llu, active=%llu, "
+          "peak=%llu, retired=%llu, physical=%llu, queries=%llu, "
+          "candidates=%llu, exact_tests=%llu, bytes=%llu, "
+          "peak_bytes=%llu.\n",
+          Compact_back_demod_authoritative ? "authoritative" : "audit",
+          Compact_back_demod_failures, stats.active, stats.peak,
+          stats.retired, stats.physical, stats.queries, stats.candidates,
+          stats.exact_tests, stats.total_bytes, stats.peak_bytes);
+}
 
 /*************
  *
@@ -363,8 +484,12 @@ Plist back_demodulatable(Topform demod, int type, BOOL lex_order_vars)
 /* PUBLIC */
 void back_demod_idx_report(void)
 {
-  printf("Back demod index: ");
-  p_fpa_density(Back_demod_idx->fpa);
+  if (Compact_back_demod_authoritative)
+    fprint_compact_back_demod(stdout);
+  else {
+    printf("Back demod index: ");
+    p_fpa_density(Back_demod_idx->fpa);
+  }
 }  /* back_demod_idx_report */
 
 /*************
@@ -379,6 +504,8 @@ void write_fpa_back_demod_index(const char *dir)
   char path[600];
   FILE *fp;
 
+  if (Compact_back_demod_authoritative)
+    fatal_error("write_fpa_back_demod_index: compact checkpoint is not implemented");
   snprintf(path, sizeof(path), "%s/fpa_back_demod_index.txt", dir);
   fp = fopen(path, "w");
   if (!fp) return;
@@ -395,6 +522,8 @@ BOOL restore_fpa_back_demod_index(const char *dir)
   FILE *fp;
   BOOL ok;
 
+  if (Compact_back_demod_authoritative)
+    fatal_error("restore_fpa_back_demod_index: compact checkpoint is not implemented");
   snprintf(path, sizeof(path), "%s/fpa_back_demod_index.txt", dir);
   fp = fopen(path, "r");
   if (!fp) return FALSE;
