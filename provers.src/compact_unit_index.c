@@ -7,7 +7,8 @@
 #define CUI_TOMBSTONE UINT64_MAX
 
 struct cui_node {
-  int32_t code;
+  uint32_t token_offset;
+  uint32_t token_length;
   uint32_t first_child;
   uint32_t next_sibling;
   uint32_t first_posting;
@@ -211,7 +212,8 @@ static int code_compare(int32_t a, int32_t b)
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
-static uint32_t new_node(Compact_unit_index index, int32_t code)
+static uint32_t new_node(Compact_unit_index index,
+                         uint32_t token_offset, uint32_t token_length)
 {
   uint32_t node;
   ENSURE_ARRAY(index, nodes, node_count, node_capacity,
@@ -220,32 +222,91 @@ static uint32_t new_node(Compact_unit_index index, int32_t code)
     fatal_error("compact_unit_index: node offsets exceed 32 bits");
   node = (uint32_t) index->node_count++;
   memset(&index->nodes[node], 0, sizeof(index->nodes[node]));
-  index->nodes[node].code = code;
+  index->nodes[node].token_offset = token_offset;
+  index->nodes[node].token_length = token_length;
   return node;
 }
 
-static uint32_t trie_child(Compact_unit_index index, uint32_t parent,
-                           int32_t code)
+static int32_t first_code(Compact_unit_index index, uint32_t node)
 {
-  uint32_t current = index->nodes[parent].first_child;
-  uint32_t previous = CUI_NONE;
-  while (current != CUI_NONE &&
-         code_compare(index->nodes[current].code, code) < 0) {
-    previous = current;
-    current = index->nodes[current].next_sibling;
+  struct cui_node *n = &index->nodes[node];
+  if (n->token_length == 0)
+    fatal_error("compact_unit_index: empty nonroot radix edge");
+  return index->tokens[n->token_offset];
+}
+
+static uint32_t insert_token_path(Compact_unit_index index, uint32_t root,
+                                  uint32_t offset, uint32_t length)
+{
+  uint32_t parent = root;
+  uint32_t position = 0;
+  while (position < length) {
+    uint32_t current = index->nodes[parent].first_child;
+    uint32_t previous = CUI_NONE;
+    int32_t wanted = index->tokens[offset + position];
+    while (current != CUI_NONE &&
+           code_compare(first_code(index, current), wanted) < 0) {
+      previous = current;
+      current = index->nodes[current].next_sibling;
+    }
+    if (current == CUI_NONE || first_code(index, current) != wanted) {
+      uint32_t added = new_node(index, offset + position,
+                                length - position);
+      if (previous == CUI_NONE) {
+        index->nodes[added].next_sibling =
+          index->nodes[parent].first_child;
+        index->nodes[parent].first_child = added;
+      }
+      else {
+        index->nodes[added].next_sibling =
+          index->nodes[previous].next_sibling;
+        index->nodes[previous].next_sibling = added;
+      }
+      return added;
+    }
+    else {
+      uint32_t old_offset = index->nodes[current].token_offset;
+      uint32_t old_length = index->nodes[current].token_length;
+      uint32_t common = 0;
+      while (common < old_length && position + common < length &&
+             index->tokens[old_offset + common] ==
+             index->tokens[offset + position + common])
+        common++;
+      if (common == old_length) {
+        position += common;
+        parent = current;
+      }
+      else {
+        uint32_t old_next = index->nodes[current].next_sibling;
+        uint32_t split = new_node(index, old_offset, common);
+        uint32_t added;
+        if (common == 0)
+          fatal_error("compact_unit_index: invalid zero-length radix split");
+        index->nodes[split].next_sibling = old_next;
+        if (previous == CUI_NONE)
+          index->nodes[parent].first_child = split;
+        else
+          index->nodes[previous].next_sibling = split;
+        index->nodes[current].token_offset += common;
+        index->nodes[current].token_length -= common;
+        index->nodes[current].next_sibling = CUI_NONE;
+        index->nodes[split].first_child = current;
+        position += common;
+        if (position == length)
+          return split;
+        added = new_node(index, offset + position, length - position);
+        if (code_compare(first_code(index, added),
+                         first_code(index, current)) < 0) {
+          index->nodes[added].next_sibling = current;
+          index->nodes[split].first_child = added;
+        }
+        else
+          index->nodes[current].next_sibling = added;
+        return added;
+      }
+    }
   }
-  if (current != CUI_NONE && index->nodes[current].code == code)
-    return current;
-  current = new_node(index, code);
-  if (previous == CUI_NONE) {
-    index->nodes[current].next_sibling = index->nodes[parent].first_child;
-    index->nodes[parent].first_child = current;
-  }
-  else {
-    index->nodes[current].next_sibling = index->nodes[previous].next_sibling;
-    index->nodes[previous].next_sibling = current;
-  }
-  return current;
+  return parent;
 }
 
 static uint32_t append_tokens(Compact_unit_index index, Term atom,
@@ -288,12 +349,9 @@ static uint32_t append_tokens(Compact_unit_index index, Term atom,
 static void index_record(Compact_unit_index index, uint32_t record)
 {
   struct cui_record *r = &index->records[record];
-  uint32_t node = index->roots[r->sign ? 1 : 0];
+  uint32_t node = insert_token_path(
+    index, index->roots[r->sign ? 1 : 0], r->token_offset, r->token_length);
   uint32_t posting;
-  uint32_t i;
-  for (i = 0; i < r->token_length; i++)
-    node = trie_child(index, node,
-                      index->tokens[r->token_offset + i]);
   ENSURE_ARRAY(index, postings, posting_count, posting_capacity,
                "compact_unit_index: posting overflow");
   if (index->posting_count > UINT32_MAX)
@@ -311,9 +369,9 @@ static void index_record(Compact_unit_index index, uint32_t record)
 Compact_unit_index compact_unit_index_init(void)
 {
   Compact_unit_index index = safe_calloc(1, sizeof(*index));
-  (void) new_node(index, 0);  /* reserved null node */
-  index->roots[0] = new_node(index, 0);
-  index->roots[1] = new_node(index, 0);
+  (void) new_node(index, 0, 0);  /* reserved null node */
+  index->roots[0] = new_node(index, 0, 0);
+  index->roots[1] = new_node(index, 0, 0);
   ENSURE_ARRAY(index, postings, posting_count, posting_capacity,
                "compact_unit_index: posting overflow");
   memset(&index->postings[0], 0, sizeof(index->postings[0]));
@@ -406,6 +464,50 @@ static void flatten_query(Compact_unit_index index, Term term,
   index->query[at].end = (uint32_t) *count;
 }
 
+static BOOL match_generalization_edge(
+  Compact_unit_index index, uint32_t node, uint32_t position, uint32_t end,
+  Term *bindings, unsigned *new_bindings, unsigned *new_count,
+  uint32_t *next_position)
+{
+  struct cui_node *edge = &index->nodes[node];
+  uint32_t i;
+  *new_count = 0;
+  for (i = 0; i < edge->token_length; i++) {
+    int32_t code = index->tokens[edge->token_offset + i];
+    Term query_term;
+    if (position >= end)
+      return FALSE;
+    query_term = index->query[position].term;
+    if (code < 0) {
+      unsigned variable = (unsigned) (-code - 1);
+      if (variable >= MAX_VARS)
+        fatal_error("compact_unit_index: variable exceeds MAX_VARS");
+      if (bindings[variable] == NULL) {
+        bindings[variable] = query_term;
+        new_bindings[(*new_count)++] = variable;
+      }
+      else if (!term_ident(bindings[variable], query_term))
+        return FALSE;
+      position = index->query[position].end;
+    }
+    else {
+      if (VARIABLE(query_term) || SYMNUM(query_term) != code)
+        return FALSE;
+      position++;
+    }
+  }
+  *next_position = position;
+  return TRUE;
+}
+
+static void undo_generalization_bindings(Term *bindings,
+                                         const unsigned *new_bindings,
+                                         unsigned new_count)
+{
+  while (new_count != 0)
+    bindings[new_bindings[--new_count]] = NULL;
+}
+
 static unsigned long long generalization_rec(
   Compact_unit_index index, uint32_t node, uint32_t position,
   uint32_t end, Term *bindings, unsigned long long exclude_id)
@@ -424,28 +526,16 @@ static unsigned long long generalization_rec(
   }
   for (child = index->nodes[node].first_child; child != CUI_NONE;
        child = index->nodes[child].next_sibling) {
-    int32_t code = index->nodes[child].code;
-    Term query_term = index->query[position].term;
+    unsigned new_bindings[MAX_VARS];
+    unsigned new_count = 0;
+    uint32_t next_position = position;
     unsigned long long found = 0;
-    if (code < 0) {
-      int variable = -code - 1;
-      BOOL newly_bound = FALSE;
-      if (variable >= MAX_VARS)
-        fatal_error("compact_unit_index: variable exceeds MAX_VARS");
-      if (bindings[variable] == NULL) {
-        bindings[variable] = query_term;
-        newly_bound = TRUE;
-      }
-      if (newly_bound || term_ident(bindings[variable], query_term))
-        found = generalization_rec(index, child,
-                                   index->query[position].end, end,
-                                   bindings, exclude_id);
-      if (newly_bound)
-        bindings[variable] = NULL;
-    }
-    else if (!VARIABLE(query_term) && SYMNUM(query_term) == code)
-      found = generalization_rec(index, child, position + 1, end,
+    if (match_generalization_edge(index, child, position, end, bindings,
+                                  new_bindings, &new_count,
+                                  &next_position))
+      found = generalization_rec(index, child, next_position, end,
                                  bindings, exclude_id);
+    undo_generalization_bindings(bindings, new_bindings, new_count);
     if (found != 0)
       return found;
   }
