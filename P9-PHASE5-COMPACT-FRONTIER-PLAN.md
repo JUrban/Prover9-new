@@ -131,6 +131,26 @@ holds 1,048,576 tokens and its proof-ID directory uses another 1,048,576
 bytes.  This capacity slack, per-index stable-record tables, and repeated
 posting metadata are now larger targets than private token copies.
 
+Exact opt-in instrumentation (`set(compact_term_sharing_stats)`) now bounds
+the cross-clause opportunity instead of assuming it.  At 300 givens, 115,486
+subterm occurrences contain 16,185 unique terms; at 1,000 givens, 728,510
+occurrences contain 91,686 unique terms (87.4% duplicate occurrences).  A
+variable-record canonical DAG whose term ID is its word offset would need
+1,304,344 logical bytes for symbol words, child IDs, and clause atom roots at
+1,000 givens, versus the current 4,194,304-byte token capacity.  This
+2,889,960-byte difference is an upper bound, not a promised saving: a live
+production hash-cons table, fingerprints, and arena slack must be included.
+The diagnostic table itself is reported separately and is never enabled in
+ordinary CPU/RSS measurements.
+
+The other immediate large target is the redex posting directory.  Its 152,909
+logical `(symbol, clause)` groups occupy 3,672,064 bytes at 1,000 givens
+because each group is a 12-byte linked record in a doubled array.  A
+per-symbol block stream can delta-varint the monotonically increasing record
+and occurrence positions while retaining insertion traversal.  This avoids
+coupling the first production reduction to the much broader DAG matcher
+rewrite.
+
 ### Next radical index reduction
 
 The next implementation slice is structural, not another cache-size tweak:
