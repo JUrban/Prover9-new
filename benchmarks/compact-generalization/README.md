@@ -546,3 +546,68 @@ not a proposed default.  The conservative default 8 remains frozen for the
 Setting `P9_MATRIX_ALLOW_HOLDOUT=1` is required even when a holdout case is
 named explicitly.  Do this only for a recorded phase-promotion commit, never
 while selecting features or thresholds.
+
+## Frozen 300-given holdout result
+
+The product candidate was frozen at commit `1319fbf` before the four declared
+holdouts were opened.  The one-shot comparison used
+`compact_dense_file_code_tree` as the same-representation control and
+`compact_dense_file_code_tree_nonunit_path` as the candidate.  Both sides
+therefore retained dense passive/file ancestor storage, packed-fast hints,
+compact demodulation, the shared unit code tree, and the complete `mask8`
+backward-demodulation fallback.  The only paired difference was the safe
+nonunit path filter.  Runs were sequential and limited to 300 given clauses,
+120 CPU seconds, 150 wall seconds, and 2,048 MiB per process:
+
+```sh
+P9_MATRIX_ALLOW_HOLDOUT=1 \
+P9_MATRIX_CASES='aa-to-nil3 tlr-properties-2 ak2eq-1243 aa1-45-b' \
+P9_MATRIX_VARIANTS='compact_dense_file_code_tree compact_dense_file_code_tree_nonunit_path' \
+P9_MATRIX_MAX_GIVEN=300 \
+P9_MATRIX_MAX_SECONDS=120 \
+P9_MATRIX_MAX_MEGS=2048 \
+P9_MATRIX_WALL_SECONDS=150 \
+  test.src/compact_generalization_matrix.sh /tmp/p9-general-holdout-1319fbf-300
+```
+
+All eight runs stopped normally at the same 301-given boundary.  Every pair
+had identical generated, kept, usable, SOS, disabled, and proof counts:
+
+| holdout | generated | kept | control/candidate user CPU (s) | CPU change | control/candidate RSS (KiB) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `aa-to-nil3` | 311,676 | 595 | 16.26 / 16.31 | +0.31% | 28,800 / 28,928 |
+| `tlr-properties-2` | 253,927 | 569 | 10.04 / 10.56 | +5.18% | 20,992 / 20,864 |
+| `ak2eq-1243` | 246,166 | 547 | 12.96 / 11.60 | -10.49% | 23,664 / 23,660 |
+| `aa1-45-b` | 281,798 | 564 | 10.96 / 10.95 | -0.09% | 22,016 / 22,016 |
+
+The candidate/control user-CPU geometric mean was 0.986.  Across all four
+cases, nonunit exact tests fell from 14,986 to 1,730 (-88.46%) and archive
+materializations from 2,123 to 706 (-66.75%).  Aggregate nonunit-index bytes
+rose from 2,064,256 to 2,080,640 (+0.79%); each case paid exactly one 4,096-byte
+structural-summary allocation.  Peak RSS varied by at most 128 KiB.  These
+results were inspected only after the algorithm, bit budgets, and defaults had
+been frozen; no holdout-derived tuning followed.
+
+For traceability, the SHA-256 digests of the generated summary, profile table,
+and run configuration were respectively
+`ca30017f53c9c3a524edf257ce615678e059263852d8f3470ba4a675c4d11421`,
+`18ad1f61c712dbdaa46a60ae7673048eef5ef6ae004399ff20ea9657eadede0d`, and
+`681b9e75be8eb3ab6faa82c5170dc4addefc994767b85cd029cac691c2cde38f`.
+The result directory was deliberately kept outside the repository because it
+contains full generated inputs and outputs; this section records the stable
+configuration and aggregate evidence.
+
+Before this gate, `make test1`, `make hint-postings-test`,
+`make compact-frontier-tests`, and `make compact-generalization-smoke` passed.
+The first aggregate invocation found an old ASan/UBSan-compiled
+`test.src/compact_unit_index_test.o` being linked without sanitizer runtimes.
+Removing generated `test.src/*.o` files and rebuilding made every compact test
+pass; no source change was needed.  This is recorded to distinguish a stale
+mixed-instrumentation build artifact from a product defect.
+
+This is a successful short-prefix holdout gate, not general production
+acceptance.  The 1,000-given holdout tier and the long 2,945/11,000-given,
+Osborn, AAPERM, and multi-million-passive comparisons remain for a suitable
+host.  In particular, the 80--90% total-job RAM target must still be measured
+against old P9 with RSS/PSS, archive disk use, and cgroup file cache counted
+separately; these 20--29 MiB prefixes cannot establish that claim.
