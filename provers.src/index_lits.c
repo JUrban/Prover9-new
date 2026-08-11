@@ -42,6 +42,7 @@ static unsigned long long Compact_nonunit_forward_exact_tests;
 static unsigned long long Compact_nonunit_back_exact_tests;
 static Clock Compact_nonunit_exact_clock;
 static Clock Compact_nonunit_materialize_clock;
+static Clock Compact_nonunit_summary_clock;
 static Compact_clause_resolver Compact_clause_resolve;
 static Compact_clause_releaser Compact_clause_release;
 static void *Compact_clause_context;
@@ -206,8 +207,10 @@ void fprint_compact_nonunit_index(FILE *fp)
                          &stats.back_profile, stats.back_lookup_seconds);
   fprintf(fp,
           "Compact_index_timing: component=nonunit, "
-          "forward_lookup_seconds=%.3f, back_lookup_seconds=%.3f, "
+          "summary_seconds=%.3f, forward_lookup_seconds=%.3f, "
+          "back_lookup_seconds=%.3f, "
           "exact_seconds=%.3f, materialize_seconds=%.3f.\n",
+          clock_seconds(Compact_nonunit_summary_clock),
           stats.forward_lookup_seconds, stats.back_lookup_seconds,
           clock_seconds(Compact_nonunit_exact_clock),
           clock_seconds(Compact_nonunit_materialize_clock));
@@ -544,6 +547,7 @@ void init_literals_index(int depth)
     Compact_nonunit_exact_clock = clock_init("compact_nonunit_exact");
     Compact_nonunit_materialize_clock =
       clock_init("compact_nonunit_materialize");
+    Compact_nonunit_summary_clock = clock_init("compact_nonunit_summary");
   }
 }  /* init_lits_index */
 
@@ -577,6 +581,8 @@ void destroy_literals_index(void)
   free_clock(Compact_nonunit_exact_clock); Compact_nonunit_exact_clock = NULL;
   free_clock(Compact_nonunit_materialize_clock);
   Compact_nonunit_materialize_clock = NULL;
+  free_clock(Compact_nonunit_summary_clock);
+  Compact_nonunit_summary_clock = NULL;
 }  /* lits_destroy_index */
 
 /*************
@@ -617,8 +623,11 @@ void index_literals(Topform c, Indexop op, Clock clock, BOOL no_fapl)
     if (compact_nonunit_index_mode()) {
       struct compact_feature_structural_summary structural;
       memset(&structural, 0, sizeof(structural));
-      if (Compact_nonunit_path_filter && op == INSERT)
+      if (Compact_nonunit_path_filter && op == INSERT) {
+        clock_start(Compact_nonunit_summary_clock);
         structural = compact_feature_clause_summary(c);
+        clock_stop(Compact_nonunit_summary_clock);
+      }
       BOOL ok = op == INSERT ?
         compact_feature_index_add(
           Compact_nonunits, c->id, f, structural) :
@@ -795,8 +804,11 @@ static Topform compact_nonunit_forward_subsumption(Topform query)
   size_t count = 0, i, exact = 0, materialized = 0;
   Topform result = NULL;
   memset(&structural, 0, sizeof(structural));
-  if (Compact_nonunit_path_filter)
+  if (Compact_nonunit_path_filter) {
+    clock_start(Compact_nonunit_summary_clock);
     structural = compact_feature_clause_summary(query);
+    clock_stop(Compact_nonunit_summary_clock);
+  }
   ids = compact_feature_forward_candidates(
     Compact_nonunits, vector, structural, &count);
   for (i = 0; i < count && result == NULL; i++) {
@@ -833,8 +845,11 @@ static Plist compact_nonunit_back_subsumption(Topform query)
   size_t count = 0, i, exact = 0, successes = 0, materialized = 0;
   Plist result = NULL;
   memset(&structural, 0, sizeof(structural));
-  if (Compact_nonunit_path_filter)
+  if (Compact_nonunit_path_filter) {
+    clock_start(Compact_nonunit_summary_clock);
     structural = compact_feature_clause_summary(query);
+    clock_stop(Compact_nonunit_summary_clock);
+  }
   ids = compact_feature_back_candidates(
     Compact_nonunits, vector, structural, &count);
   for (i = 0; i < count; i++) {

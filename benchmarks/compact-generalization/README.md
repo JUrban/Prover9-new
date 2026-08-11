@@ -367,6 +367,31 @@ rigid facts remove only about half the reconstructions, the next prototype
 must address variable consistency and literal compatibility rather than tune
 the Bloom hash to one problem.
 
+That semantic extension stores a separate 32-bit mask of equality constraints
+between every pair of paths carrying the same pattern variable.  A target
+clause stores a 32-bit mask of path pairs whose resident subterms are
+identical.  The two masks are deliberately independent of the rigid mask:
+their collisions can retain extra candidates but cannot satisfy a missing
+rigid fact.  Predicate/sign/path locations omit literal ordinal because
+Prover9's nonunit subsumption is allowed to reuse one target literal.  The
+100-given Osborn dual-index audit compared 1,535 forward and 1,235 backward
+queries with the legacy tree and reported zero answer/order failures.
+
+The repeated-variable layer passes the 300-given dense Phase-4 materialization
+gate on all three measured training problems.  Osborn nonunit materializations
+fell from 15,750 to 328 (-97.92%), `chat-new-11k` from 14,443 to 239
+(-98.35%), and the 100-given mbol check from 191 to 8 (-95.81%).  Osborn and
+chat nonunit-index bytes rose from 193,248 to 209,120 (+8.21%); mbol rose from
+145,120 to 147,168 (+1.41%).  The paired end-to-end user times were
+17.51/17.39, 4.77/4.87, and 2.67/2.87 seconds respectively, so this prefix
+supports the materialization and memory claims but is too small and noisy for
+a CPU-speedup claim.  An explicit summary clock reports only 0.014 seconds on
+Osborn, 0.005 on chat, and below 0.001 on nil3 at 100 givens.
+
+The path filter remains opt-in pending larger training checkpoints and the
+holdout phase.  Its rules and fixed bit budgets come from matching semantics,
+not from Osborn symbols, hint IDs, or fitted work thresholds.
+
 Setting `P9_MATRIX_ALLOW_HOLDOUT=1` is required even when a holdout case is
 named explicitly.  Do this only for a recorded phase-promotion commit, never
 while selecting features or thresholds.
