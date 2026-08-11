@@ -433,6 +433,31 @@ CPU-speedup claim is made.  Peak RSS changed by at most 132 KiB.  These
 results authorize the bounded 1,000-given training checkpoint; they do not
 open the holdout suite.
 
+The candidate commit passes the 1,000-given four-category training gate with
+sampled packed-hint timing enabled.  All enabled/disabled pairs again have
+identical given/generated/kept and rule counters.  Osborn nonunit
+materializations fell from 56,286 to 1,255 (-97.77%) and chat from 56,120 to
+1,069 (-98.10%); exact nonunit tests fell from 74,374 to 5,167 and 75,171 to
+5,142 respectively.  Nil3 exact tests fell from 9,478 to 812, with 712 true
+positives, and mbol from 9,265 to 827, with 776 true positives.  The remaining
+work is therefore close to the irreducible answer sets on all four workloads.
+
+Nonunit-index bytes changed from 447,200 to 479,456 (+7.21%) on both rewrite
+cases, from 568,032 to 575,712 (+1.35%) on nil3, and from 573,664 to 581,856
+(+1.43%) on mbol.  Whole-process peak RSS changed by 0, +120, -128, and
+-128 KiB respectively.  Sequential control/filter user CPU was 89.84/84.70
+seconds on Osborn, 44.54/45.75 on chat, 53.54/53.07 on nil3, and 57.07/57.56
+on mbol.  Thus the worst individual change is +2.72%, well inside the 10%
+no-demodulation and 20% phase gates; the directions are small enough that no
+general speedup is claimed.
+
+The default observed-work hint rebuild also exercised real maintenance at
+this boundary without changing semantics.  Osborn performed four storage and
+one scan trigger, spending about 1.48 seconds in rebuilds; chat performed one
+scan trigger and no storage trigger, spending about 0.09 seconds.  Nil3 and
+mbol created no stale hint references and remained inert.  This is the
+intended workload-adaptive behavior.
+
 Phase 5 removes the single-workload constants from the `packed_fast` match
 cache.  The historical `chat_test.new.out3.gz` cache occupied 2,228,224 bytes,
 accepted at most eight structural keys, rejected 399,668 longer profiles, and
