@@ -2141,6 +2141,7 @@ Prover_options init_prover_options(void)
   p->hint_sweep_interval = init_parm("hint_sweep_interval", 1000,     1,INT_MAX);
   p->hint_expiry_min =    init_parm("hint_expiry_min",       1,      1,INT_MAX);
   p->hints_fpa_depth =    init_parm("hints_fpa_depth",      10,      1,    100);
+  p->hint_cache_kb =      init_parm("hint_cache_kb",      2048,      0,INT_MAX);
   p->rewrite_refresh_hot_ratio =
     init_parm("rewrite_refresh_hot_ratio", 7, 0, INT_MAX);
   p->rewrite_refresh_raw_budget =
@@ -10796,6 +10797,7 @@ void index_and_process_initial_clauses(void)
 	     packed_hint_bank_mode(),
 	     better_packed_hint_mode(),
 	     fast_packed_hint_mode(),
+	     (unsigned) parm(Opt->hint_cache_kb),
 	     current_demodulate_clause);
   set_hint_match_stats(flag(Opt->hint_match_stats));
   set_hint_match_once(flag(Opt->hint_match_once));
@@ -15266,6 +15268,7 @@ void load_checkpoint_into_loop(void)
              packed_hint_bank_mode(),
              better_packed_hint_mode(),
              fast_packed_hint_mode(),
+             (unsigned) parm(Opt->hint_cache_kb),
              current_demodulate_clause);
   set_hint_match_stats(flag(Opt->hint_match_stats));
   set_hint_match_once(flag(Opt->hint_match_once));

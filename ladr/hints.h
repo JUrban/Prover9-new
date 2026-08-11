@@ -41,6 +41,7 @@ void init_hints(Uniftype utype,
 		BOOL packed_index,
 		BOOL better_packed_index,
 		BOOL fast_packed_index,
+		unsigned fast_cache_kb,
 		void (*demod_proc) (Topform, int, int, BOOL, BOOL));
 
 void done_with_hints(void);

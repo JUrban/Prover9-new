@@ -392,6 +392,40 @@ The path filter remains opt-in pending larger training checkpoints and the
 holdout phase.  Its rules and fixed bit budgets come from matching semantics,
 not from Osborn symbols, hint IDs, or fitted work thresholds.
 
+Phase 5 removes the single-workload constants from the `packed_fast` match
+cache.  The historical `chat_test.new.out3.gz` cache occupied 2,228,224 bytes,
+accepted at most eight structural keys, rejected 399,668 longer profiles, and
+still avoided 2.63 billion posting candidates.  The cache is therefore useful,
+but the compiled-in shape was not a general policy.
+
+`hint_cache_kb` now supplies an explicit total cache budget (default 2,048;
+zero disables it).  The allocation contains a power-of-two direct table and a
+bounded ring of complete variable-length profile keys.  Each ring cell records
+its owning table slot.  On wrap, overwriting a key range invalidates only live
+entries that overlap that range; it does not flush the whole cache.  A profile
+larger than the entire arena follows the unchanged posting path.  Candidate
+vectors remain capped at eight because broad result sets are deliberately not
+cached; this affects speed only, never authoritative matching.  Statistics
+report the exact budget/allocation, key distribution, wraps, overlap
+invalidations, and both overflow reasons.
+
+The focused test constructs a profile longer than the former eight-key cap,
+checks that it is cached completely with no key overflow, verifies the match,
+and checks a 64-KiB allocation against the reported byte total.  The complete
+FPA/packed/packed-fast/hybrid trace suite, equality flips, `_AnyConst`, and
+side-effect-free preview tests agree.
+
+At 300 givens, both Osborn and `chat-new-11k` reached nine-key profiles.  With
+a 512-KiB ring, chat used 524,284 bytes, hit 35.93% of 37,694 queries, wrapped
+five times, and invalidated 2,151 overlapping entries; Osborn hit 34.62% of
+34,872 queries with three wraps and 1,323 overlap invalidations.  The earlier
+same-build budget sweep measured 37.75% and 34.97% hit rates at 2 MiB, only
+about two and 0.4 percentage points above 512 KiB respectively.  End-to-end
+times at this prefix remain noise-dominated.  The 2-MiB default is retained
+for the long training checkpoint because the historical run had a much larger
+working set; users can now make the RAM/CPU tradeoff explicitly rather than
+recompile a CHAT-derived table.
+
 Setting `P9_MATRIX_ALLOW_HOLDOUT=1` is required even when a holdout case is
 named explicitly.  Do this only for a recorded phase-promotion commit, never
 while selecting features or thresholds.

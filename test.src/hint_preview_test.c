@@ -21,7 +21,7 @@ static void run_case(BOOL packed, BOOL better, BOOL fast, int bsub)
   Attribute candidate_attributes = candidate->attributes;
 
   hint->attributes = set_int_attribute(hint->attributes, bsub, 7);
-  init_hints(ORDINARY_UNIF, bsub, FALSE, FALSE, 2, packed, better, fast,
+  init_hints(ORDINARY_UNIF, bsub, FALSE, FALSE, 2, packed, better, fast, 2048,
              NULL);
   index_hint(hint);
   epoch_before = hint_state_epoch();
@@ -62,6 +62,57 @@ static void run_case(BOOL packed, BOOL better, BOOL fast, int bsub)
   delete_clause(hint);
 }
 
+static void run_variable_cache_case(int bsub)
+{
+  const char *text = "cache_probe(wide(a,b,c,d,e,f,g,h,i,j)).";
+  Topform hint = parse_clause_from_string((char *) text);
+  Topform first = parse_clause_from_string((char *) text);
+  Topform second = parse_clause_from_string((char *) text);
+  unsigned long long maximum_keys = 0;
+  unsigned long long cache_bytes = 0;
+  BOOL saw_cache = FALSE, saw_no_overflow = FALSE;
+  FILE *stats = tmpfile();
+  char line[4096];
+
+  hint->attributes = set_int_attribute(hint->attributes, bsub, 5);
+  init_hints(ORDINARY_UNIF, bsub, FALSE, FALSE, 2,
+             TRUE, TRUE, TRUE, 64, NULL);
+  index_hint(hint);
+  adjust_weight_with_hints(first, FALSE, FALSE);
+  adjust_weight_with_hints(second, FALSE, FALSE);
+  CHECK(first->matching_hint == hint && second->matching_hint == hint,
+        "variable-length cache preserves authoritative matches");
+  CHECK(stats != NULL, "open cache statistics stream");
+  if (stats != NULL) {
+    fprint_packed_hint_operation_stats(stats);
+    rewind(stats);
+    while (fgets(line, sizeof(line), stats) != NULL) {
+      char *maximum = strstr(line, "max_keys=");
+      char *table = strstr(line, "table_bytes=");
+      if (strstr(line, "Packed_fast_cache:") != NULL) {
+        saw_cache = TRUE;
+        saw_no_overflow = strstr(line, "key_overflow=0,") != NULL;
+      }
+      if (maximum != NULL)
+        (void) sscanf(maximum, "max_keys=%llu", &maximum_keys);
+      if (table != NULL)
+        (void) sscanf(table, "table_bytes=%llu", &cache_bytes);
+    }
+    fclose(stats);
+  }
+  CHECK(saw_cache && saw_no_overflow,
+        "complete cache key fits without a fixed-profile overflow");
+  CHECK(maximum_keys > 8,
+        "cache accepts a complete profile beyond the former eight-key cap");
+  CHECK(cache_bytes <= 64 * 1024 && cache_bytes > 0,
+        "fast cache allocation obeys its KiB budget");
+  unindex_hint(hint);
+  done_with_hints();
+  delete_clause(first);
+  delete_clause(second);
+  delete_clause(hint);
+}
+
 int main(void)
 {
   init_standard_ladr();
@@ -71,6 +122,7 @@ int main(void)
   run_case(TRUE, FALSE, FALSE, bsub);
   run_case(TRUE, TRUE, FALSE, bsub);
   run_case(TRUE, TRUE, TRUE, bsub);
+  run_variable_cache_case(bsub);
   if (Failures != 0) {
     fprintf(stderr, "hint_preview_test: %d failure(s)\n", Failures);
     return 1;

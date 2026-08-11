@@ -120,11 +120,6 @@ static unsigned Preview_key_scratch_capacity = 0;
    invalidate possible additions, so neither hash collisions nor unrelated
    hint mutations can cause an unsafe omission. */
 
-#define FAST_MATCH_CACHE_CAPACITY 16384U
-/* CHAT profiling shows that eight exact feature keys cover 98.7% of fast
-   queries at 1,000 givens.  Larger profiles simply take the unchanged exact
-   posting intersection; they never enter a truncated cache identity. */
-#define FAST_MATCH_CACHE_KEYS 8U
 #define FAST_MATCH_CACHE_CANDIDATES 8U
 #define FAST_DENSE_MIN_POSTING 512U
 #define FAST_DENSE_MAX_KEYS 64U
@@ -133,17 +128,23 @@ struct fast_match_cache_entry {
   unsigned long long seed_key;
   unsigned long long seed_generation;
   unsigned long long first_mask;
-  unsigned long long keys[FAST_MATCH_CACHE_KEYS];
   unsigned long long source_posting_candidates;
+  uint32_t key_offset;
+  uint32_t key_count;
   unsigned candidates[FAST_MATCH_CACHE_CANDIDATES];
   unsigned short positive;
   unsigned short negative;
-  unsigned char key_count;
   unsigned char candidate_count;
   unsigned char valid;
 };
 
 static struct fast_match_cache_entry *Fast_match_cache = NULL;
+static unsigned Fast_match_cache_capacity = 0;
+static unsigned long long *Fast_match_cache_keys = NULL;
+static uint32_t *Fast_match_cache_key_owners = NULL;
+static size_t Fast_match_cache_key_count = 0;
+static size_t Fast_match_cache_key_capacity = 0;
+static unsigned long long Fast_match_cache_budget = 0;
 static unsigned long long Fast_cache_queries = 0;
 static unsigned long long Fast_cache_eligible = 0;
 static unsigned long long Fast_cache_hits = 0;
@@ -154,6 +155,10 @@ static unsigned long long Fast_cache_candidate_overflow = 0;
 static unsigned long long Fast_cache_posting_candidates_avoided = 0;
 static unsigned long long Fast_cache_dependency_misses = 0;
 static unsigned long long Fast_cache_profile_misses = 0;
+static unsigned long long Fast_cache_arena_resets = 0;
+static unsigned long long Fast_cache_overlap_invalidations = 0;
+static unsigned long long Fast_cache_profile_keys = 0;
+static unsigned long long Fast_cache_key_max = 0;
 static unsigned long long Fast_dense_queries = 0;
 static unsigned long long Fast_dense_used = 0;
 static unsigned long long Fast_sparse_used = 0;
@@ -173,7 +178,12 @@ static void fast_cache_invalidate_all(void)
 {
   if (Fast_match_cache != NULL)
     memset(Fast_match_cache, 0,
-           (size_t) FAST_MATCH_CACHE_CAPACITY * sizeof(*Fast_match_cache));
+           (size_t) Fast_match_cache_capacity * sizeof(*Fast_match_cache));
+  if (Fast_match_cache_key_owners != NULL)
+    memset(Fast_match_cache_key_owners, 0,
+           Fast_match_cache_key_capacity *
+             sizeof(*Fast_match_cache_key_owners));
+  Fast_match_cache_key_count = 0;
 }
 
 #define BETTER_FEATURE_BACK 1U
@@ -1210,23 +1220,23 @@ static unsigned long long fast_profile_hash(
   return h ^ (h >> 31);
 }
 
-static BOOL fast_canonical_profile(unsigned long long *keys,
+static int fast_key_order(const void *a, const void *b)
+{
+  unsigned long long x = *(const unsigned long long *) a;
+  unsigned long long y = *(const unsigned long long *) b;
+  return x < y ? -1 : x > y ? 1 : 0;
+}
+
+static BOOL fast_canonical_profile(const unsigned long long **keys,
                                    unsigned *key_count)
 {
-  unsigned i;
-  if (Better_key_scratch_count > FAST_MATCH_CACHE_KEYS)
+  if (Fast_match_cache == NULL)
     return FALSE;
   *key_count = Better_key_scratch_count;
-  for (i = 0; i < *key_count; i++) {
-    unsigned j = i;
-    keys[i] = Better_key_scratch[i];
-    while (j > 0 && keys[j-1] > keys[j]) {
-      unsigned long long tmp = keys[j-1];
-      keys[j-1] = keys[j];
-      keys[j] = tmp;
-      j--;
-    }
-  }
+  if (*key_count > 1)
+    qsort(Better_key_scratch, *key_count,
+          sizeof(*Better_key_scratch), fast_key_order);
+  *keys = Better_key_scratch;
   return TRUE;
 }
 
@@ -1237,7 +1247,7 @@ static struct fast_match_cache_entry *fast_cache_slot(
   unsigned long long hash = fast_profile_hash(
     keys, key_count, first_mask, positive, negative);
   return Fast_match_cache +
-    ((unsigned) hash & (FAST_MATCH_CACHE_CAPACITY - 1));
+    ((unsigned) hash & (Fast_match_cache_capacity - 1));
 }
 
 static BOOL fast_cache_lookup(
@@ -1250,11 +1260,14 @@ static BOOL fast_cache_lookup(
   if (!Hint_preview_active) {
     Fast_cache_queries++;
     Fast_cache_eligible++;
+    Fast_cache_profile_keys += key_count;
+    if (key_count > Fast_cache_key_max)
+      Fast_cache_key_max = key_count;
   }
   if (!e->valid || e->first_mask != first_mask ||
       e->positive != positive || e->negative != negative ||
       e->key_count != key_count ||
-      memcmp(e->keys, keys,
+      memcmp(Fast_match_cache_keys + e->key_offset, keys,
              (size_t) key_count * sizeof(unsigned long long)) != 0) {
     if (!Hint_preview_active) {
       Fast_cache_misses++;
@@ -1295,7 +1308,34 @@ static void fast_cache_store(
     Fast_cache_candidate_overflow++;
     return;
   }
+  if ((size_t) key_count > Fast_match_cache_key_capacity) {
+    Fast_cache_key_overflow++;
+    return;
+  }
+  if (Fast_match_cache_key_count + key_count >
+      Fast_match_cache_key_capacity) {
+    Fast_match_cache_key_count = 0;
+    Fast_cache_arena_resets++;
+  }
   e = fast_cache_slot(keys, key_count, first_mask, positive, negative);
+  if (key_count != 0) {
+    size_t slot = (size_t) (e - Fast_match_cache);
+    size_t position;
+    for (position = Fast_match_cache_key_count;
+         position < Fast_match_cache_key_count + key_count; position++) {
+      uint32_t owner = Fast_match_cache_key_owners[position];
+      if (owner != 0 && owner - 1 < Fast_match_cache_capacity) {
+        struct fast_match_cache_entry *overlap =
+          Fast_match_cache + (owner - 1);
+        if (overlap->valid && position >= overlap->key_offset &&
+            position < (size_t) overlap->key_offset + overlap->key_count) {
+          overlap->valid = 0;
+          Fast_cache_overlap_invalidations++;
+        }
+      }
+      Fast_match_cache_key_owners[position] = (uint32_t) slot + 1;
+    }
+  }
   memset(e, 0, sizeof(*e));
   if (key_count == 0)
     e->seed_generation = Hint_state_epoch;
@@ -1312,13 +1352,17 @@ static void fast_cache_store(
       hint_postings_generation(Better_postings, e->seed_key);
   }
   e->first_mask = first_mask;
-  memcpy(e->keys, keys, (size_t) key_count * sizeof(unsigned long long));
+  e->key_offset = (uint32_t) Fast_match_cache_key_count;
+  if (key_count != 0)
+    memcpy(Fast_match_cache_keys + Fast_match_cache_key_count, keys,
+           (size_t) key_count * sizeof(unsigned long long));
+  Fast_match_cache_key_count += key_count;
   memcpy(e->candidates, Packed_candidates,
          (size_t) Packed_candidates_count * sizeof(unsigned));
   e->source_posting_candidates = source_posting_candidates;
   e->positive = (unsigned short) positive;
   e->negative = (unsigned short) negative;
-  e->key_count = (unsigned char) key_count;
+  e->key_count = key_count;
   e->candidate_count = (unsigned char) Packed_candidates_count;
   e->valid = 1;
   Fast_cache_stores++;
@@ -1479,6 +1523,45 @@ static double Delta_sum = 0;
  *
  *************/
 
+static void fast_cache_init(unsigned cache_kb)
+{
+  size_t budget, desired, entry_bytes, key_bytes;
+  unsigned capacity = 1;
+  Fast_match_cache_budget = (unsigned long long) cache_kb * 1024;
+  if (Fast_match_cache_budget == 0)
+    return;
+  if (Fast_match_cache_budget > SIZE_MAX)
+    fatal_error("fast hint cache budget exceeds address space");
+  budget = (size_t) Fast_match_cache_budget;
+  desired = budget /
+    (sizeof(*Fast_match_cache) +
+     8 * (sizeof(*Fast_match_cache_keys) +
+          sizeof(*Fast_match_cache_key_owners)));
+  if (desired < 64)
+    return;
+  while (capacity <= UINT_MAX / 2 &&
+         (size_t) capacity * 2 <= desired)
+    capacity *= 2;
+  entry_bytes = (size_t) capacity * sizeof(*Fast_match_cache);
+  if (entry_bytes >= budget)
+    return;
+  key_bytes = budget - entry_bytes;
+  Fast_match_cache_key_capacity = key_bytes /
+    (sizeof(*Fast_match_cache_keys) +
+     sizeof(*Fast_match_cache_key_owners));
+  if (Fast_match_cache_key_capacity > UINT32_MAX)
+    Fast_match_cache_key_capacity = UINT32_MAX;
+  if (Fast_match_cache_key_capacity == 0)
+    return;
+  Fast_match_cache = safe_calloc(capacity, sizeof(*Fast_match_cache));
+  Fast_match_cache_keys = safe_malloc(
+    Fast_match_cache_key_capacity * sizeof(*Fast_match_cache_keys));
+  Fast_match_cache_key_owners = safe_calloc(
+    Fast_match_cache_key_capacity,
+    sizeof(*Fast_match_cache_key_owners));
+  Fast_match_cache_capacity = capacity;
+}
+
 /* DOCUMENTATION
 */
 
@@ -1491,6 +1574,7 @@ void init_hints(Uniftype utype,
 		BOOL packed_index,
 		BOOL better_packed_index,
 		BOOL fast_packed_index,
+		unsigned fast_cache_kb,
 		void (*demod_proc) (Topform, int, int, BOOL, BOOL))
 {
   Bsub_wt_attr = bsub_wt_attr;
@@ -1505,8 +1589,7 @@ void init_hints(Uniftype utype,
   if (Fast_packed_index && !Better_packed_index)
     fatal_error("init_hints: fast packed index requires better packed index");
   if (Fast_packed_index)
-    Fast_match_cache = safe_calloc(
-      FAST_MATCH_CACHE_CAPACITY, sizeof(struct fast_match_cache_entry));
+    fast_cache_init(fast_cache_kb);
   if (Better_packed_index)
     Better_postings = hint_postings_init();
   if (packed_index) {
@@ -1570,6 +1653,8 @@ void done_with_hints(void)
   if (Preview_intersection_ids) safe_free(Preview_intersection_ids);
   if (Preview_key_scratch) safe_free(Preview_key_scratch);
   if (Fast_match_cache) safe_free(Fast_match_cache);
+  if (Fast_match_cache_keys) safe_free(Fast_match_cache_keys);
+  if (Fast_match_cache_key_owners) safe_free(Fast_match_cache_key_owners);
   hint_postings_destroy(Better_postings);
   if (Better_equivalence_buckets) safe_free(Better_equivalence_buckets);
   if (Better_equivalence_references) safe_free(Better_equivalence_references);
@@ -1602,6 +1687,11 @@ void done_with_hints(void)
   Preview_intersection_ids = NULL;
   Preview_key_scratch = NULL;
   Fast_match_cache = NULL;
+  Fast_match_cache_keys = NULL;
+  Fast_match_cache_key_owners = NULL;
+  Fast_match_cache_capacity = 0;
+  Fast_match_cache_key_count = Fast_match_cache_key_capacity = 0;
+  Fast_match_cache_budget = 0;
   Better_feature_live_count = 0;
   Better_equivalence_live_count = 0;
   Better_anyconst_live_count = 0;
@@ -1618,6 +1708,9 @@ void done_with_hints(void)
   Fast_cache_key_overflow = Fast_cache_candidate_overflow = 0;
   Fast_cache_posting_candidates_avoided = 0;
   Fast_cache_dependency_misses = Fast_cache_profile_misses = 0;
+  Fast_cache_arena_resets = 0;
+  Fast_cache_overlap_invalidations = 0;
+  Fast_cache_profile_keys = Fast_cache_key_max = 0;
   Fast_dense_queries = Fast_dense_used = 0;
   Fast_sparse_used = Fast_sparse_seed_ids = 0;
   Fast_sparse_feature_tests = Fast_sparse_rejects = 0;
@@ -1758,7 +1851,7 @@ static void better_collect_clause_candidates(
   unsigned positive = 0, negative = 0;
   unsigned i, keep;
   unsigned long long positive_mask = 0, negative_mask = 0;
-  unsigned long long fast_keys[FAST_MATCH_CACHE_KEYS];
+  const unsigned long long *fast_keys = NULL;
   unsigned fast_key_count = 0;
   unsigned long long posting_candidates_before = 0;
   BOOL fast_eligible = FALSE;
@@ -1807,10 +1900,9 @@ static void better_collect_clause_candidates(
                                        BETTER_MATCH_FEATURE_DEPTH);
     if (Fast_packed_index) {
       fast_eligible = positive <= USHRT_MAX && negative <= USHRT_MAX &&
-                      fast_canonical_profile(fast_keys, &fast_key_count);
+                      fast_canonical_profile(&fast_keys, &fast_key_count);
       if (!fast_eligible && !Hint_preview_active) {
         Fast_cache_queries++;
-        Fast_cache_key_overflow++;
       }
       if (fast_eligible && fast_cache_lookup(
             fast_keys, fast_key_count, first_mask, positive, negative)) {
@@ -2710,8 +2802,12 @@ void packed_hint_index_stats(unsigned long long *node_bytes,
         sizeof(unsigned);
   }
   if (Fast_packed_index)
-    *table_bytes += (unsigned long long) FAST_MATCH_CACHE_CAPACITY *
-      sizeof(struct fast_match_cache_entry);
+    *table_bytes +=
+      (unsigned long long) Fast_match_cache_capacity *
+        sizeof(struct fast_match_cache_entry) +
+      (unsigned long long) Fast_match_cache_key_capacity *
+        (sizeof(*Fast_match_cache_keys) +
+         sizeof(*Fast_match_cache_key_owners));
 }
 
 static unsigned long long packed_preview_workspace_bytes(void)
@@ -2815,21 +2911,35 @@ void fprint_packed_hint_operation_stats(FILE *fp)
   }
   if (Fast_packed_index) {
     fprintf(fp,
-            "Packed_fast_cache: entries=%u, entry_bytes=%llu, "
+            "Packed_fast_cache: budget_bytes=%llu, entries=%u, "
+            "entry_bytes=%llu, key_capacity=%llu, key_cursor=%llu, "
             "table_bytes=%llu, queries=%llu, eligible=%llu, hits=%llu, "
             "misses=%llu, hit_rate=%.2f, stores=%llu, key_overflow=%llu, "
+            "mean_keys=%.2f, max_keys=%llu, arena_wraps=%llu, "
+            "overlap_invalidations=%llu, "
             "candidate_overflow=%llu, dependency_misses=%llu, "
             "profile_misses=%llu, posting_candidates_avoided=%llu.\n",
-            FAST_MATCH_CACHE_CAPACITY,
+            Fast_match_cache_budget, Fast_match_cache_capacity,
             (unsigned long long) sizeof(struct fast_match_cache_entry),
-            (unsigned long long) FAST_MATCH_CACHE_CAPACITY *
-              sizeof(struct fast_match_cache_entry),
+            (unsigned long long) Fast_match_cache_key_capacity,
+            (unsigned long long) Fast_match_cache_key_count,
+            (unsigned long long) Fast_match_cache_capacity *
+              sizeof(struct fast_match_cache_entry) +
+            (unsigned long long) Fast_match_cache_key_capacity *
+              (sizeof(*Fast_match_cache_keys) +
+               sizeof(*Fast_match_cache_key_owners)),
             Fast_cache_queries, Fast_cache_eligible, Fast_cache_hits,
             Fast_cache_misses,
             Fast_cache_eligible == 0 ? 0.0 :
               100.0 * (double) Fast_cache_hits /
                 (double) Fast_cache_eligible,
             Fast_cache_stores, Fast_cache_key_overflow,
+            Fast_cache_eligible == 0 ? 0.0 :
+              (double) Fast_cache_profile_keys /
+                (double) Fast_cache_eligible,
+            Fast_cache_key_max,
+            Fast_cache_arena_resets,
+            Fast_cache_overlap_invalidations,
             Fast_cache_candidate_overflow,
             Fast_cache_dependency_misses, Fast_cache_profile_misses,
             Fast_cache_posting_candidates_avoided);

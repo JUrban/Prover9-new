@@ -18,6 +18,7 @@ back_tree_admit_work=${P9_MATRIX_BACK_TREE_ADMIT_WORK:-4096}
 back_position_admit_work=${P9_MATRIX_BACK_POSITION_ADMIT_WORK:-4096}
 back_position_budget_kb=${P9_MATRIX_BACK_POSITION_BUDGET_KB:-65536}
 back_position_admission=${P9_MATRIX_BACK_POSITION_ADMISSION:-1}
+hint_cache_kb=${P9_MATRIX_HINT_CACHE_KB:-2048}
 detected_cpu=$(taskset -pc $$ 2>/dev/null | sed 's/^.*: //;s/,.*//;s/-.*//' || true)
 cpu=${P9_MATRIX_CPU:-${detected_cpu:-0}}
 allow_holdout=${P9_MATRIX_ALLOW_HOLDOUT:-0}
@@ -98,7 +99,7 @@ prepare_input()
   awk '
     /^assign\((max_given|max_seconds|max_minutes|max_hours|max_days|max_megs|report|stats),/ { next }
     /^assign\((search_loop|passive_store|hint_index|inference_frontier|ancestor_store),/ { next }
-    /^assign\((compact_term_reclaim_kb|compact_index_stale_pct|compact_passive_cache|compact_back_tree_min_tokens|compact_back_tree_budget_kb|compact_back_tree_admit_work),/ { next }
+    /^assign\((compact_term_reclaim_kb|compact_index_stale_pct|compact_passive_cache|compact_back_tree_min_tokens|compact_back_tree_budget_kb|compact_back_tree_admit_work|hint_cache_kb),/ { next }
     /^assign\(compact_unit_strategy,/ { next }
     /^assign\(compact_back_demod_strategy,/ { next }
     /^(set|clear)\(compact_back_position_admission\)\./ { next }
@@ -124,6 +125,7 @@ emit_common()
   echo "assign(max_given,$max_given)."
   echo "assign(max_seconds,$max_seconds)."
   echo "assign(max_megs,$max_megs)."
+  echo "assign(hint_cache_kb,$hint_cache_kb)."
 }
 
 emit_variant()
@@ -355,6 +357,7 @@ done
   echo "back_position_admit_work=$back_position_admit_work"
   echo "back_position_budget_kb=$back_position_budget_kb"
   echo "back_position_admission=$back_position_admission"
+  echo "hint_cache_kb=$hint_cache_kb"
   echo "back_position_min_gain=4"
   echo "back_position_budget_pct=20"
   echo "cpu=$cpu"
