@@ -270,6 +270,7 @@ set(compact_otter_demodulation).\
 set(compact_otter_unit_index).\
 set(compact_otter_back_demod_index).\
 set(compact_nonunit_subsumption_audit).\
+set(compact_nonunit_path_filter).\
 assign(stats,all).' "$test_tmp/nonunit.in" | \
   "$repo_dir/bin/prover9" > "$test_tmp/nonunit-audit.out" 2> "$test_tmp/nonunit-audit.err"
 
@@ -283,6 +284,7 @@ set(compact_otter_demodulation).\
 set(compact_otter_unit_index).\
 set(compact_otter_back_demod_index).\
 set(compact_otter_nonunit_index).\
+set(compact_nonunit_path_filter).\
 assign(stats,all).' "$test_tmp/nonunit.in" | \
   "$repo_dir/bin/prover9" > "$test_tmp/nonunit-compact.out" 2> "$test_tmp/nonunit-compact.err"
 
@@ -301,6 +303,7 @@ set(compact_otter_demodulation).\
 set(compact_otter_unit_index).\
 set(compact_otter_back_demod_index).\
 set(compact_otter_nonunit_index).\
+set(compact_nonunit_path_filter).\
 assign(stats,all).' "$test_tmp/nonunit.in" | \
   "$repo_dir/bin/prover9" > "$test_tmp/nonunit-archive.out" 2> "$test_tmp/nonunit-archive.err"
 
@@ -313,6 +316,8 @@ for run in nonunit-reference nonunit-audit nonunit-compact nonunit-archive; do
   grep '^Usable=' "$test_tmp/$run.out" | tail -n 1 >> "$test_tmp/$run.search"
 done
 grep -Eq 'Compact_nonunit_index: mode=audit, failures=0, active=[1-9][0-9]*,' \
+  "$test_tmp/nonunit-audit.out"
+grep -Eq 'forward_path_rejects=[1-9][0-9]*,' \
   "$test_tmp/nonunit-audit.out"
 grep -Eq 'Compact_nonunit_index: mode=authoritative, failures=0, active=[1-9][0-9]*,' \
   "$test_tmp/nonunit-compact.out"

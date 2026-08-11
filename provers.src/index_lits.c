@@ -35,6 +35,7 @@ static Compact_term_pool Compact_unit_terms;
 static unsigned long long Compact_unit_audit_failures;
 static BOOL Compact_nonunit_audit;
 static BOOL Compact_nonunit_authoritative;
+static BOOL Compact_nonunit_path_filter;
 static Compact_feature_index Compact_nonunits;
 static unsigned long long Compact_nonunit_audit_failures;
 static unsigned long long Compact_nonunit_forward_exact_tests;
@@ -148,7 +149,8 @@ void compact_unit_rebase_term_pool(Compact_term_pool pool,
   Compact_unit_terms = pool;
 }
 
-void configure_compact_nonunit_index(BOOL audit, BOOL authoritative)
+void configure_compact_nonunit_index(BOOL audit, BOOL authoritative,
+                                     BOOL path_filter)
 {
   if (Compact_nonunits != NULL)
     fatal_error("configure_compact_nonunit_index: index is live");
@@ -156,6 +158,7 @@ void configure_compact_nonunit_index(BOOL audit, BOOL authoritative)
     fatal_error("configure_compact_nonunit_index: audit and authoritative modes conflict");
   Compact_nonunit_audit = audit;
   Compact_nonunit_authoritative = authoritative;
+  Compact_nonunit_path_filter = path_filter;
   Compact_nonunit_audit_failures = 0;
   Compact_nonunit_forward_exact_tests = 0;
   Compact_nonunit_back_exact_tests = 0;
@@ -176,16 +179,20 @@ void fprint_compact_nonunit_index(FILE *fp)
           "Compact_nonunit_index: mode=%s, failures=%llu, active=%llu, "
           "peak=%llu, retired=%llu, physical=%llu, forward_queries=%llu, "
           "forward_candidates=%llu, forward_exact_tests=%llu, "
-          "back_queries=%llu, back_candidates=%llu, back_exact_tests=%llu, "
-          "nodes=%llu, labels=%llu, postings=%llu, records=%llu, hash=%llu, "
+          "forward_path_rejects=%llu, back_queries=%llu, "
+          "back_candidates=%llu, back_exact_tests=%llu, "
+          "back_path_rejects=%llu, nodes=%llu, labels=%llu, postings=%llu, "
+          "records=%llu, structural=%llu, hash=%llu, "
           "scratch=%llu, bytes=%llu, peak_bytes=%llu.\n",
           Compact_nonunit_authoritative ? "authoritative" : "audit",
           Compact_nonunit_audit_failures, stats.active, stats.peak,
           stats.retired, stats.physical, stats.forward_queries,
           stats.forward_candidates, Compact_nonunit_forward_exact_tests,
+          stats.forward_structural_rejects,
           stats.back_queries, stats.back_candidates,
-          Compact_nonunit_back_exact_tests, stats.node_bytes,
-          stats.label_bytes, stats.posting_bytes, stats.record_bytes, stats.hash_bytes,
+          Compact_nonunit_back_exact_tests, stats.back_structural_rejects,
+          stats.node_bytes, stats.label_bytes, stats.posting_bytes,
+          stats.record_bytes, stats.structural_bytes, stats.hash_bytes,
           stats.scratch_bytes, stats.total_bytes,
           stats.peak_bytes);
   compact_profile_fprint(fp, "nonunit", "forward_subsumption",
@@ -527,7 +534,8 @@ void init_literals_index(int depth)
     (Compact_unit_terms == NULL ? compact_unit_index_init() :
      compact_unit_index_init_with_pool(Compact_unit_terms)) : NULL;
   Compact_nonunits = compact_nonunit_index_mode() ?
-    compact_feature_index_init(feature_length()) : NULL;
+    compact_feature_index_init(feature_length(),
+                               Compact_nonunit_path_filter) : NULL;
   if (compact_nonunit_index_mode()) {
     Compact_nonunit_exact_clock = clock_init("compact_nonunit_exact");
     Compact_nonunit_materialize_clock =
@@ -604,7 +612,9 @@ void index_literals(Topform c, Indexop op, Clock clock, BOOL no_fapl)
     int flen = feature_length();
     if (compact_nonunit_index_mode()) {
       BOOL ok = op == INSERT ?
-        compact_feature_index_add(Compact_nonunits, c->id, f) :
+        compact_feature_index_add(
+          Compact_nonunits, c->id, f,
+          Compact_nonunit_path_filter ? compact_feature_clause_mask(c) : 0) :
         compact_feature_index_remove(Compact_nonunits, c->id);
       if (!ok)
         fatal_error(op == INSERT ?
@@ -776,7 +786,10 @@ static Topform compact_nonunit_forward_subsumption(Topform query)
   unsigned long long *ids;
   size_t count = 0, i, exact = 0, materialized = 0;
   Topform result = NULL;
-  ids = compact_feature_forward_candidates(Compact_nonunits, vector, &count);
+  ids = compact_feature_forward_candidates(
+    Compact_nonunits, vector,
+    Compact_nonunit_path_filter ? compact_feature_clause_mask(query) : 0,
+    &count);
   for (i = 0; i < count && result == NULL; i++) {
     BOOL was_materialized;
     Topform candidate = resolve_compact_index_clause_profile(
@@ -809,7 +822,10 @@ static Plist compact_nonunit_back_subsumption(Topform query)
   unsigned long long *ids;
   size_t count = 0, i, exact = 0, successes = 0, materialized = 0;
   Plist result = NULL;
-  ids = compact_feature_back_candidates(Compact_nonunits, vector, &count);
+  ids = compact_feature_back_candidates(
+    Compact_nonunits, vector,
+    Compact_nonunit_path_filter ? compact_feature_clause_mask(query) : 0,
+    &count);
   for (i = 0; i < count; i++) {
     BOOL was_materialized;
     Topform candidate = resolve_compact_index_clause_profile(

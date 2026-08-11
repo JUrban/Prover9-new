@@ -96,6 +96,7 @@ struct prover_options {
     compact_back_position_admission, // enable bounded exact-feature probation
     compact_nonunit_subsumption_audit, // compare compact/legacy feature trie
     compact_otter_nonunit_index, // stable-ID nonunit feature trie authoritative
+    compact_nonunit_path_filter, // rigid-path prefilter before materialization
     compact_term_sharing_stats, // opt-in exact cross-clause term profile
     collective_trace,        // one line per collective batch expansion
     collective_hint_probes,  // one bounded early expansion for hinted givens

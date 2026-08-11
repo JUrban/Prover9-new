@@ -1932,6 +1932,8 @@ Prover_options init_prover_options(void)
     init_flag("compact_nonunit_subsumption_audit", FALSE);
   p->compact_otter_nonunit_index =
     init_flag("compact_otter_nonunit_index", FALSE);
+  p->compact_nonunit_path_filter =
+    init_flag("compact_nonunit_path_filter", FALSE);
   p->compact_term_sharing_stats =
     init_flag("compact_term_sharing_stats", FALSE);
   p->collective_trace       = init_flag("collective_trace",       FALSE);
@@ -10741,7 +10743,8 @@ static void configure_search_indexes(void)
     flag(Opt->compact_otter_unit_index));
   configure_compact_nonunit_index(
     flag(Opt->compact_nonunit_subsumption_audit),
-    flag(Opt->compact_otter_nonunit_index));
+    flag(Opt->compact_otter_nonunit_index),
+    flag(Opt->compact_nonunit_path_filter));
   configure_compact_clause_access(compact_otter_resolve_clause,
                                   compact_otter_release_clause, NULL);
   configure_compact_back_demod(

@@ -101,7 +101,8 @@ void configure_compact_unit_term_pool(Compact_term_pool pool);
 
 void configure_compact_unit_stale_pct(unsigned percentage);
 
-void configure_compact_nonunit_index(BOOL audit, BOOL authoritative);
+void configure_compact_nonunit_index(BOOL audit, BOOL authoritative,
+                                     BOOL path_filter);
 
 unsigned long long compact_unit_subsumption_audit_failures(void);
 
