@@ -249,6 +249,8 @@ struct prover_options {
     compact_passive_cache, // MiB cap for decoded compact-OTTER passive bodies
     compact_term_reclaim_kb, // minimum estimated stale token payload to compact
     compact_index_stale_pct, // inactive physical records before index rebuild
+    compact_back_tree_min_tokens, // complete structural partition cutoff
+    compact_back_tree_budget_kb, // hard structural metadata budget (0=unlimited)
     fpa_depth,     // FPA index depth (higher = more selective, more memory)
     candidate_warn_limit,  // warn when candidates exceed this
     candidate_hard_limit,  // skip inference when candidates exceed this
@@ -287,7 +289,7 @@ struct prover_options {
     search_loop,         // otter, discount
     passive_store,       // full, compressed
     compact_unit_strategy, // root_scan, position, code_tree
-    compact_back_demod_strategy, // mask8, signature32, code_tree
+    compact_back_demod_strategy, // mask8, signature32, code_tree, hybrid_tree
     discount_demodulation, // selected, eager_legacy, eager_interreduced
     hint_index,          // fpa, compact, shallow, packed/hybrid, packed_legacy
     inference_frontier,  // clauses, collective

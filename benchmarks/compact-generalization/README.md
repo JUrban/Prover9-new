@@ -197,6 +197,36 @@ budget raises the cutoff, or (2) sealed structural generations plus fallback
 retrieval for every uncovered generation.  Budget exhaustion must degrade to
 the complete fallback, never silently omit candidates.
 
+The first safe partition is exposed as
+`compact_back_demod_strategy=hybrid_tree`.  It always builds the complete
+`mask8` fallback and additionally indexes every subject subterm with at least
+`compact_back_tree_min_tokens` serialized tokens.  A query uses the tree only
+when its own minimum token count reaches that cutoff; every matching subject
+must then belong to the complete tree partition.  Otherwise it uses `mask8`.
+`compact_back_tree_budget_kb` (default 65,536) bounds conservatively estimated
+persistent tree metadata.  A clause that could exceed the budget is not added
+to the tree, `tree_complete` becomes false, and all subsequent queries use the
+fallback.  The partial tree is never queried.  Statistics report the cutoff,
+budget, estimated bytes, completeness state, and exhaustion count.
+
+This mechanism is correct and bounded but token length alone is rejected as
+the final admission policy.  On the current-build 1,000-given Osborn trio,
+`mask8` used 3,078,736 bytes and examined 9,556,812 groups.  Cutoff 12 used
+4,215,984 bytes (+36.94%) and examined 3,764,171 groups (-60.61%).  Cutoff 14
+used 3,545,184 bytes (+15.15%) but still examined 6,669,165 groups (-30.22%).
+User CPU in the parallel bounded runs was 81.35, 79.34, and 79.28 seconds,
+respectively; those timings show no gross regression but are not quiet-machine
+promotion evidence.  The tradeoff is too weak for radical improvement.
+
+The next structural partition should therefore be by complete root symbol,
+not length.  Keep `mask8` for every root; measure fallback work per queried
+root; admit a root only after its cumulative false-candidate work justifies a
+backfill; backfill every active occurrence of that root before marking it
+complete; and index all later occurrences for admitted roots.  Budget failure
+leaves that root on `mask8`.  This preserves completeness independently for
+each root while directing structural bytes toward the actual hot query
+families rather than every unique constant and subterm in the problem.
+
 Setting `P9_MATRIX_ALLOW_HOLDOUT=1` is required even when a holdout case is
 named explicitly.  Do this only for a recorded phase-promotion commit, never
 while selecting features or thresholds.

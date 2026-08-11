@@ -81,6 +81,13 @@ void configure_compact_back_demod_strategy(
   compact_back_demod_set_strategy(strategy);
 }
 
+void configure_compact_back_demod_tree(unsigned min_tokens,
+                                       unsigned budget_kb)
+{
+  compact_back_demod_set_tree_min_tokens(min_tokens);
+  compact_back_demod_set_tree_budget_kb(budget_kb);
+}
+
 static BOOL compact_back_demod_mode(void)
 {
   return Compact_back_demod_audit || Compact_back_demod_authoritative;
@@ -608,6 +615,9 @@ void fprint_compact_back_demod(FILE *fp)
           "candidates=%llu, exact_tests=%llu, posting_groups=%llu, "
           "path_buckets=%llu, tree_nodes=%llu, tree_terminals=%llu, "
           "tree_queries=%llu, tree_nodes_examined=%llu, "
+          "tree_posting_groups=%llu, tree_min_tokens=%u, "
+          "tree_complete=%s, tree_budget=%llu, tree_estimated=%llu, "
+          "tree_budget_exhaustions=%llu, "
           "symbol_occurrences=%llu, groups_examined=%llu, "
           "occurrences_examined=%llu, path_checks=%llu, "
           "path_rejects=%llu, file_snapshots=%llu, snapshot_ids=%llu, "
@@ -618,6 +628,7 @@ void fprint_compact_back_demod(FILE *fp)
           Compact_back_demod_authoritative ? "authoritative" : "audit",
           stats.strategy == COMPACT_BACK_DEMOD_SIGNATURE32 ? "signature32" :
           stats.strategy == COMPACT_BACK_DEMOD_CODE_TREE ? "code_tree" :
+          stats.strategy == COMPACT_BACK_DEMOD_HYBRID_TREE ? "hybrid_tree" :
             "mask8",
           Compact_back_demod_failures, stats.active, stats.peak,
           stats.retired, stats.physical, stats.compactions,
@@ -625,6 +636,10 @@ void fprint_compact_back_demod(FILE *fp)
           stats.exact_tests, stats.posting_groups, stats.path_buckets,
           stats.tree_nodes, stats.tree_terminals, stats.tree_queries,
           stats.tree_nodes_examined,
+          stats.tree_posting_groups, stats.tree_min_tokens,
+          stats.tree_complete ? "yes" : "no",
+          stats.tree_budget_bytes, stats.tree_estimated_bytes,
+          stats.tree_budget_exhaustions,
           stats.symbol_occurrences,
           stats.posting_groups_examined, stats.occurrences_examined,
           stats.path_filter_checks, stats.path_filter_rejects,

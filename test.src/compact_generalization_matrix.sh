@@ -12,6 +12,8 @@ max_seconds=${P9_MATRIX_MAX_SECONDS:-120}
 max_megs=${P9_MATRIX_MAX_MEGS:-2048}
 wall_seconds=${P9_MATRIX_WALL_SECONDS:-$((max_seconds + 30))}
 report_seconds=${P9_MATRIX_REPORT_SECONDS:-30}
+back_tree_min_tokens=${P9_MATRIX_BACK_TREE_MIN_TOKENS:-8}
+back_tree_budget_kb=${P9_MATRIX_BACK_TREE_BUDGET_KB:-65536}
 detected_cpu=$(taskset -pc $$ 2>/dev/null | sed 's/^.*: //;s/,.*//;s/-.*//' || true)
 cpu=${P9_MATRIX_CPU:-${detected_cpu:-0}}
 allow_holdout=${P9_MATRIX_ALLOW_HOLDOUT:-0}
@@ -92,7 +94,7 @@ prepare_input()
   awk '
     /^assign\((max_given|max_seconds|max_minutes|max_hours|max_days|max_megs|report|stats),/ { next }
     /^assign\((search_loop|passive_store|hint_index|inference_frontier|ancestor_store),/ { next }
-    /^assign\((compact_term_reclaim_kb|compact_index_stale_pct|compact_passive_cache),/ { next }
+    /^assign\((compact_term_reclaim_kb|compact_index_stale_pct|compact_passive_cache|compact_back_tree_min_tokens|compact_back_tree_budget_kb),/ { next }
     /^assign\(compact_unit_strategy,/ { next }
     /^assign\(compact_back_demod_strategy,/ { next }
     /^(set|clear)\(compact_otter_[a-z_]+\)\./ { next }
@@ -171,11 +173,18 @@ emit_variant()
       echo 'assign(compact_back_demod_strategy,code_tree).'
       echo 'set(compact_otter_back_demod_index).'
       ;;
+    compact_back_hybrid)
+      emit_variant packed_only
+      echo 'assign(compact_back_demod_strategy,hybrid_tree).'
+      echo "assign(compact_back_tree_min_tokens,$back_tree_min_tokens)."
+      echo "assign(compact_back_tree_budget_kb,$back_tree_budget_kb)."
+      echo 'set(compact_otter_back_demod_index).'
+      ;;
     compact_nonunit_only)
       emit_variant packed_only
       echo 'set(compact_otter_nonunit_index).'
       ;;
-    compact_full|compact_dense_file|compact_full_position|compact_dense_file_position|compact_full_code_tree|compact_dense_file_code_tree|compact_full_signature|compact_dense_file_signature|compact_full_code_tree_signature|compact_dense_file_code_tree_signature|compact_full_back_tree|compact_dense_file_back_tree|compact_full_code_tree_back_tree|compact_dense_file_code_tree_back_tree)
+    compact_full|compact_dense_file|compact_full_position|compact_dense_file_position|compact_full_code_tree|compact_dense_file_code_tree|compact_full_signature|compact_dense_file_signature|compact_full_code_tree_signature|compact_dense_file_code_tree_signature|compact_full_back_tree|compact_dense_file_back_tree|compact_full_code_tree_back_tree|compact_dense_file_code_tree_back_tree|compact_full_back_hybrid|compact_dense_file_back_hybrid|compact_full_code_tree_back_hybrid|compact_dense_file_code_tree_back_hybrid)
       echo 'assign(search_loop,otter).'
       case "$1" in
         compact_dense_file*)
@@ -195,6 +204,11 @@ emit_variant()
       case "$1" in
         *_signature) echo 'assign(compact_back_demod_strategy,signature32).' ;;
         *_back_tree) echo 'assign(compact_back_demod_strategy,code_tree).' ;;
+        *_back_hybrid)
+          echo 'assign(compact_back_demod_strategy,hybrid_tree).'
+          echo "assign(compact_back_tree_min_tokens,$back_tree_min_tokens)."
+          echo "assign(compact_back_tree_budget_kb,$back_tree_budget_kb)."
+          ;;
         *) echo 'assign(compact_back_demod_strategy,mask8).' ;;
       esac
       echo 'assign(hint_index,packed_fast).'
@@ -266,6 +280,8 @@ done
   echo "max_seconds=$max_seconds"
   echo "max_megs=$max_megs"
   echo "wall_seconds=$wall_seconds"
+  echo "back_tree_min_tokens=$back_tree_min_tokens"
+  echo "back_tree_budget_kb=$back_tree_budget_kb"
   echo "cpu=$cpu"
   echo "allow_holdout=$allow_holdout"
   uname -a

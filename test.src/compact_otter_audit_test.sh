@@ -62,6 +62,16 @@ assign(stats,all).' "$repo_dir/prover9.examples/x2.in" | \
   "$repo_dir/bin/prover9" > "$test_tmp/back-tree-audit.out" 2> "$test_tmp/back-tree-audit.err"
 
 sed '1i\
+assign(compact_back_demod_strategy,hybrid_tree).\
+assign(compact_back_tree_min_tokens,4).\
+assign(compact_back_tree_budget_kb,65536).\
+set(compact_otter_demodulation).\
+set(compact_otter_unit_index).\
+set(compact_back_demod_audit).\
+assign(stats,all).' "$repo_dir/prover9.examples/x2.in" | \
+  "$repo_dir/bin/prover9" > "$test_tmp/back-hybrid-audit.out" 2> "$test_tmp/back-hybrid-audit.err"
+
+sed '1i\
 set(compact_otter_demodulation).\
 set(compact_otter_unit_index).\
 set(compact_otter_back_demod_index).\
@@ -77,6 +87,7 @@ grep -q 'THEOREM PROVED' "$test_tmp/unit-compact.out"
 grep -q 'THEOREM PROVED' "$test_tmp/back-demod-audit.out"
 grep -q 'THEOREM PROVED' "$test_tmp/back-signature-audit.out"
 grep -q 'THEOREM PROVED' "$test_tmp/back-tree-audit.out"
+grep -q 'THEOREM PROVED' "$test_tmp/back-hybrid-audit.out"
 grep -q 'THEOREM PROVED' "$test_tmp/back-demod-compact.out"
 grep -Eq 'Compact_otter_audit: queries=[1-9][0-9]*, failures=0, current_rules=[1-9][0-9]*,' \
   "$test_tmp/audit.out"
@@ -94,6 +105,8 @@ grep -Eq 'Compact_back_demod: mode=audit, strategy=signature32, failures=0, acti
   "$test_tmp/back-signature-audit.out"
 grep -Eq 'Compact_back_demod: mode=audit, strategy=code_tree, failures=0, active=[1-9][0-9]*, peak=[1-9][0-9]*,' \
   "$test_tmp/back-tree-audit.out"
+grep -Eq 'Compact_back_demod: mode=audit, strategy=hybrid_tree, failures=0, active=[1-9][0-9]*, peak=[1-9][0-9]*,' \
+  "$test_tmp/back-hybrid-audit.out"
 grep -Eq 'Compact_back_demod: mode=authoritative, strategy=mask8, failures=0, active=[1-9][0-9]*, peak=[1-9][0-9]*,' \
   "$test_tmp/back-demod-compact.out"
 if grep -q 'compact_otter_audit: demodulation mismatch' "$test_tmp/audit.err"; then
@@ -110,6 +123,10 @@ if grep -q 'compact_back_demod_audit: mismatch' "$test_tmp/back-signature-audit.
 fi
 if grep -q 'compact_back_demod_audit: mismatch' "$test_tmp/back-tree-audit.err"; then
   cat "$test_tmp/back-tree-audit.err" >&2
+  exit 1
+fi
+if grep -q 'compact_back_demod_audit: mismatch' "$test_tmp/back-hybrid-audit.err"; then
+  cat "$test_tmp/back-hybrid-audit.err" >&2
   exit 1
 fi
 
@@ -131,6 +148,8 @@ fi
   > "$test_tmp/back-signature-audit.proof"
 "$repo_dir/bin/prooftrans" parents_only < "$test_tmp/back-tree-audit.out" \
   > "$test_tmp/back-tree-audit.proof"
+"$repo_dir/bin/prooftrans" parents_only < "$test_tmp/back-hybrid-audit.out" \
+  > "$test_tmp/back-hybrid-audit.proof"
 "$repo_dir/bin/prooftrans" parents_only < "$test_tmp/back-demod-compact.out" \
   > "$test_tmp/back-demod-compact.proof"
 sed -n '/^% Length of proof:/,/^============================== end of proof/p' \
@@ -152,6 +171,8 @@ sed -n '/^% Length of proof:/,/^============================== end of proof/p' \
 sed -n '/^% Length of proof:/,/^============================== end of proof/p' \
   "$test_tmp/back-tree-audit.proof" > "$test_tmp/back-tree-audit.norm"
 sed -n '/^% Length of proof:/,/^============================== end of proof/p' \
+  "$test_tmp/back-hybrid-audit.proof" > "$test_tmp/back-hybrid-audit.norm"
+sed -n '/^% Length of proof:/,/^============================== end of proof/p' \
   "$test_tmp/back-demod-compact.proof" > "$test_tmp/back-demod-compact.norm"
 cmp "$test_tmp/reference.norm" "$test_tmp/audit.norm"
 cmp "$test_tmp/reference.norm" "$test_tmp/compact.norm"
@@ -161,9 +182,10 @@ cmp "$test_tmp/reference.norm" "$test_tmp/unit-compact.norm"
 cmp "$test_tmp/reference.norm" "$test_tmp/back-demod-audit.norm"
 cmp "$test_tmp/reference.norm" "$test_tmp/back-signature-audit.norm"
 cmp "$test_tmp/reference.norm" "$test_tmp/back-tree-audit.norm"
+cmp "$test_tmp/reference.norm" "$test_tmp/back-hybrid-audit.norm"
 cmp "$test_tmp/reference.norm" "$test_tmp/back-demod-compact.norm"
 
-for run in reference audit compact unit-audit unit-tree-audit unit-compact back-demod-audit back-signature-audit back-tree-audit back-demod-compact; do
+for run in reference audit compact unit-audit unit-tree-audit unit-compact back-demod-audit back-signature-audit back-tree-audit back-hybrid-audit back-demod-compact; do
   grep '^Given=' "$test_tmp/$run.out" | tail -n 1 > "$test_tmp/$run.search"
   grep '^Usable=' "$test_tmp/$run.out" | tail -n 1 >> "$test_tmp/$run.search"
 done
@@ -175,6 +197,7 @@ cmp "$test_tmp/reference.search" "$test_tmp/unit-compact.search"
 cmp "$test_tmp/reference.search" "$test_tmp/back-demod-audit.search"
 cmp "$test_tmp/reference.search" "$test_tmp/back-signature-audit.search"
 cmp "$test_tmp/reference.search" "$test_tmp/back-tree-audit.search"
+cmp "$test_tmp/reference.search" "$test_tmp/back-hybrid-audit.search"
 cmp "$test_tmp/reference.search" "$test_tmp/back-demod-compact.search"
 
 # x2 itself is unit-only.  Add one harmless nonunit equality clause and turn

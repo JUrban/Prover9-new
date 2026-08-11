@@ -2111,6 +2111,10 @@ Prover_options init_prover_options(void)
     init_parm("compact_term_reclaim_kb", 8192, 1, INT_MAX);
   p->compact_index_stale_pct =
     init_parm("compact_index_stale_pct", 25, 1, 1000);
+  p->compact_back_tree_min_tokens =
+    init_parm("compact_back_tree_min_tokens", 8, 1, INT_MAX);
+  p->compact_back_tree_budget_kb =
+    init_parm("compact_back_tree_budget_kb", 65536, 0, INT_MAX);
   p->fpa_depth =        init_parm("fpa_depth",            10,      1,    100);
   p->candidate_warn_limit = init_parm("candidate_warn_limit", -1,   -1,INT_MAX);
   p->candidate_hard_limit = init_parm("candidate_hard_limit", -1,   -1,INT_MAX);
@@ -2196,10 +2200,11 @@ Prover_options init_prover_options(void)
                     "code_tree");
 
   p->compact_back_demod_strategy =
-    init_stringparm("compact_back_demod_strategy", 3,
+    init_stringparm("compact_back_demod_strategy", 4,
                     "mask8",
                     "signature32",
-                    "code_tree");
+                    "code_tree",
+                    "hybrid_tree");
 
   p->discount_demodulation =
     init_stringparm("discount_demodulation", 3,
@@ -10706,7 +10711,12 @@ static void configure_search_indexes(void)
     str_ident(stringparm1(Opt->compact_back_demod_strategy), "signature32") ?
       COMPACT_BACK_DEMOD_SIGNATURE32 :
     str_ident(stringparm1(Opt->compact_back_demod_strategy), "code_tree") ?
-      COMPACT_BACK_DEMOD_CODE_TREE : COMPACT_BACK_DEMOD_MASK8);
+      COMPACT_BACK_DEMOD_CODE_TREE :
+    str_ident(stringparm1(Opt->compact_back_demod_strategy), "hybrid_tree") ?
+      COMPACT_BACK_DEMOD_HYBRID_TREE : COMPACT_BACK_DEMOD_MASK8);
+  configure_compact_back_demod_tree(
+    (unsigned) parm(Opt->compact_back_tree_min_tokens),
+    (unsigned) parm(Opt->compact_back_tree_budget_kb));
   configure_compact_unit_term_pool(Compact_terms);
   configure_compact_unit_index(
     flag(Opt->compact_unit_subsumption_audit),
