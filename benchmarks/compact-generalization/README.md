@@ -65,7 +65,16 @@ Results include the complete generated input, binary/input hashes,
 machine-readable `profiles.tsv`/`profiles.json`.  Component-isolation variants
 are `compact_demod_only`, `compact_unit_only`, `compact_back_only`, and
 `compact_nonunit_only`; they retain full passive bodies so the other legacy
-indexes remain valid.  The experimental position-compatible unit retrieval is
+indexes remain valid.  `compact_nonunit_path` enables the experimental rigid
+path prefilter for the isolated nonunit index.  The paired full-index variants
+are `compact_full_nonunit_path` and `compact_dense_file_nonunit_path`; their
+unsuffixed counterparts explicitly clear the filter and are the controls.
+The filter stores a 64-bit Bloom summary of signed rigid symbols at exact term
+paths.  A subset failure is a safe pre-materialization rejection; collisions
+only retain extra candidates, and ordinary exact subsumption remains the final
+authority.
+
+The experimental position-compatible unit retrieval is
 selected by `compact_unit_position`, `compact_full_position`, or
 `compact_dense_file_position`; the corresponding variants without the suffix
 remain root-scan controls.  This first prototype is intentionally not the
@@ -318,6 +327,32 @@ allocated no probation index.  Thus exact positions remain a correct,
 byte-bounded research path, but the recommended backward-demodulation strategy
 remains `mask8` until a representation can eliminate construction overhead on
 more than one rewrite-heavy training workload.
+
+Phase 4 begins with the opt-in `compact_nonunit_path_filter`.  It augments the
+complete numerical feature tree with one 64-bit Bloom mask per physical
+nonunit record.  The mask represents signed rigid symbols at ordered argument
+paths.  Before an ID leaves the feature tree, forward retrieval requires the
+stored mask to be a subset of the query mask; backward retrieval applies the
+reverse subset.  These are necessary conditions for the ordinary ordered
+one-way matcher used by `feature_subsumes_raw()`.  Collisions can only retain
+extra candidates, and the ordinary exact routine is still authoritative.
+
+The first corrected 100-given training comparison is encouraging but not a
+promotion result.  On Osborn, forward exact tests fell from 4,561 to 2,286 and
+backward tests from 833 to 504 while nonunit-index bytes rose from 60,104 to
+62,152 (+3.41%).  On `chat-new-11k`, the corresponding changes were
+3,821 to 2,263, 638 to 362, and 57,032 to 59,080 bytes (+3.59%).  Nil3 changed
+229 to 145 forward tests, 99 to 73 backward tests, and 142,536 to 143,560
+bytes (+0.72%).  The full-passive isolation variants materialize no archived
+clauses, so the next bounded dense-file comparison must determine whether
+these candidate reductions translate into fewer archive reconstructions.
+End-to-end times at this prefix are recorded but treated as noise; the paired
+Osborn values were 11.25 and 9.57 user seconds, whereas `chat-new-11k` and
+nil3 moved slightly in the opposite direction.
+
+The matrix recipes now enable the required compact unit index for both
+nonunit-isolation variants.  Before that repair they terminated during option
+validation and therefore supplied no performance evidence.
 
 Setting `P9_MATRIX_ALLOW_HOLDOUT=1` is required even when a holdout case is
 named explicitly.  Do this only for a recorded phase-promotion commit, never

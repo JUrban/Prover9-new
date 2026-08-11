@@ -102,6 +102,7 @@ prepare_input()
     /^assign\(compact_unit_strategy,/ { next }
     /^assign\(compact_back_demod_strategy,/ { next }
     /^(set|clear)\(compact_back_position_admission\)\./ { next }
+    /^(set|clear)\(compact_nonunit_path_filter\)\./ { next }
     /^(set|clear)\(compact_otter_[a-z_]+\)\./ { next }
     /^(set|clear)\((clocks|hint_match_stats|print_gen|print_kept|print_given|print_initial_clauses)\)\./ { next }
     { print }
@@ -214,9 +215,18 @@ emit_variant()
       ;;
     compact_nonunit_only)
       emit_variant packed_only
+      echo 'assign(compact_unit_strategy,root_scan).'
+      echo 'set(compact_otter_unit_index).'
       echo 'set(compact_otter_nonunit_index).'
       ;;
-    compact_full|compact_dense_file|compact_full_position|compact_dense_file_position|compact_full_code_tree|compact_dense_file_code_tree|compact_full_signature|compact_dense_file_signature|compact_full_code_tree_signature|compact_dense_file_code_tree_signature|compact_full_back_tree|compact_dense_file_back_tree|compact_full_code_tree_back_tree|compact_dense_file_code_tree_back_tree|compact_full_back_hybrid|compact_dense_file_back_hybrid|compact_full_code_tree_back_hybrid|compact_dense_file_code_tree_back_hybrid|compact_full_back_hot_root|compact_dense_file_back_hot_root|compact_full_code_tree_back_hot_root|compact_dense_file_code_tree_back_hot_root|compact_full_back_position|compact_dense_file_back_position|compact_full_code_tree_back_position|compact_dense_file_code_tree_back_position|compact_full_back_position_off|compact_dense_file_back_position_off|compact_full_code_tree_back_position_off|compact_dense_file_code_tree_back_position_off)
+    compact_nonunit_path)
+      emit_variant packed_only
+      echo 'assign(compact_unit_strategy,root_scan).'
+      echo 'set(compact_otter_unit_index).'
+      echo 'set(compact_otter_nonunit_index).'
+      echo 'set(compact_nonunit_path_filter).'
+      ;;
+    compact_full|compact_dense_file|compact_full_nonunit_path|compact_dense_file_nonunit_path|compact_full_position|compact_dense_file_position|compact_full_code_tree|compact_dense_file_code_tree|compact_full_signature|compact_dense_file_signature|compact_full_code_tree_signature|compact_dense_file_code_tree_signature|compact_full_back_tree|compact_dense_file_back_tree|compact_full_code_tree_back_tree|compact_dense_file_code_tree_back_tree|compact_full_back_hybrid|compact_dense_file_back_hybrid|compact_full_code_tree_back_hybrid|compact_dense_file_code_tree_back_hybrid|compact_full_back_hot_root|compact_dense_file_back_hot_root|compact_full_code_tree_back_hot_root|compact_dense_file_code_tree_back_hot_root|compact_full_back_position|compact_dense_file_back_position|compact_full_code_tree_back_position|compact_dense_file_code_tree_back_position|compact_full_back_position_off|compact_dense_file_back_position_off|compact_full_code_tree_back_position_off|compact_dense_file_code_tree_back_position_off)
       echo 'assign(search_loop,otter).'
       case "$1" in
         compact_dense_file*)
@@ -272,6 +282,10 @@ emit_variant()
       echo 'set(compact_otter_unit_index).'
       echo 'set(compact_otter_back_demod_index).'
       echo 'set(compact_otter_nonunit_index).'
+      case "$1" in
+        *_nonunit_path) echo 'set(compact_nonunit_path_filter).' ;;
+        *) echo 'clear(compact_nonunit_path_filter).' ;;
+      esac
       echo 'assign(compact_passive_cache,0).'
       echo 'assign(compact_term_reclaim_kb,2048).'
       echo 'assign(compact_index_stale_pct,25).'
