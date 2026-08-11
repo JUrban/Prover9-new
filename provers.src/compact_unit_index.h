@@ -2,6 +2,7 @@
 #define TP_COMPACT_UNIT_INDEX_H
 
 #include "../ladr/ladr.h"
+#include "compact_profile.h"
 #include "compact_term_pool.h"
 
 typedef struct compact_unit_index * Compact_unit_index;
@@ -18,6 +19,14 @@ struct compact_unit_index_stats {
   unsigned long long instance_exact_tests;
   unsigned long long unifier_queries;
   unsigned long long unifier_exact_tests;
+  struct compact_query_profile generalization_profile;
+  struct compact_query_profile instance_profile;
+  struct compact_query_profile unifier_profile;
+  double generalization_seconds;
+  double instance_seconds;
+  double unifier_seconds;
+  double sort_seconds;
+  double maintenance_seconds;
   unsigned long long node_items;
   unsigned long long posting_items;
   unsigned long long node_bytes;

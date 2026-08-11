@@ -98,6 +98,16 @@ int main(void)
         "lifecycle counters are exact");
   CHECK(stats.total_bytes > 0 && stats.peak_bytes >= stats.total_bytes,
         "resident byte accounting is present");
+  CHECK(stats.generalization_profile.queries ==
+          stats.generalization_queries &&
+        stats.instance_profile.queries == stats.instance_queries &&
+        stats.unifier_profile.queries == stats.unifier_queries,
+        "operation profiles account for every unit query");
+  CHECK(stats.instance_profile.exact_tests ==
+          stats.instance_exact_tests &&
+        stats.unifier_profile.exact_tests == stats.unifier_exact_tests &&
+        stats.unifier_profile.candidate_max >= 1,
+        "unit profiles retain exact-test totals and query tails");
   {
     unsigned long long bloated_bytes = stats.total_bytes;
     compact_unit_index_compact_all_stale(index);
@@ -108,6 +118,10 @@ int main(void)
     CHECK(compact_unit_index_contains(index, general->id) &&
           !compact_unit_index_contains(index, exact->id),
           "forced compaction preserves live ID membership");
+    CHECK(stats.generalization_profile.queries == 5 &&
+          stats.instance_profile.queries == 1 &&
+          stats.unifier_profile.queries == 2,
+          "forced compaction preserves unit query distributions");
   }
 
   compact_unit_index_free(index);

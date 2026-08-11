@@ -54,6 +54,14 @@ struct compact_feature_index {
   unsigned long long forward_candidates;
   unsigned long long back_queries;
   unsigned long long back_candidates;
+  struct compact_query_profile forward_profile;
+  struct compact_query_profile back_profile;
+  unsigned long long query_nodes;
+  unsigned long long query_postings;
+  unsigned long long query_live;
+  unsigned long long query_dead;
+  Clock forward_lookup_clock;
+  Clock back_lookup_clock;
   unsigned long long peak_bytes;
 };
 
@@ -305,6 +313,8 @@ Compact_feature_index compact_feature_index_init(int feature_length)
     fatal_error("compact_feature_index_init: feature length must be positive");
   index = safe_calloc(1, sizeof(*index));
   index->feature_length = feature_length;
+  index->forward_lookup_clock = clock_init("compact_nonunit_forward_lookup");
+  index->back_lookup_clock = clock_init("compact_nonunit_back_lookup");
   (void) new_node(index, 0, 0);  /* reserved null node */
   index->root = new_node(index, 0, 0);
   ENSURE_ARRAY(index, postings, posting_count, posting_capacity,
@@ -396,10 +406,14 @@ static void collect_leaf(Compact_feature_index index, uint32_t node,
        posting = index->postings[posting].next) {
     struct cfi_record *record =
       &index->records[index->postings[posting].record];
+    index->query_postings++;
     if (record->active) {
+      index->query_live++;
       ensure_results(index, *count + 1);
       index->results[(*count)++] = record->proof_id;
     }
+    else
+      index->query_dead++;
   }
 }
 
@@ -422,6 +436,7 @@ static void collect_candidates(Compact_feature_index index, uint32_t node,
     uint32_t i;
     BOOL eligible = level + (int) edge->label_length <=
                     index->feature_length;
+    index->query_nodes++;
     for (i = 0; eligible && i < edge->label_length; i++) {
       int32_t label = index->labels[edge->label_offset + i];
       int32_t bound = query[level + (int) i];
@@ -442,6 +457,12 @@ static unsigned long long *candidates(Compact_feature_index index,
   *count = 0;
   if (index == NULL || query == NULL)
     return NULL;
+  clock_start(forward ? index->forward_lookup_clock :
+              index->back_lookup_clock);
+  index->query_nodes = 0;
+  index->query_postings = 0;
+  index->query_live = 0;
+  index->query_dead = 0;
   collect_candidates(index, index->root, 0, query, forward, count);
   answer = *count == 0 ? NULL : safe_malloc(*count * sizeof(*answer));
   if (*count != 0)
@@ -449,12 +470,22 @@ static unsigned long long *candidates(Compact_feature_index index,
   if (forward) {
     index->forward_queries++;
     index->forward_candidates += *count;
+    compact_profile_note(&index->forward_profile, *count,
+                         index->query_nodes + index->query_postings,
+                         index->query_live, index->query_dead,
+                         0, 0, 0);
   }
   else {
     index->back_queries++;
     index->back_candidates += *count;
+    compact_profile_note(&index->back_profile, *count,
+                         index->query_nodes + index->query_postings,
+                         index->query_live, index->query_dead,
+                         0, 0, 0);
   }
   update_peak(index);
+  clock_stop(forward ? index->forward_lookup_clock :
+             index->back_lookup_clock);
   return answer;
 }
 
@@ -468,6 +499,19 @@ unsigned long long *compact_feature_back_candidates(
   Compact_feature_index index, const int *query, size_t *count)
 {
   return candidates(index, query, FALSE, count);
+}
+
+void compact_feature_note_exact_query(
+  Compact_feature_index index, BOOL forward,
+  size_t exact_tests, size_t successes, size_t materializations)
+{
+  struct compact_query_profile *profile;
+  if (index == NULL)
+    return;
+  profile = forward ? &index->forward_profile : &index->back_profile;
+  compact_profile_note_exact(profile, exact_tests, successes,
+                             materializations);
+  profile->successes += successes;
 }
 
 void compact_feature_index_get_stats(Compact_feature_index index,
@@ -484,6 +528,10 @@ void compact_feature_index_get_stats(Compact_feature_index index,
   stats->forward_candidates = index->forward_candidates;
   stats->back_queries = index->back_queries;
   stats->back_candidates = index->back_candidates;
+  stats->forward_profile = index->forward_profile;
+  stats->back_profile = index->back_profile;
+  stats->forward_lookup_seconds = clock_seconds(index->forward_lookup_clock);
+  stats->back_lookup_seconds = clock_seconds(index->back_lookup_clock);
   stats->node_bytes = index->node_capacity * sizeof(*index->nodes);
   stats->label_bytes = index->label_capacity * sizeof(*index->labels);
   stats->posting_bytes = index->posting_capacity * sizeof(*index->postings);
@@ -506,5 +554,7 @@ void compact_feature_index_free(Compact_feature_index index)
   safe_free(index->hash_keys);
   safe_free(index->hash_values);
   safe_free(index->results);
+  free_clock(index->forward_lookup_clock);
+  free_clock(index->back_lookup_clock);
   safe_free(index);
 }

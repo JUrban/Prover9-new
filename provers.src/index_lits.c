@@ -39,6 +39,8 @@ static Compact_feature_index Compact_nonunits;
 static unsigned long long Compact_nonunit_audit_failures;
 static unsigned long long Compact_nonunit_forward_exact_tests;
 static unsigned long long Compact_nonunit_back_exact_tests;
+static Clock Compact_nonunit_exact_clock;
+static Clock Compact_nonunit_materialize_clock;
 static Compact_clause_resolver Compact_clause_resolve;
 static Compact_clause_releaser Compact_clause_release;
 static void *Compact_clause_context;
@@ -52,12 +54,27 @@ void configure_compact_clause_access(Compact_clause_resolver resolver,
   Compact_clause_context = context;
 }
 
-static Topform resolve_compact_index_clause(unsigned long long id)
+static Topform resolve_compact_index_clause_profile(unsigned long long id,
+                                                    BOOL *materialized)
 {
   Topform clause = find_clause_by_id(id);
-  if (clause == NULL && Compact_clause_resolve != NULL)
+  if (materialized != NULL)
+    *materialized = FALSE;
+  if (clause == NULL && Compact_clause_resolve != NULL) {
+    if (materialized != NULL)
+      clock_start(Compact_nonunit_materialize_clock);
     clause = Compact_clause_resolve(id, Compact_clause_context);
+    if (materialized != NULL) {
+      clock_stop(Compact_nonunit_materialize_clock);
+      *materialized = TRUE;
+    }
+  }
   return clause;
+}
+
+static Topform resolve_compact_index_clause(unsigned long long id)
+{
+  return resolve_compact_index_clause_profile(id, NULL);
 }
 
 void release_compact_index_clause(Topform clause)
@@ -171,6 +188,18 @@ void fprint_compact_nonunit_index(FILE *fp)
           stats.label_bytes, stats.posting_bytes, stats.record_bytes, stats.hash_bytes,
           stats.scratch_bytes, stats.total_bytes,
           stats.peak_bytes);
+  compact_profile_fprint(fp, "nonunit", "forward_subsumption",
+                         &stats.forward_profile,
+                         stats.forward_lookup_seconds);
+  compact_profile_fprint(fp, "nonunit", "back_subsumption",
+                         &stats.back_profile, stats.back_lookup_seconds);
+  fprintf(fp,
+          "Compact_index_timing: component=nonunit, "
+          "forward_lookup_seconds=%.3f, back_lookup_seconds=%.3f, "
+          "exact_seconds=%.3f, materialize_seconds=%.3f.\n",
+          stats.forward_lookup_seconds, stats.back_lookup_seconds,
+          clock_seconds(Compact_nonunit_exact_clock),
+          clock_seconds(Compact_nonunit_materialize_clock));
 }
 
 static void compact_nonunit_audit_mismatch(const char *operation,
@@ -219,6 +248,17 @@ void fprint_compact_unit_index(FILE *fp)
           stats.token_bytes,
           stats.hash_bytes, stats.scratch_bytes,
           stats.total_bytes, stats.peak_bytes);
+  compact_profile_fprint(fp, "unit", "generalization",
+                         &stats.generalization_profile,
+                         stats.generalization_seconds);
+  compact_profile_fprint(fp, "unit", "instance",
+                         &stats.instance_profile, stats.instance_seconds);
+  compact_profile_fprint(fp, "unit", "unification",
+                         &stats.unifier_profile, stats.unifier_seconds);
+  fprintf(fp,
+          "Compact_index_timing: component=unit, sort_seconds=%.3f, "
+          "maintenance_seconds=%.3f.\n",
+          stats.sort_seconds, stats.maintenance_seconds);
 }
 
 static void compact_unit_audit_mismatch(const char *operation, Topform query,
@@ -468,6 +508,11 @@ void init_literals_index(int depth)
      compact_unit_index_init_with_pool(Compact_unit_terms)) : NULL;
   Compact_nonunits = compact_nonunit_index_mode() ?
     compact_feature_index_init(feature_length()) : NULL;
+  if (compact_nonunit_index_mode()) {
+    Compact_nonunit_exact_clock = clock_init("compact_nonunit_exact");
+    Compact_nonunit_materialize_clock =
+      clock_init("compact_nonunit_materialize");
+  }
 }  /* init_lits_index */
 
 /*************
@@ -497,6 +542,9 @@ void destroy_literals_index(void)
   compact_unit_index_free(Compact_units); Compact_units = NULL;
   Compact_unit_terms = NULL;
   compact_feature_index_free(Compact_nonunits); Compact_nonunits = NULL;
+  free_clock(Compact_nonunit_exact_clock); Compact_nonunit_exact_clock = NULL;
+  free_clock(Compact_nonunit_materialize_clock);
+  Compact_nonunit_materialize_clock = NULL;
 }  /* lits_destroy_index */
 
 /*************
@@ -706,19 +754,31 @@ static Topform compact_nonunit_forward_subsumption(Topform query)
 {
   int *vector = features(query->literals);
   unsigned long long *ids;
-  size_t count = 0, i;
+  size_t count = 0, i, exact = 0, materialized = 0;
   Topform result = NULL;
   ids = compact_feature_forward_candidates(Compact_nonunits, vector, &count);
   for (i = 0; i < count && result == NULL; i++) {
-    Topform candidate = resolve_compact_index_clause(ids[i]);
+    BOOL was_materialized;
+    Topform candidate = resolve_compact_index_clause_profile(
+      ids[i], &was_materialized);
+    if (was_materialized)
+      materialized++;
     if (candidate == NULL)
       fatal_error("compact_nonunit_forward_subsumption: candidate is not resident");
     Compact_nonunit_forward_exact_tests++;
-    if (feature_subsumes_raw(candidate, query))
+    exact++;
+    clock_start(Compact_nonunit_exact_clock);
+    if (feature_subsumes_raw(candidate, query)) {
+      clock_stop(Compact_nonunit_exact_clock);
       result = candidate;
-    else
+    }
+    else {
+      clock_stop(Compact_nonunit_exact_clock);
       release_compact_index_clause(candidate);
+    }
   }
+  compact_feature_note_exact_query(Compact_nonunits, TRUE, exact,
+                                   result == NULL ? 0 : 1, materialized);
   safe_free(ids);
   return result;
 }
@@ -727,23 +787,36 @@ static Plist compact_nonunit_back_subsumption(Topform query)
 {
   int *vector = features(query->literals);
   unsigned long long *ids;
-  size_t count = 0, i;
+  size_t count = 0, i, exact = 0, successes = 0, materialized = 0;
   Plist result = NULL;
   ids = compact_feature_back_candidates(Compact_nonunits, vector, &count);
   for (i = 0; i < count; i++) {
-    Topform candidate = resolve_compact_index_clause(ids[i]);
+    BOOL was_materialized;
+    Topform candidate = resolve_compact_index_clause_profile(
+      ids[i], &was_materialized);
+    if (was_materialized)
+      materialized++;
     if (candidate == NULL)
       fatal_error("compact_nonunit_back_subsumption: candidate is not resident");
     if (candidate != query) {
       Compact_nonunit_back_exact_tests++;
-      if (feature_subsumes_raw(query, candidate))
+      exact++;
+      clock_start(Compact_nonunit_exact_clock);
+      if (feature_subsumes_raw(query, candidate)) {
+        clock_stop(Compact_nonunit_exact_clock);
+        successes++;
         result = plist_prepend(result, candidate);
-      else
+      }
+      else {
+        clock_stop(Compact_nonunit_exact_clock);
         release_compact_index_clause(candidate);
+      }
     }
     else
       release_compact_index_clause(candidate);
   }
+  compact_feature_note_exact_query(Compact_nonunits, FALSE, exact,
+                                   successes, materialized);
   safe_free(ids);
   return result;
 }

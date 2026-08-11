@@ -31,6 +31,8 @@ static Compact_term_pool Compact_back_demod_terms;
 static BOOL Compact_back_demod_audit;
 static BOOL Compact_back_demod_authoritative;
 static unsigned long long Compact_back_demod_failures;
+static Clock Compact_back_demod_exact_clock;
+static Clock Compact_back_demod_materialize_clock;
 static Compact_back_demod_resolver Compact_back_demod_resolve;
 static Compact_back_demod_releaser Compact_back_demod_release;
 static Compact_back_demod_batch_adviser Compact_back_demod_advise;
@@ -174,6 +176,11 @@ void init_back_demod_index(Mindextype mtype, Uniftype utype, int fpa_depth)
   Compact_back_demod_idx = compact_back_demod_mode() ?
     (Compact_back_demod_terms == NULL ? compact_back_demod_init() :
      compact_back_demod_init_with_pool(Compact_back_demod_terms)) : NULL;
+  if (compact_back_demod_mode()) {
+    Compact_back_demod_exact_clock = clock_init("compact_back_demod_exact");
+    Compact_back_demod_materialize_clock =
+      clock_init("compact_back_demod_materialize");
+  }
 }  /* init_back_demod_index */
 
 /*************
@@ -417,6 +424,10 @@ void destroy_back_demod_index(void)
   compact_back_demod_free(Compact_back_demod_idx);
   Compact_back_demod_idx = NULL;
   Compact_back_demod_terms = NULL;
+  free_clock(Compact_back_demod_exact_clock);
+  Compact_back_demod_exact_clock = NULL;
+  free_clock(Compact_back_demod_materialize_clock);
+  Compact_back_demod_materialize_clock = NULL;
 }  /* destroy_back_demod_index */
 
 /*************
@@ -495,20 +506,26 @@ static Plist compact_back_demodulatable(Topform demod, int type,
                                         BOOL lex_order_vars)
 {
   unsigned long long *ids;
-  size_t count = 0, i;
+  size_t count = 0, i, successes = 0, materializations = 0;
   Plist answer = NULL, tail = NULL;
   ids = compact_back_demod_candidate_ids(
     Compact_back_demod_idx, demod, type, &count);
-  compact_back_demod_note_exact_tests(Compact_back_demod_idx, count);
   for (i = 0; i < count; i++) {
     Topform candidate = find_clause_by_id(ids[i]);
-    if (candidate == NULL && Compact_back_demod_resolve != NULL)
+    if (candidate == NULL && Compact_back_demod_resolve != NULL) {
+      clock_start(Compact_back_demod_materialize_clock);
       candidate = Compact_back_demod_resolve(
         ids[i], Compact_back_demod_context);
+      clock_stop(Compact_back_demod_materialize_clock);
+      materializations++;
+    }
     if (candidate == NULL)
       fatal_error("compact_back_demodulatable: candidate is not resident");
+    clock_start(Compact_back_demod_exact_clock);
     if (rewritable_clause_type(demod, candidate, type, lex_order_vars)) {
       Plist cell = get_plist();
+      clock_stop(Compact_back_demod_exact_clock);
+      successes++;
       cell->v = candidate;
       cell->next = NULL;
       if (tail == NULL)
@@ -517,9 +534,14 @@ static Plist compact_back_demodulatable(Topform demod, int type,
         tail->next = cell;
       tail = cell;
     }
-    else if (Compact_back_demod_release != NULL)
-      Compact_back_demod_release(candidate, Compact_back_demod_context);
+    else {
+      clock_stop(Compact_back_demod_exact_clock);
+      if (Compact_back_demod_release != NULL)
+        Compact_back_demod_release(candidate, Compact_back_demod_context);
+    }
   }
+  compact_back_demod_note_exact_query(
+    Compact_back_demod_idx, count, successes, materializations);
   safe_free(ids);
   return answer;
 }
@@ -601,6 +623,23 @@ void fprint_compact_back_demod(FILE *fp)
           stats.posting_bytes, stats.record_bytes, stats.root_bytes,
           stats.token_bytes, stats.hash_bytes, stats.scratch_bytes,
           stats.total_bytes, stats.peak_bytes);
+  compact_profile_fprint(fp, "back_demod", "candidate_lookup",
+                         &stats.query_profile, stats.lookup_seconds);
+  fprintf(fp,
+          "Compact_index_timing: component=back_demod, lookup_seconds=%.3f, "
+          "exact_seconds=%.3f, materialize_seconds=%.3f, "
+          "maintenance_seconds=%.3f.\n",
+          stats.lookup_seconds, clock_seconds(Compact_back_demod_exact_clock),
+          clock_seconds(Compact_back_demod_materialize_clock),
+          stats.maintenance_seconds);
+  fprintf(fp,
+          "Compact_worst_query: component=back_demod, proof_id=%llu, "
+          "groups=%llu, occurrences=%llu, candidates=%llu, inactive=%llu, "
+          "duplicates=%llu, posting_bytes_decoded=%llu.\n",
+          stats.worst_query_id, stats.worst_query_groups,
+          stats.worst_query_occurrences, stats.worst_query_candidates,
+          stats.inactive_groups_examined, stats.duplicate_groups_examined,
+          stats.posting_bytes_decoded);
 }
 
 /*************

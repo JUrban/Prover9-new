@@ -68,7 +68,22 @@ struct compact_unit_index {
   unsigned long long instance_exact_tests;
   unsigned long long unifier_queries;
   unsigned long long unifier_exact_tests;
+  struct compact_query_profile generalization_profile;
+  struct compact_query_profile instance_profile;
+  struct compact_query_profile unifier_profile;
+  Clock generalization_clock;
+  Clock instance_clock;
+  Clock unifier_clock;
+  Clock sort_clock;
+  Clock maintenance_clock;
   unsigned long long peak_bytes;
+};
+
+struct cui_query_work {
+  unsigned long long nodes;
+  unsigned long long postings;
+  unsigned long long live;
+  unsigned long long dead;
 };
 
 static size_t grow_capacity(size_t current, size_t item_size,
@@ -348,6 +363,11 @@ Compact_unit_index compact_unit_index_init_with_pool(Compact_term_pool pool)
   index->term_pool = pool;
   index->tokens = compact_term_pool_tokens(pool);
   index->id_map = compact_id_map_init(1);
+  index->generalization_clock = clock_init("compact_unit_generalization");
+  index->instance_clock = clock_init("compact_unit_instance");
+  index->unifier_clock = clock_init("compact_unit_unifier");
+  index->sort_clock = clock_init("compact_unit_sort");
+  index->maintenance_clock = clock_init("compact_unit_maintenance");
   (void) new_node(index, 0, 0);  /* reserved null node */
   index->roots[0] = new_node(index, 0, 0);
   index->roots[1] = new_node(index, 0, 0);
@@ -494,6 +514,7 @@ static void compact_unit_index_compact_internal(Compact_unit_index index,
       (!force && !compact_unit_index_compaction_needed(index)) ||
       (force && index->record_count - 1 == index->active))
     return;
+  clock_start(index->maintenance_clock);
   old_bytes = index_bytes(index);
   old_peak = index->peak_bytes;
   old_peak_active = index->peak;
@@ -539,6 +560,16 @@ static void compact_unit_index_compact_internal(Compact_unit_index index,
   replacement->record_count = 1;
   for (i = 1; i < packed; i++)
     copy_live_record(replacement, &old.records[i]);
+  free_clock(replacement->generalization_clock);
+  free_clock(replacement->instance_clock);
+  free_clock(replacement->unifier_clock);
+  free_clock(replacement->sort_clock);
+  free_clock(replacement->maintenance_clock);
+  replacement->generalization_clock = old.generalization_clock;
+  replacement->instance_clock = old.instance_clock;
+  replacement->unifier_clock = old.unifier_clock;
+  replacement->sort_clock = old.sort_clock;
+  replacement->maintenance_clock = old.maintenance_clock;
   *index = *replacement;
   safe_free(replacement);
   index->retired = retired;
@@ -550,10 +581,14 @@ static void compact_unit_index_compact_internal(Compact_unit_index index,
   index->instance_exact_tests = instance_exact_tests;
   index->unifier_queries = unifier_queries;
   index->unifier_exact_tests = unifier_exact_tests;
+  index->generalization_profile = old.generalization_profile;
+  index->instance_profile = old.instance_profile;
+  index->unifier_profile = old.unifier_profile;
   if (old_peak > index->peak_bytes)
     index->peak_bytes = old_peak;
   if (old_peak_active > index->peak)
     index->peak = old_peak_active;
+  clock_stop(index->maintenance_clock);
 }
 
 void compact_unit_index_compact(Compact_unit_index index)
@@ -678,7 +713,8 @@ static void undo_generalization_bindings(Term *bindings,
 
 static unsigned long long generalization_rec(
   Compact_unit_index index, uint32_t node, uint32_t position,
-  uint32_t end, Term *bindings, unsigned long long exclude_id)
+  uint32_t end, Term *bindings, unsigned long long exclude_id,
+  struct cui_query_work *work)
 {
   uint32_t child;
   if (position == end) {
@@ -687,6 +723,11 @@ static unsigned long long generalization_rec(
          posting != CUI_NONE; posting = index->postings[posting].next) {
       struct cui_record *record =
         &index->records[index->postings[posting].record];
+      work->postings++;
+      if (record->active)
+        work->live++;
+      else
+        work->dead++;
       if (record->active && record->proof_id != exclude_id)
         return record->proof_id;
     }
@@ -698,11 +739,12 @@ static unsigned long long generalization_rec(
     unsigned new_count = 0;
     uint32_t next_position = position;
     unsigned long long found = 0;
+    work->nodes++;
     if (match_generalization_edge(index, child, position, end, bindings,
                                   new_bindings, &new_count,
                                   &next_position))
       found = generalization_rec(index, child, next_position, end,
-                                 bindings, exclude_id);
+                                 bindings, exclude_id, work);
     undo_generalization_bindings(bindings, new_bindings, new_count);
     if (found != 0)
       return found;
@@ -716,19 +758,30 @@ unsigned long long compact_unit_generalization_first(
 {
   size_t count = 0;
   Term bindings[MAX_VARS];
+  struct cui_query_work work;
+  unsigned long long result;
   if (index == NULL || target == NULL)
     return 0;
+  memset(&work, 0, sizeof(work));
+  clock_start(index->generalization_clock);
   index->tokens = compact_term_pool_tokens(index->term_pool);
   index->generalization_queries++;
   memset(bindings, 0, sizeof(bindings));
   flatten_query(index, target, &count);
-  {
-    unsigned long long result = count == 0 ? 0 : generalization_rec(
-      index, index->roots[sign ? 1 : 0], 0, (uint32_t) count,
-      bindings, exclude_id);
-    update_peak(index);
-    return result;
-  }
+  result = count == 0 ? 0 : generalization_rec(
+    index, index->roots[sign ? 1 : 0], 0, (uint32_t) count,
+    bindings, exclude_id, &work);
+  compact_profile_note(&index->generalization_profile,
+                       work.postings,
+                       work.nodes + work.postings,
+                       work.live, work.dead, 0,
+                       result == 0 ? 0 : 1, 0);
+  compact_profile_note_exact(&index->generalization_profile,
+                             work.postings,
+                             result == 0 ? 0 : 1, 0);
+  update_peak(index);
+  clock_stop(index->generalization_clock);
+  return result;
 }
 
 static uint32_t token_term_end(Compact_unit_index index, uint32_t position,
@@ -814,19 +867,26 @@ unsigned long long *compact_unit_instance_ids(
   uint64_t wanted;
   size_t found = 0;
   size_t i;
+  unsigned long long tests_before, live = 0, dead = 0;
   if (count == NULL)
     return NULL;
   *count = 0;
   if (index == NULL || pattern == NULL)
     return NULL;
+  clock_start(index->instance_clock);
   index->tokens = compact_term_pool_tokens(index->term_pool);
   index->instance_queries++;
+  tests_before = index->instance_exact_tests;
   wanted = resident_symbol_mask(pattern);
   for (i = 1; i < index->record_count; i++) {
     struct cui_record *record = &index->records[i];
     uint32_t position;
     uint32_t starts[MAX_VARS], ends[MAX_VARS];
     unsigned j;
+    if (record->active)
+      live++;
+    else
+      dead++;
     if (!record->active || record->sign != (unsigned char) sign ||
         record->proof_id == exclude_id ||
         (record->symbol_mask & wanted) != wanted)
@@ -850,15 +910,27 @@ unsigned long long *compact_unit_instance_ids(
       index->result_ids[found++] = record->proof_id;
     }
   }
+  if (found > 1) {
+    clock_start(index->sort_clock);
+    qsort(index->result_ids, found, sizeof(*index->result_ids),
+          descending_id_compare);
+    clock_stop(index->sort_clock);
+  }
+  compact_profile_note(
+    &index->instance_profile,
+    index->instance_exact_tests - tests_before,
+    index->record_count - 1, live, dead, 0, found, 0);
+  compact_profile_note_exact(
+    &index->instance_profile,
+    index->instance_exact_tests - tests_before, found, 0);
+  update_peak(index);
+  clock_stop(index->instance_clock);
   if (found == 0)
     return NULL;
-  qsort(index->result_ids, found, sizeof(*index->result_ids),
-        descending_id_compare);
   {
     unsigned long long *result = safe_malloc(found * sizeof(*result));
     memcpy(result, index->result_ids, found * sizeof(*result));
     *count = found;
-    update_peak(index);
     return result;
   }
 }
@@ -1044,19 +1116,31 @@ unsigned long long *compact_unit_unifier_ids(
   size_t found = 0;
   uint32_t i;
   int query_root;
+  unsigned long long tests_before, visited = 0, live = 0, dead = 0;
   if (count == NULL)
     return NULL;
   *count = 0;
   if (index == NULL || query == NULL || VARIABLE(query))
     return NULL;
+  clock_start(index->unifier_clock);
   index->tokens = compact_term_pool_tokens(index->term_pool);
   index->unifier_queries++;
+  tests_before = index->unifier_exact_tests;
   query_root = SYMNUM(query);
-  if ((size_t) query_root >= index->unifier_symbol_capacity)
+  if ((size_t) query_root >= index->unifier_symbol_capacity) {
+    compact_profile_note(&index->unifier_profile, 0, 0, 0, 0, 0, 0, 0);
+    compact_profile_note_exact(&index->unifier_profile, 0, 0, 0);
+    clock_stop(index->unifier_clock);
     return NULL;
+  }
   for (i = index->unifier_heads[sign ? 1 : 0][query_root];
        i != CUI_NONE; i = index->records[i].next_root) {
     struct cui_record *record = &index->records[i];
+    visited++;
+    if (record->active)
+      live++;
+    else
+      dead++;
     if (!record->active || record->sign != (unsigned char) sign ||
         record->proof_id == exclude_id || record->token_length == 0 ||
         index->tokens[record->token_offset] != query_root)
@@ -1074,17 +1158,28 @@ unsigned long long *compact_unit_unifier_ids(
       index->result_ids[found++] = record->proof_id;
     }
   }
+  if (found > 1) {
+    clock_start(index->sort_clock);
+    qsort(index->result_ids, found, sizeof(*index->result_ids),
+          descending_id_compare);
+    clock_stop(index->sort_clock);
+  }
+  compact_profile_note(
+    &index->unifier_profile,
+    index->unifier_exact_tests - tests_before,
+    visited, live, dead, 0, found, 0);
+  compact_profile_note_exact(
+    &index->unifier_profile,
+    index->unifier_exact_tests - tests_before, found, 0);
+  update_peak(index);
+  clock_stop(index->unifier_clock);
   if (found == 0) {
-    update_peak(index);
     return NULL;
   }
-  qsort(index->result_ids, found, sizeof(*index->result_ids),
-        descending_id_compare);
   {
     unsigned long long *result = safe_malloc(found * sizeof(*result));
     memcpy(result, index->result_ids, found * sizeof(*result));
     *count = found;
-    update_peak(index);
     return result;
   }
 }
@@ -1110,6 +1205,14 @@ void compact_unit_index_get_stats(Compact_unit_index index,
   stats->instance_exact_tests = index->instance_exact_tests;
   stats->unifier_queries = index->unifier_queries;
   stats->unifier_exact_tests = index->unifier_exact_tests;
+  stats->generalization_profile = index->generalization_profile;
+  stats->instance_profile = index->instance_profile;
+  stats->unifier_profile = index->unifier_profile;
+  stats->generalization_seconds = clock_seconds(index->generalization_clock);
+  stats->instance_seconds = clock_seconds(index->instance_clock);
+  stats->unifier_seconds = clock_seconds(index->unifier_clock);
+  stats->sort_seconds = clock_seconds(index->sort_clock);
+  stats->maintenance_seconds = clock_seconds(index->maintenance_clock);
   stats->node_items = index->node_count;
   stats->posting_items = index->posting_count;
   stats->node_bytes = index->node_capacity * sizeof(*index->nodes);
@@ -1141,5 +1244,10 @@ void compact_unit_index_free(Compact_unit_index index)
   compact_id_map_free(index->id_map);
   safe_free(index->query);
   safe_free(index->result_ids);
+  free_clock(index->generalization_clock);
+  free_clock(index->instance_clock);
+  free_clock(index->unifier_clock);
+  free_clock(index->sort_clock);
+  free_clock(index->maintenance_clock);
   safe_free(index);
 }

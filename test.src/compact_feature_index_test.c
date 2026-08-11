@@ -34,12 +34,14 @@ int main(void)
   CHECK(ids != NULL && ids[0] == 30 && ids[1] == 50 &&
         ids[2] == 20 && ids[3] == 10,
         "forward order is ascending trie traversal then newest leaf first");
+  compact_feature_note_exact_query(index, TRUE, 3, 1, 2);
   safe_free(ids);
 
   ids = compact_feature_back_candidates(index, back, &count);
   CHECK(count == 3, "back componentwise filter returns three vectors");
   CHECK(ids != NULL && ids[0] == 20 && ids[1] == 10 && ids[2] == 40,
         "back traversal order matches the legacy trie before prepending");
+  compact_feature_note_exact_query(index, FALSE, count, 2, 1);
   safe_free(ids);
 
   CHECK(compact_feature_index_remove(index, 20), "remove live ID");
@@ -47,6 +49,7 @@ int main(void)
   ids = compact_feature_forward_candidates(index, forward, &count);
   CHECK(count == 3 && ids[0] == 30 && ids[1] == 50 && ids[2] == 10,
         "retired leaf postings are ignored");
+  compact_feature_note_exact_query(index, TRUE, count, 0, 3);
   safe_free(ids);
 
   compact_feature_index_get_stats(index, &stats);
@@ -54,6 +57,12 @@ int main(void)
         "lifecycle counters are exact");
   CHECK(stats.forward_queries == 2 && stats.back_queries == 1,
         "query counters are exact");
+  CHECK(stats.forward_profile.queries == 2 &&
+        stats.forward_profile.exact_tests == 6 &&
+        stats.forward_profile.materializations == 5 &&
+        stats.back_profile.queries == 1 &&
+        stats.back_profile.exact_tests == 3,
+        "feature profiles separate lookup, exact, and materialization work");
   CHECK(stats.label_bytes > 0 && stats.total_bytes > 0 &&
         stats.peak_bytes >= stats.total_bytes,
         "resident byte accounting is present");

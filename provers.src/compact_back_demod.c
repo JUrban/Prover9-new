@@ -89,6 +89,21 @@ struct compact_back_demod_index {
   unsigned long long occurrences_examined;
   unsigned long long path_filter_checks;
   unsigned long long path_filter_rejects;
+  unsigned long long inactive_groups_examined;
+  unsigned long long duplicate_groups_examined;
+  unsigned long long posting_bytes_decoded;
+  unsigned long long query_work;
+  unsigned long long query_live;
+  unsigned long long query_dead;
+  unsigned long long query_duplicates;
+  unsigned long long query_bytes_decoded;
+  unsigned long long worst_query_id;
+  unsigned long long worst_query_groups;
+  unsigned long long worst_query_occurrences;
+  unsigned long long worst_query_candidates;
+  struct compact_query_profile query_profile;
+  Clock lookup_clock;
+  Clock maintenance_clock;
   unsigned long long materialized_file_snapshots;
   unsigned long long materialized_snapshot_ids;
   unsigned long long peak_bytes;
@@ -521,6 +536,8 @@ Compact_back_demod_index compact_back_demod_init_with_pool(
   index->term_pool = pool;
   index->tokens = compact_term_pool_tokens(pool);
   index->id_map = compact_id_map_init(1);
+  index->lookup_clock = clock_init("compact_back_demod_lookup");
+  index->maintenance_clock = clock_init("compact_back_demod_maintenance");
   index->token_limit = compact_term_pool_token_count(pool);
   if (new_posting_block(index) != CBD_NONE)
     fatal_error("compact_back_demod: invalid posting block sentinel");
@@ -831,8 +848,21 @@ static void collect_symbol(Compact_back_demod_index index, Term pattern,
   cbd_path_mask required_mask;
   if (VARIABLE(pattern)) {
     size_t at;
-    for (at = 1; at < index->record_count; at++)
+    for (at = 1; at < index->record_count; at++) {
+      struct cbd_record *record = &index->records[at];
+      index->query_work++;
+      if (record->active)
+        index->query_live++;
+      else {
+        index->query_dead++;
+        index->inactive_groups_examined++;
+      }
+      if (record->active && record->query_stamp == index->query_stamp) {
+        index->query_duplicates++;
+        index->duplicate_groups_examined++;
+      }
       collect_record(index, (uint32_t) at, exclude_id, count);
+    }
     return;
   }
   symbol = (unsigned) SYMNUM(pattern);
@@ -862,6 +892,8 @@ static void collect_symbol(Compact_back_demod_index index, Term pattern,
       if (block >= index->posting_block_count)
         fatal_error("compact_back_demod: corrupt posting block");
       current = &index->posting_blocks[block];
+      index->posting_bytes_decoded += current->used;
+      index->query_bytes_decoded += current->used;
       while (position < current->used) {
         uint32_t delta = decode_posting_value(current, &position);
         uint32_t occurrence_delta;
@@ -879,6 +911,17 @@ static void collect_symbol(Compact_back_demod_index index, Term pattern,
           fatal_error("compact_back_demod: corrupt posting record");
         record = &index->records[record_index];
         index->posting_groups_examined++;
+        index->query_work++;
+        if (record->active)
+          index->query_live++;
+        else {
+          index->query_dead++;
+          index->inactive_groups_examined++;
+        }
+        if (record->active && record->query_stamp == index->query_stamp) {
+          index->query_duplicates++;
+          index->duplicate_groups_examined++;
+        }
         if (record->active && record->proof_id != exclude_id &&
             record->query_stamp != index->query_stamp &&
             posting_contains_pattern(index, occurrence_offset,
@@ -905,9 +948,17 @@ unsigned long long *compact_back_demod_candidate_ids(
 {
   Term atom, alpha, beta;
   unsigned long long *answer;
+  unsigned long long occurrences_before;
   *count = 0;
   if (index == NULL || demod == NULL || demod->literals == NULL)
     return NULL;
+  clock_start(index->lookup_clock);
+  index->query_work = 0;
+  index->query_live = 0;
+  index->query_dead = 0;
+  index->query_duplicates = 0;
+  index->query_bytes_decoded = 0;
+  occurrences_before = index->occurrences_examined;
   index->tokens = compact_term_pool_tokens(index->term_pool);
   index->token_limit = compact_term_pool_token_count(index->term_pool);
   atom = demod->literals->atom;
@@ -925,15 +976,31 @@ unsigned long long *compact_back_demod_candidate_ids(
     memcpy(answer, index->results, *count * sizeof(*answer));
   index->queries++;
   index->candidates += *count;
+  compact_profile_note(&index->query_profile, *count, index->query_work,
+                       index->query_live, index->query_dead,
+                       index->query_duplicates, *count,
+                       index->query_bytes_decoded);
+  if (index->query_work > index->worst_query_groups) {
+    index->worst_query_id = demod->id;
+    index->worst_query_groups = index->query_work;
+    index->worst_query_occurrences =
+      index->occurrences_examined - occurrences_before;
+    index->worst_query_candidates = *count;
+  }
   update_peak(index);
+  clock_stop(index->lookup_clock);
   return answer;
 }
 
-void compact_back_demod_note_exact_tests(Compact_back_demod_index index,
-                                         size_t count)
+void compact_back_demod_note_exact_query(
+  Compact_back_demod_index index, size_t tests, size_t successes,
+  size_t materializations)
 {
-  if (index != NULL)
-    index->exact_tests += count;
+  if (index != NULL) {
+    index->exact_tests += tests;
+    compact_profile_note_exact(&index->query_profile, tests, successes,
+                               materializations);
+  }
 }
 
 BOOL compact_back_demod_compaction_needed(Compact_back_demod_index index)
@@ -986,6 +1053,7 @@ static void compact_back_demod_compact_internal(
       (!force && !compact_back_demod_compaction_needed(index)) ||
       (force && index->record_count - 1 == index->active))
     return;
+  clock_start(index->maintenance_clock);
   old_bytes = index_bytes(index);
   old_peak = index->peak_bytes;
   old_peak_active = index->peak;
@@ -1066,6 +1134,10 @@ static void compact_back_demod_compact_internal(
   safe_free(record_map);
   update_peak(replacement);
   old = *index;
+  free_clock(replacement->lookup_clock);
+  free_clock(replacement->maintenance_clock);
+  replacement->lookup_clock = old.lookup_clock;
+  replacement->maintenance_clock = old.maintenance_clock;
   *index = *replacement;
   safe_free(replacement);
   safe_free(old.posting_blocks);
@@ -1087,10 +1159,19 @@ static void compact_back_demod_compact_internal(
   index->occurrences_examined = occurrences_examined;
   index->path_filter_checks = path_checks;
   index->path_filter_rejects = path_rejects;
+  index->inactive_groups_examined = old.inactive_groups_examined;
+  index->duplicate_groups_examined = old.duplicate_groups_examined;
+  index->posting_bytes_decoded = old.posting_bytes_decoded;
+  index->worst_query_id = old.worst_query_id;
+  index->worst_query_groups = old.worst_query_groups;
+  index->worst_query_occurrences = old.worst_query_occurrences;
+  index->worst_query_candidates = old.worst_query_candidates;
+  index->query_profile = old.query_profile;
   if (old_peak > index->peak_bytes)
     index->peak_bytes = old_peak;
   if (old_peak_active > index->peak)
     index->peak = old_peak_active;
+  clock_stop(index->maintenance_clock);
 }
 
 void compact_back_demod_compact(Compact_back_demod_index index)
@@ -1122,6 +1203,7 @@ void compact_back_demod_compact_materialized(
   if (index == NULL || materialize == NULL ||
       !compact_back_demod_compaction_needed(index))
     return;
+  clock_start(index->maintenance_clock);
   if (index->active > SIZE_MAX / sizeof(*ids))
     fatal_error("compact_back_demod: materialized ID snapshot overflow");
   if (index->active != 0)
@@ -1217,6 +1299,10 @@ void compact_back_demod_compact_materialized(
   if (id_file != NULL)
     fclose(id_file);
   safe_free(ids);
+  free_clock(replacement->lookup_clock);
+  free_clock(replacement->maintenance_clock);
+  replacement->lookup_clock = old.lookup_clock;
+  replacement->maintenance_clock = old.maintenance_clock;
   *index = *replacement;
   safe_free(replacement);
   index->retired = retired;
@@ -1230,6 +1316,14 @@ void compact_back_demod_compact_materialized(
   index->occurrences_examined = occurrences_examined;
   index->path_filter_checks = path_checks;
   index->path_filter_rejects = path_rejects;
+  index->inactive_groups_examined = old.inactive_groups_examined;
+  index->duplicate_groups_examined = old.duplicate_groups_examined;
+  index->posting_bytes_decoded = old.posting_bytes_decoded;
+  index->worst_query_id = old.worst_query_id;
+  index->worst_query_groups = old.worst_query_groups;
+  index->worst_query_occurrences = old.worst_query_occurrences;
+  index->worst_query_candidates = old.worst_query_candidates;
+  index->query_profile = old.query_profile;
   index->materialized_file_snapshots =
     file_snapshots + (file_snapshot ? 1 : 0);
   index->materialized_snapshot_ids = snapshot_ids + count;
@@ -1237,6 +1331,7 @@ void compact_back_demod_compact_materialized(
     index->peak_bytes = old_peak;
   if (old_peak_active > index->peak)
     index->peak = old_peak_active;
+  clock_stop(index->maintenance_clock);
 }
 
 void compact_back_demod_compact_all_stale(Compact_back_demod_index index)
@@ -1310,6 +1405,16 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->occurrences_examined = index->occurrences_examined;
   stats->path_filter_checks = index->path_filter_checks;
   stats->path_filter_rejects = index->path_filter_rejects;
+  stats->inactive_groups_examined = index->inactive_groups_examined;
+  stats->duplicate_groups_examined = index->duplicate_groups_examined;
+  stats->posting_bytes_decoded = index->posting_bytes_decoded;
+  stats->worst_query_id = index->worst_query_id;
+  stats->worst_query_groups = index->worst_query_groups;
+  stats->worst_query_occurrences = index->worst_query_occurrences;
+  stats->worst_query_candidates = index->worst_query_candidates;
+  stats->query_profile = index->query_profile;
+  stats->lookup_seconds = clock_seconds(index->lookup_clock);
+  stats->maintenance_seconds = clock_seconds(index->maintenance_clock);
   stats->materialized_file_snapshots = index->materialized_file_snapshots;
   stats->materialized_snapshot_ids = index->materialized_snapshot_ids;
   stats->posting_bytes =
@@ -1347,5 +1452,7 @@ void compact_back_demod_free(Compact_back_demod_index index)
     compact_term_pool_free(index->term_pool);
   compact_id_map_free(index->id_map);
   safe_free(index->results);
+  free_clock(index->lookup_clock);
+  free_clock(index->maintenance_clock);
   safe_free(index);
 }

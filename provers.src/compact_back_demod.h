@@ -2,6 +2,7 @@
 #define TP_COMPACT_BACK_DEMOD_H
 
 #include "../ladr/ladr.h"
+#include "compact_profile.h"
 #include "compact_term_pool.h"
 
 typedef struct compact_back_demod_index * Compact_back_demod_index;
@@ -23,6 +24,16 @@ struct compact_back_demod_stats {
   unsigned long long occurrences_examined;
   unsigned long long path_filter_checks;
   unsigned long long path_filter_rejects;
+  unsigned long long inactive_groups_examined;
+  unsigned long long duplicate_groups_examined;
+  unsigned long long posting_bytes_decoded;
+  unsigned long long worst_query_id;
+  unsigned long long worst_query_groups;
+  unsigned long long worst_query_occurrences;
+  unsigned long long worst_query_candidates;
+  struct compact_query_profile query_profile;
+  double lookup_seconds;
+  double maintenance_seconds;
   unsigned long long materialized_file_snapshots;
   unsigned long long materialized_snapshot_ids;
   unsigned long long posting_bytes;
@@ -92,8 +103,9 @@ void compact_back_demod_rebase_term_pool(
 unsigned long long *compact_back_demod_candidate_ids(
   Compact_back_demod_index index, Topform demod, int type, size_t *count);
 
-void compact_back_demod_note_exact_tests(Compact_back_demod_index index,
-                                         size_t count);
+void compact_back_demod_note_exact_query(
+  Compact_back_demod_index index, size_t tests, size_t successes,
+  size_t materializations);
 
 void compact_back_demod_get_stats(Compact_back_demod_index index,
                                   struct compact_back_demod_stats *stats);

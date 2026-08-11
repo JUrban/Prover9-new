@@ -48,6 +48,7 @@ int main(void)
   CHECK(count == 2, "root-symbol posting finds both possible redex clauses");
   CHECK(ids != NULL && ids[0] == second->id && ids[1] == first->id,
         "candidate IDs are in decreasing proof-ID order");
+  compact_back_demod_note_exact_query(index, count, count, 0);
   safe_free(ids);
 
   path_demod = indexed_clause("f(a) = a.");
@@ -55,6 +56,7 @@ int main(void)
                                          ORIENTED, &count);
   CHECK(count == 1 && ids[0] == first->id,
         "path signature rejects a different fixed child");
+  compact_back_demod_note_exact_query(index, count, count, 0);
   safe_free(ids);
 
   repeated_demod = indexed_clause("m(x,x) = x.");
@@ -62,6 +64,7 @@ int main(void)
                                          ORIENTED, &count);
   CHECK(count == 1 && ids[0] == repeated_good->id,
         "structural filter enforces repeated pattern variables");
+  compact_back_demod_note_exact_query(index, count, count, 0);
   safe_free(ids);
 
   bidirectional = indexed_clause("k(x) = g(x).");
@@ -70,6 +73,7 @@ int main(void)
   CHECK(count == 2, "bidirectional query merges both source symbols");
   CHECK(ids != NULL && ids[0] == irrelevant->id && ids[1] == first->id,
         "merged candidates remain unique and decreasing");
+  compact_back_demod_note_exact_query(index, count, count, 0);
   safe_free(ids);
 
   CHECK(compact_back_demod_remove(index, second->id), "remove live clause");
@@ -77,14 +81,19 @@ int main(void)
   ids = compact_back_demod_candidate_ids(index, demod, ORIENTED, &count);
   CHECK(count == 1 && ids[0] == first->id,
         "retired postings are ignored");
+  compact_back_demod_note_exact_query(index, count, count, 0);
   safe_free(ids);
 
-  compact_back_demod_note_exact_tests(index, 3);
   compact_back_demod_get_stats(index, &stats);
   CHECK(stats.active == 4 && stats.retired == 1 && stats.physical == 5,
         "lifecycle counters are exact");
-  CHECK(stats.queries == 5 && stats.exact_tests == 3,
+  CHECK(stats.queries == 5 && stats.exact_tests == 7,
         "query accounting is exact");
+  CHECK(stats.query_profile.queries == stats.queries &&
+        stats.query_profile.exact_tests == stats.exact_tests &&
+        stats.query_profile.candidate_max == 2 &&
+        stats.query_profile.bytes_decoded > 0,
+        "back-demod profile records candidates, exact work, and bytes");
   CHECK(stats.path_filter_checks > 0 && stats.path_filter_rejects > 0,
         "path filter accounts for a safe fixed-symbol rejection");
   CHECK(stats.posting_groups == 14 && stats.symbol_occurrences == 15,
@@ -126,6 +135,7 @@ int main(void)
       gap_index, gap_demod, ORIENTED, &count);
     CHECK(count == 1 && ids[0] == gap_clause->id,
           "multi-byte occurrence delta retrieves distant occurrence");
+    compact_back_demod_note_exact_query(gap_index, count, count, 0);
     safe_free(ids);
     compact_back_demod_get_stats(gap_index, &gap_stats);
     CHECK(gap_stats.posting_groups >= 4 &&
@@ -144,6 +154,7 @@ int main(void)
       gap_index, duplicate_demod, ORIENTED, &count);
     CHECK(count == 1 && ids[0] == duplicate_clause->id,
           "deduplicated pooled offsets retain the clause candidate");
+    compact_back_demod_note_exact_query(gap_index, count, count, 0);
     safe_free(ids);
     compact_back_demod_free(gap_index);
     delete_clause(gap_clause);
@@ -173,6 +184,7 @@ int main(void)
     CHECK(ids != NULL && ids[0] == block_clauses[99]->id &&
           ids[99] == block_clauses[0]->id,
           "multi-block candidates retain decreasing proof-ID order");
+    compact_back_demod_note_exact_query(block_index, count, count, 0);
     safe_free(ids);
     compact_back_demod_get_stats(block_index, &block_stats);
     CHECK(block_stats.posting_stream_used > 0 &&
