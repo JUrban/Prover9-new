@@ -458,6 +458,25 @@ run with zero triggers as evidence for either setting; this control matters
 only after hint expiry or back-demodulation has created stale postings and
 subsequent queries repeatedly encounter them.
 
+The first 300-given attribution pair used `packed_only` on the two rewrite
+training cases.  Ratio 0 and the default ratio 8 had identical generated,
+kept, and non-time hint-work counters.  Ratio 8 did not fire at this boundary.
+On Osborn both traversed 6,374,542 stale IDs and performed the same three
+storage-triggered rebuilds; user CPU was 16.51/17.48 seconds and peak RSS was
+90,416 KiB in both runs.  On `chat-new-11k`, both traversed 452,964 stale IDs
+without a rebuild; user CPU was 4.98/5.06 seconds and peak RSS was 26,248 KiB.
+These are single short measurements, so the time variation is noise evidence,
+not a promotion result.
+
+A ratio-2 diagnostic deliberately made the work trigger observable on the
+same Osborn prefix.  One of the three rebuilds fired from scan work earlier
+than the storage rule, reducing stale skips to 5,981,463 (-6.17%) while
+preserving `Generated=120793` and `Kept=5737`; rebuild CPU was 0.925 seconds
+and total user CPU was 16.98 seconds.  It remained inert on `chat-new-11k` and
+again preserved `Generated=129756` and `Kept=5039`.  Ratio 2 is diagnostic,
+not a proposed default.  The conservative default 8 remains frozen for the
+1,000-given and longevity gates.
+
 Setting `P9_MATRIX_ALLOW_HOLDOUT=1` is required even when a holdout case is
 named explicitly.  Do this only for a recorded phase-promotion commit, never
 while selecting features or thresholds.
