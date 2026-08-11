@@ -69,6 +69,11 @@ indexes remain valid.  `compact_nonunit_path` enables the experimental rigid
 path prefilter for the isolated nonunit index.  The paired full-index variants
 are `compact_full_nonunit_path` and `compact_dense_file_nonunit_path`; their
 unsuffixed counterparts explicitly clear the filter and are the controls.
+The product-checkpoint compositions
+`compact_full_code_tree_nonunit_path` and
+`compact_dense_file_code_tree_nonunit_path` additionally select the shared
+unit code-tree traversal while retaining the recommended complete `mask8`
+backward-demodulation fallback.
 The filter stores a 64-bit Bloom summary of signed rigid symbols at exact term
 paths.  A subset failure is a safe pre-materialization rejection; collisions
 only retain extra candidates, and ordinary exact subsumption remains the final
