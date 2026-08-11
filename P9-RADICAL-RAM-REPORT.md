@@ -1,5 +1,10 @@
 # Radical RAM Reduction in Prover9
 
+> This document records the DISCOUNT/collective development path.  The complete
+> post-Phase-5 synthesis, including accepted compact OTTER, failure analysis,
+> the new 11,000-given comparison, usage, and future work, is
+> [`P9-RADICAL-MEMORY-TECHREPORT.md`](P9-RADICAL-MEMORY-TECHREPORT.md).
+
 ## A DISCOUNT loop, compact state, and Waldmeister-style collective inference
 
 **Engineering report, updated 11 August 2026**
@@ -421,8 +426,10 @@ The final transient controls matter for long runs: retained shared terms are
 rebased through unlinked files with a bounded radix sorter, materialized
 back-demod rebuilds stream IDs in 4,096-ID batches, and the packed-fast cache
 uses 16,384 exact 136-byte entries.  Component accounting explains 96.93% of
-terminal PSS.  The 84,404,096-byte ancestor file is disk backing, not resident
-memory.  Because the peak-gate margin is narrow and libc behavior can vary,
+terminal PSS.  The 84,404,096-byte ancestor value is a logical disk-file length,
+not process-resident memory.  Reclaimable kernel page cache is outside PSS and
+needs cgroup accounting for a total-job measurement.  Because the peak-gate
+margin is narrow and libc behavior can vary,
 remeasure `/usr/bin/time -v` RSS on a deployment host rather than relying on
 Prover9's historical `Megabytes` line.
 

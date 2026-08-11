@@ -1,0 +1,1010 @@
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[a4paper,margin=23mm]{geometry}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{hyperref}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!55!black,
+  urlcolor=blue!55!black,
+  pdftitle={Reducing Memory in Hint-Guided Prover9 Saturation},
+  pdfauthor={Prover9 engineering report}
+}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  columns=fullflexible,
+  frame=single,
+  framesep=5pt,
+  rulecolor=\color{black!25},
+  showstringspaces=false
+}
+
+\newcommand{\setting}[1]{\texttt{\detokenize{#1}}}
+\newcommand{\hashval}[1]{\nolinkurl{#1}}
+\newcommand{\mib}{\,MiB}
+\newcommand{\kib}{\,KiB}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+
+\title{Reducing Memory in Hint-Guided Prover9 Saturation\\
+\large From Passive-Clause Explosion to a Compact
+OTTER-Compatible Given-Clause Loop}
+\author{Technical engineering report}
+\date{11 August 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Long hint-guided Prover9 searches in algebra can retain millions of clauses in
+the set of support (SOS), millions of demodulators, millions of disabled proof
+ancestors, and hundreds of thousands of hints.  Historical runs reported
+18.8\,GiB for an Osborn proof and 125.8\,GiB for an AAPERM prefix.  The initial
+hypothesis that disabled clauses alone caused this growth was only partly
+correct.  Clauses rejected immediately as tautologies or by forward
+subsumption were not retained, while deleting almost all disabled clauses saved
+only 22\% at the 4000-given Osborn boundary.  The dominant architectural
+problem was that retained but not yet selected SOS clauses remained represented
+as ordinary pointer-rich clause and term graphs and participated in eager
+simplification indexes.
+
+This report describes two responses.  The first is a DISCOUNT-style loop with a
+strict active/passive separation, dense passive records, packed hints, and a
+bounded collective representation of delayed paramodulation and
+hyperresolution work inspired by Waldmeister.  It gives the strongest
+asymptotic memory bound, but changes when simplification and generating
+inferences occur.  On the supplied Osborn hint chains, matching more hints did
+not reproduce the historical proof: demodulation and inference timing are part
+of the effective search strategy.
+
+The accepted response is an eager compact OTTER-compatible loop.  It preserves
+the old treatment of every retained clause for demodulation, unit conflict,
+subsumption, backward demodulation, hint matching, and given-clause selection,
+but replaces resident clause graphs and pointer-based passive indexes by an
+immutable file archive, dense selector records, stable clause numbers, shared
+serialized terms, and four compact authoritative indexes.  Ordinary clauses
+are reconstructed only for exact logical tests or activation.
+
+On the accepted full proof, old P9 used 550,400\kib peak RSS and 765.69 seconds
+of user CPU.  Compact OTTER proved at the same 2945-given boundary, with the
+same 7051 proof clauses and 3231 new hints, in 754.78 user seconds and
+127,420\kib peak RSS.  This is a measured 76.85\% whole-process reduction
+(4.32 times smaller) with 1.42\% less user CPU.  A terminal accounting explains
+96.93\% of proportional resident memory.
+\end{abstract}
+
+\paragraph{Implementation status.}
+The implementation is on branch \setting{phase5-compact-frontier}.  The
+accepted code commit is \setting{2483a7a49e4e21c54b1692c142b55435eeefe44b};
+the closing audit is commit \setting{ac3f0fe}.  All hard Phase-5 correctness,
+proof, CPU, memory, checkpoint, and accounting gates passed on the current
+\setting{chat_test}/Osborn acceptance problem.
+
+\section{Terminology and scope}
+
+The report uses the standard saturation terminology familiar from OTTER,
+Prover9, E, Vampire, the \emph{Handbook of Automated Reasoning}, and Harrison's
+\emph{Handbook of Practical Logic and Automated Reasoning}.
+
+The \emph{passive set}, called \setting{sos} by Prover9, contains retained
+clauses waiting to be selected.  The \emph{active set}, called
+\setting{usable}, contains selected clauses available as parents of generating
+inferences.  A \emph{given clause} is selected from passive, moved to active,
+and combined with suitable active clauses by the enabled inference rules.
+Generating inferences are called expansion; simplification and redundancy
+elimination---demodulation, unit deletion, forward/backward subsumption, and
+backward demodulation---are called contraction.
+
+A hint is a clause used for search guidance, not an inference premise.  A
+derived clause that subsumes a hint, is subsumed by a hint, or satisfies the
+configured matching relation can receive favorable selection treatment.  This
+is the hints/proof-sketch tradition developed by Veroff and implemented in
+OTTER and Prover9.
+
+The main nonstandard terms are representational:
+\begin{itemize}
+  \item A \emph{stable clause number} is the ordinary Prover9 clause ID used in
+        an index instead of a C pointer.
+  \item A \emph{dense record} is one fixed-size array element holding selection
+        and status data rather than a separately allocated object graph.
+  \item \emph{Materialization} reconstructs an ordinary Prover9 clause,
+        literal, and term graph from an immutable serialized record for an
+        exact test.
+  \item A \emph{posting list} is a list of stable clause numbers sharing an
+        index feature such as a root symbol or shallow term path.
+  \item A \emph{conservative filter} may return false candidates but never omit
+        a possible answer.  The established matcher, unifier, subsumption test,
+        or rewrite operation makes the final decision.
+\end{itemize}
+
+Accordingly, ``exact index'' below means that the final operation agrees with
+the ordinary implementation.  The intermediate candidate set need not itself
+be exact.
+
+\section{The original memory problem}
+
+The motivating AIM searches are much larger than their given counts suggest.
+A few thousand selected clauses can generate and retain millions of SOS
+clauses, and many of those retained equations can become simplifiers before
+selection.
+
+\begin{center}
+\small
+\begin{tabular}{lrrrrr}
+\toprule
+State & Given & SOS & Demodulators & Disabled & Hints \\
+\midrule
+Osborn, 4000 prefix & 4,000 & 588,252 & 489,224 & 577,347 & 310,153 \\
+Osborn proof & 11,242 & 4,594,786 & 3,759,850 & 6,519,452 & 310,153 \\
+AAPERM prefix & 12,560 & 8,504,637 & 6,199,295 & 4,593,127 & 220,117 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The corresponding internal \setting{Megabytes} values were 2626.98, 18810.85,
+and 125829.01\mib.  The AAPERM profile further showed that inference generation
+was not the dominant CPU term: about 902 of 225,533 user seconds were in
+\setting{infer}; preprocessing, subsumption, indexing, disabling, and backward
+demodulation dominated.
+
+\subsection{What the 2024 RAM discussion corrected}
+
+The archived \setting{Plans-RAM-24.txt} discussion prevents two incorrect
+interpretations.
+
+First, \setting{Generated} is not a resident-clause count.  Immediate
+tautologies and clauses rejected by forward subsumption are normally destroyed.
+They consume CPU and allocation traffic but not terminal memory by their count.
+
+Second, disabled clauses matter, especially late in a long run, but are not the
+whole problem.  Direct deletion experiments measured:
+
+\begin{center}
+\begin{tabular}{lrrr}
+\toprule
+Boundary & Ordinary & Delete disabled & Saving \\
+\midrule
+1000 givens, hints & 674\mib & 644\mib & 4.5\% \\
+2000 givens, hints & 1101\mib & 963\mib & 12.5\% \\
+4000 givens, hints & 2627\mib & 2037\mib & 22\% \\
+8000 givens & 9192\mib & 6470\mib & 30\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+At 4000 givens the disabled population fell from 577,347 to 383 while the
+588,252-clause SOS and its eager indexes remained.  Moreover, proof
+justifications refer to parent clause numbers.  Freeing a disabled object
+without a replacement proof-history representation leaves dangling
+references.  A radical solution therefore had to compact proof history and the
+live SOS/index state.
+
+\subsection{Logical bytes are not resident bytes}
+
+Prover9's historical \setting{Megabytes} is allocator-oriented and may omit
+anonymous mappings, mapped files, libc arenas, shared pages, and file-backed
+resident pages.  Conversely, the logical length of an archive file is disk
+usage rather than RAM.  Measurements in this work distinguish internal
+component bytes, RSS, PSS, and the maximum RSS from \setting{/usr/bin/time -v}.
+
+This mattered in a long DISCOUNT run whose deleted mmap file was
+13,419,485,217 logical bytes, occupied 9.7\,GiB of allocated disk blocks, and
+had 10,223,128\kib actually resident.  An mmap does not stay cold if code scans
+it.  A former statistics routine verified every archived record and thereby
+faulted the entire mapping into memory.  The accepted configuration uses
+explicit file reads instead.
+
+Explicit I/O can still populate the kernel page cache.  Those pages are
+reclaimable and absent from process RSS/PSS, but may be charged to a cgroup and
+consume machine RAM until reclaimed.  Thus 127,420\kib is an exact process
+peak-RSS result, not every kernel page used on behalf of the job.  Total
+container or machine claims require cgroup \setting{memory.current},
+\setting{memory.peak}, and the \setting{file} fields of
+\setting{memory.stat}.
+
+\section{Semantic constraints}
+
+A Prover9 SOS clause is passive for generating inferences but, in the
+traditional OTTER loop, not passive for contraction.  A newly retained equation
+can become a demodulator immediately, rewrite old SOS and usable clauses, rewrite
+hints, and change later subsumption decisions.  Unit clauses participate in
+unit conflict and simplification; nonunit clauses must remain visible to
+subsumption.  Hint matching occurs while a candidate is an ordinary clause,
+before passivization, and affects its weight and selector membership.
+
+Four contracts follow.
+
+\paragraph{Search.}
+Trajectory-preserving mode must execute the same eager contraction transaction
+for a retained clause.  Selection cycles, weights, hint degradation,
+\setting{match_once}, matcher limits, and actions must observe the same result
+in the same order.
+
+\paragraph{Hints.}
+Hints are not active inference premises, but equivalence handling, ordinary and
+flipped matching, subsumption matching, degradation, matcher limits,
+\setting{back_demod_hints}, and checkpoint state must remain exact.  A cold
+passive is checked against hints while it is still a materialized candidate and
+is archived only after authoritative hint processing.
+
+\paragraph{Proofs.}
+Every parent must remain recoverable by stable number after its ordinary body
+is freed.  The archive retains clause body, attributes, flags, matching-hint
+state, and justification.  Corruption must be detected rather than appear in a
+proof.
+
+\paragraph{Indexes.}
+Removing passive clause graphs also removes pointers stored in ordinary
+indexes.  Every passive-sensitive operation therefore needs either a compact
+authoritative replacement or an ordinary live representation.  Compact OTTER
+refuses to start unless all four required replacements are active.
+
+\section{Waldmeister and the DISCOUNT/collective path}
+
+Hillenbrand's Waldmeister account emphasizes compact discrimination structures,
+a strict active/passive separation, and collective representation of critical
+pairs.  Critical pairs generated with one newly active equation can be stored
+as a constant-size descriptor plus a minimum remaining weight, while only a
+fixed buffer of promising pairs is represented individually.  This changes
+Waldmeister's passive-space growth from quadratic to linear in abstract search
+time.  Its reported unit-equational workload processed more than 500 million
+passive equations with about 200 MB.
+
+That number cannot be transferred directly to Prover9's paramodulation and
+hyperresolution workloads.  The architectural question is nevertheless the
+right one: represent delayed inference work rather than every conclusion.
+
+\subsection{Strict active/passive ownership}
+
+\setting{assign(search_loop,discount)} inserts only selected active clauses in
+inference and simplification indexes.  A new candidate is simplified,
+hint-matched, weighed, and stored passively.  At selection it is refreshed
+against the current simplifier epoch, requeued if changed, and only then becomes
+an inference parent or demodulator.
+
+\setting{assign(passive_store,dense)} replaces each passive clause graph and
+selector nodes by a dense record containing stable ID, selector keys, weight,
+semantics, matched-hint ID, and epoch/status bits.  The clause and justification
+are serialized and reconstructed at selection.
+
+\subsection{Packed hints}
+
+The old FPA hint index retained pointer-rich term forests.  The packed modes
+retain compressed hint bodies, structural postings, and small mutable side
+arrays.  The first packed implementation saved RAM but was too slow: at one
+1000-given boundary it used 295,680\kib versus old P9's 507,108\kib, but took
+441.39 instead of 113.44 CPU seconds.  Instrumentation exposed broad posting
+lists and repeated reconstruction.
+
+The successor \setting{packed_fast} uses density-adaptive intersections, exact
+feature profiles, a bounded dependency-scoped cache, direct compressed-unit
+matching, and compact \setting{_AnyConst} state.  At a 300-given selected-
+DISCOUNT boundary it took 10.23 user seconds versus 27.72 for FPA and 50.02 for
+the earlier packed mode, with a byte-identical hint trace.
+
+\subsection{Collective expansion}
+
+The collective frontier records bounded descriptors for paramodulation from
+and into a given clause and for positive and negative hyperresolution.  Each
+descriptor holds stable parent IDs, an active-set snapshot boundary, a native
+rule continuation, and fairness/checkpoint state.  A balanced scheduler gives
+each enabled rule a nonzero share, imposes high/low descriptor water marks, and
+bounds raw conclusions committed per turn.
+
+Optional read-only hint previews rank a bounded candidate set without assigning
+an ID or mutating hints.  A dual-cursor discovery lane can promote a promising
+conclusion early and later verify by ordinal and structural checksum which fair
+conclusion to skip.  FIFO service remains, supplying the fairness argument.
+
+\subsection{Why it did not reproduce Osborn}
+
+Some DISCOUNT/collective runs matched more hints than the historical proof but
+did not prove within the tested resources.  A hint match says that a useful
+clause shape appeared; it does not say that the same ancestors exist, the same
+demodulators were available, or the clause survived in the same normal form.
+Traditional OTTER admits an unselected SOS equation as a demodulator
+immediately.  Selected DISCOUNT delays it.  Eager-interreduced DISCOUNT rewrites
+more strongly but can remove shapes expected by the historical chain.
+
+Bounded rewrite-debt drains fixed a liveness defect in which eager repair could
+exclude all ordinary inference, but did not recover the old trajectory.  The
+result illustrates a familiar ATP fact: fairness or refutational completeness
+does not imply the same proof under a finite resource limit.  Demodulation and
+inference scheduling are part of the practical strategy.
+
+\section{The accepted eager compact-OTTER architecture}
+
+Phase 5 retains \setting{search_loop=otter} and
+\setting{inference_frontier=clauses}.  Each retained candidate completes the
+ordinary eager transaction.  Afterwards its body is archived and long-lived
+passive structures retain compact records by stable number.
+
+\begin{lstlisting}
+infer an ordinary candidate
+  -> demodulate and simplify literals
+  -> safe unit-conflict test
+  -> exact hint matching and weighting
+  -> limits, semantics, keep/delete rules
+  -> forward subsumption
+  -> assign a stable clause number
+  -> admit a demodulator when appropriate
+  -> backward subsumption and backward demodulation
+  -> update the four compact indexes
+  -> serialize body and justification
+  -> retain only dense selection state and stable IDs
+
+select a given clause
+  -> locate its archive record by stable number
+  -> reconstruct the ordinary clause
+  -> retire compact passive memberships
+  -> activate the clause
+  -> make ordinary inferences at the historical point
+\end{lstlisting}
+
+\subsection{Immutable file archive}
+
+\setting{ancestor_store=file} uses checksummed append-only records and explicit
+\setting{pread}/\setting{pwrite}.  A record retains the compressed clause,
+attributes, flags, hint state, and parent IDs.  In compact OTTER the proof
+archive is also the sole owner of a cold passive body; the selector does not
+retain a duplicate arena.
+
+The accepted proof's archive was 84,404,096 logical bytes and used one 4-KiB I/O
+buffer.  It performed about 3.8 million reads totaling 374 MB and 412,000 writes
+totaling 84.4 MB.  Logical file length is reported separately from process RAM;
+reclaimable kernel page cache needs cgroup accounting for a whole-job measure.
+
+\subsection{Dense given-clause selection}
+
+Dense records preserve low/high selection cycles, breadth-first level,
+semantics, weight, hint ID, age, and membership.  At the final boundary 131,001
+passives used 9,532,864 bytes of records and a 611,368-byte selector heap.
+
+A set-associative decoded-passive cache is available, but the accepted setting
+is zero.  Controlled 0, 4, and 32-MiB experiments at 1500 givens avoided about
+98,000 decodes without improving CPU; nonzero caches increased RSS.  Index
+candidate work, not archive decoding, was the dominant cost.
+
+\subsection{Four authoritative compact indexes}
+
+The compact rewrite bank stores serialized rule sides, rule kind, activity, and
+stable proof ID.  A radix-compressed discrimination structure retrieves rule
+candidates; reverse occurrence streams support backward demodulation.  Exact
+matching, ordering, and rewriting retain ordinary Prover9 semantics.  It used
+11,205,308 bytes at the proof boundary.
+
+The compact unit index supports generalization, instance and unifier retrieval,
+forward/back unit subsumption, and unit conflict.  It stores radix paths,
+postings, polarity, a symbol mask, and stable proof ID, using 13,166,960 bytes.
+
+The backward-demodulation index groups occurrences by root symbol, clause
+number, and exact shallow path signature.  Monotone record and occurrence
+positions are delta-encoded in small blocks.  A structural matcher checks every
+survivor.  It used 12,109,376 bytes.
+
+The nonunit feature trie returns stable IDs for forward/backward subsumption;
+ordinary subsumption remains authoritative.  It used 1,508,576 bytes.
+
+\subsection{Shared serialized terms}
+
+The four indexes share a clause-coalescing 32-bit term-token pool.  A clause is
+serialized once; subsequent index requests receive stable slices.  The pool has
+a sparse stable-ID directory, 12.5\% growth, and coordinated compaction.  Exact
+old-to-new offset maps rebuild every dependent index before commit.  Large
+rebase ordering is streamed and file-sorted, and Linux can use
+\setting{mremap} to move page tables instead of copying the entire arena.
+
+At the proof boundary the pool held 3,220,436 logical tokens in 16,219,320
+bytes.  Five compactions reclaimed 14,793,444 bytes, and 38,557,344 token
+requests were reused across indexes.
+
+This is not full hash-consing.  Instrumentation at 1000 givens found 728,510
+subterm occurrences but only 91,686 unique terms.  A canonical variable-record
+DAG was estimated at 1,304,344 logical bytes versus 4,194,304 bytes of allocated
+token capacity at that experiment.  A production hash table, fingerprints,
+reference management, and slack would reduce the saving.
+
+\subsection{Packed-fast hints}
+
+The accepted hint bank combines compressed immutable bodies, stable-ID
+postings, mutable side state, and a bounded exact query cache.  Profiles with at
+most eight keys can use the 16,384-entry cache; wider profiles take the ordinary
+authoritative intersection path.  Entries are 136 bytes, for a 2,228,224-byte
+table.  The final hit rate was 35.08\%, avoiding 136,373,547 posting candidates.
+
+Hint rewriting and reindexing, degradation, match-once state, and checkpoints
+remain active.  Hint nodes, references, tables, cache, and bodies together used
+about 15.2\mib for 88,494 hints.
+
+\subsection{Reclamation and peak control}
+
+Steady-state compactness did not by itself control peak RSS.  The final design
+also:
+\begin{itemize}
+  \item rebuilds stale compact indexes at a deterministic percentage;
+  \item reclaims the term pool after a measured stale-payload threshold;
+  \item streams back-index rebuilds in 4096-ID batches;
+  \item file-sorts large retained-ID/rebase orderings;
+  \item releases predecessor arrays before allocating successors;
+  \item reuses packed records during rebuilds;
+  \item replaces general hashes by sparse direct maps where possible;
+  \item releases dense passives, hints, and compact search indexes before final
+        proof-DAG expansion;
+  \item selects a compact process heap at startup with
+        \setting{P9_COMPACT_HEAP=1}.
+\end{itemize}
+
+These lifetime changes prevent a compaction or terminal proof from holding two
+large generations simultaneously.
+
+\section{Correctness evidence}
+
+\subsection{Differential and focused tests}
+
+Focused tests cover archive corruption, allocator lifetime, dense selection,
+term rebasing, stable-ID maps, rewrite retrieval, unit operations,
+backward-demodulation candidates, nonunit features, hint postings/previews,
+compressed-unit matching, and resumable paramodulation/hyperresolution.  The
+aggregate commands are:
+
+\begin{lstlisting}[language=bash]
+make all -j4
+make test1
+make compact-frontier-tests
+make discount-tests
+\end{lstlisting}
+
+\subsection{Exact prefixes}
+
+At 300 givens the final file build emits 132,567 candidate, hint, kept, and
+given events byte-identically to the accepted full-body \setting{packed_fast}
+OTTER reference:
+
+\begin{lstlisting}
+SHA-256 bc38f369ef02271d9b8a00db0cd01a6ba8f890e9608e0abd947de68f763322aa
+Given=301 Generated=120793 Kept=5737
+Usable=285 SOS=4298 Demodulators=3282 Disabled=1183
+\end{lstlisting}
+
+A current 1000-given A/B comparison measured 76.90 user seconds for compact
+indexes with resident bodies and 81.35 seconds for the file archive with zero
+cache, a ratio of 1.058.  Both peaked at 90,404\kib and ended at
+\setting{Given=1001}, \setting{Generated=1268285}, \setting{Kept=33909},
+\setting{Usable=949}, \setting{SOS=26052},
+\setting{Demodulators=21741}, and \setting{Disabled=6937}, with identical hint
+and index counters.
+
+\subsection{Checkpoint and proof}
+
+A full-hint run checkpointed at given 100 and resumed to given 301.  Its
+concatenated event stream has the same hash as the uninterrupted run; all
+populations agree and 22 integrity checks pass.  Format 3 now records the count
+of deliberately omitted, dead ID-0 scratch clauses without serializing their
+bodies.
+
+The accepted complete run ends with:
+
+\begin{lstlisting}
+Given=2945 Generated=8248032 Kept=272787 proofs=1
+Usable=1800 SOS=131001 Demodulators=109987 Limbo=300 Disabled=139715
+Hints=88494 Active_Hints=4122
+\end{lstlisting}
+
+\setting{prooftrans parents_only} emits 7051 proof clauses and 3231 new hints.
+The normalized proof SHA-256 is
+\hashval{9d7c9a12894c1c11ede6aeae08d1cec658ccee66a47fb9663859347a5413fd07},
+identical to the full-body packed-fast reference.  Old FPA retains two extra
+\setting{other} clauses, shifting later IDs, but reaches the same given boundary,
+SOS/demodulator populations, proof length, and theorem.
+
+\section{Evaluation}
+
+\subsection{Accepted proof result}
+
+\begin{center}
+\begin{tabular}{lrrr}
+\toprule
+Measure & Old P9 OTTER/FPA & Compact OTTER & Change \\
+\midrule
+Given & 2,945 & 2,945 & same \\
+Generated & 8,248,034 & 8,248,032 & $-2$ \\
+Kept & 272,789 & 272,787 & $-2$ \\
+Proof clauses & 7,051 & 7,051 & same \\
+New proof hints & 3,231 & 3,231 & same \\
+User CPU & 765.69 s & 754.78 s & $-1.42\%$ \\
+Wall & 14:16.20 & 14:19.48 & essentially equal \\
+Peak RSS & 550,400\kib & 127,420\kib & $-76.85\%$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The new process is 4.32 times smaller.  It passes the 128,000-KiB hard gate by
+only 580 KiB, so a different libc, compiler, or machine requires remeasurement.
+The optional 115-MiB stretch target is not met.
+
+\subsection{Resident accounting}
+
+\begin{center}
+\small
+\begin{tabular}{lr}
+\toprule
+Component & Bytes \\
+\midrule
+Rewrite bank & 11,205,308 \\
+Unit index & 13,166,960 \\
+Backward-demodulation index & 12,109,376 \\
+Nonunit index & 1,508,576 \\
+Shared term pool & 16,219,320 \\
+Dense passive records and heap & 10,144,232 \\
+Hint nodes, references, tables/cache, bodies & 15,953,167 \\
+Ancestor handles & 4,198,608 \\
+Clause-ID structures & 2,316,400 \\
+Prover9 allocator reservation & 24,123,712 \\
+Nonanonymous pages & 1,025,024 \\
+\midrule
+Accounted total & 111,970,683 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The total is 106.78\mib.  Terminal PSS was 112,809\kib (110.17\mib), giving
+96.93\% coverage.  Sampled RSS peaked at 123,084\kib and external maximum RSS at
+127,420\kib.  The 84,404,096-byte logical file length is excluded from process
+RAM; reclaimable page cache is outside this PSS accounting.
+
+\subsection{Within-design index reduction}
+
+At 1000 givens the first four compact indexes occupied 44,545,464 bytes.  Radix
+paths, shared terms, delta streams, dense maps, packed records, and tighter
+growth reduced the corresponding five-structure total to 13,239,168 bytes, a
+70.28\% reduction with unchanged search state.  This explains why serializing
+bodies alone was insufficient: at that boundary the early compact indexes were
+about 43 MB while the clause archive was only about 8 MB.
+
+\subsection{Newly supplied 11,000-given comparison}
+
+The new files \setting{bob/chat_test.new.out1.gz} and
+\setting{bob/chat_test.new.out2.gz} use a different, larger profile with 18,306
+hints.  Both prove after about 11,000 givens.  The first is ordinary OTTER/FPA
+with full bodies; the second is an early dense/packed-fast/all-compact-index
+mmap configuration.  It predates the final filtering, bounded rebuild,
+file-archive, cache-sizing, transient-release, and heap work.
+
+The compressed output SHA-256 values are
+\hashval{fd7a07f0a8ec1feafacb2672b664a393368ce728d0918c5e2708c7919d4a4406}
+for \setting{out1} and
+\hashval{049a44cb9871fb28c3cf829011fb102dc390d5101ed28677dd7ced15ac5d64f2}
+for \setting{out2}.
+
+\begin{center}
+\small
+\begin{tabular}{lrrr}
+\toprule
+Measure & Ordinary & Early compact & Change/ratio \\
+\midrule
+Given & 11,368 & 11,369 & $+1$ \\
+Generated & 253,338,893 & 253,302,129 & $-36,764$ \\
+Kept & 2,216,836 & 2,207,014 & $-9,822$ \\
+SOS & 1,454,686 & 1,520,775 & $+4.5\%$ \\
+Demodulators & 1,297,818 & 1,362,847 & $+5.0\%$ \\
+Disabled & 739,073 & 662,309 & $-10.4\%$ \\
+Internal \setting{Megabytes} & 3,354.28 & 355.86 & $-89.39\%$ \\
+Terminal \setting{RSS_kb peak} & 3,603,800 KiB & 1,492,656 KiB & $-58.58\%$ \\
+User CPU & 5,110.38 s & 15,144.10 s & $2.963\times$ \\
+Wall & 5,131 s & 15,178 s & $2.958\times$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+This is valuable negative evidence: representation size fell radically but CPU
+nearly tripled.  The compact output reports 19.190 billion unit-conflict exact
+tests, 24.503 billion backward-demodulation posting groups examined, 21.342
+billion occurrences examined, and 494.44 million shallow path checks.  Both
+runs made about 6.10 billion demodulation attempts.
+
+The trajectories are not identical.  The files contain no external
+\setting{/usr/bin/time} result, but their terminal \setting{Allocator_slabs}
+lines contain a process peak-RSS diagnostic: 3,603,800 versus 1,492,656 KiB,
+or 58.58\% lower (2.414 times smaller).  This is the appropriate process-RSS
+comparison for the pair.  Because the compact run used mmap, its internal
+355.86-MiB counter omits resident mapped pages and the 89.39\% value is only an
+internal-accounting reduction.  Even RSS excludes unmapped filesystem cache,
+so a cgroup total is still needed for whole-job memory.  Both numbers describe
+an obsolete, slow build, not the performance of the accepted code.
+
+The final implementation addresses the exposed mechanisms through shallow-path
+selectivity, grouped and delta-coded occurrences, bounded 4096-ID archive
+snapshots, dense stable-ID maps, coordinated term compaction, and explicit file
+backing.  The exact 11,000-given input should now be rerun with the accepted
+binary.
+
+\subsection{Expected saving on very large AIM runs}
+
+For trajectory-sensitive compact OTTER, the accepted measurement is 76.85\%
+less peak RSS.  The fixed 88,494-hint bank and 131,001-clause final SOS make a
+literal 80\% difficult on this particular proof.  The obsolete 11,000-given
+result suggests that savings grow with passive/index dominance, but is not an
+RSS basis for quantitative extrapolation.
+
+For bounded collective DISCOUNT the intended growth law is stronger:
+
+\begin{lstlisting}
+ordinary OTTER RAM
+  = fixed hints + O(all passive bodies and eager indexes) + proof history
+
+DISCOUNT/collective RAM
+  = packed hints + O(active indexes and history/descriptors)
+    + O(configured candidate window) + file-backed bodies
+\end{lstlisting}
+
+Replacing 4.59 or 8.50 million resident SOS clauses by active/history state and
+a bounded window makes 80--95\% whole-process reduction plausible on the
+largest passive-dominated workloads.  The 90\% midpoint is a capacity-planning
+hypothesis, not an accepted measurement.
+
+The defensible statements are:
+\begin{itemize}
+  \item accepted: 76.85\% lower external peak RSS at the same proof boundary
+        without CPU penalty;
+  \item intermediate indication: at 11,000 givens, 58.58\% lower self-reported
+        peak RSS and 89.39\% lower internally accounted memory, from an obsolete
+        2.963-times-slower mmap build without cgroup page-cache accounting;
+  \item conditional forecast: 80--95\% less total RAM on much larger
+        passive-dominated AIM searches, awaiting current-binary RSS/PSS,
+        cgroup page-cache, and proof/coverage experiments.
+\end{itemize}
+
+\section{What worked and what failed}
+
+\begin{longtable}{>{\raggedright\arraybackslash}p{0.27\textwidth}
+                  >{\raggedright\arraybackslash}p{0.17\textwidth}
+                  >{\raggedright\arraybackslash}p{0.47\textwidth}}
+\toprule
+Idea & Outcome & Explanation \\
+\midrule
+\endfirsthead
+\toprule
+Idea & Outcome & Explanation \\
+\midrule
+\endhead
+Delete rejected generated clauses & no radical gain & Most tautologies and
+forward-subsumed conclusions were already transient. \\
+Delete disabled clauses & useful, insufficient & Measured 4.5--30\%; proof
+parents still need storage and live SOS remains. \\
+Compact proof ancestors & retained & Exact proof history without live clause
+graphs; necessary but not the SOS growth law. \\
+Ancestor mmap & rejected as final default & Scans and reports faulted cold pages;
+a 13.1-GB mapping had 10.2 GB resident. \\
+Explicit file archive & retained & One reusable I/O buffer and predictable
+residency. \\
+Strict DISCOUNT & alternative & Best asymptotic bound, but different
+demodulator availability and Osborn trajectory. \\
+Collective descriptors & alternative & Bounded and checkpointable, but hint
+counts did not recover the proof. \\
+Eager-interreduced DISCOUNT & not default & Strong contraction, costly rewrite
+debt, and changed hint normal forms. \\
+First packed hints & replaced & Memory saving with severe broad-posting CPU
+cost. \\
+Packed-fast hints & retained & Exact trace and bounded, selective retrieval. \\
+Compact bodies only & insufficient & Rewrite/unit/back indexes dominated by
+1000 givens. \\
+First compact indexes & correct, too slow & Billions of unit and redex
+candidates in the 11k run. \\
+Radix paths, shallow filters, shared terms, delta streams & retained & Smaller
+and more selective without changing final logical answers. \\
+Large decoded cache & rejected & Avoided decodes but did not improve CPU and
+raised RSS. \\
+8K final query cache & rejected & Only 596 KiB saved, with worse CPU and
+fragmentation. \\
+16K bounded query cache & retained & 35.08\% hits and 136 million avoided
+candidates within the RSS gate. \\
+Full-array compaction & replaced & Temporary copies raised peak memory. \\
+Streamed/file-sorted compaction & retained & Bounds transient memory and
+preserves deterministic order. \\
+Release before proof replay & retained & Avoids overlapping the search state
+and final proof DAG. \\
+\bottomrule
+\end{longtable}
+
+The general lessons are that indexes must be judged by candidate volume rather
+than bytes per node; contraction timing is part of practical algebraic search;
+and resident memory is a lifetime property, not merely a sum of steady-state
+record sizes.
+
+\section{Using the accepted mode}
+
+\subsection{Build and test}
+
+\begin{lstlisting}[language=bash]
+make all -j4
+make test1
+make compact-frontier-tests
+make discount-tests
+\end{lstlisting}
+
+For publication record the commit, binary/input SHA-256, linked libraries, and
+host.  The accepted binary SHA-256 was
+\hashval{78b5ef4b2e53fc5ae2ab81cc46e6455213128e8ac083d6fb11259ad7b1339a6b};
+the accepted input SHA-256 was
+\hashval{9781ee07691bc62e01f67534208620ca0be3f026f55248a227e9161f1ed17e6c}.
+
+\subsection{Compact-OTTER input}
+
+Place the following after automatic and older experimental assignments:
+
+\begin{lstlisting}
+assign(search_loop,otter).
+assign(passive_store,dense).
+assign(hint_index,packed_fast).
+assign(inference_frontier,clauses).
+assign(ancestor_store,file).
+assign(sos_limit,-1).
+
+set(process_initial_sos).
+set(back_demod).
+set(back_demod_hints).
+clear(unit_deletion).
+clear(ancestor_subsume).
+clear(eval_rewrite).
+set(compact_otter_demodulation).
+set(compact_otter_unit_index).
+set(compact_otter_back_demod_index).
+set(compact_otter_nonunit_index).
+
+assign(compact_passive_cache,0).
+assign(compact_index_stale_pct,10).
+assign(compact_term_reclaim_kb,2048).
+\end{lstlisting}
+
+Start the process with the measured heap policy:
+
+\begin{lstlisting}[language=bash]
+P9_COMPACT_HEAP=1 /usr/bin/time -v bin/prover9 \
+  -f your-compact-input.in \
+  > your-compact-output.out \
+  2> your-compact-output.time
+\end{lstlisting}
+
+The mode requires \setting{sos_limit=-1},
+\setting{process_initial_sos}, a clauses frontier, all four compact indexes,
+and backward demodulation.  The current authoritative compact unit/nonunit
+indexes do not support \setting{unit_deletion} or
+\setting{ancestor_subsume}; the compact rewrite bank is incompatible with
+\setting{eval_rewrite}.
+
+The ordinary control uses \setting{search_loop=otter},
+\setting{passive_store=full}, \setting{hint_index=fpa},
+\setting{inference_frontier=clauses}, and \setting{ancestor_store=off}, while
+retaining identical rules, order, actions, selection, hints, and resource
+limits.
+
+\subsection{Bounded progression}
+
+On a low-memory or slow host, begin with 100--300 givens and a deterministic
+hint sample, then all hints at 300, 1000 givens, a time-bounded 2000--4000
+prefix, and only then a full run.  Keep both internal and external limits.
+Independent small runs may use separate real cores if aggregate RSS is known.
+A hint sample is a debugging/A-B instrument, not a proof replacement.
+
+\subsection{Archive location and measurement}
+
+Current source hard-codes \setting{/tmp} in both archive constructors and does
+not consult \setting{TMPDIR}.  It creates and immediately unlinks either a
+\setting{/tmp/prover9-ancestors-XXXXXX} or
+\setting{/tmp/prover9-passive-XXXXXX} file.  The open file is visible only
+through \setting{/proc/PID/fd} and disappears on exit.  Ensure that the
+filesystem containing \setting{/tmp} has enough space.
+
+Logical size, allocated blocks, and residency can be inspected with
+\setting{readlink}, \setting{stat -L}, \setting{du -hL}, and
+\setting{/proc/PID/smaps}.  Changing \setting{TMPDIR} currently has no effect.
+
+When claiming total job RAM rather than process RSS, also record cgroup-v2
+\setting{memory.peak} and the file-cache fields in \setting{memory.stat}.
+
+For each comparison report proof/stopping reason; all main clause populations;
+proof length and \setting{prooftrans} result; user/system/wall time; external
+maximum RSS; RSS/PSS at common given boundaries; archive logical bytes
+separately; and compact-index bytes, exact tests, rebuilds, and validation
+failures.  Do not use only the last active-hint \setting{matched=} snapshot or
+the cumulative \setting{Generated} count.
+
+\section{Future work}
+
+\subsection{Current-binary large-profile replay}
+
+The first priority is a replay of the exact 18,306-hint input behind the new
+11,000-given pair, using file backing, compact heap policy, and external RSS/PSS.
+If possible compare ordinary indexes/full bodies, final compact indexes/full
+bodies, and the complete file-backed mode.  This separates index CPU from
+archive I/O.
+
+\subsection{Multi-million-SOS validation}
+
+Run current compact OTTER and DISCOUNT/collective on several passive-dominated
+problems including Osborn and AAPERM, with identical hashes and limits.  Report
+equal-given prefixes and equal-resource solved coverage.  A radical claim for
+these workloads should require at least 80\% lower external peak RSS,
+corresponding cgroup whole-job/page-cache measurements, and at least 95\% PSS
+accounting.
+
+\subsection{Reduce exact-test amplification}
+
+Future indexes should be driven by per-query candidate distributions.  Options
+include measured selective path features, substitution/code-tree retrieval,
+block-compressed posting intersections with skips, operation-specific unit
+structures, and direct exact matching over serialized terms.  Every prototype
+must pass the event oracle and be compared with the final index, not the first
+packed version.
+
+\subsection{True cross-clause term sharing}
+
+The measured duplicate-subterm rate justifies a canonical immutable term DAG
+prototype.  It needs symbol/child-ID keys, compact clause roots, a bounded
+interning table, liveness compatible with index compaction, direct matching and
+rewriting over term IDs, portable archive encoding, and a peak analysis that
+includes both generations.  The current instrumentation is an upper bound on
+savings, not proof that hash-consing wins.
+
+\subsection{File-backed cold posting tiers}
+
+Compact OTTER still retains candidate indexes for every passive in RAM.  A
+two-tier external-memory index could use an in-memory directory/hot tail and
+immutable compressed posting blocks on disk, with skip metadata and sequential
+merge/compaction.  Backward demodulation is the difficult access pattern;
+batching new rules and scanning compressed blocks may outperform millions of
+small reads.
+
+\subsection{Direct compact rewriting}
+
+A compact rewrite pipeline could decode into a bounded workspace, rewrite, and
+emit a new archived record without constructing a full \setting{Topform}
+forest.  It must preserve justifications, attributes, hints, orientation, and
+action side effects, and should target the backward-demodulation/preprocessing
+clocks rather than only allocation counts.
+
+\subsection{Collective proof guidance}
+
+Collective search should use proof-relevant ancestor progress, not total hint
+matches.  Candidate signals include proof-hint parent closure, distance to
+unmatched successor hints, per-rule/direction quotas from source proofs, and
+normal-form agreement.  A heuristic lane may reorder finite work, but fair FIFO
+service and exact committed processing must remain.
+
+\subsection{Two-stage workflow and operational hardening}
+
+Where exact trajectory is not required, many low-memory DISCOUNT/collective
+jobs can discover proofs or hints, followed by a smaller number of compact-
+OTTER proof-producing replays.  Evaluate solved problems per machine-day and
+verified proofs per GiB.
+
+Operational work should honor \setting{TMPDIR} or add an archive-directory
+option, check free space, expose diagnostic FD information, collect cgroup-v2
+counters, record hashes and external time automatically, test the tight RSS
+gate across platforms, and publish option incompatibilities.
+
+\section{Reproducibility map}
+
+The central source files are \setting{provers.src/search.c},
+\setting{provers.src/giv_select.c},
+\setting{provers.src/cold_passive_store.c},
+\setting{ladr/clause_store.c}, \setting{ladr/hints.c},
+\setting{ladr/hint_postings.c}, and the
+\setting{compact_rewrite}, \setting{compact_unit_index},
+\setting{compact_back_demod}, \setting{compact_feature_index},
+\setting{compact_term_pool}, and \setting{compact_id_map} modules.
+
+The authoritative records are
+\setting{P9-PHASE5-ACCEPTANCE-AUDIT.md},
+\setting{P9-PHASE5-COMPACT-FRONTIER-PLAN.md},
+\setting{P9-CHAT-TEST-REPORT.md},
+\setting{P9-RADICAL-RAM-REPORT.md},
+\setting{P9-DISCOUNT-WALDMEISTER-PLAN.md},
+\setting{P9-COLLECTIVE-SCHEDULER-PLAN.md},
+\setting{P9-COLLECTIVE-DEMODULATION-PLAN.md},
+\setting{P9-BETTER-PACKED-PLAN.md}, and
+\setting{Checkpoint-Format-Spec.txt}.
+
+Full-proof artifacts are under
+\setting{/project/phase5-results/phase5-completion-audit/final-proof-current}.
+The work from the frozen baseline to the final audit comprises 192 small
+commits with detailed messages covering ancestor storage, allocation, DISCOUNT,
+collective continuations, hints, compact indexes, term sharing, file backing,
+bounded rebuilds, proof lifetime, and checkpoint audit.
+
+\section{Conclusion}
+
+Millions of SOS clauses were not merely proof debris.  Under the OTTER loop
+they remained active for contraction and therefore occurred in several term
+and clause indexes.  Hints and proof ancestors added fixed and historical
+costs.  Radical memory reduction required changing ownership across the whole
+saturation state rather than deleting one list.
+
+The DISCOUNT/collective architecture gives the cleanest asymptotic answer and
+remains promising for large passive-dominated exploration.  It also showed that
+the practical behavior of an ATP is not determined by inference rules alone:
+the timing of demodulation, normalization, hint matching, and rule interleaving
+can decide whether a known proof is found.
+
+Compact OTTER resolves that tension for the current trajectory-sensitive
+problem.  It keeps eager contraction and hint semantics while replacing
+pointer identity by stable clause numbers, resident passive bodies by an exact
+file archive, and pointer-heavy indexes by compact authoritative filters.  It
+proves at the same 2945-given boundary with 76.85\% less peak RSS and no CPU
+penalty.
+
+The literal 80--90\% target is not yet a universal measured claim.  The
+accepted proof saves 76.85\%; the obsolete slow mmap build saved 58.58\% by its
+terminal peak-RSS diagnostic while its allocator-only counter fell 89.39\%.
+Current-binary 11,000-given and multi-million-SOS runs with cgroup accounting
+are the next decisive experiments.
+
+\begin{thebibliography}{12}
+
+\bibitem{bachmair-ganzinger}
+L. Bachmair and H. Ganzinger,
+``Resolution Theorem Proving,'' in J. A. Robinson and A. Voronkov (eds.),
+\emph{Handbook of Automated Reasoning}, vol. 1, Elsevier/MIT Press, 2001.
+
+\bibitem{harrison}
+J. Harrison, \emph{Handbook of Practical Logic and Automated Reasoning},
+Cambridge University Press, 2009.
+DOI: \href{https://doi.org/10.1017/CBO9780511576430}
+{10.1017/CBO9780511576430}.
+
+\bibitem{waldmeister}
+T. Hillenbrand,
+``Citius altius fortius: Lessons learned from the Theorem Prover Waldmeister,''
+\emph{Electronic Notes in Theoretical Computer Science}, 2003/2004.
+DOI: \href{https://doi.org/10.1016/S1571-0661(04)80649-2}
+{10.1016/S1571-0661(04)80649-2}.
+
+\bibitem{next-waldmeister}
+T. Hillenbrand and B. L\"ochner, ``The Next Waldmeister Loop,'' in
+A. Voronkov (ed.), \emph{Proceedings of CADE-18}, pp. 486--500, Springer, 2002.
+
+\bibitem{otter}
+W. McCune, \emph{OTTER 3.3 Reference Manual}, Technical Memorandum
+ANL/MCS-TM-263, Argonne National Laboratory, 2003.
+
+\bibitem{prover9}
+W. McCune, ``Prover9 and Mace4,'' Prover9 distribution and manual, 2005--2009.
+
+\bibitem{nieuwenhuis-rubio}
+R. Nieuwenhuis and A. Rubio, ``Paramodulation-Based Theorem Proving,'' in
+J. A. Robinson and A. Voronkov (eds.), \emph{Handbook of Automated Reasoning},
+vol. 1, Elsevier/MIT Press, 2001.
+
+\bibitem{lrs}
+A. Riazanov and A. Voronkov, ``Limited Resource Strategy in Resolution Theorem
+Proving,'' \emph{Journal of Symbolic Computation} 36(1--2):101--115, 2003.
+
+\bibitem{e}
+S. Schulz, ``E---A Brainiac Theorem Prover,'' \emph{AI Communications}
+15(2--3):111--126, 2002.
+
+\bibitem{hints}
+R. Veroff, ``Using Hints to Increase the Effectiveness of an Automated
+Reasoning Program: Case Studies,'' \emph{Journal of Automated Reasoning}
+16(3):223--239, 1996.
+
+\bibitem{sketches}
+R. Veroff, ``Solving Open Questions and Other Challenge Problems Using Proof
+Sketches,'' \emph{Journal of Automated Reasoning} 27(2):157--174, 2001.
+
+\bibitem{resonance}
+L. Wos, ``The Resonance Strategy,'' \emph{Computers \& Mathematics with
+Applications} 29(2):133--178, 1995.
+
+\end{thebibliography}
+
+\end{document}
