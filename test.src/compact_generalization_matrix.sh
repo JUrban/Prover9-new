@@ -94,6 +94,7 @@ prepare_input()
     /^assign\((search_loop|passive_store|hint_index|inference_frontier|ancestor_store),/ { next }
     /^assign\((compact_term_reclaim_kb|compact_index_stale_pct|compact_passive_cache),/ { next }
     /^assign\(compact_unit_strategy,/ { next }
+    /^assign\(compact_back_demod_strategy,/ { next }
     /^(set|clear)\(compact_otter_[a-z_]+\)\./ { next }
     /^(set|clear)\((clocks|hint_match_stats|print_gen|print_kept|print_given|print_initial_clauses)\)\./ { next }
     { print }
@@ -157,13 +158,19 @@ emit_variant()
       ;;
     compact_back_only)
       emit_variant packed_only
+      echo 'assign(compact_back_demod_strategy,mask8).'
+      echo 'set(compact_otter_back_demod_index).'
+      ;;
+    compact_back_signature)
+      emit_variant packed_only
+      echo 'assign(compact_back_demod_strategy,signature32).'
       echo 'set(compact_otter_back_demod_index).'
       ;;
     compact_nonunit_only)
       emit_variant packed_only
       echo 'set(compact_otter_nonunit_index).'
       ;;
-    compact_full|compact_dense_file|compact_full_position|compact_dense_file_position|compact_full_code_tree|compact_dense_file_code_tree)
+    compact_full|compact_dense_file|compact_full_position|compact_dense_file_position|compact_full_code_tree|compact_dense_file_code_tree|compact_full_signature|compact_dense_file_signature|compact_full_code_tree_signature|compact_dense_file_code_tree_signature)
       echo 'assign(search_loop,otter).'
       case "$1" in
         compact_dense_file*)
@@ -177,8 +184,12 @@ emit_variant()
       esac
       case "$1" in
         *_position) echo 'assign(compact_unit_strategy,position).' ;;
-        *_code_tree) echo 'assign(compact_unit_strategy,code_tree).' ;;
+        *_code_tree*) echo 'assign(compact_unit_strategy,code_tree).' ;;
         *) echo 'assign(compact_unit_strategy,root_scan).' ;;
+      esac
+      case "$1" in
+        *_signature) echo 'assign(compact_back_demod_strategy,signature32).' ;;
+        *) echo 'assign(compact_back_demod_strategy,mask8).' ;;
       esac
       echo 'assign(hint_index,packed_fast).'
       echo 'assign(inference_frontier,clauses).'

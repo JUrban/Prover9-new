@@ -7,7 +7,13 @@
 
 typedef struct compact_back_demod_index * Compact_back_demod_index;
 
+typedef enum {
+  COMPACT_BACK_DEMOD_MASK8,
+  COMPACT_BACK_DEMOD_SIGNATURE32
+} Compact_back_demod_strategy;
+
 struct compact_back_demod_stats {
+  Compact_back_demod_strategy strategy;
   unsigned long long active;
   unsigned long long peak;
   unsigned long long retired;
@@ -56,6 +62,8 @@ Compact_back_demod_index compact_back_demod_init_with_pool(
   Compact_term_pool pool);
 
 void compact_back_demod_set_compaction_stale_pct(unsigned percentage);
+
+void compact_back_demod_set_strategy(Compact_back_demod_strategy strategy);
 
 BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause);
 

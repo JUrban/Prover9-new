@@ -2195,6 +2195,11 @@ Prover_options init_prover_options(void)
                     "position",
                     "code_tree");
 
+  p->compact_back_demod_strategy =
+    init_stringparm("compact_back_demod_strategy", 2,
+                    "mask8",
+                    "signature32");
+
   p->discount_demodulation =
     init_stringparm("discount_demodulation", 3,
 			"selected",
@@ -10696,6 +10701,8 @@ static void configure_search_indexes(void)
       COMPACT_UNIT_CODE_TREE : COMPACT_UNIT_ROOT_SCAN);
   configure_compact_back_demod_stale_pct(
     (unsigned) parm(Opt->compact_index_stale_pct));
+  configure_compact_back_demod_strategy(
+    str_ident(stringparm1(Opt->compact_back_demod_strategy), "signature32"));
   configure_compact_unit_term_pool(Compact_terms);
   configure_compact_unit_index(
     flag(Opt->compact_unit_subsumption_audit),

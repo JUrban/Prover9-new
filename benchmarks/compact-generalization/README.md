@@ -93,6 +93,24 @@ cases this reduced exact instance tests from 100,042 to 114 on Osborn and from
 1,769 to 17 on nil3.  The Osborn legacy-index audit reported zero answer/order
 mismatches; the added persistent state is three 64-bit reporting counters.
 
+Backward-demodulation experiments use `compact_back_signature`,
+`compact_full_signature`, or `compact_full_code_tree_signature` (and matching
+dense-file names).  These select `compact_back_demod_strategy=signature32`;
+controls explicitly select `mask8` so option parsing cannot perturb problem
+symbol numbers.  `signature32` records two hashed bits for every rigid
+path/symbol fact at arbitrary depth.  Collisions only add work because direct
+compact matching remains authoritative.
+
+The finer signature initially exposed a general packing defect: every sparse
+path bucket paid for a 64-byte posting block.  Posting blocks now use a
+16-byte payload and the first group is stored inline in its bucket; the
+high-cardinality signature directory also grows by bounded 25% increments.
+On the corrected 100-given Osborn pair, signature32 reduced examined groups
+from 18,566 to 2,687 and occurrences from 14,762 to 2,139 with the same 278
+candidates.  Back-index bytes rose from 209,144 to 248,520 (18.83%), within
+the 20% replacement gate; whole-process RSS was unchanged within measurement
+noise.  This remains an explicit prototype pending the 300/1,000-given gates.
+
 Setting `P9_MATRIX_ALLOW_HOLDOUT=1` is required even when a holdout case is
 named explicitly.  Do this only for a recorded phase-promotion commit, never
 while selecting features or thresholds.

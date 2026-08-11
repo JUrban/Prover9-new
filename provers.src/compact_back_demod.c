@@ -7,12 +7,14 @@
 #include <string.h>
 
 #define CBD_NONE 0U
-#define CBD_POSTING_BLOCK_PAYLOAD 56
+#define CBD_POSTING_BLOCK_PAYLOAD 16
 #define CBD_PATH_DEPTH 3
 
 static unsigned Compaction_stale_pct = 25;
+static Compact_back_demod_strategy Back_demod_strategy =
+  COMPACT_BACK_DEMOD_MASK8;
 
-typedef uint8_t cbd_path_mask;
+typedef uint32_t cbd_path_mask;
 
 struct cbd_posting_block {
   uint32_t next;
@@ -21,14 +23,18 @@ struct cbd_posting_block {
   unsigned char data[CBD_POSTING_BLOCK_PAYLOAD];
 };
 
-/* Occurrences with one root symbol and one exact shallow-path signature share
-   a posting chain.  A query only opens buckets whose signature contains all
-   of its fixed path features; the structural matcher still checks every
-   survivor. */
+/* Occurrences with one root symbol and one structural signature share a
+   posting chain.  mask8 preserves the original shallow 8-bit signature;
+   signature32 uses two bits per rigid fact at arbitrary depth.  A query only
+   opens buckets whose signature contains all of its fixed path features; hash
+   collisions can add candidates but the structural matcher remains final. */
 struct cbd_path_bucket {
   uint32_t next;
   uint32_t posting_head;
   uint32_t posting_tail;
+  uint32_t inline_record;
+  uint32_t inline_occurrence;
+  uint32_t inline_length;
   uint32_t last_record;
   uint32_t last_occurrence;
   uint32_t symbol;
@@ -50,6 +56,7 @@ struct cbd_record {
 };
 
 struct compact_back_demod_index {
+  Compact_back_demod_strategy strategy;
   struct cbd_posting_block *posting_blocks;
   size_t posting_block_count;
   size_t posting_block_capacity;
@@ -292,7 +299,7 @@ static uint32_t new_posting_block(Compact_back_demod_index index)
 
 static uint64_t path_bucket_key(uint32_t symbol, cbd_path_mask mask)
 {
-  return ((uint64_t) symbol << 16) | (uint64_t) mask;
+  return hash_id(((uint64_t) symbol << 32) ^ hash_id(mask));
 }
 
 static size_t path_bucket_hash_slot(Compact_back_demod_index index,
@@ -346,9 +353,19 @@ static uint32_t find_or_add_path_bucket(Compact_back_demod_index index,
   bucket = index->path_bucket_hash[at];
   if (bucket != CBD_NONE)
     return bucket;
-  ENSURE_ARRAY(index, path_buckets, path_bucket_count,
-               path_bucket_capacity,
-               "compact_back_demod: path bucket overflow");
+  if (index->path_bucket_count == index->path_bucket_capacity) {
+    index->path_bucket_capacity =
+      index->strategy == COMPACT_BACK_DEMOD_SIGNATURE32 ?
+        grow_record_capacity(
+          index->path_bucket_capacity, sizeof(*index->path_buckets),
+          "compact_back_demod: path bucket overflow") :
+        grow_capacity(
+          index->path_bucket_capacity, sizeof(*index->path_buckets),
+          "compact_back_demod: path bucket overflow");
+    index->path_buckets = safe_realloc(
+      index->path_buckets,
+      index->path_bucket_capacity * sizeof(*index->path_buckets));
+  }
   if (index->path_bucket_count > UINT32_MAX)
     fatal_error("compact_back_demod: path bucket offsets exceed 32 bits");
   bucket = (uint32_t) index->path_bucket_count++;
@@ -381,6 +398,15 @@ static void append_symbol_record(Compact_back_demod_index index,
     fatal_error("compact_back_demod: nonmonotone posting occurrence");
   if (occurrence_length == 0)
     fatal_error("compact_back_demod: empty posting occurrence list");
+  if (bucket->inline_length == 0) {
+    bucket->inline_record = record;
+    bucket->inline_occurrence = occurrence_offset;
+    bucket->inline_length = occurrence_length;
+    bucket->last_record = record;
+    bucket->last_occurrence = occurrence_offset;
+    index->posting_count++;
+    return;
+  }
   length += encode_u32(encoded + length,
                        record - bucket->last_record);
   length += encode_u32(
@@ -411,18 +437,34 @@ static void append_symbol_record(Compact_back_demod_index index,
   index->posting_stream_used += length;
 }
 
-static cbd_path_mask path_feature_bit(uint32_t path, uint32_t symbol)
+static uint64_t signature_child_path(uint64_t path, unsigned child)
 {
-  uint32_t mixed = path * UINT32_C(0x9e3779b1) ^
-                   symbol * UINT32_C(0x85ebca6b);
-  mixed ^= mixed >> 16;
-  return (cbd_path_mask) 1U <<
-    (mixed % (sizeof(cbd_path_mask) * 8U));
+  return hash_id(path ^ (UINT64_C(0x9e3779b97f4a7c15) + child));
+}
+
+static cbd_path_mask path_feature_bits(Compact_back_demod_index index,
+                                       uint64_t path, uint32_t symbol)
+{
+  if (index->strategy == COMPACT_BACK_DEMOD_MASK8) {
+    uint32_t mixed = (uint32_t) path * UINT32_C(0x9e3779b1) ^
+                     symbol * UINT32_C(0x85ebca6b);
+    mixed ^= mixed >> 16;
+    return UINT64_C(1) << (mixed % 8U);
+  }
+  else {
+    uint64_t mixed = hash_id(
+      path ^ ((uint64_t) symbol * UINT64_C(0x85ebca77c2b2ae63)));
+    unsigned first = (unsigned) (mixed & 31U);
+    unsigned second = (unsigned) ((mixed >> 32) & 31U);
+    if (second == first)
+      second = (second + 15U) & 31U;
+    return (UINT32_C(1) << first) | (UINT32_C(1) << second);
+  }
 }
 
 static cbd_path_mask token_path_mask_rec(Compact_back_demod_index index,
                                          uint32_t *position, unsigned depth,
-                                         uint32_t path)
+                                         uint64_t path)
 {
   int32_t code;
   int i, arity;
@@ -432,15 +474,21 @@ static cbd_path_mask token_path_mask_rec(Compact_back_demod_index index,
   code = index->tokens[(*position)++];
   arity = code < 0 ? 0 : sn_to_arity(code);
   for (i = 0; i < arity; i++) {
-    uint32_t child_path = path * 17U + (uint32_t) i + 1U;
+    uint64_t child_path =
+      index->strategy == COMPACT_BACK_DEMOD_MASK8 ?
+        (uint32_t) path * 17U + (uint32_t) i + 1U :
+        signature_child_path(path, (unsigned) i);
     if ((size_t) *position >= index->token_limit)
       fatal_error("compact_back_demod: corrupt path child offset");
-    if (depth < CBD_PATH_DEPTH && index->tokens[*position] >= 0)
-      mask |= path_feature_bit(
+    if ((index->strategy == COMPACT_BACK_DEMOD_SIGNATURE32 ||
+         depth < CBD_PATH_DEPTH) && index->tokens[*position] >= 0)
+      mask |= path_feature_bits(
+        index,
         child_path, (uint32_t) index->tokens[*position]);
     mask |= token_path_mask_rec(index, position, depth + 1, child_path);
   }
-  return depth < CBD_PATH_DEPTH ? mask : 0;
+  return index->strategy == COMPACT_BACK_DEMOD_SIGNATURE32 ||
+         depth < CBD_PATH_DEPTH ? mask : 0;
 }
 
 static cbd_path_mask token_path_mask(Compact_back_demod_index index,
@@ -451,26 +499,33 @@ static cbd_path_mask token_path_mask(Compact_back_demod_index index,
 }
 
 static cbd_path_mask term_path_mask_rec(Term term, unsigned depth,
-                                        uint32_t path)
+                                        uint64_t path,
+                                        Compact_back_demod_index index)
 {
   cbd_path_mask mask = 0;
   int i;
-  if (VARIABLE(term) || depth >= CBD_PATH_DEPTH)
+  if (VARIABLE(term) ||
+      (index->strategy == COMPACT_BACK_DEMOD_MASK8 &&
+       depth >= CBD_PATH_DEPTH))
     return 0;
   for (i = 0; i < ARITY(term); i++) {
     Term child = ARG(term, i);
-    uint32_t child_path = path * 17U + (uint32_t) i + 1U;
+    uint64_t child_path =
+      index->strategy == COMPACT_BACK_DEMOD_MASK8 ?
+        (uint32_t) path * 17U + (uint32_t) i + 1U :
+        signature_child_path(path, (unsigned) i);
     if (!VARIABLE(child)) {
-      mask |= path_feature_bit(child_path, (uint32_t) SYMNUM(child));
-      mask |= term_path_mask_rec(child, depth + 1, child_path);
+      mask |= path_feature_bits(index, child_path,
+                                (uint32_t) SYMNUM(child));
+      mask |= term_path_mask_rec(child, depth + 1, child_path, index);
     }
   }
   return mask;
 }
 
-static cbd_path_mask term_path_mask(Term term)
+static cbd_path_mask term_path_mask(Compact_back_demod_index index, Term term)
 {
-  return term_path_mask_rec(term, 0, 0);
+  return term_path_mask_rec(term, 0, 0, index);
 }
 
 static void note_symbol(struct cbd_symbol_set *set, uint32_t symbol,
@@ -527,13 +582,14 @@ static int increasing_local_bucket(const void *left, const void *right)
   return 0;
 }
 
-Compact_back_demod_index compact_back_demod_init_with_pool(
-  Compact_term_pool pool)
+static Compact_back_demod_index compact_back_demod_init_with_pool_strategy(
+  Compact_term_pool pool, Compact_back_demod_strategy strategy)
 {
   Compact_back_demod_index index = safe_calloc(1, sizeof(*index));
   if (pool == NULL)
     fatal_error("compact_back_demod_init_with_pool: null term pool");
   index->term_pool = pool;
+  index->strategy = strategy;
   index->tokens = compact_term_pool_tokens(pool);
   index->id_map = compact_id_map_init(1);
   index->lookup_clock = clock_init("compact_back_demod_lookup");
@@ -553,6 +609,13 @@ Compact_back_demod_index compact_back_demod_init_with_pool(
   return index;
 }
 
+Compact_back_demod_index compact_back_demod_init_with_pool(
+  Compact_term_pool pool)
+{
+  return compact_back_demod_init_with_pool_strategy(
+    pool, Back_demod_strategy);
+}
+
 Compact_back_demod_index compact_back_demod_init(void)
 {
   Compact_term_pool pool = compact_term_pool_init();
@@ -561,6 +624,14 @@ Compact_back_demod_index compact_back_demod_init(void)
   index->owns_term_pool = TRUE;
   update_peak(index);
   return index;
+}
+
+void compact_back_demod_set_strategy(Compact_back_demod_strategy strategy)
+{
+  if (strategy != COMPACT_BACK_DEMOD_MASK8 &&
+      strategy != COMPACT_BACK_DEMOD_SIGNATURE32)
+    fatal_error("compact_back_demod: invalid strategy");
+  Back_demod_strategy = strategy;
 }
 
 BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
@@ -840,6 +911,35 @@ static uint32_t decode_posting_value(const struct cbd_posting_block *block,
   return 0;
 }
 
+static void examine_posting_group(
+  Compact_back_demod_index index, uint32_t record_index,
+  uint32_t occurrence_offset, uint32_t occurrence_length,
+  Term pattern, int32_t symbol, unsigned long long exclude_id,
+  size_t *count)
+{
+  struct cbd_record *record;
+  if (record_index == CBD_NONE || record_index >= index->record_count)
+    fatal_error("compact_back_demod: corrupt posting record");
+  record = &index->records[record_index];
+  index->posting_groups_examined++;
+  index->query_work++;
+  if (record->active)
+    index->query_live++;
+  else {
+    index->query_dead++;
+    index->inactive_groups_examined++;
+  }
+  if (record->active && record->query_stamp == index->query_stamp) {
+    index->query_duplicates++;
+    index->duplicate_groups_examined++;
+  }
+  if (record->active && record->proof_id != exclude_id &&
+      record->query_stamp != index->query_stamp &&
+      posting_contains_pattern(index, occurrence_offset,
+                               occurrence_length, record, pattern, symbol))
+    collect_record(index, record_index, exclude_id, count);
+}
+
 static void collect_symbol(Compact_back_demod_index index, Term pattern,
                            unsigned long long exclude_id, size_t *count)
 {
@@ -866,7 +966,7 @@ static void collect_symbol(Compact_back_demod_index index, Term pattern,
     return;
   }
   symbol = (unsigned) SYMNUM(pattern);
-  required_mask = term_path_mask(pattern);
+  required_mask = term_path_mask(index, pattern);
   if ((size_t) symbol >= index->symbol_capacity)
     return;
   for (bucket_index = index->symbol_buckets[symbol];
@@ -874,8 +974,8 @@ static void collect_symbol(Compact_back_demod_index index, Term pattern,
        bucket_index = index->path_buckets[bucket_index].next) {
     struct cbd_path_bucket *bucket;
     uint32_t block;
-    uint32_t record_index = 0;
-    uint32_t occurrence_offset = 0;
+    uint32_t record_index;
+    uint32_t occurrence_offset;
     if (bucket_index >= index->path_bucket_count)
       fatal_error("compact_back_demod: corrupt path bucket");
     bucket = &index->path_buckets[bucket_index];
@@ -884,6 +984,15 @@ static void collect_symbol(Compact_back_demod_index index, Term pattern,
       index->path_filter_rejects++;
       continue;
     }
+    if (bucket->inline_record == CBD_NONE || bucket->inline_length == 0)
+      fatal_error("compact_back_demod: missing inline posting");
+    record_index = bucket->inline_record;
+    occurrence_offset = bucket->inline_occurrence;
+    index->posting_bytes_decoded += 3 * sizeof(uint32_t);
+    index->query_bytes_decoded += 3 * sizeof(uint32_t);
+    examine_posting_group(index, record_index, occurrence_offset,
+                          bucket->inline_length, pattern, (int32_t) symbol,
+                          exclude_id, count);
     for (block = bucket->posting_head; block != CBD_NONE;
          block = index->posting_blocks[block].next) {
       const struct cbd_posting_block *current;
@@ -898,7 +1007,6 @@ static void collect_symbol(Compact_back_demod_index index, Term pattern,
         uint32_t delta = decode_posting_value(current, &position);
         uint32_t occurrence_delta;
         uint32_t occurrence_length;
-        struct cbd_record *record;
         if (delta > UINT32_MAX - record_index)
           fatal_error("compact_back_demod: posting record overflow");
         record_index += delta;
@@ -907,27 +1015,9 @@ static void collect_symbol(Compact_back_demod_index index, Term pattern,
           fatal_error("compact_back_demod: posting occurrence overflow");
         occurrence_offset += occurrence_delta;
         occurrence_length = decode_posting_value(current, &position);
-        if (record_index == CBD_NONE || record_index >= index->record_count)
-          fatal_error("compact_back_demod: corrupt posting record");
-        record = &index->records[record_index];
-        index->posting_groups_examined++;
-        index->query_work++;
-        if (record->active)
-          index->query_live++;
-        else {
-          index->query_dead++;
-          index->inactive_groups_examined++;
-        }
-        if (record->active && record->query_stamp == index->query_stamp) {
-          index->query_duplicates++;
-          index->duplicate_groups_examined++;
-        }
-        if (record->active && record->proof_id != exclude_id &&
-            record->query_stamp != index->query_stamp &&
-            posting_contains_pattern(index, occurrence_offset,
-                                     occurrence_length, record, pattern,
-                                     (int32_t) symbol))
-          collect_record(index, record_index, exclude_id, count);
+        examine_posting_group(index, record_index, occurrence_offset,
+                              occurrence_length, pattern, (int32_t) symbol,
+                              exclude_id, count);
         entries++;
       }
       if (position != current->used || entries != current->count)
@@ -1067,7 +1157,8 @@ static void compact_back_demod_compact_internal(
   occurrences_examined = index->occurrences_examined;
   path_checks = index->path_filter_checks;
   path_rejects = index->path_filter_rejects;
-  replacement = compact_back_demod_init_with_pool(index->term_pool);
+  replacement = compact_back_demod_init_with_pool_strategy(
+    index->term_pool, index->strategy);
   replacement->tokens = compact_term_pool_tokens(index->term_pool);
   replacement->token_limit = compact_term_pool_token_count(index->term_pool);
   record_map = safe_calloc(index->record_count, sizeof(*record_map));
@@ -1090,8 +1181,26 @@ static void compact_back_demod_compact_internal(
   for (i = 1; i < index->path_bucket_count; i++) {
     struct cbd_path_bucket *bucket = &index->path_buckets[i];
     uint32_t block;
-    uint32_t record_index = 0;
-    uint32_t occurrence_offset = 0;
+    uint32_t record_index = bucket->inline_record;
+    uint32_t occurrence_offset = bucket->inline_occurrence;
+    if (record_index == CBD_NONE || record_index >= index->record_count ||
+        bucket->inline_length == 0 ||
+        occurrence_offset > index->occurrence_count ||
+        bucket->inline_length > index->occurrence_count - occurrence_offset)
+      fatal_error("compact_back_demod: corrupt compacted inline posting");
+    if (record_map[record_index] != CBD_NONE) {
+      uint32_t new_offset = (uint32_t) replacement->occurrence_count;
+      ensure_occurrence_bytes(replacement, bucket->inline_length);
+      memcpy(replacement->occurrences + replacement->occurrence_count,
+             index->occurrences + occurrence_offset,
+             bucket->inline_length);
+      replacement->occurrence_count += bucket->inline_length;
+      replacement->symbol_occurrences += occurrence_items(
+        index, occurrence_offset, bucket->inline_length);
+      append_symbol_record(replacement, record_map[record_index],
+                           bucket->symbol, bucket->mask, new_offset,
+                           bucket->inline_length);
+    }
     for (block = bucket->posting_head; block != CBD_NONE;
          block = index->posting_blocks[block].next) {
       const struct cbd_posting_block *current =
@@ -1270,7 +1379,8 @@ void compact_back_demod_compact_materialized(
   safe_free(old.records);
   compact_id_map_free(old.id_map);
   safe_free(old.results);
-  replacement = compact_back_demod_init_with_pool(old.term_pool);
+  replacement = compact_back_demod_init_with_pool_strategy(
+    old.term_pool, old.strategy);
   replacement->owns_term_pool = old.owns_term_pool;
   while (rebuilt < count) {
     unsigned long long *batch;
@@ -1389,6 +1499,7 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   if (index == NULL)
     return;
   compact_term_pool_get_stats(index->term_pool, &terms);
+  stats->strategy = index->strategy;
   stats->active = index->active;
   stats->peak = index->peak;
   stats->retired = index->retired;

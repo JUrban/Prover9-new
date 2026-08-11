@@ -287,6 +287,7 @@ struct prover_options {
     search_loop,         // otter, discount
     passive_store,       // full, compressed
     compact_unit_strategy, // root_scan, position, code_tree
+    compact_back_demod_strategy, // mask8, signature32
     discount_demodulation, // selected, eager_legacy, eager_interreduced
     hint_index,          // fpa, compact, shallow, packed/hybrid, packed_legacy
     inference_frontier,  // clauses, collective

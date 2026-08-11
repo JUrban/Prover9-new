@@ -75,6 +75,13 @@ void configure_compact_back_demod_stale_pct(unsigned percentage)
   compact_back_demod_set_compaction_stale_pct(percentage);
 }
 
+void configure_compact_back_demod_strategy(BOOL signature32)
+{
+  compact_back_demod_set_strategy(
+    signature32 ? COMPACT_BACK_DEMOD_SIGNATURE32 :
+                  COMPACT_BACK_DEMOD_MASK8);
+}
+
 static BOOL compact_back_demod_mode(void)
 {
   return Compact_back_demod_audit || Compact_back_demod_authoritative;
@@ -596,7 +603,7 @@ void fprint_compact_back_demod(FILE *fp)
     return;
   compact_back_demod_get_stats(Compact_back_demod_idx, &stats);
   fprintf(fp,
-          "Compact_back_demod: mode=%s, failures=%llu, active=%llu, "
+          "Compact_back_demod: mode=%s, strategy=%s, failures=%llu, active=%llu, "
           "peak=%llu, retired=%llu, physical=%llu, compactions=%llu, "
           "reclaimed=%llu, queries=%llu, "
           "candidates=%llu, exact_tests=%llu, posting_groups=%llu, "
@@ -609,6 +616,8 @@ void fprint_compact_back_demod(FILE *fp)
           "occurrence_stream=%llu, postings=%llu, records=%llu, roots=%llu, "
           "tokens=%llu, hash=%llu, scratch=%llu, bytes=%llu, peak_bytes=%llu.\n",
           Compact_back_demod_authoritative ? "authoritative" : "audit",
+          stats.strategy == COMPACT_BACK_DEMOD_SIGNATURE32 ?
+            "signature32" : "mask8",
           Compact_back_demod_failures, stats.active, stats.peak,
           stats.retired, stats.physical, stats.compactions,
           stats.bytes_reclaimed, stats.queries, stats.candidates,

@@ -197,6 +197,73 @@ int main(void)
     delete_clause(block_demod);
   }
 
+  {
+    enum { DEEP_FAMILY = 128, DEEP_TARGET = 73 };
+    Compact_back_demod_index mask_index, signature_index;
+    struct compact_back_demod_stats mask_stats, signature_stats;
+    Topform deep_clauses[DEEP_FAMILY];
+    Topform deep_demod;
+    unsigned long long *mask_ids, *signature_ids;
+    size_t mask_count, signature_count;
+    char text[128];
+    int j;
+
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
+    mask_index = compact_back_demod_init();
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_SIGNATURE32);
+    signature_index = compact_back_demod_init();
+    for (j = 0; j < DEEP_FAMILY; j++) {
+      (void) snprintf(text, sizeof(text),
+                      "u(f(a,g(h(j(c%d))))).", j);
+      deep_clauses[j] = indexed_clause(text);
+      CHECK(compact_back_demod_add(mask_index, deep_clauses[j]),
+            "add deep family clause to mask8 index");
+      CHECK(compact_back_demod_add(signature_index, deep_clauses[j]),
+            "add deep family clause to signature32 index");
+    }
+    (void) snprintf(text, sizeof(text),
+                    "f(a,g(h(j(c%d)))) = a.", DEEP_TARGET);
+    deep_demod = indexed_clause(text);
+    mask_ids = compact_back_demod_candidate_ids(
+      mask_index, deep_demod, ORIENTED, &mask_count);
+    signature_ids = compact_back_demod_candidate_ids(
+      signature_index, deep_demod, ORIENTED, &signature_count);
+    CHECK(mask_count == 1 && signature_count == mask_count &&
+          mask_ids[0] == deep_clauses[DEEP_TARGET]->id &&
+          signature_ids[0] == mask_ids[0],
+          "unbounded signature preserves the exact deep candidate");
+    compact_back_demod_note_exact_query(mask_index, mask_count, mask_count, 0);
+    compact_back_demod_note_exact_query(
+      signature_index, signature_count, signature_count, 0);
+    compact_back_demod_get_stats(mask_index, &mask_stats);
+    compact_back_demod_get_stats(signature_index, &signature_stats);
+    CHECK(mask_stats.strategy == COMPACT_BACK_DEMOD_MASK8 &&
+          signature_stats.strategy == COMPACT_BACK_DEMOD_SIGNATURE32,
+          "back-demod indexes retain their configured strategies");
+    CHECK(mask_stats.posting_groups_examined >= DEEP_FAMILY &&
+          signature_stats.posting_groups_examined <= 8 &&
+          signature_stats.posting_groups_examined * 16 <
+            mask_stats.posting_groups_examined,
+          "unbounded signature separates deep same-shape occurrences");
+    CHECK(compact_back_demod_remove(
+            signature_index, deep_clauses[DEEP_TARGET]->id),
+          "remove deep signature answer");
+    compact_back_demod_compact_all_stale(signature_index);
+    safe_free(signature_ids);
+    signature_ids = compact_back_demod_candidate_ids(
+      signature_index, deep_demod, ORIENTED, &signature_count);
+    CHECK(signature_count == 0 && signature_ids == NULL,
+          "signature strategy survives deletion and forced rebuild");
+
+    safe_free(mask_ids);
+    compact_back_demod_free(mask_index);
+    compact_back_demod_free(signature_index);
+    delete_clause(deep_demod);
+    for (j = 0; j < DEEP_FAMILY; j++)
+      delete_clause(deep_clauses[j]);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
+  }
+
   delete_clause(first);
   delete_clause(second);
   delete_clause(irrelevant);
