@@ -42,3 +42,29 @@ and freeze a new holdout partition before another tuning cycle.
 Correctness-only cases may run in parallel.  Promotion CPU measurements run
 sequentially on a quiet machine, pinned to one real core, with binary and input
 digests, `/usr/bin/time -v`, and the complete Prover9 statistics recorded.
+
+## Bounded runner
+
+The generalization runner uses only training/control cases unless holdout access
+is explicitly authorized.  Its defaults are deliberately small: one Osborn
+training case, 100 givens, 120 CPU seconds, and 2 GiB per variant.
+
+```sh
+P9_MATRIX_CASES='osborn-chat chat-new-11k nil3-1k mbol-nil3-a' \
+P9_MATRIX_VARIANTS='legacy packed_only compact_full compact_dense_file' \
+P9_MATRIX_MAX_GIVEN=300 \
+P9_MATRIX_MAX_SECONDS=600 \
+P9_MATRIX_MAX_MEGS=4096 \
+  test.src/compact_generalization_matrix.sh /path/to/results
+```
+
+Results include the complete generated input, binary/input hashes,
+`/usr/bin/time -v`, prooftrans output for completed proofs, `summary.tsv`, and
+machine-readable `profiles.tsv`/`profiles.json`.  Component-isolation variants
+are `compact_demod_only`, `compact_unit_only`, `compact_back_only`, and
+`compact_nonunit_only`; they retain full passive bodies so the other legacy
+indexes remain valid.
+
+Setting `P9_MATRIX_ALLOW_HOLDOUT=1` is required even when a holdout case is
+named explicitly.  Do this only for a recorded phase-promotion commit, never
+while selecting features or thresholds.

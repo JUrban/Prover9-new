@@ -92,6 +92,9 @@ compact-frontier-tests: all
 compact-generalization-validate:
 	./test.src/validate_compact_generalization_manifest.sh
 
+compact-generalization-smoke: all
+	./test.src/compact_generalization_smoke_test.sh
+
 clean:
 	cd ladr             && $(MAKE) realclean
 	cd apps.src         && $(MAKE) realclean
