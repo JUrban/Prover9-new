@@ -8,6 +8,12 @@
 
 typedef struct compact_feature_index * Compact_feature_index;
 
+struct compact_feature_structural_summary {
+  uint64_t rigid;
+  uint32_t variable_constraints;
+  uint32_t equal_positions;
+};
+
 struct compact_feature_index_stats {
   unsigned long long active;
   unsigned long long peak;
@@ -16,9 +22,11 @@ struct compact_feature_index_stats {
   unsigned long long forward_queries;
   unsigned long long forward_candidates;
   unsigned long long forward_structural_rejects;
+  unsigned long long forward_variable_rejects;
   unsigned long long back_queries;
   unsigned long long back_candidates;
   unsigned long long back_structural_rejects;
+  unsigned long long back_variable_rejects;
   struct compact_query_profile forward_profile;
   struct compact_query_profile back_profile;
   double forward_lookup_seconds;
@@ -37,16 +45,19 @@ struct compact_feature_index_stats {
 Compact_feature_index compact_feature_index_init(int feature_length,
                                                  BOOL structural_filter);
 
-/* A Bloom-style necessary-condition summary of signed rigid symbols at exact
-   argument paths.  If clause A subsumes clause B under feature_subsumes_raw(),
-   every bit in A's mask must occur in B's mask.  Hash collisions can retain
-   extra candidates, but cannot reject a real subsumption. */
-uint64_t compact_feature_clause_mask(Topform clause);
+/* Bloom-style necessary-condition summaries for signed rigid symbols at exact
+   argument paths and for repeated-variable equality between paths.  If A
+   subsumes B under feature_subsumes_raw(), A.rigid is a subset of B.rigid and
+   A.variable_constraints is a subset of B.equal_positions.  Hash collisions
+   can retain extra candidates, but cannot reject a real subsumption. */
+struct compact_feature_structural_summary compact_feature_clause_summary(
+  Topform clause);
 
 BOOL compact_feature_index_add(Compact_feature_index index,
                                unsigned long long proof_id,
                                const int *features,
-                               uint64_t structural_mask);
+                               struct compact_feature_structural_summary
+                                 structural);
 
 BOOL compact_feature_index_remove(Compact_feature_index index,
                                   unsigned long long proof_id);
@@ -54,11 +65,13 @@ BOOL compact_feature_index_remove(Compact_feature_index index,
 /* Candidate orders exactly follow di_tree_forward()/di_tree_back().  The
    caller owns the result and applies the exact subsumption test. */
 unsigned long long *compact_feature_forward_candidates(
-  Compact_feature_index index, const int *query, uint64_t structural_mask,
+  Compact_feature_index index, const int *query,
+  struct compact_feature_structural_summary structural,
   size_t *count);
 
 unsigned long long *compact_feature_back_candidates(
-  Compact_feature_index index, const int *query, uint64_t structural_mask,
+  Compact_feature_index index, const int *query,
+  struct compact_feature_structural_summary structural,
   size_t *count);
 
 /* Complete the per-query profile after the caller's authoritative exact

@@ -179,9 +179,11 @@ void fprint_compact_nonunit_index(FILE *fp)
           "Compact_nonunit_index: mode=%s, failures=%llu, active=%llu, "
           "peak=%llu, retired=%llu, physical=%llu, forward_queries=%llu, "
           "forward_candidates=%llu, forward_exact_tests=%llu, "
-          "forward_path_rejects=%llu, back_queries=%llu, "
+          "forward_path_rejects=%llu, forward_variable_rejects=%llu, "
+          "back_queries=%llu, "
           "back_candidates=%llu, back_exact_tests=%llu, "
-          "back_path_rejects=%llu, nodes=%llu, labels=%llu, postings=%llu, "
+          "back_path_rejects=%llu, back_variable_rejects=%llu, "
+          "nodes=%llu, labels=%llu, postings=%llu, "
           "records=%llu, structural=%llu, hash=%llu, "
           "scratch=%llu, bytes=%llu, peak_bytes=%llu.\n",
           Compact_nonunit_authoritative ? "authoritative" : "audit",
@@ -189,8 +191,10 @@ void fprint_compact_nonunit_index(FILE *fp)
           stats.retired, stats.physical, stats.forward_queries,
           stats.forward_candidates, Compact_nonunit_forward_exact_tests,
           stats.forward_structural_rejects,
+          stats.forward_variable_rejects,
           stats.back_queries, stats.back_candidates,
           Compact_nonunit_back_exact_tests, stats.back_structural_rejects,
+          stats.back_variable_rejects,
           stats.node_bytes, stats.label_bytes, stats.posting_bytes,
           stats.record_bytes, stats.structural_bytes, stats.hash_bytes,
           stats.scratch_bytes, stats.total_bytes,
@@ -611,10 +615,13 @@ void index_literals(Topform c, Indexop op, Clock clock, BOOL no_fapl)
     int *f = features(c->literals);
     int flen = feature_length();
     if (compact_nonunit_index_mode()) {
+      struct compact_feature_structural_summary structural;
+      memset(&structural, 0, sizeof(structural));
+      if (Compact_nonunit_path_filter && op == INSERT)
+        structural = compact_feature_clause_summary(c);
       BOOL ok = op == INSERT ?
         compact_feature_index_add(
-          Compact_nonunits, c->id, f,
-          Compact_nonunit_path_filter ? compact_feature_clause_mask(c) : 0) :
+          Compact_nonunits, c->id, f, structural) :
         compact_feature_index_remove(Compact_nonunits, c->id);
       if (!ok)
         fatal_error(op == INSERT ?
@@ -783,13 +790,15 @@ Plist back_unit_deletable(Topform c)
 static Topform compact_nonunit_forward_subsumption(Topform query)
 {
   int *vector = features(query->literals);
+  struct compact_feature_structural_summary structural;
   unsigned long long *ids;
   size_t count = 0, i, exact = 0, materialized = 0;
   Topform result = NULL;
+  memset(&structural, 0, sizeof(structural));
+  if (Compact_nonunit_path_filter)
+    structural = compact_feature_clause_summary(query);
   ids = compact_feature_forward_candidates(
-    Compact_nonunits, vector,
-    Compact_nonunit_path_filter ? compact_feature_clause_mask(query) : 0,
-    &count);
+    Compact_nonunits, vector, structural, &count);
   for (i = 0; i < count && result == NULL; i++) {
     BOOL was_materialized;
     Topform candidate = resolve_compact_index_clause_profile(
@@ -819,13 +828,15 @@ static Topform compact_nonunit_forward_subsumption(Topform query)
 static Plist compact_nonunit_back_subsumption(Topform query)
 {
   int *vector = features(query->literals);
+  struct compact_feature_structural_summary structural;
   unsigned long long *ids;
   size_t count = 0, i, exact = 0, successes = 0, materialized = 0;
   Plist result = NULL;
+  memset(&structural, 0, sizeof(structural));
+  if (Compact_nonunit_path_filter)
+    structural = compact_feature_clause_summary(query);
   ids = compact_feature_back_candidates(
-    Compact_nonunits, vector,
-    Compact_nonunit_path_filter ? compact_feature_clause_mask(query) : 0,
-    &count);
+    Compact_nonunits, vector, structural, &count);
   for (i = 0; i < count; i++) {
     BOOL was_materialized;
     Topform candidate = resolve_compact_index_clause_profile(

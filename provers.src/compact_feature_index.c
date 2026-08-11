@@ -38,7 +38,7 @@ struct compact_feature_index {
   struct cfi_record *records;
   size_t record_count;
   size_t record_capacity;
-  uint64_t *structural_masks;
+  struct compact_feature_structural_summary *structural_summaries;
   unsigned long long *hash_keys;
   uint32_t *hash_values;
   size_t hash_capacity;
@@ -55,9 +55,11 @@ struct compact_feature_index {
   unsigned long long forward_queries;
   unsigned long long forward_candidates;
   unsigned long long forward_structural_rejects;
+  unsigned long long forward_variable_rejects;
   unsigned long long back_queries;
   unsigned long long back_candidates;
   unsigned long long back_structural_rejects;
+  unsigned long long back_variable_rejects;
   struct compact_query_profile forward_profile;
   struct compact_query_profile back_profile;
   unsigned long long query_nodes;
@@ -65,6 +67,7 @@ struct compact_feature_index {
   unsigned long long query_live;
   unsigned long long query_dead;
   unsigned long long query_structural_rejects;
+  unsigned long long query_variable_rejects;
   Clock forward_lookup_clock;
   Clock back_lookup_clock;
   unsigned long long peak_bytes;
@@ -98,33 +101,89 @@ static uint64_t hash_id(uint64_t x)
   return x;
 }
 
-static uint64_t structural_term_mask(Term term, uint64_t literal_context,
-                                     uint64_t path)
+struct cfi_term_occurrence {
+  Term term;
+  uint64_t location;
+  unsigned term_hash;
+};
+
+static uint64_t rigid_fact_mask(uint64_t literal_context, uint64_t path,
+                                unsigned symbol)
 {
-  uint64_t mask, fact;
-  int i;
-  if (VARIABLE(term))
-    return 0;
-  fact = hash_id(literal_context ^ hash_id(path) ^
-                 hash_id((uint64_t) (unsigned) SYMNUM(term) +
+  uint64_t fact = hash_id(literal_context ^ hash_id(path) ^
+                 hash_id((uint64_t) symbol +
                          UINT64_C(0x9e3779b97f4a7c15)));
-  mask = (UINT64_C(1) << (fact & 63)) |
+  return (UINT64_C(1) << (fact & 63)) |
          (UINT64_C(1) << ((fact >> 17) & 63));
+}
+
+static uint32_t equality_fact_mask(uint64_t first, uint64_t second)
+{
+  uint64_t low = first < second ? first : second;
+  uint64_t high = first < second ? second : first;
+  uint64_t fact = hash_id(low ^ hash_id(
+    high + UINT64_C(0x455155414c504154)));
+  return (UINT32_C(1) << (fact & 31)) |
+         (UINT32_C(1) << ((fact >> 13) & 31));
+}
+
+static void append_occurrence(struct cfi_term_occurrence **occurrences,
+                              size_t *count, size_t *capacity,
+                              Term term, uint64_t context, uint64_t path)
+{
+  if (*count == *capacity) {
+    *capacity = grow_capacity(*capacity, sizeof(**occurrences),
+                              "compact_feature_index: occurrence overflow");
+    *occurrences = safe_realloc(
+      *occurrences, *capacity * sizeof(**occurrences));
+  }
+  (*occurrences)[*count].term = term;
+  (*occurrences)[*count].location = hash_id(context ^ hash_id(path));
+  (*occurrences)[*count].term_hash = hash_term(term);
+  (*count)++;
+}
+
+static void summarize_term(Term term, uint64_t literal_context,
+                           uint64_t path, BOOL atom_root,
+                           struct compact_feature_structural_summary *summary,
+                           struct cfi_term_occurrence **occurrences,
+                           size_t *count, size_t *capacity)
+{
+  int i;
+  if (!atom_root)
+    append_occurrence(occurrences, count, capacity, term,
+                      literal_context, path);
+  if (VARIABLE(term))
+    return;
+  summary->rigid |= rigid_fact_mask(
+    literal_context, path, (unsigned) SYMNUM(term));
   for (i = 0; i < ARITY(term); i++) {
     uint64_t child_path = hash_id(
       path ^ ((uint64_t) (unsigned) (i + 1) *
               UINT64_C(0xd6e8feb86659fd93)));
-    mask |= structural_term_mask(ARG(term, i), literal_context, child_path);
+    summarize_term(ARG(term, i), literal_context, child_path, FALSE,
+                   summary, occurrences, count, capacity);
   }
-  return mask;
 }
 
-uint64_t compact_feature_clause_mask(Topform clause)
+static int occurrence_hash_order(const void *a, const void *b)
 {
+  const struct cfi_term_occurrence *x = a;
+  const struct cfi_term_occurrence *y = b;
+  return x->term_hash < y->term_hash ? -1 :
+         x->term_hash > y->term_hash ? 1 : 0;
+}
+
+struct compact_feature_structural_summary compact_feature_clause_summary(
+  Topform clause)
+{
+  struct compact_feature_structural_summary summary;
+  struct cfi_term_occurrence *occurrences = NULL;
+  size_t count = 0, capacity = 0, i, j;
   Literals literal;
-  uint64_t mask = 0;
+  memset(&summary, 0, sizeof(summary));
   if (clause == NULL)
-    return 0;
+    return summary;
   for (literal = clause->literals; literal != NULL; literal = literal->next) {
     Term atom = literal->atom;
     uint64_t context;
@@ -132,10 +191,30 @@ uint64_t compact_feature_clause_mask(Topform clause)
       continue;
     context = hash_id(((uint64_t) (unsigned) SYMNUM(atom) << 1) |
                       (literal->sign ? UINT64_C(1) : UINT64_C(0)));
-    mask |= structural_term_mask(atom, context,
-                                 UINT64_C(0xa0761d6478bd642f));
+    summarize_term(atom, context, UINT64_C(0xa0761d6478bd642f), TRUE,
+                   &summary, &occurrences, &count, &capacity);
   }
-  return mask;
+  for (i = 0; i < count; i++)
+    if (VARIABLE(occurrences[i].term))
+      for (j = i + 1; j < count; j++)
+        if (VARIABLE(occurrences[j].term) &&
+            VARNUM(occurrences[i].term) == VARNUM(occurrences[j].term) &&
+            occurrences[i].location != occurrences[j].location)
+          summary.variable_constraints |= equality_fact_mask(
+            occurrences[i].location, occurrences[j].location);
+  if (count > 1)
+    qsort(occurrences, count, sizeof(*occurrences), occurrence_hash_order);
+  for (i = 0; i < count; i++) {
+    for (j = i + 1;
+         j < count && occurrences[j].term_hash == occurrences[i].term_hash;
+         j++)
+      if (occurrences[i].location != occurrences[j].location &&
+          term_ident(occurrences[i].term, occurrences[j].term))
+        summary.equal_positions |= equality_fact_mask(
+          occurrences[i].location, occurrences[j].location);
+  }
+  safe_free(occurrences);
+  return summary;
 }
 
 static unsigned long long index_bytes(Compact_feature_index index)
@@ -147,8 +226,8 @@ static unsigned long long index_bytes(Compact_feature_index index)
     index->label_capacity * sizeof(*index->labels) +
     index->posting_capacity * sizeof(*index->postings) +
     index->record_capacity * sizeof(*index->records) +
-    (index->structural_masks == NULL ? 0 :
-     index->record_capacity * sizeof(*index->structural_masks)) +
+    (index->structural_summaries == NULL ? 0 :
+     index->record_capacity * sizeof(*index->structural_summaries)) +
     index->hash_capacity *
       (sizeof(*index->hash_keys) + sizeof(*index->hash_values)) +
     index->result_capacity * sizeof(*index->results);
@@ -363,12 +442,12 @@ static void ensure_records(Compact_feature_index index)
     index->records = safe_realloc(
       index->records, index->record_capacity * sizeof(*index->records));
     if (index->structural_filter) {
-      index->structural_masks = safe_realloc(
-        index->structural_masks,
-        index->record_capacity * sizeof(*index->structural_masks));
-      memset(index->structural_masks + old_capacity, 0,
+      index->structural_summaries = safe_realloc(
+        index->structural_summaries,
+        index->record_capacity * sizeof(*index->structural_summaries));
+      memset(index->structural_summaries + old_capacity, 0,
              (index->record_capacity - old_capacity) *
-             sizeof(*index->structural_masks));
+             sizeof(*index->structural_summaries));
     }
   }
 }
@@ -400,7 +479,8 @@ Compact_feature_index compact_feature_index_init(int feature_length,
 BOOL compact_feature_index_add(Compact_feature_index index,
                                unsigned long long proof_id,
                                const int *features,
-                               uint64_t structural_mask)
+                               struct compact_feature_structural_summary
+                                 structural)
 {
   uint32_t record_index, node, posting;
   struct cfi_record *record;
@@ -417,7 +497,7 @@ BOOL compact_feature_index_add(Compact_feature_index index,
   record->proof_id = proof_id;
   record->active = TRUE;
   if (index->structural_filter)
-    index->structural_masks[record_index] = structural_mask;
+    index->structural_summaries[record_index] = structural;
   node = insert_vector(index, features);
   ENSURE_ARRAY(index, postings, posting_count, posting_capacity,
                "compact_feature_index: posting overflow");
@@ -469,7 +549,9 @@ static void ensure_results(Compact_feature_index index, size_t needed)
 }
 
 static void collect_leaf(Compact_feature_index index, uint32_t node,
-                         BOOL forward, uint64_t query_mask, size_t *count)
+                         BOOL forward,
+                         struct compact_feature_structural_summary query,
+                         size_t *count)
 {
   uint32_t posting;
   for (posting = index->nodes[node].first_posting; posting != CFI_NONE;
@@ -478,13 +560,21 @@ static void collect_leaf(Compact_feature_index index, uint32_t node,
       &index->records[index->postings[posting].record];
     index->query_postings++;
     if (record->active) {
-      uint64_t stored_mask = index->structural_filter ?
-        index->structural_masks[index->postings[posting].record] : 0;
+      struct compact_feature_structural_summary stored;
+      memset(&stored, 0, sizeof(stored));
+      if (index->structural_filter)
+        stored = index->structural_summaries[
+          index->postings[posting].record];
       index->query_live++;
       if (index->structural_filter &&
-          (forward ? (stored_mask & ~query_mask) != 0 :
-                     (query_mask & ~stored_mask) != 0))
+          (forward ? (stored.rigid & ~query.rigid) != 0 :
+                     (query.rigid & ~stored.rigid) != 0))
         index->query_structural_rejects++;
+      else if (index->structural_filter &&
+               (forward ?
+                 (stored.variable_constraints & ~query.equal_positions) != 0 :
+                 (query.variable_constraints & ~stored.equal_positions) != 0))
+        index->query_variable_rejects++;
       else {
         ensure_results(index, *count + 1);
         index->results[(*count)++] = record->proof_id;
@@ -497,11 +587,13 @@ static void collect_leaf(Compact_feature_index index, uint32_t node,
 
 static void collect_candidates(Compact_feature_index index, uint32_t node,
                                int level, const int *query, BOOL forward,
-                               uint64_t query_mask, size_t *count)
+                               struct compact_feature_structural_summary
+                                 structural,
+                               size_t *count)
 {
   uint32_t child;
   if (level == index->feature_length) {
-    collect_leaf(index, node, forward, query_mask, count);
+    collect_leaf(index, node, forward, structural, count);
     return;
   }
   child = index->nodes[node].first_child;
@@ -522,14 +614,16 @@ static void collect_candidates(Compact_feature_index index, uint32_t node,
     }
     if (eligible)
       collect_candidates(index, child, level + (int) edge->label_length,
-                         query, forward, query_mask, count);
+                         query, forward, structural, count);
     child = index->nodes[child].next_sibling;
   }
 }
 
 static unsigned long long *candidates(Compact_feature_index index,
                                       const int *query, BOOL forward,
-                                      uint64_t query_mask, size_t *count)
+                                      struct compact_feature_structural_summary
+                                        structural,
+                                      size_t *count)
 {
   unsigned long long *answer;
   *count = 0;
@@ -542,7 +636,8 @@ static unsigned long long *candidates(Compact_feature_index index,
   index->query_live = 0;
   index->query_dead = 0;
   index->query_structural_rejects = 0;
-  collect_candidates(index, index->root, 0, query, forward, query_mask,
+  index->query_variable_rejects = 0;
+  collect_candidates(index, index->root, 0, query, forward, structural,
                      count);
   answer = *count == 0 ? NULL : safe_malloc(*count * sizeof(*answer));
   if (*count != 0)
@@ -551,6 +646,7 @@ static unsigned long long *candidates(Compact_feature_index index,
     index->forward_queries++;
     index->forward_candidates += *count;
     index->forward_structural_rejects += index->query_structural_rejects;
+    index->forward_variable_rejects += index->query_variable_rejects;
     compact_profile_note(&index->forward_profile, *count,
                          index->query_nodes + index->query_postings,
                          index->query_live, index->query_dead,
@@ -560,6 +656,7 @@ static unsigned long long *candidates(Compact_feature_index index,
     index->back_queries++;
     index->back_candidates += *count;
     index->back_structural_rejects += index->query_structural_rejects;
+    index->back_variable_rejects += index->query_variable_rejects;
     compact_profile_note(&index->back_profile, *count,
                          index->query_nodes + index->query_postings,
                          index->query_live, index->query_dead,
@@ -572,17 +669,19 @@ static unsigned long long *candidates(Compact_feature_index index,
 }
 
 unsigned long long *compact_feature_forward_candidates(
-  Compact_feature_index index, const int *query, uint64_t structural_mask,
+  Compact_feature_index index, const int *query,
+  struct compact_feature_structural_summary structural,
   size_t *count)
 {
-  return candidates(index, query, TRUE, structural_mask, count);
+  return candidates(index, query, TRUE, structural, count);
 }
 
 unsigned long long *compact_feature_back_candidates(
-  Compact_feature_index index, const int *query, uint64_t structural_mask,
+  Compact_feature_index index, const int *query,
+  struct compact_feature_structural_summary structural,
   size_t *count)
 {
-  return candidates(index, query, FALSE, structural_mask, count);
+  return candidates(index, query, FALSE, structural, count);
 }
 
 void compact_feature_note_exact_query(
@@ -611,9 +710,11 @@ void compact_feature_index_get_stats(Compact_feature_index index,
   stats->forward_queries = index->forward_queries;
   stats->forward_candidates = index->forward_candidates;
   stats->forward_structural_rejects = index->forward_structural_rejects;
+  stats->forward_variable_rejects = index->forward_variable_rejects;
   stats->back_queries = index->back_queries;
   stats->back_candidates = index->back_candidates;
   stats->back_structural_rejects = index->back_structural_rejects;
+  stats->back_variable_rejects = index->back_variable_rejects;
   stats->forward_profile = index->forward_profile;
   stats->back_profile = index->back_profile;
   stats->forward_lookup_seconds = clock_seconds(index->forward_lookup_clock);
@@ -622,8 +723,8 @@ void compact_feature_index_get_stats(Compact_feature_index index,
   stats->label_bytes = index->label_capacity * sizeof(*index->labels);
   stats->posting_bytes = index->posting_capacity * sizeof(*index->postings);
   stats->record_bytes = index->record_capacity * sizeof(*index->records);
-  stats->structural_bytes = index->structural_masks == NULL ? 0 :
-    index->record_capacity * sizeof(*index->structural_masks);
+  stats->structural_bytes = index->structural_summaries == NULL ? 0 :
+    index->record_capacity * sizeof(*index->structural_summaries);
   stats->hash_bytes = index->hash_capacity *
     (sizeof(*index->hash_keys) + sizeof(*index->hash_values));
   stats->scratch_bytes = index->result_capacity * sizeof(*index->results);
@@ -639,7 +740,7 @@ void compact_feature_index_free(Compact_feature_index index)
   safe_free(index->labels);
   safe_free(index->postings);
   safe_free(index->records);
-  safe_free(index->structural_masks);
+  safe_free(index->structural_summaries);
   safe_free(index->hash_keys);
   safe_free(index->hash_values);
   safe_free(index->results);
