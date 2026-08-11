@@ -354,6 +354,19 @@ The matrix recipes now enable the required compact unit index for both
 nonunit-isolation variants.  Before that repair they terminated during option
 validation and therefore supplied no performance evidence.
 
+The 300-given dense-file comparison confirms that the first mask acts at the
+intended archive boundary, but it does not yet pass the Phase-4 gate.  Osborn
+archive cache misses fell from 21,322 to 11,490 (-46.11%), materialization
+clock time from 0.231 to 0.124 seconds, and nonunit-index bytes rose from
+193,224 to 201,416 (+4.24%); user CPU was 18.25 versus 17.03 seconds.
+`chat-new-11k` misses fell from 16,483 to 7,106 (-56.89%), materialization
+time from 0.078 to 0.033 seconds, and bytes changed by the same 8,192; user CPU
+was 4.70 versus 4.89 seconds.  The 100-given mbol diversity check reduced
+misses from 343 to 271 but was timing-neutral at this scale.  Since the safe
+rigid facts remove only about half the reconstructions, the next prototype
+must address variable consistency and literal compatibility rather than tune
+the Bloom hash to one problem.
+
 Setting `P9_MATRIX_ALLOW_HOLDOUT=1` is required even when a holdout case is
 named explicitly.  Do this only for a recorded phase-promotion commit, never
 while selecting features or thresholds.
