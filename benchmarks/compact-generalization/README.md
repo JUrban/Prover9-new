@@ -397,6 +397,25 @@ The path filter remains opt-in pending larger training checkpoints and the
 holdout phase.  Its rules and fixed bit budgets come from matching semantics,
 not from Osborn symbols, hint IDs, or fitted work thresholds.
 
+The combined product variant passes its 300-given four-category training
+gate.  Each enabled/disabled pair used dense passive storage, unit code-tree
+retrieval, complete `mask8` backward demodulation, and packed-fast hints; all
+four pairs had identical given/generated/kept boundaries.  Nonunit
+materializations fell from 15,750 to 336 on Osborn (-97.87%) and from 14,443
+to 249 on `chat-new-11k` (-98.28%), with nonunit-index growth from 193,248 to
+209,120 bytes (+8.21%).  On nil3 they fell from 506 to 128 and on mbol from
+398 to 72.  Those percentage reductions are smaller because the final exact
+sets are nearly irreducible: nil3 performed 406 forward exact tests for 390
+successes and no backward exact tests; mbol performed 252 for 250 and none.
+Their index growth was only 0.74% and 1.43%.
+
+Single-run user CPU for control/filter was 16.07/17.76 seconds on Osborn,
+4.79/4.72 on chat, 8.79/9.18 on nil3, and 16.30/14.41 on mbol.  The directions
+are mixed and index-level work is a small fraction of these short runs, so no
+CPU-speedup claim is made.  Peak RSS changed by at most 132 KiB.  These
+results authorize the bounded 1,000-given training checkpoint; they do not
+open the holdout suite.
+
 Phase 5 removes the single-workload constants from the `packed_fast` match
 cache.  The historical `chat_test.new.out3.gz` cache occupied 2,228,224 bytes,
 accepted at most eight structural keys, rejected 399,668 longer profiles, and
