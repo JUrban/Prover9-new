@@ -82,10 +82,12 @@ void configure_compact_back_demod_strategy(
 }
 
 void configure_compact_back_demod_tree(unsigned min_tokens,
-                                       unsigned budget_kb)
+                                       unsigned budget_kb,
+                                       unsigned admit_work)
 {
   compact_back_demod_set_tree_min_tokens(min_tokens);
   compact_back_demod_set_tree_budget_kb(budget_kb);
+  compact_back_demod_set_tree_admit_work(admit_work);
 }
 
 static BOOL compact_back_demod_mode(void)
@@ -618,6 +620,9 @@ void fprint_compact_back_demod(FILE *fp)
           "tree_posting_groups=%llu, tree_min_tokens=%u, "
           "tree_complete=%s, tree_budget=%llu, tree_estimated=%llu, "
           "tree_budget_exhaustions=%llu, "
+          "tree_admit_work=%u, tree_root_admissions=%llu, "
+          "tree_root_rejections=%llu, tree_backfill_groups=%llu, "
+          "tree_backfill_occurrences=%llu, tree_fallback_work=%llu, "
           "symbol_occurrences=%llu, groups_examined=%llu, "
           "occurrences_examined=%llu, path_checks=%llu, "
           "path_rejects=%llu, file_snapshots=%llu, snapshot_ids=%llu, "
@@ -629,6 +634,7 @@ void fprint_compact_back_demod(FILE *fp)
           stats.strategy == COMPACT_BACK_DEMOD_SIGNATURE32 ? "signature32" :
           stats.strategy == COMPACT_BACK_DEMOD_CODE_TREE ? "code_tree" :
           stats.strategy == COMPACT_BACK_DEMOD_HYBRID_TREE ? "hybrid_tree" :
+          stats.strategy == COMPACT_BACK_DEMOD_HOT_ROOT_TREE ? "hot_root_tree" :
             "mask8",
           Compact_back_demod_failures, stats.active, stats.peak,
           stats.retired, stats.physical, stats.compactions,
@@ -640,6 +646,9 @@ void fprint_compact_back_demod(FILE *fp)
           stats.tree_complete ? "yes" : "no",
           stats.tree_budget_bytes, stats.tree_estimated_bytes,
           stats.tree_budget_exhaustions,
+          stats.tree_admit_work, stats.tree_root_admissions,
+          stats.tree_root_rejections, stats.tree_root_backfill_groups,
+          stats.tree_root_backfill_occurrences, stats.tree_fallback_work,
           stats.symbol_occurrences,
           stats.posting_groups_examined, stats.occurrences_examined,
           stats.path_filter_checks, stats.path_filter_rejects,

@@ -18,6 +18,7 @@ static unsigned Compaction_stale_pct = 25;
 static Compact_back_demod_strategy Back_demod_strategy =
   COMPACT_BACK_DEMOD_MASK8;
 static unsigned Back_demod_tree_min_tokens = 8;
+static unsigned Back_demod_tree_admit_work = 4096;
 static unsigned long long Back_demod_tree_budget_bytes =
   UINT64_C(64) * 1024 * 1024;
 
@@ -79,6 +80,12 @@ struct cbd_query_term {
   uint32_t end;
 };
 
+struct cbd_tree_root_state {
+  unsigned long long fallback_work;
+  unsigned char admitted;
+  unsigned char rejected;
+};
+
 struct cbd_record {
   unsigned long long proof_id;
   uint32_t token_offset;
@@ -107,6 +114,8 @@ struct compact_back_demod_index {
   struct cbd_tree_posting_list *tree_posting_lists;
   size_t tree_posting_list_count;
   size_t tree_posting_list_capacity;
+  struct cbd_tree_root_state *tree_roots;
+  size_t tree_root_capacity;
   unsigned char *occurrences;
   size_t occurrence_count;
   size_t occurrence_capacity;
@@ -142,7 +151,13 @@ struct compact_back_demod_index {
   unsigned long long tree_posting_blocks;
   unsigned long long tree_posting_stream_used;
   unsigned long long tree_budget_exhaustions;
+  unsigned long long tree_root_admissions;
+  unsigned long long tree_root_rejections;
+  unsigned long long tree_root_backfill_groups;
+  unsigned long long tree_root_backfill_occurrences;
+  unsigned long long tree_fallback_work;
   unsigned tree_min_tokens;
+  unsigned tree_admit_work;
   unsigned long long tree_budget_bytes;
   BOOL tree_complete;
   unsigned long long inactive_groups_examined;
@@ -232,7 +247,8 @@ static uint64_t hash_id(uint64_t x)
 static BOOL strategy_uses_tree(Compact_back_demod_strategy strategy)
 {
   return strategy == COMPACT_BACK_DEMOD_CODE_TREE ||
-    strategy == COMPACT_BACK_DEMOD_HYBRID_TREE;
+    strategy == COMPACT_BACK_DEMOD_HYBRID_TREE ||
+    strategy == COMPACT_BACK_DEMOD_HOT_ROOT_TREE;
 }
 
 static BOOL strategy_uses_paths(Compact_back_demod_strategy strategy)
@@ -243,7 +259,8 @@ static BOOL strategy_uses_paths(Compact_back_demod_strategy strategy)
 static BOOL strategy_uses_mask8(Compact_back_demod_strategy strategy)
 {
   return strategy == COMPACT_BACK_DEMOD_MASK8 ||
-    strategy == COMPACT_BACK_DEMOD_HYBRID_TREE;
+    strategy == COMPACT_BACK_DEMOD_HYBRID_TREE ||
+    strategy == COMPACT_BACK_DEMOD_HOT_ROOT_TREE;
 }
 
 static unsigned long long tree_estimated_bytes(
@@ -254,6 +271,7 @@ static unsigned long long tree_estimated_bytes(
   return index->tree_node_capacity * sizeof(*index->tree_nodes) +
     index->tree_posting_list_capacity *
       sizeof(*index->tree_posting_lists) + blocks +
+    index->tree_root_capacity * sizeof(*index->tree_roots) +
     index->query_capacity * sizeof(*index->query);
 }
 
@@ -271,6 +289,7 @@ static unsigned long long index_bytes(Compact_back_demod_index index)
     index->tree_node_capacity * sizeof(*index->tree_nodes) +
     index->tree_posting_list_capacity *
       sizeof(*index->tree_posting_lists) +
+    index->tree_root_capacity * sizeof(*index->tree_roots) +
     index->occurrence_capacity * sizeof(*index->occurrences) +
     index->record_capacity * sizeof(*index->records) +
     (index->owns_term_pool ? terms.total_bytes : 0) +
@@ -312,6 +331,16 @@ static void ensure_symbols(Compact_back_demod_index index, unsigned symbol)
   memset(index->symbol_buckets + old_capacity, 0,
          (index->symbol_capacity - old_capacity) *
            sizeof(*index->symbol_buckets));
+  if (index->strategy == COMPACT_BACK_DEMOD_HOT_ROOT_TREE) {
+    size_t old_roots = index->tree_root_capacity;
+    index->tree_root_capacity = index->symbol_capacity;
+    index->tree_roots = safe_realloc(
+      index->tree_roots,
+      index->tree_root_capacity * sizeof(*index->tree_roots));
+    memset(index->tree_roots + old_roots, 0,
+           (index->tree_root_capacity - old_roots) *
+             sizeof(*index->tree_roots));
+  }
 }
 
 static void ensure_occurrence_bytes(Compact_back_demod_index index,
@@ -870,6 +899,8 @@ static cbd_path_mask term_path_mask(Compact_back_demod_index index, Term term)
 
 static uint32_t token_term_end(Compact_back_demod_index index,
                                uint32_t position);
+static unsigned long long occurrence_items(
+  Compact_back_demod_index index, uint32_t offset, uint32_t length);
 
 static void note_symbol(struct cbd_symbol_set *set, uint32_t symbol,
                         uint32_t offset, uint32_t length,
@@ -1002,6 +1033,7 @@ static Compact_back_demod_index compact_back_demod_init_with_pool_strategy(
   index->term_pool = pool;
   index->strategy = strategy;
   index->tree_min_tokens = Back_demod_tree_min_tokens;
+  index->tree_admit_work = Back_demod_tree_admit_work;
   index->tree_budget_bytes = Back_demod_tree_budget_bytes;
   index->tree_complete = TRUE;
   index->tokens = compact_term_pool_tokens(pool);
@@ -1052,7 +1084,8 @@ void compact_back_demod_set_strategy(Compact_back_demod_strategy strategy)
   if (strategy != COMPACT_BACK_DEMOD_MASK8 &&
       strategy != COMPACT_BACK_DEMOD_SIGNATURE32 &&
       strategy != COMPACT_BACK_DEMOD_CODE_TREE &&
-      strategy != COMPACT_BACK_DEMOD_HYBRID_TREE)
+      strategy != COMPACT_BACK_DEMOD_HYBRID_TREE &&
+      strategy != COMPACT_BACK_DEMOD_HOT_ROOT_TREE)
     fatal_error("compact_back_demod: invalid strategy");
   Back_demod_strategy = strategy;
 }
@@ -1068,6 +1101,13 @@ void compact_back_demod_set_tree_budget_kb(unsigned kilobytes)
 {
   Back_demod_tree_budget_bytes =
     (unsigned long long) kilobytes * 1024;
+}
+
+void compact_back_demod_set_tree_admit_work(unsigned groups)
+{
+  if (groups == 0)
+    fatal_error("compact_back_demod: tree admission work must be positive");
+  Back_demod_tree_admit_work = groups;
 }
 
 BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
@@ -1153,6 +1193,16 @@ BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
   if (strategy_uses_tree(index->strategy) && index->tree_complete) {
     size_t i = 0;
     size_t eligible = 0;
+    if (index->strategy == COMPACT_BACK_DEMOD_HOT_ROOT_TREE) {
+      for (i = 0; i < symbols.occurrence_count; i++) {
+        unsigned symbol = symbols.occurrence_values[i].symbol;
+        if ((size_t) symbol < index->tree_root_capacity &&
+            index->tree_roots[symbol].admitted)
+          eligible++;
+      }
+      if (eligible == 0)
+        goto tree_index_done;
+    }
     sort_tree_occurrences(index, record->token_offset,
                           symbols.occurrence_values,
                           symbols.occurrence_count);
@@ -1161,6 +1211,18 @@ BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
       for (i = 0; i < symbols.occurrence_count; i++)
         if (symbols.occurrence_values[i].length >= index->tree_min_tokens)
           eligible++;
+      worst = eligible > (ULLONG_MAX - 4096) / 96 ? ULLONG_MAX :
+        4096 + (unsigned long long) eligible * 96;
+      if (eligible != 0 && index->tree_budget_bytes != 0 &&
+          (tree_estimated_bytes(index) > index->tree_budget_bytes ||
+           worst > index->tree_budget_bytes -
+             tree_estimated_bytes(index))) {
+        index->tree_complete = FALSE;
+        index->tree_budget_exhaustions++;
+      }
+    }
+    else if (index->strategy == COMPACT_BACK_DEMOD_HOT_ROOT_TREE) {
+      unsigned long long worst;
       worst = eligible > (ULLONG_MAX - 4096) / 96 ? ULLONG_MAX :
         4096 + (unsigned long long) eligible * 96;
       if (eligible != 0 && index->tree_budget_bytes != 0 &&
@@ -1184,12 +1246,19 @@ BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
                     (size_t) length * sizeof(*index->tokens)) == 0)
         j++;
       if (index->strategy == COMPACT_BACK_DEMOD_CODE_TREE ||
-          length >= index->tree_min_tokens)
+          (index->strategy == COMPACT_BACK_DEMOD_HYBRID_TREE &&
+           length >= index->tree_min_tokens) ||
+          (index->strategy == COMPACT_BACK_DEMOD_HOT_ROOT_TREE &&
+           (size_t) symbols.occurrence_values[i].symbol <
+             index->tree_root_capacity &&
+           index->tree_roots[
+             symbols.occurrence_values[i].symbol].admitted))
         append_tree_record(
           index, record_index, record->token_offset + relative, length);
       i = j;
     }
   }
+tree_index_done:
   if (symbols.occurrence_values != symbols.occurrence_fixed)
     safe_free(symbols.occurrence_values);
   if (!compact_id_map_put(index->id_map, clause->id, &record_index))
@@ -1532,6 +1601,160 @@ static void collect_tree_posting_list(
   }
 }
 
+static unsigned long long backfill_root_group(
+  Compact_back_demod_index index, uint32_t record_index,
+  uint32_t occurrence_offset, uint32_t occurrence_length, BOOL build)
+{
+  struct cbd_record *record;
+  uint32_t position = occurrence_offset;
+  uint32_t end;
+  uint32_t relative = 0;
+  unsigned long long occurrences = 0;
+  struct cbd_symbol_set terms;
+  if (record_index == CBD_NONE || record_index >= index->record_count ||
+      occurrence_offset > index->occurrence_count ||
+      occurrence_length > index->occurrence_count - occurrence_offset)
+    fatal_error("compact_back_demod: corrupt root backfill group");
+  if (!build)
+    return occurrence_items(index, occurrence_offset, occurrence_length);
+  index->tree_root_backfill_groups++;
+  record = &index->records[record_index];
+  if (!record->active)
+    return 0;
+  memset(&terms, 0, sizeof(terms));
+  terms.occurrence_values = terms.occurrence_fixed;
+  terms.occurrence_capacity = sizeof(terms.occurrence_fixed) /
+    sizeof(terms.occurrence_fixed[0]);
+  end = occurrence_offset + occurrence_length;
+  while (position < end) {
+    uint32_t delta = decode_occurrence_delta(index, &position, end);
+    uint32_t token_offset, token_end;
+    if (delta > UINT32_MAX - relative)
+      fatal_error("compact_back_demod: root backfill offset overflow");
+    relative += delta;
+    if (relative >= record->token_length)
+      fatal_error("compact_back_demod: corrupt root backfill occurrence");
+    token_offset = record->token_offset + relative;
+    token_end = token_term_end(index, token_offset);
+    note_symbol(&terms, (uint32_t) index->tokens[token_offset], relative,
+                token_end - token_offset, 0);
+    occurrences++;
+  }
+  sort_tree_occurrences(index, record->token_offset,
+                        terms.occurrence_values, terms.occurrence_count);
+  {
+    size_t i = 0;
+    while (i < terms.occurrence_count) {
+      size_t j = i;
+      uint32_t local = terms.occurrence_values[i].offset;
+      uint32_t length = terms.occurrence_values[i].length;
+      while (j < terms.occurrence_count &&
+             terms.occurrence_values[j].length == length &&
+             memcmp(index->tokens + record->token_offset + local,
+                    index->tokens + record->token_offset +
+                      terms.occurrence_values[j].offset,
+                    (size_t) length * sizeof(*index->tokens)) == 0)
+        j++;
+      append_tree_record(index, record_index,
+                         record->token_offset + local, length);
+      i = j;
+    }
+  }
+  if (terms.occurrence_values != terms.occurrence_fixed)
+    safe_free(terms.occurrence_values);
+  index->tree_root_backfill_occurrences += occurrences;
+  return occurrences;
+}
+
+static unsigned long long process_root_postings(
+  Compact_back_demod_index index, unsigned symbol, BOOL build)
+{
+  uint32_t bucket_index;
+  unsigned long long occurrences = 0;
+  if ((size_t) symbol >= index->symbol_capacity)
+    return 0;
+  for (bucket_index = index->symbol_buckets[symbol];
+       bucket_index != CBD_NONE;
+       bucket_index = index->path_buckets[bucket_index].next) {
+    struct cbd_path_bucket *bucket = &index->path_buckets[bucket_index];
+    uint32_t block;
+    uint32_t record_index = bucket->inline_record;
+    uint32_t occurrence_offset = bucket->inline_occurrence;
+    occurrences += backfill_root_group(
+      index, record_index, occurrence_offset, bucket->inline_length, build);
+    for (block = bucket->posting_head; block != CBD_NONE;
+         block = index->posting_blocks[block].next) {
+      const struct cbd_posting_block *current =
+        &index->posting_blocks[block];
+      uint16_t position = 0;
+      uint16_t entries = 0;
+      while (position < current->used) {
+        uint32_t delta = decode_posting_value(current, &position);
+        uint32_t occurrence_delta =
+          decode_posting_value(current, &position);
+        uint32_t occurrence_length =
+          decode_posting_value(current, &position);
+        if (delta > UINT32_MAX - record_index ||
+            occurrence_delta > UINT32_MAX - occurrence_offset)
+          fatal_error("compact_back_demod: root backfill posting overflow");
+        record_index += delta;
+        occurrence_offset += occurrence_delta;
+        occurrences += backfill_root_group(
+          index, record_index, occurrence_offset, occurrence_length, build);
+        entries++;
+      }
+      if (position != current->used || entries != current->count)
+        fatal_error("compact_back_demod: corrupt root backfill block");
+    }
+  }
+  return occurrences;
+}
+
+static void maybe_admit_hot_root(Compact_back_demod_index index,
+                                 Term pattern,
+                                 unsigned long long query_work)
+{
+  unsigned symbol;
+  struct cbd_tree_root_state *state;
+  unsigned long long occurrences, worst, estimated;
+  if (index->strategy != COMPACT_BACK_DEMOD_HOT_ROOT_TREE ||
+      VARIABLE(pattern))
+    return;
+  symbol = (unsigned) SYMNUM(pattern);
+  if ((size_t) symbol >= index->tree_root_capacity)
+    return;
+  state = &index->tree_roots[symbol];
+  if (ULLONG_MAX - state->fallback_work < query_work)
+    state->fallback_work = ULLONG_MAX;
+  else
+    state->fallback_work += query_work;
+  if (ULLONG_MAX - index->tree_fallback_work < query_work)
+    index->tree_fallback_work = ULLONG_MAX;
+  else
+    index->tree_fallback_work += query_work;
+  if (!index->tree_complete || state->admitted || state->rejected ||
+      state->fallback_work < index->tree_admit_work)
+    return;
+  clock_start(index->maintenance_clock);
+  occurrences = process_root_postings(index, symbol, FALSE);
+  worst = occurrences > (ULLONG_MAX - 4096) / 96 ? ULLONG_MAX :
+    4096 + occurrences * 96;
+  estimated = tree_estimated_bytes(index);
+  if (index->tree_budget_bytes != 0 &&
+      (estimated > index->tree_budget_bytes ||
+       worst > index->tree_budget_bytes - estimated)) {
+    state->rejected = TRUE;
+    index->tree_root_rejections++;
+  }
+  else {
+    (void) process_root_postings(index, symbol, TRUE);
+    state->admitted = TRUE;
+    index->tree_root_admissions++;
+    update_peak(index);
+  }
+  clock_stop(index->maintenance_clock);
+}
+
 static void collect_symbol(Compact_back_demod_index index, Term pattern,
                            unsigned long long exclude_id, size_t *count);
 
@@ -1729,7 +1952,23 @@ static BOOL use_tree_for_pattern(Compact_back_demod_index index,
   return index->strategy == COMPACT_BACK_DEMOD_CODE_TREE ||
     (index->strategy == COMPACT_BACK_DEMOD_HYBRID_TREE &&
      index->tree_complete &&
-     pattern_min_tokens(pattern) >= index->tree_min_tokens);
+     pattern_min_tokens(pattern) >= index->tree_min_tokens) ||
+    (index->strategy == COMPACT_BACK_DEMOD_HOT_ROOT_TREE &&
+     index->tree_complete && !VARIABLE(pattern) &&
+     (size_t) SYMNUM(pattern) < index->tree_root_capacity &&
+     index->tree_roots[SYMNUM(pattern)].admitted);
+}
+
+static void collect_pattern(Compact_back_demod_index index, Term pattern,
+                            unsigned long long exclude_id, size_t *count)
+{
+  unsigned long long before = index->query_work;
+  if (use_tree_for_pattern(index, pattern))
+    collect_tree(index, pattern, exclude_id, count);
+  else {
+    collect_symbol(index, pattern, exclude_id, count);
+    maybe_admit_hot_root(index, pattern, index->query_work - before);
+  }
 }
 
 unsigned long long *compact_back_demod_candidate_ids(
@@ -1754,18 +1993,10 @@ unsigned long long *compact_back_demod_candidate_ids(
   alpha = ARG(atom, 0);
   beta = ARG(atom, 1);
   begin_query(index);
-  if (type == ORIENTED || type == LEX_DEP_LR || type == LEX_DEP_BOTH) {
-    if (use_tree_for_pattern(index, alpha))
-      collect_tree(index, alpha, demod->id, count);
-    else
-      collect_symbol(index, alpha, demod->id, count);
-  }
-  if (type == LEX_DEP_RL || type == LEX_DEP_BOTH) {
-    if (use_tree_for_pattern(index, beta))
-      collect_tree(index, beta, demod->id, count);
-    else
-      collect_symbol(index, beta, demod->id, count);
-  }
+  if (type == ORIENTED || type == LEX_DEP_LR || type == LEX_DEP_BOTH)
+    collect_pattern(index, alpha, demod->id, count);
+  if (type == LEX_DEP_RL || type == LEX_DEP_BOTH)
+    collect_pattern(index, beta, demod->id, count);
   if (*count > 1)
     qsort(index->results, *count, sizeof(*index->results), decreasing_id);
   answer = *count == 0 ? NULL : safe_malloc(*count * sizeof(*answer));
@@ -1852,6 +2083,20 @@ static void copy_live_tree_record(Compact_back_demod_index source,
                      token_end - token_offset);
 }
 
+static void copy_hot_root_states(Compact_back_demod_index destination,
+                                 Compact_back_demod_index source)
+{
+  if (source->strategy != COMPACT_BACK_DEMOD_HOT_ROOT_TREE ||
+      source->tree_root_capacity == 0)
+    return;
+  if (source->tree_root_capacity - 1 > UINT_MAX)
+    fatal_error("compact_back_demod: root-state symbol overflow");
+  ensure_symbols(destination,
+                 (unsigned) source->tree_root_capacity - 1);
+  memcpy(destination->tree_roots, source->tree_roots,
+         source->tree_root_capacity * sizeof(*source->tree_roots));
+}
+
 static void compact_back_demod_compact_internal(
   Compact_back_demod_index index, BOOL force)
 {
@@ -1885,6 +2130,7 @@ static void compact_back_demod_compact_internal(
   replacement = compact_back_demod_init_with_pool_strategy(
     index->term_pool, index->strategy);
   replacement->tree_complete = index->tree_complete;
+  copy_hot_root_states(replacement, index);
   replacement->tokens = compact_term_pool_tokens(index->term_pool);
   replacement->token_limit = compact_term_pool_token_count(index->term_pool);
   record_map = safe_calloc(index->record_count, sizeof(*record_map));
@@ -2017,6 +2263,7 @@ static void compact_back_demod_compact_internal(
   safe_free(old.path_bucket_hash);
   safe_free(old.tree_nodes);
   safe_free(old.tree_posting_lists);
+  safe_free(old.tree_roots);
   safe_free(old.occurrences);
   safe_free(old.records);
   compact_id_map_free(old.id_map);
@@ -2036,6 +2283,12 @@ static void compact_back_demod_compact_internal(
   index->tree_queries = old.tree_queries;
   index->tree_nodes_examined = old.tree_nodes_examined;
   index->tree_budget_exhaustions += old.tree_budget_exhaustions;
+  index->tree_root_admissions = old.tree_root_admissions;
+  index->tree_root_rejections = old.tree_root_rejections;
+  index->tree_root_backfill_groups = old.tree_root_backfill_groups;
+  index->tree_root_backfill_occurrences =
+    old.tree_root_backfill_occurrences;
+  index->tree_fallback_work = old.tree_fallback_work;
   index->inactive_groups_examined = old.inactive_groups_examined;
   index->duplicate_groups_examined = old.duplicate_groups_examined;
   index->posting_bytes_decoded = old.posting_bytes_decoded;
@@ -2152,6 +2405,8 @@ void compact_back_demod_compact_materialized(
   safe_free(old.query);
   replacement = compact_back_demod_init_with_pool_strategy(
     old.term_pool, old.strategy);
+  copy_hot_root_states(replacement, &old);
+  safe_free(old.tree_roots);
   replacement->owns_term_pool = old.owns_term_pool;
   while (rebuilt < count) {
     unsigned long long *batch;
@@ -2200,6 +2455,12 @@ void compact_back_demod_compact_materialized(
   index->tree_queries = old.tree_queries;
   index->tree_nodes_examined = old.tree_nodes_examined;
   index->tree_budget_exhaustions += old.tree_budget_exhaustions;
+  index->tree_root_admissions = old.tree_root_admissions;
+  index->tree_root_rejections = old.tree_root_rejections;
+  index->tree_root_backfill_groups = old.tree_root_backfill_groups;
+  index->tree_root_backfill_occurrences =
+    old.tree_root_backfill_occurrences;
+  index->tree_fallback_work = old.tree_fallback_work;
   index->inactive_groups_examined = old.inactive_groups_examined;
   index->duplicate_groups_examined = old.duplicate_groups_examined;
   index->posting_bytes_decoded = old.posting_bytes_decoded;
@@ -2303,7 +2564,14 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->tree_budget_bytes = index->tree_budget_bytes;
   stats->tree_estimated_bytes = tree_estimated_bytes(index);
   stats->tree_budget_exhaustions = index->tree_budget_exhaustions;
+  stats->tree_root_admissions = index->tree_root_admissions;
+  stats->tree_root_rejections = index->tree_root_rejections;
+  stats->tree_root_backfill_groups = index->tree_root_backfill_groups;
+  stats->tree_root_backfill_occurrences =
+    index->tree_root_backfill_occurrences;
+  stats->tree_fallback_work = index->tree_fallback_work;
   stats->tree_min_tokens = index->tree_min_tokens;
+  stats->tree_admit_work = index->tree_admit_work;
   stats->tree_complete = index->tree_complete;
   stats->symbol_occurrences = index->symbol_occurrences;
   stats->posting_groups_examined = index->posting_groups_examined;
@@ -2338,7 +2606,8 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
     index->path_bucket_hash_capacity * sizeof(*index->path_bucket_hash) +
     index->tree_node_capacity * sizeof(*index->tree_nodes) +
     index->tree_posting_list_capacity *
-      sizeof(*index->tree_posting_lists);
+      sizeof(*index->tree_posting_lists) +
+    index->tree_root_capacity * sizeof(*index->tree_roots);
   stats->token_bytes = index->owns_term_pool ? terms.token_bytes : 0;
   stats->hash_bytes = compact_id_map_bytes(index->id_map);
   stats->scratch_bytes = index->result_capacity * sizeof(*index->results) +
@@ -2357,6 +2626,7 @@ void compact_back_demod_free(Compact_back_demod_index index)
   safe_free(index->path_bucket_hash);
   safe_free(index->tree_nodes);
   safe_free(index->tree_posting_lists);
+  safe_free(index->tree_roots);
   safe_free(index->occurrences);
   safe_free(index->records);
   if (index->owns_term_pool)

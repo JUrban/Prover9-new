@@ -43,7 +43,8 @@ void configure_compact_back_demod_strategy(
   Compact_back_demod_strategy strategy);
 
 void configure_compact_back_demod_tree(unsigned min_tokens,
-                                       unsigned budget_kb);
+                                       unsigned budget_kb,
+                                       unsigned admit_work);
 
 unsigned long long compact_back_demod_active_count(void);
 

@@ -11,7 +11,8 @@ typedef enum {
   COMPACT_BACK_DEMOD_MASK8,
   COMPACT_BACK_DEMOD_SIGNATURE32,
   COMPACT_BACK_DEMOD_CODE_TREE,
-  COMPACT_BACK_DEMOD_HYBRID_TREE
+  COMPACT_BACK_DEMOD_HYBRID_TREE,
+  COMPACT_BACK_DEMOD_HOT_ROOT_TREE
 } Compact_back_demod_strategy;
 
 struct compact_back_demod_stats {
@@ -35,7 +36,13 @@ struct compact_back_demod_stats {
   unsigned long long tree_budget_bytes;
   unsigned long long tree_estimated_bytes;
   unsigned long long tree_budget_exhaustions;
+  unsigned long long tree_root_admissions;
+  unsigned long long tree_root_rejections;
+  unsigned long long tree_root_backfill_groups;
+  unsigned long long tree_root_backfill_occurrences;
+  unsigned long long tree_fallback_work;
   unsigned tree_min_tokens;
+  unsigned tree_admit_work;
   BOOL tree_complete;
   unsigned long long symbol_occurrences;
   unsigned long long posting_groups_examined;
@@ -80,6 +87,8 @@ void compact_back_demod_set_strategy(Compact_back_demod_strategy strategy);
 void compact_back_demod_set_tree_min_tokens(unsigned tokens);
 
 void compact_back_demod_set_tree_budget_kb(unsigned kilobytes);
+
+void compact_back_demod_set_tree_admit_work(unsigned groups);
 
 BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause);
 

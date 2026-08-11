@@ -227,6 +227,29 @@ leaves that root on `mask8`.  This preserves completeness independently for
 each root while directing structural bytes toward the actual hot query
 families rather than every unique constant and subterm in the problem.
 
+That hot-root policy is now available diagnostically as
+`compact_back_demod_strategy=hot_root_tree`, with
+`compact_back_tree_admit_work` setting the deterministic cumulative fallback
+group threshold.  Admission first counts and budget-checks the complete root,
+then backfills every active occurrence before the root is marked usable.  The
+complete `mask8` index remains authoritative if admission is rejected or the
+global structural budget is exhausted.  Forced and materialized compaction
+copy the per-root decision state, and the focused and legacy-audit tests cover
+admission, later insertion, deletion, rebuilding, and exact answer order.
+
+The 100/300-given Osborn gates reject this policy as the Phase-3 production
+answer.  At 100 given, thresholds 256, 1,024, 4,096, and 16,384 used 337,808,
+304,008, 288,392, and 215,480 bytes, respectively, versus 209,224 bytes for
+`mask8`; only the last threshold admitted no roots.  At 300 given, thresholds
+4,096, 16,384, and 65,536 admitted 7, 3, and 2 roots and used 992,917,
+882,133, and 829,829 bytes, versus 560,773 bytes for `mask8`.  The most
+conservative active policy therefore cost 47.99% extra, outside the 20% gate,
+and user CPU was not improved.  Root heat identifies where lookup work occurs,
+but a complete root tree still duplicates too much fallback storage.  The next
+Phase-3 candidate must be the planned exact-position posting index, where one
+occurrence participates only in selected structural facts and queries intersect
+the rarest safe facts rather than materializing a second complete term index.
+
 Setting `P9_MATRIX_ALLOW_HOLDOUT=1` is required even when a holdout case is
 named explicitly.  Do this only for a recorded phase-promotion commit, never
 while selecting features or thresholds.

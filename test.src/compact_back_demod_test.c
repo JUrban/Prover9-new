@@ -340,6 +340,61 @@ int main(void)
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
   }
 
+  {
+    enum { HOT_FAMILY = 64, HOT_TARGET = 31 };
+    Compact_back_demod_index hot;
+    struct compact_back_demod_stats hot_stats;
+    Topform clauses[HOT_FAMILY], rule, later;
+    char text[128];
+    int j;
+    compact_back_demod_set_tree_budget_kb(65536);
+    compact_back_demod_set_tree_admit_work(1);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_HOT_ROOT_TREE);
+    hot = compact_back_demod_init();
+    for (j = 0; j < HOT_FAMILY; j++) {
+      (void) snprintf(text, sizeof(text), "w(f(a,g(c%d))).", j);
+      clauses[j] = indexed_clause(text);
+      CHECK(compact_back_demod_add(hot, clauses[j]),
+            "add hot-root backfill family");
+    }
+    (void) snprintf(text, sizeof(text), "f(a,g(c%d)) = a.", HOT_TARGET);
+    rule = indexed_clause(text);
+    ids = compact_back_demod_candidate_ids(hot, rule, ORIENTED, &count);
+    CHECK(count == 1 && ids[0] == clauses[HOT_TARGET]->id,
+          "admission query returns the complete fallback answer");
+    safe_free(ids);
+    compact_back_demod_get_stats(hot, &hot_stats);
+    CHECK(hot_stats.tree_root_admissions == 1 &&
+          hot_stats.tree_queries == 0 && hot_stats.tree_complete,
+          "fallback work admits and backfills one complete root");
+    ids = compact_back_demod_candidate_ids(hot, rule, ORIENTED, &count);
+    CHECK(count == 1 && ids[0] == clauses[HOT_TARGET]->id,
+          "admitted root uses the same exact tree answer");
+    safe_free(ids);
+    later = indexed_clause("w(f(a,g(c31))).");
+    CHECK(compact_back_demod_add(hot, later),
+          "index later occurrence for an admitted root");
+    ids = compact_back_demod_candidate_ids(hot, rule, ORIENTED, &count);
+    CHECK(count == 2 && ids[0] == later->id &&
+          ids[1] == clauses[HOT_TARGET]->id,
+          "admitted root remains complete after incremental insertion");
+    safe_free(ids);
+    CHECK(compact_back_demod_remove(hot, later->id),
+          "remove later admitted-root occurrence");
+    compact_back_demod_compact_all_stale(hot);
+    ids = compact_back_demod_candidate_ids(hot, rule, ORIENTED, &count);
+    CHECK(count == 1 && ids[0] == clauses[HOT_TARGET]->id,
+          "hot-root admission survives forced compaction");
+    safe_free(ids);
+    compact_back_demod_free(hot);
+    delete_clause(rule);
+    delete_clause(later);
+    for (j = 0; j < HOT_FAMILY; j++)
+      delete_clause(clauses[j]);
+    compact_back_demod_set_tree_admit_work(4096);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
+  }
+
   delete_clause(first);
   delete_clause(second);
   delete_clause(irrelevant);
