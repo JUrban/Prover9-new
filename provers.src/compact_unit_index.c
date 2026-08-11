@@ -94,6 +94,9 @@ struct compact_unit_index {
   unsigned long long generalization_queries;
   unsigned long long instance_queries;
   unsigned long long instance_exact_tests;
+  unsigned long long instance_tree_queries;
+  unsigned long long instance_tree_nodes_examined;
+  unsigned long long instance_tree_postings_examined;
   unsigned long long unifier_queries;
   unsigned long long unifier_exact_tests;
   unsigned long long position_queries;
@@ -821,6 +824,10 @@ static void compact_unit_index_compact_internal(Compact_unit_index index,
   index->generalization_queries = generalization_queries;
   index->instance_queries = instance_queries;
   index->instance_exact_tests = instance_exact_tests;
+  index->instance_tree_queries = old.instance_tree_queries;
+  index->instance_tree_nodes_examined = old.instance_tree_nodes_examined;
+  index->instance_tree_postings_examined =
+    old.instance_tree_postings_examined;
   index->unifier_queries = unifier_queries;
   index->unifier_exact_tests = unifier_exact_tests;
   index->position_queries = old.position_queries;
@@ -1109,6 +1116,111 @@ static int descending_id_compare(const void *a, const void *b)
   return x < y ? 1 : x > y ? -1 : 0;
 }
 
+static void append_result_id(Compact_unit_index index,
+                             unsigned long long proof_id,
+                             size_t *found)
+{
+  if (*found == index->result_capacity) {
+    index->result_capacity = grow_capacity(
+      index->result_capacity, sizeof(*index->result_ids),
+      "compact_unit_index: result overflow");
+    index->result_ids = safe_realloc(
+      index->result_ids,
+      index->result_capacity * sizeof(*index->result_ids));
+  }
+  index->result_ids[(*found)++] = proof_id;
+}
+
+/* Retrieve stored instances of a resident pattern from the shared serialized
+   term tree.  A pattern variable may cover any complete stored subterm;
+   repeated-variable equality is left to pattern_matches_tokens() at terminal
+   postings.  A stored variable cannot satisfy a rigid pattern position. */
+static void collect_instance_tree_candidates(
+  Compact_unit_index index, uint32_t node, uint32_t query_position,
+  uint32_t query_end, size_t pending, Term pattern,
+  unsigned long long exclude_id, size_t *found,
+  unsigned long long *visited, unsigned long long *live,
+  unsigned long long *dead)
+{
+  struct cui_node *edge = &index->nodes[node];
+  uint32_t at;
+  uint32_t child;
+
+  (*visited)++;
+  index->instance_tree_nodes_examined++;
+  for (at = 0; at < edge->token_length; at++) {
+    int32_t code = index->tokens[edge->token_offset + at];
+    if (pending != 0) {
+      int arity = code < 0 ? 0 : sn_to_arity(code);
+      pending--;
+      if ((size_t) arity > SIZE_MAX - pending)
+        fatal_error("compact_unit_index: instance tree term overflow");
+      pending += (size_t) arity;
+      if (pending == 0) {
+        if (query_position >= query_end)
+          return;
+        query_position = index->query[query_position].end;
+      }
+    }
+    else {
+      Term resident;
+      if (query_position >= query_end)
+        return;
+      resident = index->query[query_position].term;
+      if (VARIABLE(resident)) {
+        if (code < 0)
+          query_position = index->query[query_position].end;
+        else {
+          pending = (size_t) sn_to_arity(code);
+          if (pending == 0)
+            query_position = index->query[query_position].end;
+        }
+      }
+      else {
+        if (code < 0 || code != SYMNUM(resident))
+          return;
+        query_position++;
+      }
+    }
+  }
+
+  if (query_position == query_end && pending == 0) {
+    uint32_t posting;
+    for (posting = edge->first_posting; posting != CUI_NONE;
+         posting = index->postings[posting].next) {
+      struct cui_record *record =
+        &index->records[index->postings[posting].record];
+      uint32_t position;
+      uint32_t starts[MAX_VARS], ends[MAX_VARS];
+      unsigned variable;
+      index->instance_tree_postings_examined++;
+      if (!record->active) {
+        (*dead)++;
+        continue;
+      }
+      (*live)++;
+      if (record->proof_id == exclude_id)
+        continue;
+      index->instance_exact_tests++;
+      for (variable = 0; variable < MAX_VARS; variable++)
+        starts[variable] = UINT32_MAX;
+      position = record->token_offset;
+      if (pattern_matches_tokens(
+            index, pattern, &position,
+            record->token_offset + record->token_length, starts, ends) &&
+          position == record->token_offset + record->token_length)
+        append_result_id(index, record->proof_id, found);
+    }
+    return;
+  }
+
+  for (child = edge->first_child; child != CUI_NONE;
+       child = index->nodes[child].next_sibling)
+    collect_instance_tree_candidates(
+      index, child, query_position, query_end, pending, pattern, exclude_id,
+      found, visited, live, dead);
+}
+
 unsigned long long *compact_unit_instance_ids(
   Compact_unit_index index, Term pattern, BOOL sign,
   unsigned long long exclude_id, size_t *count)
@@ -1116,7 +1228,7 @@ unsigned long long *compact_unit_instance_ids(
   uint64_t wanted;
   size_t found = 0;
   size_t i;
-  unsigned long long tests_before, live = 0, dead = 0;
+  unsigned long long tests_before, visited = 0, live = 0, dead = 0;
   if (count == NULL)
     return NULL;
   *count = 0;
@@ -1126,37 +1238,45 @@ unsigned long long *compact_unit_instance_ids(
   index->tokens = compact_term_pool_tokens(index->term_pool);
   index->instance_queries++;
   tests_before = index->instance_exact_tests;
-  wanted = resident_symbol_mask(pattern);
-  for (i = 1; i < index->record_count; i++) {
-    struct cui_record *record = &index->records[i];
-    uint32_t position;
-    uint32_t starts[MAX_VARS], ends[MAX_VARS];
-    unsigned j;
-    if (record->active)
-      live++;
-    else
-      dead++;
-    if (!record->active || record->sign != (unsigned char) sign ||
-        record->proof_id == exclude_id ||
-        (record->symbol_mask & wanted) != wanted)
-      continue;
-    index->instance_exact_tests++;
-    for (j = 0; j < MAX_VARS; j++)
-      starts[j] = UINT32_MAX;
-    position = record->token_offset;
-    if (pattern_matches_tokens(index, pattern, &position,
-                               record->token_offset + record->token_length,
-                               starts, ends) &&
-        position == record->token_offset + record->token_length) {
-      if (found == index->result_capacity) {
-        index->result_capacity = grow_capacity(
-          index->result_capacity, sizeof(*index->result_ids),
-          "compact_unit_index: result overflow");
-        index->result_ids = safe_realloc(
-          index->result_ids,
-          index->result_capacity * sizeof(*index->result_ids));
+  if (index->strategy == COMPACT_UNIT_CODE_TREE) {
+    size_t query_count = 0;
+    uint32_t child;
+    index->instance_tree_queries++;
+    flatten_query(index, pattern, &query_count);
+    if (query_count > UINT32_MAX)
+      fatal_error("compact_unit_index: instance-tree query overflow");
+    for (child = index->nodes[index->roots[sign ? 1 : 0]].first_child;
+         child != CUI_NONE; child = index->nodes[child].next_sibling)
+      collect_instance_tree_candidates(
+        index, child, 0, (uint32_t) query_count, 0, pattern, exclude_id,
+        &found, &visited, &live, &dead);
+  }
+  else {
+    wanted = resident_symbol_mask(pattern);
+    for (i = 1; i < index->record_count; i++) {
+      struct cui_record *record = &index->records[i];
+      uint32_t position;
+      uint32_t starts[MAX_VARS], ends[MAX_VARS];
+      unsigned j;
+      visited++;
+      if (record->active)
+        live++;
+      else
+        dead++;
+      if (!record->active || record->sign != (unsigned char) sign ||
+          record->proof_id == exclude_id ||
+          (record->symbol_mask & wanted) != wanted)
+        continue;
+      index->instance_exact_tests++;
+      for (j = 0; j < MAX_VARS; j++)
+        starts[j] = UINT32_MAX;
+      position = record->token_offset;
+      if (pattern_matches_tokens(
+            index, pattern, &position,
+            record->token_offset + record->token_length, starts, ends) &&
+          position == record->token_offset + record->token_length) {
+        append_result_id(index, record->proof_id, &found);
       }
-      index->result_ids[found++] = record->proof_id;
     }
   }
   if (found > 1) {
@@ -1168,7 +1288,8 @@ unsigned long long *compact_unit_instance_ids(
   compact_profile_note(
     &index->instance_profile,
     index->instance_exact_tests - tests_before,
-    index->record_count - 1, live, dead, 0, found, 0);
+    visited + (index->strategy == COMPACT_UNIT_CODE_TREE ? live + dead : 0),
+    live, dead, 0, found, 0);
   compact_profile_note_exact(
     &index->instance_profile,
     index->instance_exact_tests - tests_before, found, 0);
@@ -1358,21 +1479,6 @@ static BOOL resident_unifies_record(Compact_unit_index index, Term query,
   return unify_exprs(&state, resident, token);
 }
 
-static void append_unifier_result(Compact_unit_index index,
-                                  unsigned long long proof_id,
-                                  size_t *found)
-{
-  if (*found == index->result_capacity) {
-    index->result_capacity = grow_capacity(
-      index->result_capacity, sizeof(*index->result_ids),
-      "compact_unit_index: result overflow");
-    index->result_ids = safe_realloc(
-      index->result_ids,
-      index->result_capacity * sizeof(*index->result_ids));
-  }
-  index->result_ids[(*found)++] = proof_id;
-}
-
 /* Traverse the existing radix-compressed term-code tree as a safe unification
    filter.  Repeated-variable and occurs-check constraints are deliberately
    deferred to resident_unifies_record(); ignoring them can add candidates but
@@ -1441,7 +1547,7 @@ static void collect_code_tree_candidates(
         continue;
       index->unifier_exact_tests++;
       if (resident_unifies_record(index, query, record))
-        append_unifier_result(index, record->proof_id, found);
+        append_result_id(index, record->proof_id, found);
     }
     return;
   }
@@ -1566,7 +1672,7 @@ static void collect_position_bucket(
       continue;
     index->unifier_exact_tests++;
     if (resident_unifies_record(index, query, record)) {
-      append_unifier_result(index, record->proof_id, found);
+      append_result_id(index, record->proof_id, found);
     }
   }
 }
@@ -1645,7 +1751,7 @@ unsigned long long *compact_unit_unifier_ids(
         continue;
       index->unifier_exact_tests++;
       if (resident_unifies_record(index, query, record)) {
-        append_unifier_result(index, record->proof_id, &found);
+        append_result_id(index, record->proof_id, &found);
       }
     }
   }
@@ -1695,6 +1801,10 @@ void compact_unit_index_get_stats(Compact_unit_index index,
   stats->generalization_queries = index->generalization_queries;
   stats->instance_queries = index->instance_queries;
   stats->instance_exact_tests = index->instance_exact_tests;
+  stats->instance_tree_queries = index->instance_tree_queries;
+  stats->instance_tree_nodes_examined = index->instance_tree_nodes_examined;
+  stats->instance_tree_postings_examined =
+    index->instance_tree_postings_examined;
   stats->unifier_queries = index->unifier_queries;
   stats->unifier_exact_tests = index->unifier_exact_tests;
   stats->position_queries = index->position_queries;

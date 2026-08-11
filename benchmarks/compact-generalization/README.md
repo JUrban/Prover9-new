@@ -86,6 +86,12 @@ from 4,620 to 3 on nil3.  The paired unit-instance counts and unit-index bytes
 were identical; x2 retained the same 12-given proof.  End-to-end CPU at this
 small boundary remains noise-dominated because unit unification accounts for
 only milliseconds, so larger gates—not this prefix—decide promotion.
+The same strategy also traverses the shared tree for stored-instance retrieval
+(backward unit subsumption), using a distinct compatibility rule and retaining
+the direct repeated-variable matcher at terminal postings.  On the 100-given
+cases this reduced exact instance tests from 100,042 to 114 on Osborn and from
+1,769 to 17 on nil3.  The Osborn legacy-index audit reported zero answer/order
+mismatches; the added persistent state is three 64-bit reporting counters.
 
 Setting `P9_MATRIX_ALLOW_HOLDOUT=1` is required even when a holdout case is
 named explicitly.  Do this only for a recorded phase-promotion commit, never

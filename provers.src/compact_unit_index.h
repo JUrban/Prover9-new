@@ -24,6 +24,9 @@ struct compact_unit_index_stats {
   unsigned long long generalization_queries;
   unsigned long long instance_queries;
   unsigned long long instance_exact_tests;
+  unsigned long long instance_tree_queries;
+  unsigned long long instance_tree_nodes_examined;
+  unsigned long long instance_tree_postings_examined;
   unsigned long long unifier_queries;
   unsigned long long unifier_exact_tests;
   unsigned long long position_queries;

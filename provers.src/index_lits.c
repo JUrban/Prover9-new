@@ -232,7 +232,9 @@ void fprint_compact_unit_index(FILE *fp)
           "Compact_unit_index: mode=%s, strategy=%s, failures=%llu, active=%llu, "
           "peak=%llu, retired=%llu, physical=%llu, compactions=%llu, "
           "reclaimed=%llu, forward_queries=%llu, "
-          "back_queries=%llu, back_exact_tests=%llu, conflict_queries=%llu, "
+          "back_queries=%llu, back_exact_tests=%llu, "
+          "instance_tree_queries=%llu, instance_tree_nodes=%llu, "
+          "instance_tree_postings=%llu, conflict_queries=%llu, "
           "conflict_exact_tests=%llu, position_queries=%llu, "
           "position_fallbacks=%llu, position_postings=%llu, "
           "position_duplicates=%llu, code_tree_queries=%llu, "
@@ -250,6 +252,8 @@ void fprint_compact_unit_index(FILE *fp)
           stats.retired, stats.physical, stats.compactions,
           stats.bytes_reclaimed, stats.generalization_queries,
           stats.instance_queries, stats.instance_exact_tests,
+          stats.instance_tree_queries, stats.instance_tree_nodes_examined,
+          stats.instance_tree_postings_examined,
           stats.unifier_queries, stats.unifier_exact_tests,
           stats.position_queries, stats.position_fallback_queries,
           stats.position_postings_examined,

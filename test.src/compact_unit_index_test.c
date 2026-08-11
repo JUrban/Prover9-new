@@ -140,7 +140,9 @@ int main(void)
     Topform broad;
     Topform query;
     unsigned long long *root_ids, *position_ids, *tree_ids;
+    unsigned long long *root_instances, *tree_instances;
     size_t root_count, position_count, tree_count;
+    size_t root_instance_count, tree_instance_count;
     char text[128];
     int i;
 
@@ -185,6 +187,15 @@ int main(void)
           memcmp(root_ids, tree_ids,
                  root_count * sizeof(*root_ids)) == 0,
           "selective retrieval preserves canonical answer order");
+    root_instances = compact_unit_instance_ids(
+      root_index, query->literals->atom, TRUE, 0, &root_instance_count);
+    tree_instances = compact_unit_instance_ids(
+      tree_index, query->literals->atom, TRUE, 0, &tree_instance_count);
+    CHECK(root_instance_count == 1 &&
+          tree_instance_count == root_instance_count &&
+          memcmp(root_instances, tree_instances,
+                 root_instance_count * sizeof(*root_instances)) == 0,
+          "instance-tree retrieval preserves the exact rigid answer");
     compact_unit_index_get_stats(root_index, &root_stats);
     compact_unit_index_get_stats(position_index, &position_stats);
     compact_unit_index_get_stats(tree_index, &tree_stats);
@@ -200,6 +211,10 @@ int main(void)
           tree_stats.code_tree_postings_examined <= 2 &&
           tree_stats.feature_bytes == 0,
           "code-tree retrieval reuses the compact radix tree without features");
+    CHECK(tree_stats.instance_tree_queries == 1 &&
+          tree_stats.instance_exact_tests == 1 &&
+          tree_stats.instance_tree_postings_examined == 1,
+          "instance-tree retrieval reaches only the compatible posting");
     CHECK(compact_unit_index_remove(position_index, family[137]->id),
           "remove a position-index answer");
     compact_unit_index_compact_all_stale(position_index);
@@ -220,6 +235,8 @@ int main(void)
     safe_free(root_ids);
     safe_free(position_ids);
     safe_free(tree_ids);
+    safe_free(root_instances);
+    safe_free(tree_instances);
     delete_clause(query);
     compact_unit_index_free(root_index);
     compact_unit_index_free(position_index);
@@ -268,7 +285,9 @@ int main(void)
         BOOL sign = query->literals->sign;
         unsigned long long exclude = (i % 3 == 0) ? units[1]->id : 0;
         unsigned long long *root_ids, *tree_ids;
+        unsigned long long *root_instances, *tree_instances;
         size_t root_count, tree_count;
+        size_t root_instance_count, tree_instance_count;
         root_ids = compact_unit_unifier_ids(
           root_index, query->literals->atom, sign, exclude, &root_count);
         tree_ids = compact_unit_unifier_ids(
@@ -280,8 +299,23 @@ int main(void)
                memcmp(root_ids, tree_ids,
                       root_count * sizeof(*root_ids)) == 0),
               "code-tree variable-rich differential order");
+        root_instances = compact_unit_instance_ids(
+          root_index, query->literals->atom, sign, exclude,
+          &root_instance_count);
+        tree_instances = compact_unit_instance_ids(
+          tree_index, query->literals->atom, sign, exclude,
+          &tree_instance_count);
+        CHECK(root_instance_count == tree_instance_count,
+              "instance-tree variable-rich differential count");
+        CHECK(root_instance_count == 0 ||
+              (root_instances != NULL && tree_instances != NULL &&
+               memcmp(root_instances, tree_instances,
+                      root_instance_count * sizeof(*root_instances)) == 0),
+              "instance-tree variable-rich differential order");
         safe_free(root_ids);
         safe_free(tree_ids);
+        safe_free(root_instances);
+        safe_free(tree_instances);
         delete_clause(query);
       }
       if (pass == 0) {
