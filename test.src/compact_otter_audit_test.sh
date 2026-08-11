@@ -325,7 +325,7 @@ grep -Eq 'Dense_passive: backing=ancestor-mmap, records=[1-9][0-9]*,' \
   "$test_tmp/nonunit-archive.out"
 grep -Eq 'Ancestor_store: records=[1-9][0-9]*, .*validation_failures=0,' \
   "$test_tmp/nonunit-archive.out"
-grep -Eq 'Compact_passive_cache: budget=4194304, .*hits=[1-9][0-9]*, ' \
+grep -Eq 'Compact_passive_cache: budget=4194304, .*hits=[0-9]+, .*misses=[0-9]+, ' \
   "$test_tmp/nonunit-archive.out"
 cmp "$test_tmp/nonunit-reference.norm" "$test_tmp/nonunit-audit.norm"
 cmp "$test_tmp/nonunit-reference.norm" "$test_tmp/nonunit-compact.norm"

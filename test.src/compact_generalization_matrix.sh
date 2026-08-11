@@ -20,6 +20,7 @@ back_position_budget_kb=${P9_MATRIX_BACK_POSITION_BUDGET_KB:-65536}
 back_position_admission=${P9_MATRIX_BACK_POSITION_ADMISSION:-1}
 hint_cache_kb=${P9_MATRIX_HINT_CACHE_KB:-2048}
 hint_rebuild_scan_ratio=${P9_MATRIX_HINT_REBUILD_SCAN_RATIO:-8}
+clocks=${P9_MATRIX_CLOCKS:-1}
 detected_cpu=$(taskset -pc $$ 2>/dev/null | sed 's/^.*: //;s/,.*//;s/-.*//' || true)
 cpu=${P9_MATRIX_CPU:-${detected_cpu:-0}}
 allow_holdout=${P9_MATRIX_ALLOW_HOLDOUT:-0}
@@ -34,6 +35,10 @@ if test ! -x "$new_prover"; then
   echo "new prover not executable: $new_prover" >&2
   exit 2
 fi
+case "$clocks" in
+  0|1) ;;
+  *) echo "P9_MATRIX_CLOCKS must be 0 or 1" >&2; exit 2 ;;
+esac
 
 "$repo_dir/test.src/validate_compact_generalization_manifest.sh" "$manifest"
 mkdir -p "$output_dir/inputs" "$output_dir/tmp"
@@ -119,7 +124,11 @@ emit_common()
   echo 'clear(print_kept).'
   echo 'clear(print_given).'
   echo 'clear(print_initial_clauses).'
-  echo 'set(clocks).'
+  if test "$clocks" = 1; then
+    echo 'set(clocks).'
+  else
+    echo 'clear(clocks).'
+  fi
   echo 'set(hint_match_stats).'
   echo 'assign(stats,all).'
   echo "assign(report,$report_seconds)."
@@ -361,6 +370,7 @@ done
   echo "back_position_admission=$back_position_admission"
   echo "hint_cache_kb=$hint_cache_kb"
   echo "hint_rebuild_scan_ratio=$hint_rebuild_scan_ratio"
+  echo "clocks=$clocks"
   echo "back_position_min_gain=4"
   echo "back_position_budget_pct=20"
   echo "cpu=$cpu"

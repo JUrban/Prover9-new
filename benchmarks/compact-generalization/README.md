@@ -79,6 +79,23 @@ paths.  A subset failure is a safe pre-materialization rejection; collisions
 only retain extra candidates, and ordinary exact subsumption remains the final
 authority.
 
+`P9_MATRIX_CLOCKS=0` disables high-frequency CPU clocks while retaining the
+logical work counters and external `/usr/bin/time` measurement.  Use it only
+as a paired instrumentation-overhead diagnostic; operation-level time fields
+are then zero and cannot support component attribution.  Promotion profiles
+retain the default value 1 unless a lower-overhead timing implementation has
+been validated.
+
+Packed-hint operation timing now samples a deterministic hash-selected 1/64
+of authoritative queries with microsecond user-CPU readings and scales the
+sample to the exact timed-query count.  The statistics line labels
+`timing=sampled` and reports eligible and sampled counts.  Candidate, posting,
+stale, materialization, match, and histogram counters remain exact; only
+`seconds` is estimated.  Read-only previews are excluded as before.  This
+replaces two `getrusage` calls on every hint query, which became a large
+source of avoidable system calls on hint-heavy AIM searches.  Maintenance
+rebuild time remains exact because rebuilds are infrequent.
+
 The experimental position-compatible unit retrieval is
 selected by `compact_unit_position`, `compact_full_position`, or
 `compact_dense_file_position`; the corresponding variants without the suffix

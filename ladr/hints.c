@@ -234,11 +234,39 @@ struct packed_hint_operation_stats {
   unsigned long long direct_equivalences;
   unsigned long long candidate_max;
   unsigned long long candidate_buckets[PACKED_HINT_CANDIDATE_BUCKETS];
-  Clock clock;
+  unsigned long long timing_queries;
+  unsigned long long timing_samples;
+  double timing_sample_seconds;
+  double timing_sample_started;
+  BOOL timing_sample_active;
 };
 
 static struct packed_hint_operation_stats
   Packed_operation_stats[PACKED_HINT_OPERATIONS];
+
+/* Per-query getrusage pairs scale to millions of avoidable system calls on
+   hint-heavy AIM searches.  Sample a deterministic, input-derived 1/64 of
+   authoritative operations at microsecond precision; all logical work
+   counters remain exact.  Timing is diagnostic only and never affects a
+   search decision. */
+#define PACKED_HINT_TIMING_SAMPLE_RATE 64ULL
+
+static BOOL packed_timing_sample(unsigned long long query)
+{
+  unsigned long long x = query + UINT64_C(0x9e3779b97f4a7c15);
+  x = (x ^ (x >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+  x = (x ^ (x >> 27)) * UINT64_C(0x94d049bb133111eb);
+  x ^= x >> 31;
+  return query == 1 || (x & (PACKED_HINT_TIMING_SAMPLE_RATE - 1)) == 0;
+}
+
+static double packed_estimated_seconds(
+  const struct packed_hint_operation_stats *s)
+{
+  return s->timing_samples == 0 ? 0.0 :
+    s->timing_sample_seconds * (double) s->timing_queries /
+      (double) s->timing_samples;
+}
 
 /* Preview queries use the same exact matcher and tie breaking as the
    authoritative path, but operation counters and clocks must describe only
@@ -280,8 +308,17 @@ static unsigned packed_candidate_bucket(unsigned n)
 static void packed_operation_begin(enum packed_hint_operation op)
 {
   if (!Hint_preview_active) {
-    Packed_operation_stats[op].queries++;
-    clock_start(Packed_operation_stats[op].clock);
+    struct packed_hint_operation_stats *s = Packed_operation_stats + op;
+    s->queries++;
+    s->timing_sample_active = FALSE;
+    if (clocks_enabled()) {
+      s->timing_queries++;
+      if (packed_timing_sample(s->timing_queries)) {
+        s->timing_samples++;
+        s->timing_sample_active = TRUE;
+        s->timing_sample_started = user_seconds();
+      }
+    }
   }
 }
 
@@ -298,7 +335,13 @@ static void packed_operation_candidates(enum packed_hint_operation op)
 static void packed_operation_end(enum packed_hint_operation op)
 {
   if (!Hint_preview_active) {
-    clock_stop(Packed_operation_stats[op].clock);
+    struct packed_hint_operation_stats *s = Packed_operation_stats + op;
+    if (s->timing_sample_active) {
+      double elapsed = user_seconds() - s->timing_sample_started;
+      if (elapsed > 0.0)
+        s->timing_sample_seconds += elapsed;
+      s->timing_sample_active = FALSE;
+    }
     if (Better_packed_index &&
         Better_stale_scans_since_rebuild >= BETTER_REBUILD_STALE_MIN)
       better_maybe_rebuild_postings();
@@ -1643,12 +1686,6 @@ void init_hints(Uniftype utype,
     Better_postings = hint_postings_init();
     Better_rebuild_clock = clock_init("packed_hint_rebuild");
   }
-  if (packed_index) {
-    unsigned i;
-    for (i = 0; i < PACKED_HINT_OPERATIONS; i++)
-      Packed_operation_stats[i].clock =
-        clock_init((char *) Packed_operation_names[i]);
-  }
   /* Keep an empty Lindex in packed mode so the established lifecycle and
      checkpoint code can use the same ownership boundary. */
   Hints_idx = lindex_init(FPA, utype, packed_index ? 1 : fpa_depth,
@@ -1780,14 +1817,7 @@ void done_with_hints(void)
   Preview_candidates_count = Preview_candidates_capacity = 0;
   memset(Packed_feature_counts, 0, sizeof(Packed_feature_counts));
   Packed_candidate_checks = 0;
-  {
-    unsigned i;
-    for (i = 0; i < PACKED_HINT_OPERATIONS; i++) {
-      if (Packed_operation_stats[i].clock != NULL)
-        free_clock(Packed_operation_stats[i].clock);
-    }
-    memset(Packed_operation_stats, 0, sizeof(Packed_operation_stats));
-  }
+  memset(Packed_operation_stats, 0, sizeof(Packed_operation_stats));
   Packed_index = FALSE;
   Better_packed_index = FALSE;
   Fast_packed_index = FALSE;
@@ -2904,9 +2934,11 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             "reindexes=%llu, stale_skips=%llu, fingerprint_rejects=%llu, "
             "direct_attempts=%llu, direct_handled=%llu, "
             "direct_matches=%llu, direct_equivalences=%llu, "
+            "timing=sampled, timing_eligible=%llu, timing_samples=%llu, "
+            "timing_rate=1/%llu, "
             "buckets=0:%llu/1:%llu/2-7:%llu/8-31:%llu/32-127:%llu/"
             "128-1023:%llu/1024-16383:%llu/16384+:%llu.\n",
-            Packed_operation_names[i], clock_seconds(s->clock), s->queries,
+            Packed_operation_names[i], packed_estimated_seconds(s), s->queries,
             s->posting_lists, s->posting_candidates, s->unique_candidates,
             s->queries == 0 ? 0.0 :
               (double) s->unique_candidates / (double) s->queries,
@@ -2915,6 +2947,8 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             s->fingerprint_rejects,
             s->direct_attempts, s->direct_handled,
             s->direct_matches, s->direct_equivalences,
+            s->timing_queries, s->timing_samples,
+            PACKED_HINT_TIMING_SAMPLE_RATE,
             s->candidate_buckets[0], s->candidate_buckets[1],
             s->candidate_buckets[2], s->candidate_buckets[3],
             s->candidate_buckets[4], s->candidate_buckets[5],
