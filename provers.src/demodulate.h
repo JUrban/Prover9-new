@@ -20,7 +20,7 @@
 #define TP_DEMODULATE_H
 
 #include "../ladr/ladr.h"
-#include "compact_term_pool.h"
+#include "compact_back_demod.h"
 
 /* INTRODUCTION
 */
@@ -39,7 +39,8 @@ void configure_compact_back_demod_term_pool(Compact_term_pool pool);
 
 void configure_compact_back_demod_stale_pct(unsigned percentage);
 
-void configure_compact_back_demod_strategy(BOOL signature32);
+void configure_compact_back_demod_strategy(
+  Compact_back_demod_strategy strategy);
 
 unsigned long long compact_back_demod_active_count(void);
 

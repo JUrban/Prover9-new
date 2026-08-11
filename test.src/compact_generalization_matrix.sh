@@ -166,11 +166,16 @@ emit_variant()
       echo 'assign(compact_back_demod_strategy,signature32).'
       echo 'set(compact_otter_back_demod_index).'
       ;;
+    compact_back_tree)
+      emit_variant packed_only
+      echo 'assign(compact_back_demod_strategy,code_tree).'
+      echo 'set(compact_otter_back_demod_index).'
+      ;;
     compact_nonunit_only)
       emit_variant packed_only
       echo 'set(compact_otter_nonunit_index).'
       ;;
-    compact_full|compact_dense_file|compact_full_position|compact_dense_file_position|compact_full_code_tree|compact_dense_file_code_tree|compact_full_signature|compact_dense_file_signature|compact_full_code_tree_signature|compact_dense_file_code_tree_signature)
+    compact_full|compact_dense_file|compact_full_position|compact_dense_file_position|compact_full_code_tree|compact_dense_file_code_tree|compact_full_signature|compact_dense_file_signature|compact_full_code_tree_signature|compact_dense_file_code_tree_signature|compact_full_back_tree|compact_dense_file_back_tree|compact_full_code_tree_back_tree|compact_dense_file_code_tree_back_tree)
       echo 'assign(search_loop,otter).'
       case "$1" in
         compact_dense_file*)
@@ -189,6 +194,7 @@ emit_variant()
       esac
       case "$1" in
         *_signature) echo 'assign(compact_back_demod_strategy,signature32).' ;;
+        *_back_tree) echo 'assign(compact_back_demod_strategy,code_tree).' ;;
         *) echo 'assign(compact_back_demod_strategy,mask8).' ;;
       esac
       echo 'assign(hint_index,packed_fast).'

@@ -75,11 +75,10 @@ void configure_compact_back_demod_stale_pct(unsigned percentage)
   compact_back_demod_set_compaction_stale_pct(percentage);
 }
 
-void configure_compact_back_demod_strategy(BOOL signature32)
+void configure_compact_back_demod_strategy(
+  Compact_back_demod_strategy strategy)
 {
-  compact_back_demod_set_strategy(
-    signature32 ? COMPACT_BACK_DEMOD_SIGNATURE32 :
-                  COMPACT_BACK_DEMOD_MASK8);
+  compact_back_demod_set_strategy(strategy);
 }
 
 static BOOL compact_back_demod_mode(void)
@@ -607,7 +606,8 @@ void fprint_compact_back_demod(FILE *fp)
           "peak=%llu, retired=%llu, physical=%llu, compactions=%llu, "
           "reclaimed=%llu, queries=%llu, "
           "candidates=%llu, exact_tests=%llu, posting_groups=%llu, "
-          "path_buckets=%llu, "
+          "path_buckets=%llu, tree_nodes=%llu, tree_terminals=%llu, "
+          "tree_queries=%llu, tree_nodes_examined=%llu, "
           "symbol_occurrences=%llu, groups_examined=%llu, "
           "occurrences_examined=%llu, path_checks=%llu, "
           "path_rejects=%llu, file_snapshots=%llu, snapshot_ids=%llu, "
@@ -616,12 +616,15 @@ void fprint_compact_back_demod(FILE *fp)
           "occurrence_stream=%llu, postings=%llu, records=%llu, roots=%llu, "
           "tokens=%llu, hash=%llu, scratch=%llu, bytes=%llu, peak_bytes=%llu.\n",
           Compact_back_demod_authoritative ? "authoritative" : "audit",
-          stats.strategy == COMPACT_BACK_DEMOD_SIGNATURE32 ?
-            "signature32" : "mask8",
+          stats.strategy == COMPACT_BACK_DEMOD_SIGNATURE32 ? "signature32" :
+          stats.strategy == COMPACT_BACK_DEMOD_CODE_TREE ? "code_tree" :
+            "mask8",
           Compact_back_demod_failures, stats.active, stats.peak,
           stats.retired, stats.physical, stats.compactions,
           stats.bytes_reclaimed, stats.queries, stats.candidates,
           stats.exact_tests, stats.posting_groups, stats.path_buckets,
+          stats.tree_nodes, stats.tree_terminals, stats.tree_queries,
+          stats.tree_nodes_examined,
           stats.symbol_occurrences,
           stats.posting_groups_examined, stats.occurrences_examined,
           stats.path_filter_checks, stats.path_filter_rejects,

@@ -119,6 +119,29 @@ diagnostic strategy rather than a production candidate.  Phase 3 must replace
 the mask/signature directory with compact structural retrieval instead of
 adding a wider per-occurrence signature.
 
+The first structural replacement is available explicitly as
+`compact_back_demod_strategy=code_tree`, through the matrix variants
+`compact_back_tree`, `compact_full_back_tree`, and
+`compact_full_code_tree_back_tree` (with matching dense-file variants).  It
+radix-compresses complete serialized subterms, stores occurrence references at
+terminal nodes, traverses variables with one-way matching semantics, and
+retains the direct repeated-variable matcher plus decreasing proof-ID sort as
+the final authority.  Deletion, forced rebuild, term-pool rebasing, and audit
+mode use the same strategy.
+
+This uncompressed structural prototype is also diagnostic, not promoted.  On
+the corrected 100-given Osborn comparison it preserved the same 278 candidates
+and reduced examined groups from 18,566 (`mask8`) and 2,687 (`signature32`) to
+1,988.  It used 324,504 back-index bytes, versus 209,224 and 248,600 bytes,
+respectively, and its 3,708 tree nodes plus 2,491 terminal descriptors made
+construction more expensive.  Whole-run user CPU was 11.39 seconds versus
+8.70 for `mask8`, although the 0.009-second tree lookup clock shows that this
+small-prefix timing is dominated elsewhere and needs repetition before being
+attributed.  The result justifies structural traversal but
+rejects a full occurrence tree as the production representation; the next
+prototype must compress terminal postings and/or admit the tree only where a
+complete, budgeted structural partition can beat the compact fallback.
+
 Setting `P9_MATRIX_ALLOW_HOLDOUT=1` is required even when a holdout case is
 named explicitly.  Do this only for a recorded phase-promotion commit, never
 while selecting features or thresholds.

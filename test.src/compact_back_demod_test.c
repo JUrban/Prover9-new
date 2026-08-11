@@ -199,12 +199,12 @@ int main(void)
 
   {
     enum { DEEP_FAMILY = 128, DEEP_TARGET = 73 };
-    Compact_back_demod_index mask_index, signature_index;
-    struct compact_back_demod_stats mask_stats, signature_stats;
+    Compact_back_demod_index mask_index, signature_index, tree_index;
+    struct compact_back_demod_stats mask_stats, signature_stats, tree_stats;
     Topform deep_clauses[DEEP_FAMILY];
     Topform deep_demod;
-    unsigned long long *mask_ids, *signature_ids;
-    size_t mask_count, signature_count;
+    unsigned long long *mask_ids, *signature_ids, *tree_ids;
+    size_t mask_count, signature_count, tree_count;
     char text[128];
     int j;
 
@@ -212,6 +212,8 @@ int main(void)
     mask_index = compact_back_demod_init();
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_SIGNATURE32);
     signature_index = compact_back_demod_init();
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_CODE_TREE);
+    tree_index = compact_back_demod_init();
     for (j = 0; j < DEEP_FAMILY; j++) {
       (void) snprintf(text, sizeof(text),
                       "u(f(a,g(h(j(c%d))))).", j);
@@ -220,6 +222,8 @@ int main(void)
             "add deep family clause to mask8 index");
       CHECK(compact_back_demod_add(signature_index, deep_clauses[j]),
             "add deep family clause to signature32 index");
+      CHECK(compact_back_demod_add(tree_index, deep_clauses[j]),
+            "add deep family clause to code-tree index");
     }
     (void) snprintf(text, sizeof(text),
                     "f(a,g(h(j(c%d)))) = a.", DEEP_TARGET);
@@ -228,23 +232,35 @@ int main(void)
       mask_index, deep_demod, ORIENTED, &mask_count);
     signature_ids = compact_back_demod_candidate_ids(
       signature_index, deep_demod, ORIENTED, &signature_count);
+    tree_ids = compact_back_demod_candidate_ids(
+      tree_index, deep_demod, ORIENTED, &tree_count);
     CHECK(mask_count == 1 && signature_count == mask_count &&
+          tree_count == mask_count &&
           mask_ids[0] == deep_clauses[DEEP_TARGET]->id &&
-          signature_ids[0] == mask_ids[0],
-          "unbounded signature preserves the exact deep candidate");
+          signature_ids[0] == mask_ids[0] && tree_ids[0] == mask_ids[0],
+          "arbitrary-depth indexes preserve the exact deep candidate");
     compact_back_demod_note_exact_query(mask_index, mask_count, mask_count, 0);
     compact_back_demod_note_exact_query(
       signature_index, signature_count, signature_count, 0);
+    compact_back_demod_note_exact_query(
+      tree_index, tree_count, tree_count, 0);
     compact_back_demod_get_stats(mask_index, &mask_stats);
     compact_back_demod_get_stats(signature_index, &signature_stats);
+    compact_back_demod_get_stats(tree_index, &tree_stats);
     CHECK(mask_stats.strategy == COMPACT_BACK_DEMOD_MASK8 &&
-          signature_stats.strategy == COMPACT_BACK_DEMOD_SIGNATURE32,
+          signature_stats.strategy == COMPACT_BACK_DEMOD_SIGNATURE32 &&
+          tree_stats.strategy == COMPACT_BACK_DEMOD_CODE_TREE,
           "back-demod indexes retain their configured strategies");
     CHECK(mask_stats.posting_groups_examined >= DEEP_FAMILY &&
           signature_stats.posting_groups_examined <= 8 &&
           signature_stats.posting_groups_examined * 16 <
             mask_stats.posting_groups_examined,
           "unbounded signature separates deep same-shape occurrences");
+    CHECK(tree_stats.tree_nodes > 0 && tree_stats.tree_terminals > 0 &&
+          tree_stats.tree_queries == 1 &&
+          tree_stats.posting_groups_examined == 1 &&
+          tree_stats.occurrences_examined == 1,
+          "code tree reaches only the structurally matching occurrence");
     CHECK(compact_back_demod_remove(
             signature_index, deep_clauses[DEEP_TARGET]->id),
           "remove deep signature answer");
@@ -254,10 +270,20 @@ int main(void)
       signature_index, deep_demod, ORIENTED, &signature_count);
     CHECK(signature_count == 0 && signature_ids == NULL,
           "signature strategy survives deletion and forced rebuild");
+    CHECK(compact_back_demod_remove(
+            tree_index, deep_clauses[DEEP_TARGET]->id),
+          "remove deep code-tree answer");
+    compact_back_demod_compact_all_stale(tree_index);
+    safe_free(tree_ids);
+    tree_ids = compact_back_demod_candidate_ids(
+      tree_index, deep_demod, ORIENTED, &tree_count);
+    CHECK(tree_count == 0 && tree_ids == NULL,
+          "code-tree strategy survives deletion and forced rebuild");
 
     safe_free(mask_ids);
     compact_back_demod_free(mask_index);
     compact_back_demod_free(signature_index);
+    compact_back_demod_free(tree_index);
     delete_clause(deep_demod);
     for (j = 0; j < DEEP_FAMILY; j++)
       delete_clause(deep_clauses[j]);

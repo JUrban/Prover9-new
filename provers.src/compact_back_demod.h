@@ -9,7 +9,8 @@ typedef struct compact_back_demod_index * Compact_back_demod_index;
 
 typedef enum {
   COMPACT_BACK_DEMOD_MASK8,
-  COMPACT_BACK_DEMOD_SIGNATURE32
+  COMPACT_BACK_DEMOD_SIGNATURE32,
+  COMPACT_BACK_DEMOD_CODE_TREE
 } Compact_back_demod_strategy;
 
 struct compact_back_demod_stats {
@@ -25,6 +26,10 @@ struct compact_back_demod_stats {
   unsigned long long exact_tests;
   unsigned long long posting_groups;
   unsigned long long path_buckets;
+  unsigned long long tree_nodes;
+  unsigned long long tree_terminals;
+  unsigned long long tree_queries;
+  unsigned long long tree_nodes_examined;
   unsigned long long symbol_occurrences;
   unsigned long long posting_groups_examined;
   unsigned long long occurrences_examined;
