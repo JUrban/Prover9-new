@@ -3,6 +3,9 @@
 #include "../ladr/ladr.h"
 #include "../provers.src/cold_passive_store.h"
 #include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
 
 #define BULK_RECORDS 5000
 
@@ -14,6 +17,36 @@ static int Failures;
     Failures++;                                                        \
   }                                                                    \
 } while (0)
+
+#ifndef __EMSCRIPTEN__
+static void tmpdir_failure_test(void)
+{
+  const char *old = getenv("TMPDIR");
+  char *saved = NULL;
+  char missing[160];
+  Cold_passive_store store;
+  int changed;
+
+  if (old != NULL) {
+    saved = safe_malloc(strlen(old) + 1);
+    strcpy(saved, old);
+  }
+  sprintf(missing, "/tmp/p9-cold-missing-%ld/child", (long) getpid());
+  changed = setenv("TMPDIR", missing, 1);
+  CHECK(changed == 0, "test can set an invalid TMPDIR");
+  if (changed == 0) {
+    store = cold_passive_store_init(COLD_PASSIVE_FILE);
+    CHECK(store == NULL, "cold file backend honors an invalid TMPDIR");
+    cold_passive_store_free(store);
+  }
+  if (saved != NULL) {
+    setenv("TMPDIR", saved, 1);
+    safe_free(saved);
+  }
+  else
+    unsetenv("TMPDIR");
+}
+#endif
 
 static Topform make_clause(unsigned serial)
 {
@@ -167,6 +200,7 @@ int main(void)
   set_clause_id_count(0);
   round_trip(COLD_PASSIVE_MEMORY);
 #ifndef __EMSCRIPTEN__
+  tmpdir_failure_test();
   round_trip(COLD_PASSIVE_MMAP);
   round_trip(COLD_PASSIVE_FILE);
   file_backing_bound();

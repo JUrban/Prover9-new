@@ -1,6 +1,9 @@
 /* Phase 4 record-format, corruption, proof materialization, and mmap tests. */
 
 #include "../ladr/ladr.h"
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
 
 static int Failures;
 
@@ -10,6 +13,37 @@ static int Failures;
     Failures++;                                                           \
   }                                                                       \
 } while (0)
+
+#ifndef __EMSCRIPTEN__
+static void tmpdir_failure_test(void)
+{
+  const char *old = getenv("TMPDIR");
+  char *saved = NULL;
+  char missing[160];
+  Clause_store store;
+  int changed;
+
+  if (old != NULL) {
+    saved = safe_malloc(strlen(old) + 1);
+    strcpy(saved, old);
+  }
+  sprintf(missing, "/tmp/p9-ancestor-missing-%ld/child", (long) getpid());
+  changed = setenv("TMPDIR", missing, 1);
+  CHECK(changed == 0, "test can set an invalid TMPDIR");
+  if (changed == 0) {
+    store = clause_store_init("tmpdir-failure-test");
+    CHECK(!clause_store_enable_archive(store, CLAUSE_STORE_ARCHIVE_FILE),
+          "ancestor file backend honors an invalid TMPDIR");
+    clause_store_free(store);
+  }
+  if (saved != NULL) {
+    setenv("TMPDIR", saved, 1);
+    safe_free(saved);
+  }
+  else
+    unsetenv("TMPDIR");
+}
+#endif
 
 static Topform clause(char *s)
 {
@@ -417,6 +451,7 @@ int main(void)
   archive_round_trip(CLAUSE_STORE_ARCHIVE_MEMORY);
   archive_preserve_body_test(CLAUSE_STORE_ARCHIVE_MEMORY);
 #ifndef __EMSCRIPTEN__
+  tmpdir_failure_test();
   archive_round_trip(CLAUSE_STORE_ARCHIVE_MMAP);
   archive_preserve_body_test(CLAUSE_STORE_ARCHIVE_MMAP);
   archive_round_trip(CLAUSE_STORE_ARCHIVE_FILE);

@@ -307,13 +307,11 @@ Cold_passive_store cold_passive_store_init(Cold_passive_store_mode mode)
   store->fd = -1;
 #ifndef __EMSCRIPTEN__
   if (mode == COLD_PASSIVE_MMAP || mode == COLD_PASSIVE_FILE) {
-    char path[] = "/tmp/prover9-passive-XXXXXX";
-    store->fd = mkstemp(path);
+    store->fd = open_private_temp_file("prover9-passive-XXXXXX");
     if (store->fd < 0) {
       safe_free(store);
       return NULL;
     }
-    unlink(path);
   }
 #else
   if (mode == COLD_PASSIVE_MMAP || mode == COLD_PASSIVE_FILE) {

@@ -19,6 +19,7 @@
 #include "memory.h"
 #include "string.h"
 #include "fatal.h"
+#include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
 #include <stdint.h>
@@ -1339,3 +1340,43 @@ void *safe_realloc(void *p, size_t n)
 }  /* safe_realloc */
 
 #endif /* DEBUG */
+
+/* PUBLIC */
+int open_private_temp_file(const char *name_template)
+{
+#ifdef __EMSCRIPTEN__
+  (void) name_template;
+  return -1;
+#else
+  const char *directory = getenv("TMPDIR");
+  size_t directory_length, template_length, separator, length, position;
+  char *path;
+  int fd;
+
+  if (directory == NULL || directory[0] == '\0')
+    directory = "/tmp";
+  if (name_template == NULL || name_template[0] == '\0' ||
+      strchr(name_template, '/') != NULL)
+    return -1;
+  directory_length = strlen(directory);
+  template_length = strlen(name_template);
+  separator = directory[directory_length - 1] == '/' ? 0 : 1;
+  if (directory_length > SIZE_MAX - template_length - separator - 1)
+    return -1;
+  length = directory_length + separator + template_length + 1;
+  path = safe_malloc(length);
+  memcpy(path, directory, directory_length);
+  position = directory_length;
+  if (separator != 0)
+    path[position++] = '/';
+  memcpy(path + position, name_template, template_length + 1);
+
+  fd = mkstemp(path);
+  if (fd >= 0 && unlink(path) != 0) {
+    close(fd);
+    fd = -1;
+  }
+  safe_free(path);
+  return fd;
+#endif
+}

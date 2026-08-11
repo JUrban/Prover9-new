@@ -616,13 +616,11 @@ BOOL clause_store_enable_archive(Clause_store store,
 #ifndef __EMSCRIPTEN__
   if (mode == CLAUSE_STORE_ARCHIVE_MMAP ||
       mode == CLAUSE_STORE_ARCHIVE_FILE) {
-    char path[] = "/tmp/prover9-ancestors-XXXXXX";
-    store->fd = mkstemp(path);
+    store->fd = open_private_temp_file("prover9-ancestors-XXXXXX");
     if (store->fd < 0) {
       store->mode = CLAUSE_STORE_ARCHIVE_OFF;
       return FALSE;
     }
-    unlink(path);  /* backing is private and is removed on close/crash */
     Active_archive_store = store;
     return TRUE;
   }

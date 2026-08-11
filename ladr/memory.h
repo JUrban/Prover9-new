@@ -138,6 +138,11 @@ void safe_free(void *p);
 
 void *safe_realloc(void *p, size_t n);
 
+/* Create and immediately unlink a private temporary file in TMPDIR.  An
+   unset or empty TMPDIR uses /tmp.  The caller owns the returned descriptor;
+   -1 reports creation or unlink failure. */
+int open_private_temp_file(const char *name_template);
+
 void enable_memory_logging(void);
 
 void disable_memory_logging(void);
