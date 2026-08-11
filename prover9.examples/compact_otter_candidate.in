@@ -1,0 +1,28 @@
+% Frozen general compact-indexing candidate.
+%
+% Read this file before a problem with one -f option, for example:
+%   P9_COMPACT_HEAP=1 TMPDIR=/local/p9-archive \
+%     bin/prover9 -f prover9.examples/compact_otter_candidate.in problem.in
+%
+% Keep explicit until the long old-P9 CPU and total-job RAM gates pass.
+
+assign(search_loop,otter).
+assign(passive_store,dense).
+assign(ancestor_store,file).
+assign(hint_index,packed_fast).
+assign(inference_frontier,clauses).
+assign(sos_limit,-1).
+
+set(compact_otter_demodulation).
+set(compact_otter_unit_index).
+set(compact_otter_back_demod_index).
+set(compact_otter_nonunit_index).
+assign(compact_unit_strategy,code_tree).
+assign(compact_back_demod_strategy,mask8).
+set(compact_nonunit_path_filter).
+
+assign(compact_passive_cache,0).
+assign(compact_term_reclaim_kb,2048).
+assign(compact_index_stale_pct,25).
+assign(hint_cache_kb,2048).
+assign(hint_rebuild_scan_ratio,8).

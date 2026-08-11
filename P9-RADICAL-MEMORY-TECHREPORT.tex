@@ -104,7 +104,11 @@ The implementation is on branch \setting{phase5-compact-frontier}.  The
 accepted code commit is \setting{2483a7a49e4e21c54b1692c142b55435eeefe44b};
 the closing audit is commit \setting{ac3f0fe}.  All required Phase-5
 correctness, proof, CPU, memory, checkpoint, and accounting checks passed on the
-current \setting{chat_test}/Osborn problem.
+current \setting{chat_test}/Osborn problem.  Post-Phase-5 generalization work is
+on branch \setting{general-compact-indexing}; its algorithms were frozen at
+\setting{1319fbf} before the short holdout record \setting{2f02610}.  That
+candidate passes the four-category 1000-given training gate and untouched
+300-given holdout prefixes; long acceptance remains open.
 
 \section{Terminology and scope}
 
@@ -806,6 +810,52 @@ present compact representations are small and exact, but retrieval does not
 scale generally.  The corrective implementation and validation program is in
 \setting{P9-GENERAL-COMPACT-INDEXING-PLAN.md}.
 
+\subsection{General-indexing implementation and bounded gates}
+
+The corrective plan has now been implemented on
+\setting{general-compact-indexing}.  The product composition traverses the
+existing shared compact term tree as a code tree for unit unification and
+instance retrieval; rejects impossible nonunit subsumption candidates with
+fixed rigid-path and repeated-variable summaries before archive
+reconstruction; replaces the CHAT-shaped packed-hint cache with a complete
+variable-length-key ring bounded by \setting{hint_cache_kb}; and rebuilds stale
+hint postings from measured wasted scans as well as stored garbage.
+High-frequency hint clocks use deterministic 1/64 sampling instead of two
+resource-usage system calls per query.  Established exact routines remain
+authoritative for every logical answer.
+
+Several structurally stronger backward-demodulation prototypes were rejected
+rather than fitted to Osborn.  A wider signature exceeded the 20\% byte gate at
+300 givens.  A full exact code tree reduced 1000-given posting work by orders of
+magnitude but grew the back index 57.44\% and slowed the run 4.77\%.  Length,
+hot-root, and exact-position admission policies did not buy enough work
+reduction per byte.  The candidate therefore retains the complete
+\setting{mask8} fallback.
+
+At the frozen 1000-given training gate, paired runs preserved all
+given/generated/kept and rule counters on Osborn, the extracted 11,000-given
+input, nil3, and generalized-Bol.  Nonunit exact tests changed from
+74,374 to 5,167; 75,171 to 5,142; 9,478 to 812; and 9,265 to 827,
+respectively.  Archive materializations on the two rewrite-heavy cases fell
+from 56,286 to 1,255 and from 56,120 to 1,069.  Nonunit-index growth was 7.21\%
+there and 1.35--1.43\% on the no-demodulation cases.  The worst CPU increase
+was 2.72\%, and peak RSS changed by at most 128\,KiB.
+
+Commit \setting{1319fbf} froze the candidate before the four declared holdouts
+were opened.  At 300 givens all eight paired runs had identical logical
+boundaries.  In aggregate, nonunit exact tests fell from 14,986 to 1,730
+($-88.46\%$) and archive materializations from 2,123 to 706 ($-66.75\%$) for
+0.79\% nonunit-index growth.  Candidate/control user-CPU geometric mean was
+0.986, the worst increase was 5.18\%, and RSS differed by at most 128\,KiB.
+No parameter was tuned from these results.  Commands, per-case tables, hashes,
+option meanings, and the checked-in candidate configuration are in
+\setting{benchmarks/compact-generalization/README.md}.
+
+This closes the bounded implementation and short holdout phase, not the
+radical production gate.  The 1000-given holdout tier and controlled
+11,000-given, Osborn, AAPERM, and multi-million-passive runs remain for a
+suitable host with cgroup accounting.
+
 \subsection{Expected saving on very large AIM runs}
 
 For problems where reproducing the old selected-clause order matters, compact
@@ -1019,17 +1069,21 @@ for debugging and side-by-side prefix comparisons, not as a proof replacement.
 
 \subsection{Archive location and measurement}
 
-Current source hard-codes \setting{/tmp} in both archive constructors and does
-not consult \setting{TMPDIR}.  It creates and immediately unlinks either a
-\setting{/tmp/prover9-ancestors-XXXXXX} or
-\setting{/tmp/prover9-passive-XXXXXX} file.  Unlinking removes the directory
-name but not the contents while Prover9 holds the file open.  The file is
-visible only through \setting{/proc/PID/fd} and disappears on exit.  Ensure that the
-filesystem containing \setting{/tmp} has enough space.
+Current source creates both archive files in \setting{TMPDIR}, using
+\setting{/tmp} only when the variable is unset or empty.  An explicitly bad
+directory is an initialization error rather than a silent fallback.  The
+\setting{prover9-ancestors-XXXXXX} and
+\setting{prover9-passive-XXXXXX} files are unlinked immediately.  Unlinking
+removes the directory name but not the contents while Prover9 holds the file
+open.  The files are visible through \setting{/proc/PID/fd} and disappear on
+exit or forced termination.
 
 Logical size, allocated blocks, and residency can be inspected with
 \setting{readlink}, \setting{stat -L}, \setting{du -hL}, and
-\setting{/proc/PID/smaps}.  Changing \setting{TMPDIR} currently has no effect.
+\setting{/proc/PID/smaps}.  The last applies to an mmap backend; the recommended
+explicit-file backend has no whole-file mapping, so charged file cache must be
+read from the cgroup.  A long run can use, for example,
+\setting{TMPDIR=/local/p9-archive}.
 
 When claiming total job RAM rather than process RSS, also record cgroup-v2
 \setting{memory.peak} and the file-cache fields in \setting{memory.stat}.
@@ -1054,15 +1108,15 @@ slower than ordinary Prover9.  Parameter tuning is not an adequate response:
 unit conflict and backward demodulation still traverse 19.190 billion exact
 candidates and 21.500 billion posting groups, respectively.
 
-The first priority is the phased work in
-\setting{P9-GENERAL-COMPACT-INDEXING-PLAN.md}: per-operation attribution and
-candidate distributions; selective unit retrieval; exact-path backward-demod
-traversal; fewer nonunit and archive materializations; and packed-hint
-maintenance validated on a frozen training/holdout split.  Each component must
-pass candidate, CPU, RAM, and proof/search-trace gates before becoming default.
-Afterward compare ordinary indexes/full bodies, compact indexes/full bodies,
-and complete file-backed mode.  Use \setting{P9_COMPACT_HEAP=1}, external
-RSS/PSS, and cgroup page-cache accounting.
+That phased implementation is complete through the four-category 1000-given
+training gate and untouched 300-given holdout prefixes.  Selective unit
+retrieval, nonunit pre-materialization rejection, byte-bounded general hint
+caching, stale-work maintenance, and lower-overhead clocks passed.  Several
+backward-demodulation replacements failed their byte/work gates and remain
+diagnostic.  The candidate stays explicit until the long gates pass.  Next
+compare ordinary indexes/full bodies, compact indexes/full bodies, and complete
+file-backed mode with \setting{P9_COMPACT_HEAP=1}, external RSS/PSS, and cgroup
+page-cache accounting.
 
 \subsection{Multi-million-SOS validation}
 
@@ -1138,8 +1192,9 @@ jobs can discover proofs or hints, followed by a smaller number of compact-
 OTTER proof-producing reruns.  Evaluate solved problems per machine-day and
 verified proofs per GiB.
 
-Operational work should honor \setting{TMPDIR} or add an archive-directory
-option, check free space, expose the archive's open-file number and path,
+Operational work should check free space and expose the resolved archive
+directory and open-file number directly (the stores now honor
+\setting{TMPDIR}),
 collect cgroup-v2
 counters, record hashes and external time automatically, test the required RSS
 upper limit across platforms, and publish option incompatibilities.
@@ -1159,6 +1214,8 @@ The detailed engineering records supporting this synthesis are
 \setting{P9-PHASE5-ACCEPTANCE-AUDIT.md},
 \setting{P9-PHASE5-COMPACT-FRONTIER-PLAN.md},
 \setting{P9-CHAT-TEST-REPORT.md},
+\setting{P9-GENERAL-COMPACT-INDEXING-PLAN.md},
+\setting{benchmarks/compact-generalization/README.md},
 \setting{P9-RADICAL-RAM-REPORT.md},
 \setting{P9-DISCOUNT-WALDMEISTER-PLAN.md},
 \setting{P9-COLLECTIVE-SCHEDULER-PLAN.md},
@@ -1203,9 +1260,11 @@ shows that this CPU conclusion does not generalize: current compact OTTER is
 The literal 80--90\% target is not yet a universal measured claim.  The
 accepted proof saves 76.85\%; the current large-profile run reports 76.84\%
 but is too slow, used no compact allocator policy, and did not charge the
-cgroup's cached file data.  The next decisive evidence must follow the
-general-purpose indexing plan's frozen training and holdout gates, with
-controlled 11,000-given and multi-million-SOS AIM runs.
+cgroup's cached file data.  The general-purpose indexing candidate now passes
+its frozen 1000-given training and 300-given short-holdout gates without
+post-hoc tuning.  The next decisive evidence is the remaining 1000-given
+holdout tier followed by controlled 11,000-given and multi-million-SOS AIM
+runs.
 
 \begin{thebibliography}{12}
 

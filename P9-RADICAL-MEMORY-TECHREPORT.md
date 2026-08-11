@@ -4,13 +4,19 @@
 
 **Technical report, 11 August 2026**
 
-**Implementation branch:** `phase5-compact-frontier`
+**Accepted implementation branch:** `phase5-compact-frontier`
+
+**General-indexing candidate branch:** `general-compact-indexing`; algorithms
+frozen at `1319fbf`, short holdout record at `2f02610`
 
 **Accepted code:** `2483a7a49e4e21c54b1692c142b55435eeefe44b` plus audit
 commit `ac3f0fe`
 
 **Status:** all required Phase-5 correctness, proof, CPU, memory, checkpoint,
-and accounting checks passed on the current `chat_test`/Osborn problem
+and accounting checks passed on the current `chat_test`/Osborn problem.  The
+general-indexing candidate additionally passes its four-category 1,000-given
+training gate and untouched 300-given holdout prefixes; long acceptance remains
+open.
 
 This Markdown file is the reviewable primary report.  The standalone LaTeX
 companion is [`P9-RADICAL-MEMORY-TECHREPORT.tex`](P9-RADICAL-MEMORY-TECHREPORT.tex).
@@ -1005,7 +1011,56 @@ their retrieval algorithms do not scale generally.  The implementation plan
 for structurally selective, operation-specific indexes and training/holdout
 validation is [`P9-GENERAL-COMPACT-INDEXING-PLAN.md`](P9-GENERAL-COMPACT-INDEXING-PLAN.md).
 
-### 7.5 How much memory should be expected on the largest AIM runs?
+### 7.5 General-indexing implementation and bounded promotion gates
+
+The corrective plan has now been implemented on `general-compact-indexing`.
+The product composition uses the existing shared compact term tree as a code
+tree for unit unification and instance retrieval; safely rejects impossible
+nonunit subsumption candidates with fixed rigid-path and repeated-variable
+summaries before archive reconstruction; replaces the CHAT-shaped packed-hint
+cache with a complete variable-length-key ring bounded by `hint_cache_kb`; and
+rebuilds stale hint postings from measured wasted scans as well as stored
+garbage.  High-frequency hint clocks use deterministic 1/64 sampling rather
+than two resource-usage system calls per query.  None of these filters decides
+a logical answer: the established exact routines remain authoritative.
+
+Several attractive prototypes were deliberately rejected rather than fitted
+to Osborn.  A wider backward-demodulation signature exceeded the 20% index-byte
+gate at 300 givens.  A full exact code tree reduced 1,000-given posting work by
+orders of magnitude but grew the back index 57.44% and slowed the run 4.77%.
+Length, hot-root, and exact-position admission policies did not buy enough
+general work reduction per byte.  The candidate therefore retains the complete
+`mask8` backward-demodulation fallback.  These failures are important evidence
+that the final composition is a bounded multi-workload policy rather than a
+single-problem collection of constants.
+
+At the frozen 1,000-given training gate, paired control/candidate runs preserved
+all given/generated/kept and rule counters on Osborn, the extracted 11,000-given
+input, nil3, and generalized-Bol.  Nonunit exact tests changed respectively
+from 74,374 to 5,167; 75,171 to 5,142; 9,478 to 812; and 9,265 to 827.
+Archive materializations on the two rewrite-heavy cases fell from 56,286 to
+1,255 and from 56,120 to 1,069.  Nonunit-index growth was 7.21% on those cases
+and 1.35--1.43% on the no-demodulation cases.  The worst paired CPU increase
+was 2.72%, and peak RSS changed by at most 128 KiB.
+
+Commit `1319fbf` froze the algorithms before the four declared holdouts were
+opened.  At 300 givens all eight control/candidate runs had identical logical
+boundaries.  In aggregate, nonunit exact tests fell from 14,986 to 1,730
+(-88.46%) and archive materializations from 2,123 to 706 (-66.75%) for 0.79%
+nonunit-index growth.  The candidate/control user-CPU geometric mean was 0.986;
+the worst increase was 5.18%, and RSS differed by at most 128 KiB.  No
+parameter was changed from these results.  Exact commands, per-case tables,
+digests, option meanings, and the checked-in candidate configuration are in
+[`benchmarks/compact-generalization/README.md`](benchmarks/compact-generalization/README.md).
+
+This closes the bounded implementation and short holdout phase, not the
+radical production gate.  The 1,000-given holdout tier and controlled
+11,000-given, Osborn, AAPERM, and multi-million-passive comparisons still need
+a suitable host and cgroup accounting.  The old/new runner was repaired and
+dry-tested with the historical binary, but no new long-run CPU or total-job RAM
+claim is made here.
+
+### 7.6 How much memory should be expected on the largest AIM runs?
 
 There are now two answers, because the amount of RAM grows with different
 parts of the search in the two architectures.
@@ -1267,14 +1322,15 @@ comparisons; it is not a substitute for the full-hint proof experiment.
 
 ### 9.5 Disk backing and `/proc`
 
-The current source hard-codes `/tmp` in both places that create archive files.
-It does
-**not** consult `TMPDIR`.  It creates either
-`/tmp/prover9-ancestors-XXXXXX` or `/tmp/prover9-passive-XXXXXX` and unlinks the
-name immediately.  “Unlinking” removes the directory name but does not delete
-the contents while Prover9 still holds the file open.  The file therefore
-appears as `(deleted)` through the process file descriptors and is finally
-removed when the process exits.
+Current source creates both archive files in `TMPDIR`, falling back to `/tmp`
+only when that variable is unset or empty.  An explicitly invalid or
+unwritable `TMPDIR` is an initialization error; it does not silently put a
+large archive on another filesystem.  The files are named
+`prover9-ancestors-XXXXXX` and `prover9-passive-XXXXXX` and are unlinked
+immediately.  “Unlinking” removes the directory name but does not delete the
+contents while Prover9 still holds the file open.  Each file therefore appears
+as `(deleted)` through the process file descriptors and is finally removed
+when the process exits or is killed.
 
 Find it with:
 
@@ -1284,9 +1340,8 @@ for fd in /proc/PID/fd/*; do
 done
 ```
 
-Then distinguish three quantities: the logical file length, the disk blocks
-actually allocated to the file, and the subset of mapped pages currently in
-physical RAM:
+Then distinguish the logical file length, disk blocks actually allocated, and
+RAM charged for its pages:
 
 ```sh
 stat -Lc 'logical=%s bytes, blocks=%b, block-size=%B' /proc/PID/fd/FD
@@ -1297,13 +1352,12 @@ awk '/prover9-(passive|ancestors).*deleted/ {show=1} \
 ```
 
 Replace `PID` by Prover9's process number and `FD` by the open-file number found
-by the first loop.
-
-Because the location is currently fixed, `/tmp` itself must be on a local
-filesystem with enough free disk space.  On the previously examined host it
-was part of the 937-GB root filesystem, not `/dev/shm`.  Changing `TMPDIR`
-would not move it.  Making the directory configurable is listed as future
-work.
+by the first loop.  The `smaps` query applies to an `mmap` backend.  The
+recommended `file` backend uses bounded `pread`/`pwrite` buffers and therefore
+has no whole-file process mapping; use cgroup `memory.stat` to measure charged
+file cache.  On the previously examined host, `/tmp` was part of the 937-GB
+root filesystem, while `/local` had 4.0 TB free.  A long run can now select the
+latter with, for example, `TMPDIR=/local/p9-archive`.
 
 ### 9.6 Interpreting a comparison
 
@@ -1344,13 +1398,15 @@ slower than ordinary Prover9.  Parameter tuning alone is not an adequate
 response: unit conflict and backward demodulation still traverse 19.190 billion
 exact candidates and 21.500 billion posting groups, respectively.
 
-The highest-priority work is therefore the phased implementation in
-[`P9-GENERAL-COMPACT-INDEXING-PLAN.md`](P9-GENERAL-COMPACT-INDEXING-PLAN.md):
-per-operation attribution and candidate distributions; structurally selective
-unit retrieval; exact-path backward-demodulation traversal; fewer nonunit and
-archive materializations; and a packed-hint maintenance policy validated on a
-frozen training/holdout split.  Each component must pass candidate, CPU, RAM,
-and proof/search-trace gates before it becomes the default.
+That phased implementation is now complete through the four-category
+1,000-given training gate and untouched 300-given holdout prefixes.  Selective
+unit retrieval, nonunit pre-materialization rejection, byte-bounded general
+hint caching, stale-work maintenance, and low-overhead clocks passed; several
+backward-demodulation replacements failed their byte/work gates and remain
+diagnostic.  The exact algorithms, rejected prototypes, and evidence are in
+[`P9-GENERAL-COMPACT-INDEXING-PLAN.md`](P9-GENERAL-COMPACT-INDEXING-PLAN.md)
+and the benchmark README.  The candidate remains explicit until long gates
+pass.
 
 After those gates, rerun the same three configurations: ordinary OTTER/FPA/full
 bodies; full bodies with compact indexes, to isolate retrieval CPU from archive
@@ -1494,7 +1550,8 @@ not by the success of one particular search path.
 
 Smaller but important product tasks are:
 
-- honor `TMPDIR` or add an explicit `archive_directory` option;
+- report the resolved archive directory and open descriptor directly in
+  diagnostic output, supplementing the implemented `TMPDIR` control;
 - fail early on insufficient disk space and report the backing filesystem;
 - expose the archive's open-file number and path before unlinking when
   diagnostics are requested;
@@ -1543,6 +1600,8 @@ The detailed engineering records supporting this synthesis are:
 - [`P9-PHASE5-ACCEPTANCE-AUDIT.md`](P9-PHASE5-ACCEPTANCE-AUDIT.md);
 - [`P9-PHASE5-COMPACT-FRONTIER-PLAN.md`](P9-PHASE5-COMPACT-FRONTIER-PLAN.md);
 - [`P9-CHAT-TEST-REPORT.md`](P9-CHAT-TEST-REPORT.md);
+- [`P9-GENERAL-COMPACT-INDEXING-PLAN.md`](P9-GENERAL-COMPACT-INDEXING-PLAN.md)
+  and [`benchmarks/compact-generalization/README.md`](benchmarks/compact-generalization/README.md);
 - [`P9-RADICAL-RAM-REPORT.md`](P9-RADICAL-RAM-REPORT.md);
 - [`P9-DISCOUNT-WALDMEISTER-PLAN.md`](P9-DISCOUNT-WALDMEISTER-PLAN.md);
 - [`P9-COLLECTIVE-SCHEDULER-PLAN.md`](P9-COLLECTIVE-SCHEDULER-PLAN.md);
@@ -1596,11 +1655,13 @@ slower there despite a 76.84% lower embedded peak-RSS diagnostic.
 The literal 80--90% whole-process target is not yet a universal measured claim:
 the accepted proof saves 76.85%; the current large-profile run reports 76.84%
 but is too slow, used no compact allocator policy, and did not charge the
-cgroup's cached file data.  The next decisive evidence must come after the
-general-purpose indexing plan passes its frozen training and holdout gates,
-followed by controlled 11,000-given and multi-million-SOS AIM runs.  Those runs
-must distinguish index speed and search behavior from the already solved
-problem of keeping every passive clause as a complete in-memory C object.
+cgroup's cached file data.  The general-purpose indexing candidate now passes
+its frozen 1,000-given training and 300-given short-holdout gates without
+post-hoc tuning.  The next decisive evidence is therefore the remaining
+1,000-given holdout tier followed by controlled 11,000-given and
+multi-million-SOS AIM runs.  Those runs must distinguish index speed and search
+behavior from the already solved problem of keeping every passive clause as a
+complete in-memory C object.
 
 ## References
 

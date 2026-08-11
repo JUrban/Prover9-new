@@ -79,6 +79,88 @@ paths.  A subset failure is a safe pre-materialization rejection; collisions
 only retain extra candidates, and ordinary exact subsumption remains the final
 authority.
 
+## Running the frozen product candidate
+
+The current candidate is intentionally explicit rather than a changed default.
+For an ordinary Prover9 input, replace conflicting experimental assignments and
+use [`prover9.examples/compact_otter_candidate.in`](../../prover9.examples/compact_otter_candidate.in),
+which contains this option block:
+
+```text
+assign(search_loop,otter).
+assign(passive_store,dense).
+assign(ancestor_store,file).
+assign(hint_index,packed_fast).
+assign(inference_frontier,clauses).
+assign(sos_limit,-1).
+
+set(compact_otter_demodulation).
+set(compact_otter_unit_index).
+set(compact_otter_back_demod_index).
+set(compact_otter_nonunit_index).
+assign(compact_unit_strategy,code_tree).
+assign(compact_back_demod_strategy,mask8).
+set(compact_nonunit_path_filter).
+
+assign(compact_passive_cache,0).
+assign(compact_term_reclaim_kb,2048).
+assign(compact_index_stale_pct,25).
+assign(hint_cache_kb,2048).
+assign(hint_rebuild_scan_ratio,8).
+```
+
+This is compact OTTER: it preserves OTTER's eager inference/contraction order.
+It is not the DISCOUNT/collective scheduler and should not be combined with
+`search_loop=discount` or `inference_frontier=collective` for an old-search-path
+comparison.  `mask8` is deliberate: the more selective backward-demodulation
+tree and position prototypes failed the frozen 1,000-given byte/CPU gates, so
+the complete bounded fallback remains the candidate policy.  A zero
+`hint_cache_kb` disables the speed cache without affecting matching answers; a
+zero `hint_rebuild_scan_ratio` disables only the observed-work rebuild trigger,
+not the original storage-volume trigger.
+
+Put the archive on a large local filesystem by setting `TMPDIR` before starting
+Prover9.  The archive is opened and unlinked immediately, so its space is
+released automatically when the process exits or is killed; while the process
+is running it is visible through `/proc/PID/fd` on Linux.  For example:
+
+```sh
+mkdir -p /local/p9-archive /local/p9-results
+TMPDIR=/local/p9-archive P9_COMPACT_HEAP=1 \
+  bin/prover9 -f prover9.examples/compact_otter_candidate.in /path/to/problem.in \
+  > /local/p9-results/problem.out 2> /local/p9-results/problem.err
+```
+
+Use the matrix for reproducible old/new comparisons on a manifest case.  Start
+with a bounded prefix:
+
+```sh
+P9_MATRIX_OLD_PROVER=/project/Prover9-old-LADR-2026-6A/bin/prover9 \
+P9_MATRIX_CASES='osborn-chat' \
+P9_MATRIX_VARIANTS='old_p9 compact_dense_file_code_tree_nonunit_path' \
+P9_MATRIX_MAX_GIVEN=300 \
+P9_MATRIX_MAX_SECONDS=600 \
+P9_MATRIX_MAX_MEGS=4096 \
+P9_MATRIX_WALL_SECONDS=660 \
+  test.src/compact_generalization_matrix.sh /local/p9-results/osborn-300
+```
+
+After that succeeds, a suitable high-RAM host can run a full comparison by
+using `P9_MATRIX_MAX_GIVEN=-1`, a finite multi-hour/day CPU and wall limit, and
+an output directory on the large local filesystem.  Use case
+`chat-new-11k` for the extracted large input; holdout cases additionally
+require `P9_MATRIX_ALLOW_HOLDOUT=1`.  The runner keeps new-only hint options out
+of `old_p9` inputs; an actual old-binary Osborn dry run reached the same
+101-given boundary as the candidate (20.85/9.00 user seconds and
+175,488/90,420 KiB RSS).  This validates the comparison path, not long-run
+performance.
+
+`summary.tsv` and `/usr/bin/time -v` report process peak RSS.  The radical RAM
+gate also requires PSS, archive logical/disk bytes, and the cgroup's charged
+file cache.  Do not add the archive's full logical length to RSS, and do not
+ignore cached archive pages: report those components separately and use the
+cgroup total as the final job-memory measure.
+
 `P9_MATRIX_CLOCKS=0` disables high-frequency CPU clocks while retaining the
 logical work counters and external `/usr/bin/time` measurement.  Use it only
 as a paired instrumentation-overhead diagnostic; operation-level time fields
