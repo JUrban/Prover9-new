@@ -58,13 +58,13 @@ large-memory host close the acceptance gate.
 For the trajectory-sensitive Osborn proof, Phase 5 now provides a second
 product mode: eager compact OTTER.  It reaches the same 2,945-given boundary
 with the same 7,051-clause proof length and exactly replays the current
-full-body packed-fast control.  It takes
-715.10 user seconds and peaks at 127,548 KiB versus old P9's 550,400 KiB.
-That is a measured **76.83% whole-process reduction (4.32x smaller)** while
-being 6.6% faster.  This trajectory-sensitive problem has a large fixed
-88,494-hint floor, so it does not quite reach the report's 80% planning case;
-the much larger passive-dominated AIM searches remain the workloads where the
-80–95% forecast is expected to apply.
+full-body packed-fast control.  It takes 754.78 user seconds and peaks at
+127,420 KiB versus old P9's 550,400 KiB.
+That is a measured **76.85% whole-process reduction (4.32x smaller)** while
+being 1.42% faster in user CPU.  This trajectory-sensitive problem has a
+large fixed 88,494-hint floor, so it does not quite reach the report's 80%
+planning case; the much larger passive-dominated AIM searches remain the
+workloads where the 80–95% forecast is expected to apply.
 
 ## 1. What was wrong with the old architecture
 
@@ -412,9 +412,10 @@ and has SHA-256
 The archived FPA run generated and kept two additional `other` clauses, so
 its later raw IDs and some independent proof-line order differ; its given,
 inference-rule, SOS, demodulator, and proof-length boundaries agree.
-It takes 715.10 user seconds and 13:35.67 wall time.  External peak RSS is
-127,548 KiB, passing the 128,000-KiB hard gate by 452 KiB; frozen terminal PSS
-is 112,834 KiB.
+It takes 754.78 user seconds and 14:19.48 wall time.  External peak RSS is
+127,420 KiB, passing the 128,000-KiB hard gate by 580 KiB; frozen terminal PSS
+is 112,809 KiB.  The current measured binary SHA-256 is
+`78b5ef4b2e53fc5ae2ab81cc46e6455213128e8ac083d6fb11259ad7b1339a6b`.
 
 The final transient controls matter for long runs: retained shared terms are
 rebased through unlinked files with a bounded radix sorter, materialized
@@ -424,6 +425,12 @@ terminal PSS.  The 84,404,096-byte ancestor file is disk backing, not resident
 memory.  Because the peak-gate margin is narrow and libc behavior can vary,
 remeasure `/usr/bin/time -v` RSS on a deployment host rather than relying on
 Prover9's historical `Megabytes` line.
+
+The final checkpoint audit preserves exact reporting as well as continuation
+semantics.  Dead pre-elimination disabled clauses with ID 0 remain omitted
+from checkpoint bodies, but their count is saved as metadata.  A full-hint
+checkpoint at Given 100 resumes to the same 300-given event hash and every
+terminal population, including `Disabled=1,183`; all 22 integrity checks pass.
 
 ### 4.4 Tighter-memory and legacy-order experiments
 
@@ -814,29 +821,37 @@ Important implementation and documentation files are:
 - [`test.src/discount_loop_test.sh`](test.src/discount_loop_test.sh)
 - [`test.src/hint_index_trace_test.sh`](test.src/hint_index_trace_test.sh)
 - [`test.src/hint_checkpoint_test.sh`](test.src/hint_checkpoint_test.sh)
+- [`test.src/compact_otter_audit_test.sh`](test.src/compact_otter_audit_test.sh)
+- [`test.src/compact_otter_checkpoint_test.sh`](test.src/compact_otter_checkpoint_test.sh)
 - [`ladr/hint_postings.c`](ladr/hint_postings.c)
 - [`ladr/hints.c`](ladr/hints.c)
+- [`provers.src/compact_rewrite.c`](provers.src/compact_rewrite.c)
+- [`provers.src/compact_unit_index.c`](provers.src/compact_unit_index.c)
+- [`provers.src/compact_back_demod.c`](provers.src/compact_back_demod.c)
+- [`provers.src/compact_feature_index.c`](provers.src/compact_feature_index.c)
 - [`P9-BETTER-PACKED-PLAN.md`](P9-BETTER-PACKED-PLAN.md)
 - [`P9-COLLECTIVE-SCHEDULER-PLAN.md`](P9-COLLECTIVE-SCHEDULER-PLAN.md)
 - [`P9-COLLECTIVE-SCHEDULER-BASELINES.md`](P9-COLLECTIVE-SCHEDULER-BASELINES.md)
 - [`P9-DISCOUNT-WALDMEISTER-PLAN.md`](P9-DISCOUNT-WALDMEISTER-PLAN.md)
 - [`P9-MEMORY-RESULTS.md`](P9-MEMORY-RESULTS.md)
+- [`P9-PHASE5-COMPACT-FRONTIER-PLAN.md`](P9-PHASE5-COMPACT-FRONTIER-PLAN.md)
+- [`P9-PHASE5-ACCEPTANCE-AUDIT.md`](P9-PHASE5-ACCEPTANCE-AUDIT.md)
 - [`Checkpoint-Format-Spec.txt`](Checkpoint-Format-Spec.txt)
 
 ## 9. Conclusion
 
 The work does more than shrink clauses by a few percent.  It removes the
 architectural requirement that millions of passive conclusions be resident,
-fully materialized, and indexed.  The measured short prefixes demonstrate
-correct ownership boundaries, exact materialized hint behavior, bounded
-frontiers, deterministic restart, and dramatic SOS-count reductions.  The
-remaining uncertainty is the whole-search trajectory and fixed/active tail,
-not whether the dominant passive store still grows without a bound.
+fully materialized, and indexed.  The current exact-replay product closes the
+whole-proof trajectory, restart, CPU, RSS, and accounting gates: it proves
+Osborn at the accepted 2,945-given boundary with 76.85% less whole-process RAM
+and slightly less user CPU than old P9.
 
-For operational planning today, assume **80–95% less total RAM**, use **90%**
-as the midpoint, retain the old OTTER mode for compatibility comparisons, and
-perform the final long-run acceptance campaign before changing production
-defaults.
+For compatibility-sensitive equational work, eager compact OTTER is now the
+measured default candidate; retain full/FPA OTTER as the raw-output control.
+For much larger passive-dominated AIM searches, the DISCOUNT/collective mode
+still offers the stronger asymptotic bound, and **80–95% less total RAM**
+remains the planning range that those long production runs must validate.
 
 ## References
 
@@ -846,3 +861,4 @@ defaults.
 3. [`P9-MEMORY-RESULTS.md`](P9-MEMORY-RESULTS.md), bounded baseline and component measurements.
 4. [`P9-DISCOUNT-WALDMEISTER-PLAN.md`](P9-DISCOUNT-WALDMEISTER-PLAN.md), design contract, implementation log,
    and acceptance gates.
+5. [`P9-PHASE5-ACCEPTANCE-AUDIT.md`](P9-PHASE5-ACCEPTANCE-AUDIT.md), current-binary gate-by-gate evidence.

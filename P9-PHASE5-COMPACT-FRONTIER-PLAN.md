@@ -34,32 +34,34 @@ part of the measured product boundary, not an input assignment.
 
 ## Final Phase-5 acceptance (2026-08-11)
 
-Phase 5 is accepted at commit `dcbfc5d`.  The final run in
-`/project/phase5-results/phase5-final-proof-accepted` reaches the historical
-given/proof boundary and exactly replays the current full-body `packed_fast`
-OTTER control:
+Phase 5 is accepted at code commit `2483a7a`.  The completion-audit run in
+`/project/phase5-results/phase5-completion-audit/final-proof-current` reaches
+the historical given/proof boundary and exactly replays the current full-body
+`packed_fast` OTTER control:
 
 | Measurement | Old P9 OTTER | Accepted compact OTTER | Result |
 |---|---:|---:|---:|
 | Given | 2,945 | 2,945 | same proof boundary |
 | Generated / Kept | 8,248,034 / 272,789 | 8,248,032 / 272,787 | two fewer `other` clauses |
 | SOS / Demodulators | 131,001 / 109,987 | same | exact |
-| External user CPU | 765.69 s | 715.10 s | 6.6% faster |
-| Wall time | — | 13:35.67 | below 18 min |
-| External peak RSS | 550,400 KiB | 127,548 KiB | 76.83% less; 4.32x smaller |
-| Frozen terminal PSS | — | 112,834 KiB | steady state |
+| External user CPU | 765.69 s | 754.78 s | 1.42% faster |
+| Wall time | 14:16.20 | 14:19.48 | below 18 min |
+| External peak RSS | 550,400 KiB | 127,420 KiB | 76.85% less; 4.32x smaller |
+| Frozen terminal PSS | — | 112,809 KiB | steady state |
 
 `prooftrans parents_only` accepts both runs and emits 7,051 proof clauses
 with 3,231 new hints.  The compact run's normalized 7,059-line section is
 byte-identical to the accepted full-body `packed_fast` reference and has SHA-256
 `9d7c9a12894c1c11ede6aeae08d1cec658ccee66a47fb9663859347a5413fd07`.
+The measured current binary has SHA-256
+`78b5ef4b2e53fc5ae2ab81cc46e6455213128e8ac083d6fb11259ad7b1339a6b`.
 It is not raw-byte-identical to the archived FPA output: two fewer generated
 and retained `other` clauses shift later IDs and reorder some independent
 proof steps.  The inference-rule totals, SOS and demodulator populations,
 given boundary, proof length, and proof success agree.  Exact 300- and
 1,000-given event/state comparisons use the current full-body `packed_fast`
 control, so the representation change itself remains isolated.
-The run passes the 128,000-KiB hard peak gate by 452 KiB.  It does not pass
+The run passes the 128,000-KiB hard peak gate by 580 KiB.  It does not pass
 the optional 115-MiB peak stretch target, and the narrow hard-gate margin
 should be stated when transferring the binary to another libc or machine.
 
@@ -70,12 +72,20 @@ radix sorter.  All 24 materialized back-demod rebuilds stream stable IDs in
 bytes each (2,228,224 bytes); its final hit rate is 35.08%, and profiles wider
 than eight exact keys take the unchanged authoritative intersection path.
 
-Frozen terminal accounting names 111,996,283 resident bytes (106.81 MiB):
+Frozen terminal accounting names 111,970,683 resident bytes (106.78 MiB):
 the four compact indexes, shared term pool, dense selector, packed hint
 index/bodies, ancestor and clause-ID handles, reserved P9 slabs, and non-anon
-process pages.  Against 112,834-KiB PSS (110.19 MiB), this explains **96.93%**
+process pages.  Against 112,809-KiB PSS (110.17 MiB), this explains **96.93%**
 of resident memory.  The 84,404,096-byte ancestor file is logical backing,
 not RAM, and is therefore reported separately.
+
+The completion audit also closes the file-checkpoint state gate.  Format 3
+continues to omit dead pre-elimination clauses with ID 0, but now records
+their count as metadata.  At the 300-given full-hint boundary, uninterrupted
+and checkpoint/resume runs have byte-identical 132,567-event traces (SHA-256
+`bc38f369ef02271d9b8a00db0cd01a6ba8f890e9608e0abd947de68f763322aa`),
+all terminal populations including `Disabled=1,183` agree, and all 22
+checkpoint integrity checks pass.  No omitted scratch-clause body is retained.
 
 `search_loop=otter` without all four authoritative compact flags remains the
 unchanged compatibility reference.  OTTER `passive_store=dense` fails at
@@ -648,8 +658,8 @@ bytes (5.50 MiB) at both CHAT boundaries.  The 300-given oracle retains all
 terminal state, reduces current RSS from 80,284 to 73,540 KiB, and improves
 user CPU from 92.62 to 87.26 seconds.  Dedicated preview, hint trace,
 checkpoint, collective scheduler, hint-postings, and compact audit tests all
-pass.  Full-proof RSS remains to be measured before counting the saving at
-the acceptance boundary.
+pass.  At that revision, full-proof RSS had not yet been measured, so the
+saving was not counted at the acceptance boundary.
 
 The full packed-cleanup proof reaches the exact 2,945-given state, and all
 7,051 normalized proof clauses are byte-identical to the accepted proof.
@@ -659,7 +669,8 @@ old OTTER's 550,400 KiB, while user CPU is only 1.012 times the accepted
 786.23-second file-backed boundary.  The result still exceeds the 125-MiB
 gate by 42,968 KiB.  A two-second sample peaks at 166,512 KiB and therefore
 also confirms that the external maximum includes a shorter allocation or
-rebuild transient.  The packed cleanup is accepted, but Phase 5 remains open.
+rebuild transient.  The packed cleanup was accepted, but Phase 5 remained
+open at that revision.
 
 To avoid guessing at the remaining 42-MiB gap, statistics now report Linux
 `smaps_rollup` classes and glibc `mallinfo2` arena/mmap state.  At the exact

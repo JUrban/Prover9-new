@@ -2,7 +2,7 @@
 
 > **Phase-5 update (2026-08-11):** eager compact OTTER is now the recommended
 > proof/replay mode.  It reaches the old 2,945-given boundary with a valid
-> 7,051-clause proof at 127,548 KiB peak RSS and 715.10 user seconds.  The
+> 7,051-clause proof at 127,420 KiB peak RSS and 754.78 user seconds.  The
 > complete configuration is in `P9-RADICAL-RAM-REPORT.md` section 4.3 and the
 > acceptance history is in `P9-PHASE5-COMPACT-FRONTIER-PLAN.md`.  The older
 > scheduler and hint-index measurements below remain useful historical
@@ -192,9 +192,9 @@ The final file-backed run is the proof-producing radical-memory result:
 | Mode | Result | Given | Generated | Kept | User CPU | Wall | Peak RSS |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | Old P9 OTTER/FPA | proof | 2,945 | 8,248,034 | 272,789 | 765.69 s | 14:16.20 | 550,400 KiB |
-| Compact OTTER/packed-fast | proof | 2,945 | 8,248,032 | 272,787 | 715.10 s | 13:35.67 | 127,548 KiB |
+| Compact OTTER/packed-fast | proof | 2,945 | 8,248,032 | 272,787 | 754.78 s | 14:19.48 | 127,420 KiB |
 
-This is **76.83% less whole-process peak RSS (4.32x smaller)** and 6.6%
+This is **76.85% less whole-process peak RSS (4.32x smaller)** and 1.42%
 less user CPU.  Both proofs have 7,051 clauses and 3,231 new hints, and both
 are accepted by `prooftrans parents_only`.  The compact run exactly replays
 the current full-body `packed_fast` OTTER control.  It is not raw-byte-identical
@@ -203,9 +203,9 @@ which shifts later IDs and changes the order of some independent proof lines.
 The compact proof's normalized SHA-256 is
 `9d7c9a12894c1c11ede6aeae08d1cec658ccee66a47fb9663859347a5413fd07`.
 The measured binary SHA-256 is
-`07996d988203c8b4951db3b95cd111aae60e774cb7d0eede6b7104a05c09a161`.
+`78b5ef4b2e53fc5ae2ab81cc46e6455213128e8ac083d6fb11259ad7b1339a6b`.
 
-The run passes the 128,000-KiB hard RSS gate by only 452 KiB, so the exact
+The run passes the 128,000-KiB hard RSS gate by only 580 KiB, so the exact
 number should be remeasured after changing libc or machine.  Frozen terminal
 accounting explains 96.93% of PSS; the 84,404,096-byte ancestor file is disk
 backing, not RAM.
