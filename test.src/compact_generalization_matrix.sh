@@ -120,6 +120,7 @@ prepare_input()
 
 emit_common()
 {
+  variant=$1
   echo 'clear(print_gen).'
   echo 'clear(print_kept).'
   echo 'clear(print_given).'
@@ -135,8 +136,10 @@ emit_common()
   echo "assign(max_given,$max_given)."
   echo "assign(max_seconds,$max_seconds)."
   echo "assign(max_megs,$max_megs)."
-  echo "assign(hint_cache_kb,$hint_cache_kb)."
-  echo "assign(hint_rebuild_scan_ratio,$hint_rebuild_scan_ratio)."
+  if test "$variant" != old_p9; then
+    echo "assign(hint_cache_kb,$hint_cache_kb)."
+    echo "assign(hint_rebuild_scan_ratio,$hint_rebuild_scan_ratio)."
+  fi
 }
 
 emit_variant()
@@ -318,7 +321,7 @@ run_one()
   input=$output_dir/$run_id.in
   base=$output_dir/inputs/$case_id.base.in
   {
-    emit_common
+    emit_common "$variant"
     emit_variant "$variant"
     awk '{ print }' "$base"
     case "$variant" in
