@@ -97,6 +97,13 @@ static unsigned Better_intersection_capacity = 0;
 static unsigned long long Better_posting_rebuilds = 0;
 static unsigned long long Better_posting_rebuild_refs = 0;
 static unsigned long long Better_posting_rebuild_materializations = 0;
+static unsigned long long Better_stale_scans = 0;
+static unsigned long long Better_stale_scans_since_rebuild = 0;
+static unsigned long long Better_stale_scan_peak = 0;
+static unsigned long long Better_storage_rebuild_triggers = 0;
+static unsigned long long Better_scan_rebuild_triggers = 0;
+static unsigned Better_rebuild_scan_ratio = 8;
+static Clock Better_rebuild_clock = NULL;
 
 static unsigned long long *Better_key_scratch = NULL;
 static unsigned Better_key_scratch_count = 0;
@@ -243,6 +250,21 @@ static const char *Packed_operation_names[PACKED_HINT_OPERATIONS] = {
   "equivalence", "match", "flipped_match", "back_demod"
 };
 
+static void better_maybe_rebuild_postings(void);
+
+static void packed_note_stale_skip(enum packed_hint_operation op)
+{
+  Packed_operation_stats[op].stale_skips++;
+  if (Better_packed_index && !Hint_preview_active) {
+    if (Better_stale_scans != ULLONG_MAX)
+      Better_stale_scans++;
+    if (Better_stale_scans_since_rebuild != ULLONG_MAX)
+      Better_stale_scans_since_rebuild++;
+    if (Better_stale_scans_since_rebuild > Better_stale_scan_peak)
+      Better_stale_scan_peak = Better_stale_scans_since_rebuild;
+  }
+}
+
 static unsigned packed_candidate_bucket(unsigned n)
 {
   if (n == 0) return 0;
@@ -275,8 +297,12 @@ static void packed_operation_candidates(enum packed_hint_operation op)
 
 static void packed_operation_end(enum packed_hint_operation op)
 {
-  if (!Hint_preview_active)
+  if (!Hint_preview_active) {
     clock_stop(Packed_operation_stats[op].clock);
+    if (Better_packed_index &&
+        Better_stale_scans_since_rebuild >= BETTER_REBUILD_STALE_MIN)
+      better_maybe_rebuild_postings();
+  }
 }
 
 static void packed_reserve_hints(unsigned id)
@@ -557,7 +583,7 @@ static void packed_collect_term_candidates(Term t, int sign,
     for (id = 1; id < Packed_hint_capacity; id++) {
       Packed_operation_stats[op].posting_candidates++;
       if (!Packed_hint_active[id])
-        Packed_operation_stats[op].stale_skips++;
+        packed_note_stale_skip(op);
       packed_add_candidate(id);
     }
     return;
@@ -579,7 +605,7 @@ static void packed_collect_term_candidates(Term t, int sign,
                                          Packed_hint_neg_features[id];
       Packed_operation_stats[op].posting_candidates++;
       if (id >= Packed_hint_capacity || !Packed_hint_active[id])
-        Packed_operation_stats[op].stale_skips++;
+        packed_note_stale_skip(op);
       if (id < Packed_hint_capacity && (stored & mask) == mask)
         packed_add_candidate(id);
       bits &= bits - 1;
@@ -606,7 +632,7 @@ static void packed_finish_candidates(BOOL include_anyconst,
         Packed_operation_stats[op].posting_candidates++;
         if (id == 0 || id >= Packed_hint_capacity ||
             !Packed_hint_active[id] || !Packed_hint_anyconst[id])
-          Packed_operation_stats[op].stale_skips++;
+          packed_note_stale_skip(op);
         packed_add_candidate(id);
       }
     }
@@ -615,7 +641,7 @@ static void packed_finish_candidates(BOOL include_anyconst,
         if (Packed_hint_anyconst[id]) {
           Packed_operation_stats[op].posting_candidates++;
           if (!Packed_hint_active[id])
-            Packed_operation_stats[op].stale_skips++;
+            packed_note_stale_skip(op);
           packed_add_candidate(id);
         }
       }
@@ -975,12 +1001,14 @@ static void better_rebuild_postings(void)
   better_equivalence_rebuild(Better_equivalence_bucket_capacity);
   Better_posting_rebuilds++;
   Better_posting_rebuild_refs += live + equivalence_live;
+  Better_stale_scans_since_rebuild = 0;
 }
 
 static void better_maybe_rebuild_postings(void)
 {
   struct hint_postings_stats stats;
-  unsigned long long stale;
+  unsigned long long stale, live, scan_threshold;
+  BOOL storage_trigger, scan_trigger;
   hint_postings_get_stats(Better_postings, &stats);
   if (stats.references < Better_feature_live_count ||
       Better_equivalence_reference_count < Better_equivalence_live_count)
@@ -988,10 +1016,29 @@ static void better_maybe_rebuild_postings(void)
   stale = stats.references - Better_feature_live_count;
   stale += Better_equivalence_reference_count -
            Better_equivalence_live_count;
-  if (stale >= BETTER_REBUILD_STALE_MIN &&
-      stale > (Better_feature_live_count +
-               Better_equivalence_live_count) / 4)
+  live = (unsigned long long) Packed_hint_capacity +
+         Better_feature_live_count + Better_equivalence_live_count +
+         Better_anyconst_live_count;
+  if (Better_rebuild_scan_ratio == 0)
+    scan_threshold = ULLONG_MAX;
+  else if (live > ULLONG_MAX / Better_rebuild_scan_ratio)
+    scan_threshold = ULLONG_MAX;
+  else
+    scan_threshold = live * Better_rebuild_scan_ratio;
+  storage_trigger = stale >= BETTER_REBUILD_STALE_MIN &&
+                    stale > (Better_feature_live_count +
+                             Better_equivalence_live_count) / 4;
+  scan_trigger = Better_rebuild_scan_ratio != 0 && stale != 0 &&
+                 Better_stale_scans_since_rebuild >= scan_threshold;
+  if (storage_trigger || scan_trigger) {
+    if (storage_trigger)
+      Better_storage_rebuild_triggers++;
+    else
+      Better_scan_rebuild_triggers++;
+    clock_start(Better_rebuild_clock);
     better_rebuild_postings();
+    clock_stop(Better_rebuild_clock);
+  }
 }
 
 static void better_deactivate_hint(unsigned id)
@@ -1109,7 +1156,7 @@ static void better_intersect_scratch_candidates(
       if (id == 0 || id >= Packed_hint_capacity ||
           !Packed_hint_active[id] ||
           (exclude_anyconst && Packed_hint_anyconst[id])) {
-        Packed_operation_stats[op].stale_skips++;
+        packed_note_stale_skip(op);
         continue;
       }
       if (!all_features &&
@@ -1421,7 +1468,7 @@ static BOOL fast_dense_collect_candidates(
           !Packed_hint_active[id] ||
           (exclude_anyconst && Packed_hint_anyconst[id])) {
         if (!Hint_preview_active)
-          Packed_operation_stats[op].stale_skips++;
+          packed_note_stale_skip(op);
         continue;
       }
       for (i = 0; i < key_count && keep; i++) {
@@ -1474,7 +1521,7 @@ static BOOL fast_dense_collect_candidates(
             !Packed_hint_active[id] ||
             (exclude_anyconst && Packed_hint_anyconst[id])) {
           if (!Hint_preview_active)
-            Packed_operation_stats[op].stale_skips++;
+            packed_note_stale_skip(op);
         }
         else {
           packed_add_candidate(id);
@@ -1575,6 +1622,7 @@ void init_hints(Uniftype utype,
 		BOOL better_packed_index,
 		BOOL fast_packed_index,
 		unsigned fast_cache_kb,
+		unsigned rebuild_scan_ratio,
 		void (*demod_proc) (Topform, int, int, BOOL, BOOL))
 {
   Bsub_wt_attr = bsub_wt_attr;
@@ -1583,6 +1631,7 @@ void init_hints(Uniftype utype,
   Packed_index = packed_index;
   Better_packed_index = better_packed_index;
   Fast_packed_index = fast_packed_index;
+  Better_rebuild_scan_ratio = rebuild_scan_ratio;
   Demod_proc = demod_proc;
   if (Better_packed_index && !Packed_index)
     fatal_error("init_hints: better packed index requires packed hint bank");
@@ -1590,8 +1639,10 @@ void init_hints(Uniftype utype,
     fatal_error("init_hints: fast packed index requires better packed index");
   if (Fast_packed_index)
     fast_cache_init(fast_cache_kb);
-  if (Better_packed_index)
+  if (Better_packed_index) {
     Better_postings = hint_postings_init();
+    Better_rebuild_clock = clock_init("packed_hint_rebuild");
+  }
   if (packed_index) {
     unsigned i;
     for (i = 0; i < PACKED_HINT_OPERATIONS; i++)
@@ -1656,6 +1707,8 @@ void done_with_hints(void)
   if (Fast_match_cache_keys) safe_free(Fast_match_cache_keys);
   if (Fast_match_cache_key_owners) safe_free(Fast_match_cache_key_owners);
   hint_postings_destroy(Better_postings);
+  if (Better_rebuild_clock != NULL)
+    free_clock(Better_rebuild_clock);
   if (Better_equivalence_buckets) safe_free(Better_equivalence_buckets);
   if (Better_equivalence_references) safe_free(Better_equivalence_references);
   if (Better_anyconst_references) safe_free(Better_anyconst_references);
@@ -1703,6 +1756,11 @@ void done_with_hints(void)
   Preview_key_scratch_count = Preview_key_scratch_capacity = 0;
   Better_posting_rebuilds = Better_posting_rebuild_refs = 0;
   Better_posting_rebuild_materializations = 0;
+  Better_stale_scans = Better_stale_scans_since_rebuild = 0;
+  Better_stale_scan_peak = 0;
+  Better_storage_rebuild_triggers = Better_scan_rebuild_triggers = 0;
+  Better_rebuild_scan_ratio = 8;
+  Better_rebuild_clock = NULL;
   Fast_cache_queries = Fast_cache_eligible = 0;
   Fast_cache_hits = Fast_cache_misses = Fast_cache_stores = 0;
   Fast_cache_key_overflow = Fast_cache_candidate_overflow = 0;
@@ -1884,7 +1942,7 @@ static void better_collect_clause_candidates(
       Packed_operation_stats[op].posting_candidates++;
       if (id == 0 || id >= Packed_hint_capacity ||
           !Packed_hint_active[id])
-        Packed_operation_stats[op].stale_skips++;
+        packed_note_stale_skip(op);
       else
         packed_add_candidate(id);
       position = Better_equivalence_references[position].next;
@@ -2590,7 +2648,7 @@ void back_demod_hints(Topform demod, int type, BOOL lex_order_vars)
       if (hint == NULL || !Packed_hint_active[id] ||
           (MATCH_HINTS_ANYCONST && Packed_hint_anyconst[id])) {
         if (hint == NULL || !Packed_hint_active[id])
-          Packed_operation_stats[op].stale_skips++;
+          packed_note_stale_skip(op);
         continue;
       }
       if (hint->compressed != NULL) {
@@ -2908,6 +2966,15 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             s.dense_keys, s.dense_bit_bytes, s.dense_summary_bytes,
             Better_posting_rebuilds, Better_posting_rebuild_refs,
             Better_posting_rebuild_materializations);
+    fprintf(fp,
+            "Better_packed_maintenance: scan_ratio=%u, "
+            "stale_scans=%llu, since_rebuild=%llu, "
+            "peak_between_rebuilds=%llu, storage_triggers=%llu, "
+            "scan_triggers=%llu, rebuild_seconds=%.3f.\n",
+            Better_rebuild_scan_ratio, Better_stale_scans,
+            Better_stale_scans_since_rebuild, Better_stale_scan_peak,
+            Better_storage_rebuild_triggers, Better_scan_rebuild_triggers,
+            clock_seconds(Better_rebuild_clock));
   }
   if (Fast_packed_index) {
     fprintf(fp,

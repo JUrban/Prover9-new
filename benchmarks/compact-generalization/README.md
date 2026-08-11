@@ -426,6 +426,38 @@ for the long training checkpoint because the historical run had a much larger
 working set; users can now make the RAM/CPU tradeoff explicitly rather than
 recompile a CHAT-derived table.
 
+Long-lived packed indexes now also rebuild from measured wasted lookup work.
+The previous maintenance rule considered only the number of stale references
+stored in the index.  That misses a small stale posting traversed millions of
+times: `chat_test.new.out3.gz`, for example, reports about 832 million stale
+skips even though the stored garbage was not large enough to force timely
+maintenance.  Every authoritative packed operation now charges skipped stale
+IDs to a saturating counter.  Once at least 65,536 skips have accumulated, a
+rebuild is allowed when the skipped work reaches
+`hint_rebuild_scan_ratio` times a conservative live-index cost estimate.  The
+default ratio is 8; zero disables this observed-work trigger while retaining
+the original storage-volume trigger.
+
+The scale estimate includes the stable-ID table capacity, live structural and
+equivalence references, and live `_AnyConst` references.  It therefore adapts
+to the actual hint population instead of a problem name, symbol vocabulary,
+or fixed hint count.  Rebuilding remains safe: stale references only admit
+extra exact checks, and the rebuilt index is produced from all active hints,
+materializing at most one compressed hint at a time.  Read-only scheduler
+previews do not charge the counter or trigger maintenance.  The
+`Better_packed_maintenance` statistics line reports the configured ratio,
+total and current stale scans, the peak between rebuilds, trigger reasons, and
+rebuild CPU time.  The focused mutation test crosses the production floor,
+observes a scan-triggered rebuild, and verifies that no stale feature
+references remain.
+
+For controlled comparisons, the matrix accepts
+`P9_MATRIX_HINT_REBUILD_SCAN_RATIO` and records it in `run.conf`.  A useful
+attribution pair is the default value 8 versus 0.  Do not interpret a bounded
+run with zero triggers as evidence for either setting; this control matters
+only after hint expiry or back-demodulation has created stale postings and
+subsequent queries repeatedly encounter them.
+
 Setting `P9_MATRIX_ALLOW_HOLDOUT=1` is required even when a holdout case is
 named explicitly.  Do this only for a recorded phase-promotion commit, never
 while selecting features or thresholds.

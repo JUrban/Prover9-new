@@ -22,7 +22,7 @@ static void run_case(BOOL packed, BOOL better, BOOL fast, int bsub)
 
   hint->attributes = set_int_attribute(hint->attributes, bsub, 7);
   init_hints(ORDINARY_UNIF, bsub, FALSE, FALSE, 2, packed, better, fast, 2048,
-             NULL);
+             8, NULL);
   index_hint(hint);
   epoch_before = hint_state_epoch();
   packed_hint_index_stats(&nb, &rb, &tb, &checks_before);
@@ -76,7 +76,7 @@ static void run_variable_cache_case(int bsub)
 
   hint->attributes = set_int_attribute(hint->attributes, bsub, 5);
   init_hints(ORDINARY_UNIF, bsub, FALSE, FALSE, 2,
-             TRUE, TRUE, TRUE, 64, NULL);
+             TRUE, TRUE, TRUE, 64, 8, NULL);
   index_hint(hint);
   adjust_weight_with_hints(first, FALSE, FALSE);
   adjust_weight_with_hints(second, FALSE, FALSE);
@@ -113,6 +113,62 @@ static void run_variable_cache_case(int bsub)
   delete_clause(hint);
 }
 
+static void run_observed_stale_rebuild_case(int bsub)
+{
+  Topform stale = parse_clause_from_string("stale_probe(f(a)).");
+  Topform candidate = parse_clause_from_string("stale_probe(f(a)).");
+  unsigned long long rebuilds = 0, scan_triggers = 0;
+  BOOL saw_maintenance = FALSE, saw_clean_postings = FALSE;
+  FILE *stats;
+  char line[4096];
+  unsigned i;
+
+  init_hints(ORDINARY_UNIF, bsub, FALSE, FALSE, 2,
+             TRUE, TRUE, FALSE, 0, 1, NULL);
+  index_hint(stale);
+  unindex_hint(stale);
+
+  /* The production floor intentionally avoids rebuild churn on short-lived
+     garbage.  Cross it with a tiny one-posting query so this test exercises
+     the observed-work trigger rather than the storage-volume trigger. */
+  for (i = 0; i < 66000; i++)
+    adjust_weight_with_hints(candidate, FALSE, FALSE);
+
+  stats = tmpfile();
+  CHECK(stats != NULL, "open posting-maintenance statistics stream");
+  if (stats != NULL) {
+    fprint_packed_hint_operation_stats(stats);
+    rewind(stats);
+    while (fgets(line, sizeof(line), stats) != NULL) {
+      char *field;
+      if (strstr(line, "Better_packed_postings:") != NULL) {
+        field = strstr(line, "stale_features=");
+        saw_clean_postings = field != NULL &&
+          strtoull(field + strlen("stale_features="), NULL, 10) == 0;
+        field = strstr(line, "rebuilds=");
+        if (field != NULL)
+          rebuilds = strtoull(field + strlen("rebuilds="), NULL, 10);
+      }
+      if (strstr(line, "Better_packed_maintenance:") != NULL) {
+        saw_maintenance = TRUE;
+        field = strstr(line, "scan_triggers=");
+        if (field != NULL)
+          scan_triggers = strtoull(field + strlen("scan_triggers="),
+                                   NULL, 10);
+      }
+    }
+    fclose(stats);
+  }
+  CHECK(saw_maintenance, "report observed-work maintenance statistics");
+  CHECK(scan_triggers > 0 && rebuilds > 0,
+        "observed stale scans trigger a posting rebuild");
+  CHECK(saw_clean_postings, "posting rebuild removes stale references");
+
+  done_with_hints();
+  delete_clause(candidate);
+  delete_clause(stale);
+}
+
 int main(void)
 {
   init_standard_ladr();
@@ -123,6 +179,7 @@ int main(void)
   run_case(TRUE, TRUE, FALSE, bsub);
   run_case(TRUE, TRUE, TRUE, bsub);
   run_variable_cache_case(bsub);
+  run_observed_stale_rebuild_case(bsub);
   if (Failures != 0) {
     fprintf(stderr, "hint_preview_test: %d failure(s)\n", Failures);
     return 1;
