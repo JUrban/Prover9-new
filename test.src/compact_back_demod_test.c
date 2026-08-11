@@ -259,8 +259,9 @@ int main(void)
     CHECK(tree_stats.tree_nodes > 0 && tree_stats.tree_terminals > 0 &&
           tree_stats.tree_queries == 1 &&
           tree_stats.posting_groups_examined == 1 &&
-          tree_stats.occurrences_examined == 1,
-          "code tree reaches only the structurally matching occurrence");
+          tree_stats.occurrences_examined == 1 &&
+          tree_stats.occurrence_stream_bytes == 0,
+          "code tree matches one terminal without occurrence storage");
     CHECK(compact_back_demod_remove(
             signature_index, deep_clauses[DEEP_TARGET]->id),
           "remove deep signature answer");

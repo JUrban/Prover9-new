@@ -142,6 +142,39 @@ rejects a full occurrence tree as the production representation; the next
 prototype must compress terminal postings and/or admit the tree only where a
 complete, budgeted structural partition can beat the compact fallback.
 
+The follow-up representation removes the raw prototype's per-occurrence
+stream.  Complete serialized terms are prefix-free, so a 16-byte node can use
+one flagged word for either its first child or terminal posting list.  Each
+16-byte terminal stores a representative token offset for one exact match,
+one inline clause ID, and a tail.  A terminal's second clause ID is encoded
+directly in the otherwise unused tail-head word; only a third clause allocates
+a posting block.  Later IDs are absolute varints, avoiding persistent
+last-record state.  One direct match of the representative enforces repeated
+variables for every clause in the terminal; the ordinary rewritability test
+remains the final search-level authority.
+
+On Osborn at 100 given, the packed exact tree returned the same 278 candidates,
+examined 428 posting groups and 1,430 representative terminals, and used
+246,080 bytes versus 209,224 for `mask8` (+17.62%).  User CPU was 7.95 seconds
+in that tree run; nearby paired controls ranged from 8.31 to 8.70 seconds, so
+the safe claim is no measured slowdown rather than a speedup.  At 300 given it
+returned the same 1,148 candidates, reduced posting groups from 371,423 to
+1,958 (189.69x), examined 9,126 representative terminals instead of 304,611
+occurrence offsets, and used 671,128 bytes versus 560,773 (+19.68%).  User CPU
+was 16.44 seconds versus 16.50 in the recorded control.  Thus it passes the
+frozen 20% metadata gate and the two-orders-of-magnitude posting-group portion
+at 300.  Representative terminal matches fall 33.38x rather than 100x relative
+to old occurrence-offset examinations, so Phase 3 is not yet promoted;
+`code_tree` remains explicit pending the other training cases and the
+1,000-given gate.
+
+A tested alternative that added a second full inline word to every terminal
+was rejected: at 300 given it increased bytes from 696,008 to 710,016 because
+sparse terminals outnumbered saved blocks.  The flagged direct-second encoding
+gets the sparse benefit without taxing singleton terminals.  The no-demodulation
+nil3/mbol controls remained inert at 100 given, and x2 retained the same proof
+and candidate answers under legacy audit.
+
 Setting `P9_MATRIX_ALLOW_HOLDOUT=1` is required even when a holdout case is
 named explicitly.  Do this only for a recorded phase-promotion commit, never
 while selecting features or thresholds.
