@@ -109,7 +109,15 @@ On the corrected 100-given Osborn pair, signature32 reduced examined groups
 from 18,566 to 2,687 and occurrences from 14,762 to 2,139 with the same 278
 candidates.  Back-index bytes rose from 209,144 to 248,520 (18.83%), within
 the 20% replacement gate; whole-process RSS was unchanged within measurement
-noise.  This remains an explicit prototype pending the 300/1,000-given gates.
+noise.  The next 300-given gate rejected the prototype: it reduced examined
+groups from 371,423 to 22,746 and occurrences from 304,611 to 18,093, with the
+same 1,148 candidates, but back-index bytes rose from 560,773 to 750,485
+(33.83%).  User CPU changed from 16.50 to 16.15 seconds, which is too small to
+interpret as a stable speedup at this boundary.  The extra exact-signature
+buckets scale faster than the work they replace, so `signature32` remains a
+diagnostic strategy rather than a production candidate.  Phase 3 must replace
+the mask/signature directory with compact structural retrieval instead of
+adding a wider per-occurrence signature.
 
 Setting `P9_MATRIX_ALLOW_HOLDOUT=1` is required even when a holdout case is
 named explicitly.  Do this only for a recorded phase-promotion commit, never
