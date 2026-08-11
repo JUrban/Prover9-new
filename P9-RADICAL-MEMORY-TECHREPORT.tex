@@ -86,7 +86,17 @@ same 7051 proof clauses and 3231 new hints, in 754.78 user seconds and
 127,420\kib peak RSS.  This is a measured 76.85\% whole-process reduction
 (4.32 times smaller) with 1.42\% less user CPU.  Memory counters captured at
 termination explain 96.93\% of process memory after shared pages are
-apportioned among their users.
+apportioned among their users.  A larger 11,000-given comparison now includes
+ordinary Prover9, the early compact implementation, and the current file-backed
+implementation.  The current compact run lowered its terminal peak-RSS
+diagnostic from 3,603,800 to 834,780\kib (76.84\%, or 4.32 times smaller), but
+used 12,201.61 rather than 5,110.38 user seconds (2.388 times the CPU).  It is
+19.43\% faster than the early compact run, yet still performs 19.190 billion
+unit-conflict exact tests and examines 21.500 billion backward-demodulation
+posting groups.  Thus the no-CPU-penalty result applies only to the
+2945-given acceptance proof.  The large run also had allocator compact policy
+disabled, so a controlled allocator and cgroup rerun remains necessary for a
+total-job memory claim; its CPU diagnosis is already decisive.
 \end{abstract}
 
 \paragraph{Implementation status.}
@@ -730,82 +740,83 @@ event log and terminal state.  Serializing clause bodies alone was therefore
 insufficient: the early indexes were about 43 MB while the archive was only
 about 8 MB.
 
-\subsection{Newly supplied 11,000-given comparison}
+\subsection{The 11,000-given three-run comparison}
 
-The new files \setting{bob/chat_test.new.out1.gz} and
-\setting{bob/chat_test.new.out2.gz} use a different, larger profile with 18,306
-hints.  Both prove after about 11,000 givens.  The first is ordinary OTTER with
-full bodies in RAM and FPA hints.  The second keeps the OTTER loop but uses small
-passive records, packed-fast hints, four clause-number-based indexes, and a
-mapped ancestor file.  It predates the later work that made lookup more
-selective, rebuilt indexes a fixed number of records at a time, used explicit
-file reads, fixed cache sizes, and freed temporary arrays earlier.
+The files \setting{bob/chat_test.new.out1.gz},
+\setting{bob/chat_test.new.out2.gz}, and
+\setting{bob/chat_test.new.out3.gz} use a different, larger profile with 18,306
+hints.  All prove after about 11,000 givens.  The first is ordinary OTTER with
+full bodies in RAM and FPA hints.  The second is the early compact build with a
+mapped ancestor file.  The third uses the current shared-term and compact-index
+implementation, explicit file reads, bounded rebuild buffers, and the final
+packed-hint cache.  It reproduces the second run's terminal search exactly.
 
 The compressed output SHA-256 values are
 \hashval{fd7a07f0a8ec1feafacb2672b664a393368ce728d0918c5e2708c7919d4a4406}
 for \setting{out1} and
 \hashval{049a44cb9871fb28c3cf829011fb102dc390d5101ed28677dd7ced15ac5d64f2}
-for \setting{out2}.
+for \setting{out2}.  The \setting{out3} SHA-256 is
+\hashval{2b7ab154323801bd541962d2314a23a5861def3fde53271330e4ebd2a54d340e}.
 
 \begin{center}
-\small
-\begin{tabular}{lrrr}
+\scriptsize
+\begin{tabular}{lrrrr}
 \toprule
-Measure & Ordinary & Early compact & Change/ratio \\
+Measure & Ordinary & Early compact & Current compact & Current/ordinary \\
 \midrule
-Given & 11,368 & 11,369 & $+1$ \\
-Generated & 253,338,893 & 253,302,129 & $-36,764$ \\
-Kept & 2,216,836 & 2,207,014 & $-9,822$ \\
-SOS & 1,454,686 & 1,520,775 & $+4.5\%$ \\
-Demodulators & 1,297,818 & 1,362,847 & $+5.0\%$ \\
-Disabled & 739,073 & 662,309 & $-10.4\%$ \\
-Internal \setting{Megabytes} & 3,354.28 & 355.86 & $-89.39\%$ \\
-Terminal \setting{RSS_kb peak} & 3,603,800 KiB & 1,492,656 KiB & $-58.58\%$ \\
-User CPU & 5,110.38 s & 15,144.10 s & $2.963\times$ \\
-Wall & 5,131 s & 15,178 s & $2.958\times$ \\
+Given & 11,368 & 11,369 & 11,369 & $+1$ \\
+Generated & 253,338,893 & 253,302,129 & 253,302,129 & $-36,764$ \\
+Kept & 2,216,836 & 2,207,014 & 2,207,014 & $-9,822$ \\
+SOS & 1,454,686 & 1,520,775 & 1,520,775 & $+4.5\%$ \\
+Demodulators & 1,297,818 & 1,362,847 & 1,362,847 & $+5.0\%$ \\
+Disabled & 739,073 & 662,309 & 662,309 & $-10.4\%$ \\
+Internal MB & 3,354.28 & 355.86 & 341.44 & $-89.82\%$ \\
+Peak RSS KiB & 3,603,800 & 1,492,656 & 834,780 & $-76.84\%$ \\
+User CPU s & 5,110.38 & 15,144.10 & 12,201.61 & $2.388\times$ \\
+Wall s & 5,131 & 15,178 & 12,272 & $2.392\times$ \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-This is valuable negative evidence: representation size fell radically but CPU
-nearly tripled.  The smaller indexes returned enormous sets of possible
-answers.  Some 19.190 billion opposite-sign unit pairs reached the exact
-unit-conflict test.  Backward demodulation examined 24.503 billion groups of
-indexed occurrences and 21.342 billion individual symbol occurrences, with
-494.44 million additional checks of nearby symbols along a term path.  Both
-runs made about 6.10 billion demodulation attempts.
+The current implementation is 19.43\% faster and reports 44.07\% lower peak RSS
+than the early compact run.  It nevertheless takes 2.388 times ordinary CPU.
+Its counters localize the remaining scaling failures: 19.190 billion
+unit-conflict exact tests across 4.207 million queries; 21.500 billion backward
+demodulation posting groups and 20.331 billion symbol occurrences for only
+695,309 exact candidates; 21.010 million compact nonunit forward exact tests;
+21.055 million ancestor materializations and 42.222 million file reads; and
+2.380 billion packed-hint match postings with 832.323 million stale skips.
+The packed-hint cache avoided another 2.630 billion postings, and demodulation
+made about 6.10 billion attempts.
 
-The two searches followed similar but not identical clause sequences.  The
-files contain no external
-\setting{/usr/bin/time} result, but their terminal \setting{Allocator_slabs}
-lines contain a process peak-RSS diagnostic: 3,603,800 versus 1,492,656 KiB,
-or 58.58\% lower (2.414 times smaller).  This is the appropriate process-RSS
-comparison for the pair.  Because the compact run used a mapped file, its
-355.86-MiB internal counter omits mapped pages that the operating system
-includes in the 1,492,656-KiB RSS.  Thus 89.39\% is only the reduction in
-Prover9's incomplete internal count; 58.58\% is the process-RSS reduction.
-Neither number charges cached file blocks outside the process mapping, so a
-cgroup total is still needed.  Both describe an obsolete slow build, not the
-accepted code.
+The ordinary and compact searches are similar but not identical; the two
+compact searches have identical terminal counts.  These files contain no
+external \setting{/usr/bin/time} result, but their terminal
+\setting{Allocator_slabs} lines contain a process peak-RSS diagnostic.
+\setting{out3} lowers it by 76.84\% versus ordinary Prover9.  Its 341.44-MiB
+internal counter does not charge cached file blocks outside the process, so a
+cgroup total is still needed.  It also reports
+\setting{compact_policy=disabled}, meaning \setting{P9_COMPACT_HEAP=1} was not
+active.  The memory result should therefore be repeated under controlled
+allocator policy.  Neither limitation explains the measured 2.388-times CPU
+ratio or the billions of candidates.
 
-The final implementation attacks the exposed causes by recording more selective
-nearby-symbol information, keeping each clause's occurrences together, storing
-differences between increasing numbers, and reading only 4096 archived clause
-numbers at a time during rebuild.  It also shares term encodings, removes dead
-encodings while updating every index that refers to them, and reads archive
-records explicitly.  The
-exact 11,000-given input should now be rerun with the accepted binary.
+This overturns the optimistic extrapolation from the 2945-given proof.  The
+present compact representations are small and exact, but retrieval does not
+scale generally.  The corrective implementation and validation program is in
+\setting{P9-GENERAL-COMPACT-INDEXING-PLAN.md}.
 
 \subsection{Expected saving on very large AIM runs}
 
 For problems where reproducing the old selected-clause order matters, compact
 OTTER's accepted measurement is 76.85\%
 less peak RSS.  The fixed 88,494-hint collection and 131,001-clause final SOS make a
-literal 80\% difficult on this particular proof.  The obsolete 11,000-given
-run reports 58.58\% less peak RSS, suggesting that savings can grow when
-millions of passive clauses and their indexes dominate.  It should not be
-extrapolated quantitatively because it used an obsolete build, a different
-input profile, and no cgroup accounting for cached file data.
+literal 80\% difficult on this particular proof.  The obsolete run and current
+11,000-given rerun show that savings can grow when millions of passive clauses
+and their indexes dominate.  The current run reports 76.84\% less peak RSS.  It
+should not be extrapolated quantitatively because it uses a different input
+profile, had allocator compact policy disabled, and has no cgroup accounting
+for cached file data.
 
 For bounded collective DISCOUNT the intended large-search behavior is stronger:
 
@@ -832,9 +843,10 @@ The defensible statements are:
 \begin{itemize}
   \item accepted: 76.85\% lower external peak RSS at the same proof boundary
         without CPU penalty;
-  \item intermediate indication: at 11,000 givens, 58.58\% lower self-reported
-        peak RSS and 89.39\% lower internally accounted memory, from an obsolete
-        2.963-times-slower mmap build without cgroup page-cache accounting;
+  \item current large-profile diagnosis: at 11,000 givens, 76.84\% lower
+        self-reported peak RSS and 89.82\% lower internally accounted memory,
+        but 2.388 times the CPU, allocator compact policy disabled, and no
+        cgroup page-cache accounting;
   \item conditional forecast: 80--95\% less total RAM on much larger
         AIM searches with millions of passive clauses, awaiting current-binary
         RSS/PSS,
@@ -1033,15 +1045,24 @@ also insufficient because it includes immediately rejected clauses.
 
 \section{Future work}
 
-\subsection{Current-binary large-profile rerun}
+\subsection{Replace broad compact retrieval with selective indexes}
 
-The first priority is a rerun of the exact 18,306-hint input behind the new
-11,000-given pair, using file backing, the accepted allocator setting, and
-external RSS/PSS.  If possible compare ordinary indexes/full bodies, final
-compact indexes/full bodies, and the complete file-backed mode.  The middle
-case measures index CPU without archive reads; the third adds the cost of
-reading and reconstructing clauses.  This tests whether the final indexes avoid
-the billions of false candidates that made the earlier run 2.963 times slower.
+The current-binary \setting{chat_test.new.out3} run supplies the previously
+missing large-profile result.  It preserves the compact run's terminal search
+and lowers the embedded peak-RSS diagnostic by 76.84\%, but remains 2.388 times
+slower than ordinary Prover9.  Parameter tuning is not an adequate response:
+unit conflict and backward demodulation still traverse 19.190 billion exact
+candidates and 21.500 billion posting groups, respectively.
+
+The first priority is the phased work in
+\setting{P9-GENERAL-COMPACT-INDEXING-PLAN.md}: per-operation attribution and
+candidate distributions; selective unit retrieval; exact-path backward-demod
+traversal; fewer nonunit and archive materializations; and packed-hint
+maintenance validated on a frozen training/holdout split.  Each component must
+pass candidate, CPU, RAM, and proof/search-trace gates before becoming default.
+Afterward compare ordinary indexes/full bodies, compact indexes/full bodies,
+and complete file-backed mode.  Use \setting{P9_COMPACT_HEAP=1}, external
+RSS/PSS, and cgroup page-cache accounting.
 
 \subsection{Multi-million-SOS validation}
 
@@ -1175,13 +1196,16 @@ simplification and hint operations.  Complete passive clauses move to an exact
 disk archive, and smaller indexes refer to them by clause number rather than
 pointer.  The indexes propose possible answers and the old exact routines still
 decide them.  It proves at the same 2945-given boundary with 76.85\% less peak
-RSS and no CPU penalty.
+RSS and no CPU penalty on that acceptance case.  The larger 11,000-given run
+shows that this CPU conclusion does not generalize: current compact OTTER is
+2.388 times slower there despite a 76.84\% lower embedded peak-RSS diagnostic.
 
 The literal 80--90\% target is not yet a universal measured claim.  The
-accepted proof saves 76.85\%; the obsolete slow mmap build saved 58.58\% by its
-terminal peak-RSS diagnostic while its allocator-only counter fell 89.39\%.
-Current-binary 11,000-given and multi-million-SOS runs that measure both
-process memory and cgroup-cached file data are the next decisive experiments.
+accepted proof saves 76.85\%; the current large-profile run reports 76.84\%
+but is too slow, used no compact allocator policy, and did not charge the
+cgroup's cached file data.  The next decisive evidence must follow the
+general-purpose indexing plan's frozen training and holdout gates, with
+controlled 11,000-given and multi-million-SOS AIM runs.
 
 \begin{thebibliography}{12}
 

@@ -89,6 +89,9 @@ compact-frontier-tests: all
 	./test.src/compact_otter_checkpoint_test.sh
 	cd test.src && $(MAKE) cold-passive-store-test compact-id-map-test compact-rewrite-test compact-unit-index-test compact-back-demod-test compact-feature-index-test
 
+compact-generalization-validate:
+	./test.src/validate_compact_generalization_manifest.sh
+
 clean:
 	cd ladr             && $(MAKE) realclean
 	cd apps.src         && $(MAKE) realclean
