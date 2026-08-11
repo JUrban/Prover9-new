@@ -71,6 +71,21 @@ default: at 100 givens it reduced unit-unification exact tests from 5,935 to 53
 on the Osborn training case and from 4,620 to 76 on nil3, but increased the
 reported unit-index bytes by 94% and 29%, respectively.  It establishes a
 selectivity oracle while failing the 20% index-metadata promotion gate.
+The `compact_unit_code_tree`, `compact_full_code_tree`, and
+`compact_dense_file_code_tree` variants instead traverse the already-owned
+radix-compressed unit term tree and allocate no position-posting table.
+The harness emits an explicit strategy assignment for root-scan controls too.
+String-option values enter Prover9's symbol table; omitting the control value
+would shift later problem symbol numbers and change collision rates in the
+legacy 64-bit unit-instance prefilter, making exact-test counts incomparable
+even when ordered generated-clause traces are identical.
+
+In the corrected optimized 100-given matrix, code-tree versus explicit
+root-scan reduced unit-unification exact tests from 5,935 to 11 on Osborn and
+from 4,620 to 3 on nil3.  The paired unit-instance counts and unit-index bytes
+were identical; x2 retained the same 12-given proof.  End-to-end CPU at this
+small boundary remains noise-dominated because unit unification accounts for
+only milliseconds, so larger gates—not this prefix—decide promotion.
 
 Setting `P9_MATRIX_ALLOW_HOLDOUT=1` is required even when a holdout case is
 named explicitly.  Do this only for a recorded phase-promotion commit, never

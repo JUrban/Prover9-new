@@ -142,11 +142,17 @@ emit_variant()
       ;;
     compact_unit_only)
       emit_variant packed_only
+      echo 'assign(compact_unit_strategy,root_scan).'
       echo 'set(compact_otter_unit_index).'
       ;;
     compact_unit_position)
       emit_variant packed_only
       echo 'assign(compact_unit_strategy,position).'
+      echo 'set(compact_otter_unit_index).'
+      ;;
+    compact_unit_code_tree)
+      emit_variant packed_only
+      echo 'assign(compact_unit_strategy,code_tree).'
       echo 'set(compact_otter_unit_index).'
       ;;
     compact_back_only)
@@ -157,7 +163,7 @@ emit_variant()
       emit_variant packed_only
       echo 'set(compact_otter_nonunit_index).'
       ;;
-    compact_full|compact_dense_file|compact_full_position|compact_dense_file_position)
+    compact_full|compact_dense_file|compact_full_position|compact_dense_file_position|compact_full_code_tree|compact_dense_file_code_tree)
       echo 'assign(search_loop,otter).'
       case "$1" in
         compact_dense_file*)
@@ -171,6 +177,8 @@ emit_variant()
       esac
       case "$1" in
         *_position) echo 'assign(compact_unit_strategy,position).' ;;
+        *_code_tree) echo 'assign(compact_unit_strategy,code_tree).' ;;
+        *) echo 'assign(compact_unit_strategy,root_scan).' ;;
       esac
       echo 'assign(hint_index,packed_fast).'
       echo 'assign(inference_frontier,clauses).'

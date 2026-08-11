@@ -100,6 +100,9 @@ struct compact_unit_index {
   unsigned long long position_fallback_queries;
   unsigned long long position_postings_examined;
   unsigned long long position_duplicate_postings;
+  unsigned long long code_tree_queries;
+  unsigned long long code_tree_nodes_examined;
+  unsigned long long code_tree_postings_examined;
   struct compact_query_profile generalization_profile;
   struct compact_query_profile instance_profile;
   struct compact_query_profile unifier_profile;
@@ -726,7 +729,8 @@ void compact_unit_index_set_compaction_stale_pct(unsigned percentage)
 void compact_unit_index_set_strategy(Compact_unit_strategy strategy)
 {
   if (strategy != COMPACT_UNIT_ROOT_SCAN &&
-      strategy != COMPACT_UNIT_POSITION)
+      strategy != COMPACT_UNIT_POSITION &&
+      strategy != COMPACT_UNIT_CODE_TREE)
     fatal_error("compact_unit_index: invalid strategy");
   Unit_strategy = strategy;
 }
@@ -823,6 +827,9 @@ static void compact_unit_index_compact_internal(Compact_unit_index index,
   index->position_fallback_queries = old.position_fallback_queries;
   index->position_postings_examined = old.position_postings_examined;
   index->position_duplicate_postings = old.position_duplicate_postings;
+  index->code_tree_queries = old.code_tree_queries;
+  index->code_tree_nodes_examined = old.code_tree_nodes_examined;
+  index->code_tree_postings_examined = old.code_tree_postings_examined;
   index->generalization_profile = old.generalization_profile;
   index->instance_profile = old.instance_profile;
   index->unifier_profile = old.unifier_profile;
@@ -1351,6 +1358,101 @@ static BOOL resident_unifies_record(Compact_unit_index index, Term query,
   return unify_exprs(&state, resident, token);
 }
 
+static void append_unifier_result(Compact_unit_index index,
+                                  unsigned long long proof_id,
+                                  size_t *found)
+{
+  if (*found == index->result_capacity) {
+    index->result_capacity = grow_capacity(
+      index->result_capacity, sizeof(*index->result_ids),
+      "compact_unit_index: result overflow");
+    index->result_ids = safe_realloc(
+      index->result_ids,
+      index->result_capacity * sizeof(*index->result_ids));
+  }
+  index->result_ids[(*found)++] = proof_id;
+}
+
+/* Traverse the existing radix-compressed term-code tree as a safe unification
+   filter.  Repeated-variable and occurs-check constraints are deliberately
+   deferred to resident_unifies_record(); ignoring them can add candidates but
+   cannot omit an answer.  PENDING is the number of serialized stored-term
+   children still covered by the current resident query variable. */
+static void collect_code_tree_candidates(
+  Compact_unit_index index, uint32_t node, uint32_t query_position,
+  uint32_t query_end, size_t pending, Term query,
+  unsigned long long exclude_id, size_t *found,
+  unsigned long long *visited, unsigned long long *live,
+  unsigned long long *dead)
+{
+  struct cui_node *edge = &index->nodes[node];
+  uint32_t at;
+  uint32_t child;
+
+  (*visited)++;
+  index->code_tree_nodes_examined++;
+  for (at = 0; at < edge->token_length; at++) {
+    int32_t code = index->tokens[edge->token_offset + at];
+    if (pending != 0) {
+      int arity = code < 0 ? 0 : sn_to_arity(code);
+      pending--;
+      if ((size_t) arity > SIZE_MAX - pending)
+        fatal_error("compact_unit_index: code-tree term overflow");
+      pending += (size_t) arity;
+      if (pending == 0) {
+        if (query_position >= query_end)
+          return;
+        query_position = index->query[query_position].end;
+      }
+    }
+    else {
+      Term resident;
+      if (query_position >= query_end)
+        return;
+      resident = index->query[query_position].term;
+      if (code < 0)
+        query_position = index->query[query_position].end;
+      else if (VARIABLE(resident)) {
+        pending = (size_t) sn_to_arity(code);
+        if (pending == 0)
+          query_position = index->query[query_position].end;
+      }
+      else {
+        if (code != SYMNUM(resident))
+          return;
+        query_position++;
+      }
+    }
+  }
+
+  if (query_position == query_end && pending == 0) {
+    uint32_t posting;
+    for (posting = edge->first_posting; posting != CUI_NONE;
+         posting = index->postings[posting].next) {
+      struct cui_record *record =
+        &index->records[index->postings[posting].record];
+      index->code_tree_postings_examined++;
+      if (!record->active) {
+        (*dead)++;
+        continue;
+      }
+      (*live)++;
+      if (record->proof_id == exclude_id)
+        continue;
+      index->unifier_exact_tests++;
+      if (resident_unifies_record(index, query, record))
+        append_unifier_result(index, record->proof_id, found);
+    }
+    return;
+  }
+
+  for (child = edge->first_child; child != CUI_NONE;
+       child = index->nodes[child].next_sibling)
+    collect_code_tree_candidates(index, child, query_position, query_end,
+                                 pending, query, exclude_id, found, visited,
+                                 live, dead);
+}
+
 struct cui_feature_choice {
   uint64_t exact_key;
   unsigned long long score;
@@ -1464,15 +1566,7 @@ static void collect_position_bucket(
       continue;
     index->unifier_exact_tests++;
     if (resident_unifies_record(index, query, record)) {
-      if (*found == index->result_capacity) {
-        index->result_capacity = grow_capacity(
-          index->result_capacity, sizeof(*index->result_ids),
-          "compact_unit_index: result overflow");
-        index->result_ids = safe_realloc(
-          index->result_ids,
-          index->result_capacity * sizeof(*index->result_ids));
-      }
-      index->result_ids[(*found)++] = record->proof_id;
+      append_unifier_result(index, record->proof_id, found);
     }
   }
 }
@@ -1504,7 +1598,20 @@ unsigned long long *compact_unit_unifier_ids(
     return NULL;
   }
   memset(&choice, 0, sizeof(choice));
-  if (index->strategy == COMPACT_UNIT_POSITION) {
+  if (index->strategy == COMPACT_UNIT_CODE_TREE) {
+    size_t query_count = 0;
+    uint32_t child;
+    index->code_tree_queries++;
+    flatten_query(index, query, &query_count);
+    if (query_count > UINT32_MAX)
+      fatal_error("compact_unit_index: code-tree query overflow");
+    for (child = index->nodes[index->roots[sign ? 1 : 0]].first_child;
+         child != CUI_NONE; child = index->nodes[child].next_sibling)
+      collect_code_tree_candidates(
+        index, child, 0, (uint32_t) query_count, 0, query, exclude_id,
+        &found, &visited, &live, &dead);
+  }
+  else if (index->strategy == COMPACT_UNIT_POSITION) {
     size_t key_at;
     index->position_queries++;
     select_unifier_feature(index, query, sign,
@@ -1520,7 +1627,8 @@ unsigned long long *compact_unit_unifier_ids(
           exclude_id, &found, &visited, &live, &dead, &duplicates);
     }
   }
-  if (index->strategy == COMPACT_UNIT_ROOT_SCAN || !choice.found) {
+  if (index->strategy == COMPACT_UNIT_ROOT_SCAN ||
+      (index->strategy == COMPACT_UNIT_POSITION && !choice.found)) {
     if (index->strategy == COMPACT_UNIT_POSITION)
       index->position_fallback_queries++;
     for (i = index->unifier_heads[sign ? 1 : 0][query_root];
@@ -1537,15 +1645,7 @@ unsigned long long *compact_unit_unifier_ids(
         continue;
       index->unifier_exact_tests++;
       if (resident_unifies_record(index, query, record)) {
-        if (found == index->result_capacity) {
-          index->result_capacity = grow_capacity(
-            index->result_capacity, sizeof(*index->result_ids),
-            "compact_unit_index: result overflow");
-          index->result_ids = safe_realloc(
-            index->result_ids,
-            index->result_capacity * sizeof(*index->result_ids));
-        }
-        index->result_ids[found++] = record->proof_id;
+        append_unifier_result(index, record->proof_id, &found);
       }
     }
   }
@@ -1601,6 +1701,9 @@ void compact_unit_index_get_stats(Compact_unit_index index,
   stats->position_fallback_queries = index->position_fallback_queries;
   stats->position_postings_examined = index->position_postings_examined;
   stats->position_duplicate_postings = index->position_duplicate_postings;
+  stats->code_tree_queries = index->code_tree_queries;
+  stats->code_tree_nodes_examined = index->code_tree_nodes_examined;
+  stats->code_tree_postings_examined = index->code_tree_postings_examined;
   stats->feature_items = index->feature_bucket_count == 0 ? 0 :
     index->feature_bucket_count - 1;
   stats->feature_posting_items = index->feature_posting_count == 0 ? 0 :

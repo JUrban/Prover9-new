@@ -2190,9 +2190,10 @@ Prover_options init_prover_options(void)
 				     "dense");
 
   p->compact_unit_strategy =
-    init_stringparm("compact_unit_strategy", 2,
+    init_stringparm("compact_unit_strategy", 3,
                     "root_scan",
-                    "position");
+                    "position",
+                    "code_tree");
 
   p->discount_demodulation =
     init_stringparm("discount_demodulation", 3,
@@ -10690,7 +10691,9 @@ static void configure_search_indexes(void)
     (unsigned) parm(Opt->compact_index_stale_pct));
   compact_unit_index_set_strategy(
     str_ident(stringparm1(Opt->compact_unit_strategy), "position") ?
-      COMPACT_UNIT_POSITION : COMPACT_UNIT_ROOT_SCAN);
+      COMPACT_UNIT_POSITION :
+    str_ident(stringparm1(Opt->compact_unit_strategy), "code_tree") ?
+      COMPACT_UNIT_CODE_TREE : COMPACT_UNIT_ROOT_SCAN);
   configure_compact_back_demod_stale_pct(
     (unsigned) parm(Opt->compact_index_stale_pct));
   configure_compact_unit_term_pool(Compact_terms);

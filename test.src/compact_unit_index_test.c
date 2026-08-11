@@ -134,13 +134,13 @@ int main(void)
 
   {
     enum { FAMILY = 256 };
-    Compact_unit_index root_index, position_index;
-    struct compact_unit_index_stats root_stats, position_stats;
+    Compact_unit_index root_index, position_index, tree_index;
+    struct compact_unit_index_stats root_stats, position_stats, tree_stats;
     Topform *family = safe_malloc(FAMILY * sizeof(*family));
     Topform broad;
     Topform query;
-    unsigned long long *root_ids, *position_ids;
-    size_t root_count, position_count;
+    unsigned long long *root_ids, *position_ids, *tree_ids;
+    size_t root_count, position_count, tree_count;
     char text[128];
     int i;
 
@@ -148,6 +148,8 @@ int main(void)
     root_index = compact_unit_index_init();
     compact_unit_index_set_strategy(COMPACT_UNIT_POSITION);
     position_index = compact_unit_index_init();
+    compact_unit_index_set_strategy(COMPACT_UNIT_CODE_TREE);
+    tree_index = compact_unit_index_init();
     for (i = 0; i < FAMILY; i++) {
       (void) snprintf(text, sizeof(text),
                       "u(f(c%d,g(h(c%d)))).", i, i);
@@ -156,32 +158,48 @@ int main(void)
             "add same-root family to root scan");
       CHECK(compact_unit_index_add(position_index, family[i]),
             "add same-root family to position index");
+      CHECK(compact_unit_index_add(tree_index, family[i]),
+            "add same-root family to code-tree index");
     }
     broad = indexed_unit("u(x).");
     CHECK(compact_unit_index_add(root_index, broad),
           "add variable-cover unit to root scan");
     CHECK(compact_unit_index_add(position_index, broad),
           "add variable-cover unit to position index");
+    CHECK(compact_unit_index_add(tree_index, broad),
+          "add variable-cover unit to code-tree index");
     query = parse_clause_from_string("u(f(c137,g(h(c137)))).");
     root_ids = compact_unit_unifier_ids(
       root_index, query->literals->atom, TRUE, 0, &root_count);
     position_ids = compact_unit_unifier_ids(
       position_index, query->literals->atom, TRUE, 0, &position_count);
-    CHECK(root_count == 2 && position_count == root_count,
-          "position retrieval retains exact and variable-cover answers");
+    tree_ids = compact_unit_unifier_ids(
+      tree_index, query->literals->atom, TRUE, 0, &tree_count);
+    CHECK(root_count == 2 && position_count == root_count &&
+          tree_count == root_count,
+          "selective retrieval retains exact and variable-cover answers");
     CHECK(root_ids != NULL && position_ids != NULL &&
           memcmp(root_ids, position_ids,
+                 root_count * sizeof(*root_ids)) == 0 &&
+          tree_ids != NULL &&
+          memcmp(root_ids, tree_ids,
                  root_count * sizeof(*root_ids)) == 0,
-          "position retrieval preserves canonical answer order");
+          "selective retrieval preserves canonical answer order");
     compact_unit_index_get_stats(root_index, &root_stats);
     compact_unit_index_get_stats(position_index, &position_stats);
+    compact_unit_index_get_stats(tree_index, &tree_stats);
     CHECK(root_stats.unifier_exact_tests == FAMILY + 1 &&
-          position_stats.unifier_exact_tests <= 2,
-          "deep position posting avoids the same-root exact-test scan");
+          position_stats.unifier_exact_tests <= 2 &&
+          tree_stats.unifier_exact_tests <= 2,
+          "deep selective retrieval avoids the same-root exact-test scan");
     CHECK(position_stats.feature_items > 0 &&
           position_stats.feature_posting_items > FAMILY &&
           position_stats.position_fallback_queries == 0,
           "position index records unbounded-depth rigid and variable features");
+    CHECK(tree_stats.code_tree_queries == 1 &&
+          tree_stats.code_tree_postings_examined <= 2 &&
+          tree_stats.feature_bytes == 0,
+          "code-tree retrieval reuses the compact radix tree without features");
     CHECK(compact_unit_index_remove(position_index, family[137]->id),
           "remove a position-index answer");
     compact_unit_index_compact_all_stale(position_index);
@@ -190,16 +208,97 @@ int main(void)
       position_index, query->literals->atom, TRUE, 0, &position_count);
     CHECK(position_count == 1 && position_ids[0] == broad->id,
           "position features survive deletion and forced rebuilding");
+    CHECK(compact_unit_index_remove(tree_index, family[137]->id),
+          "remove a code-tree answer");
+    compact_unit_index_compact_all_stale(tree_index);
+    safe_free(tree_ids);
+    tree_ids = compact_unit_unifier_ids(
+      tree_index, query->literals->atom, TRUE, 0, &tree_count);
+    CHECK(tree_count == 1 && tree_ids[0] == broad->id,
+          "code-tree retrieval survives deletion and forced rebuilding");
 
     safe_free(root_ids);
     safe_free(position_ids);
+    safe_free(tree_ids);
     delete_clause(query);
     compact_unit_index_free(root_index);
     compact_unit_index_free(position_index);
+    compact_unit_index_free(tree_index);
     for (i = 0; i < FAMILY; i++)
       delete_clause(family[i]);
     safe_free(family);
     delete_clause(broad);
+    compact_unit_index_set_strategy(COMPACT_UNIT_ROOT_SCAN);
+  }
+
+  {
+    const char *unit_text[] = {
+      "p(x).", "p(a).", "p(f(x)).", "p(f(a)).",
+      "p(f(x,x)).", "p(f(a,b)).", "p(g(f(a),y)).",
+      "p(g(z,z)).", "p(k(g(a,b),f(c))).", "-p(f(a))."
+    };
+    const char *query_text[] = {
+      "p(x).", "p(a).", "p(b).", "p(f(y)).", "p(f(a)).",
+      "p(f(a,a)).", "p(f(a,b)).", "p(g(w,w)).",
+      "p(g(f(a),b)).", "p(k(g(a,b),f(c))).", "p(k(q,f(c))).",
+      "-p(f(a))."
+    };
+    enum {
+      UNIT_COUNT = sizeof(unit_text) / sizeof(unit_text[0]),
+      QUERY_COUNT = sizeof(query_text) / sizeof(query_text[0])
+    };
+    Compact_unit_index root_index, tree_index;
+    Topform units[UNIT_COUNT];
+    int i, pass;
+
+    compact_unit_index_set_strategy(COMPACT_UNIT_ROOT_SCAN);
+    root_index = compact_unit_index_init();
+    compact_unit_index_set_strategy(COMPACT_UNIT_CODE_TREE);
+    tree_index = compact_unit_index_init();
+    for (i = 0; i < UNIT_COUNT; i++) {
+      units[i] = indexed_unit(unit_text[i]);
+      CHECK(compact_unit_index_add(root_index, units[i]),
+            "add variable-rich differential unit to root scan");
+      CHECK(compact_unit_index_add(tree_index, units[i]),
+            "add variable-rich differential unit to code tree");
+    }
+    for (pass = 0; pass < 2; pass++) {
+      for (i = 0; i < QUERY_COUNT; i++) {
+        Topform query = parse_clause_from_string((char *) query_text[i]);
+        BOOL sign = query->literals->sign;
+        unsigned long long exclude = (i % 3 == 0) ? units[1]->id : 0;
+        unsigned long long *root_ids, *tree_ids;
+        size_t root_count, tree_count;
+        root_ids = compact_unit_unifier_ids(
+          root_index, query->literals->atom, sign, exclude, &root_count);
+        tree_ids = compact_unit_unifier_ids(
+          tree_index, query->literals->atom, sign, exclude, &tree_count);
+        CHECK(root_count == tree_count,
+              "code-tree variable-rich differential count");
+        CHECK(root_count == 0 ||
+              (root_ids != NULL && tree_ids != NULL &&
+               memcmp(root_ids, tree_ids,
+                      root_count * sizeof(*root_ids)) == 0),
+              "code-tree variable-rich differential order");
+        safe_free(root_ids);
+        safe_free(tree_ids);
+        delete_clause(query);
+      }
+      if (pass == 0) {
+        CHECK(compact_unit_index_remove(root_index, units[3]->id) &&
+              compact_unit_index_remove(tree_index, units[3]->id),
+              "remove differential unit from both strategies");
+        CHECK(compact_unit_index_remove(root_index, units[7]->id) &&
+              compact_unit_index_remove(tree_index, units[7]->id),
+              "remove repeated-variable differential unit");
+        compact_unit_index_compact_all_stale(root_index);
+        compact_unit_index_compact_all_stale(tree_index);
+      }
+    }
+    compact_unit_index_free(root_index);
+    compact_unit_index_free(tree_index);
+    for (i = 0; i < UNIT_COUNT; i++)
+      delete_clause(units[i]);
     compact_unit_index_set_strategy(COMPACT_UNIT_ROOT_SCAN);
   }
 

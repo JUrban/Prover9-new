@@ -235,13 +235,17 @@ void fprint_compact_unit_index(FILE *fp)
           "back_queries=%llu, back_exact_tests=%llu, conflict_queries=%llu, "
           "conflict_exact_tests=%llu, position_queries=%llu, "
           "position_fallbacks=%llu, position_postings=%llu, "
-          "position_duplicates=%llu, node_items=%llu, posting_items=%llu, "
+          "position_duplicates=%llu, code_tree_queries=%llu, "
+          "code_tree_nodes=%llu, code_tree_postings=%llu, "
+          "node_items=%llu, posting_items=%llu, "
           "feature_items=%llu, feature_posting_items=%llu, "
           "nodes=%llu, postings=%llu, "
           "records=%llu, roots=%llu, features=%llu, tokens=%llu, hash=%llu, scratch=%llu, bytes=%llu, "
           "peak_bytes=%llu.\n",
           Compact_unit_authoritative ? "authoritative" : "audit",
-          stats.strategy == COMPACT_UNIT_POSITION ? "position" : "root_scan",
+          stats.strategy == COMPACT_UNIT_POSITION ? "position" :
+          stats.strategy == COMPACT_UNIT_CODE_TREE ? "code_tree" :
+          "root_scan",
           Compact_unit_audit_failures, stats.active, stats.peak,
           stats.retired, stats.physical, stats.compactions,
           stats.bytes_reclaimed, stats.generalization_queries,
@@ -250,6 +254,8 @@ void fprint_compact_unit_index(FILE *fp)
           stats.position_queries, stats.position_fallback_queries,
           stats.position_postings_examined,
           stats.position_duplicate_postings,
+          stats.code_tree_queries, stats.code_tree_nodes_examined,
+          stats.code_tree_postings_examined,
           stats.node_items, stats.posting_items,
           stats.feature_items, stats.feature_posting_items,
           stats.node_bytes,

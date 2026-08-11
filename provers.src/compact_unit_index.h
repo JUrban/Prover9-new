@@ -9,7 +9,8 @@ typedef struct compact_unit_index * Compact_unit_index;
 
 typedef enum {
   COMPACT_UNIT_ROOT_SCAN,
-  COMPACT_UNIT_POSITION
+  COMPACT_UNIT_POSITION,
+  COMPACT_UNIT_CODE_TREE
 } Compact_unit_strategy;
 
 struct compact_unit_index_stats {
@@ -29,6 +30,9 @@ struct compact_unit_index_stats {
   unsigned long long position_fallback_queries;
   unsigned long long position_postings_examined;
   unsigned long long position_duplicate_postings;
+  unsigned long long code_tree_queries;
+  unsigned long long code_tree_nodes_examined;
+  unsigned long long code_tree_postings_examined;
   unsigned long long feature_items;
   unsigned long long feature_posting_items;
   struct compact_query_profile generalization_profile;

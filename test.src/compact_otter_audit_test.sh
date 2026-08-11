@@ -26,6 +26,13 @@ assign(stats,all).' "$repo_dir/prover9.examples/x2.in" | \
   "$repo_dir/bin/prover9" > "$test_tmp/unit-audit.out" 2> "$test_tmp/unit-audit.err"
 
 sed '1i\
+assign(compact_unit_strategy,code_tree).\
+set(compact_otter_demodulation).\
+set(compact_unit_subsumption_audit).\
+assign(stats,all).' "$repo_dir/prover9.examples/x2.in" | \
+  "$repo_dir/bin/prover9" > "$test_tmp/unit-tree-audit.out" 2> "$test_tmp/unit-tree-audit.err"
+
+sed '1i\
 set(compact_otter_demodulation).\
 set(compact_otter_unit_index).\
 assign(stats,all).' "$repo_dir/prover9.examples/x2.in" | \
@@ -49,6 +56,7 @@ grep -q 'THEOREM PROVED' "$test_tmp/reference.out"
 grep -q 'THEOREM PROVED' "$test_tmp/audit.out"
 grep -q 'THEOREM PROVED' "$test_tmp/compact.out"
 grep -q 'THEOREM PROVED' "$test_tmp/unit-audit.out"
+grep -q 'THEOREM PROVED' "$test_tmp/unit-tree-audit.out"
 grep -q 'THEOREM PROVED' "$test_tmp/unit-compact.out"
 grep -q 'THEOREM PROVED' "$test_tmp/back-demod-audit.out"
 grep -q 'THEOREM PROVED' "$test_tmp/back-demod-compact.out"
@@ -58,6 +66,8 @@ grep -Eq 'Compact_otter_demodulation: current_rules=[1-9][0-9]*, peak_rules=[1-9
   "$test_tmp/compact.out"
 grep -Eq 'Compact_unit_index: mode=audit, strategy=root_scan, failures=0, active=[1-9][0-9]*, peak=[1-9][0-9]*,' \
   "$test_tmp/unit-audit.out"
+grep -Eq 'Compact_unit_index: mode=audit, strategy=code_tree, failures=0, active=[1-9][0-9]*, peak=[1-9][0-9]*,' \
+  "$test_tmp/unit-tree-audit.out"
 grep -Eq 'Compact_unit_index: mode=authoritative, strategy=root_scan, failures=0, active=[1-9][0-9]*, peak=[1-9][0-9]*,' \
   "$test_tmp/unit-compact.out"
 grep -Eq 'Compact_back_demod: mode=audit, failures=0, active=[1-9][0-9]*, peak=[1-9][0-9]*,' \
@@ -81,6 +91,8 @@ fi
   > "$test_tmp/compact.proof"
 "$repo_dir/bin/prooftrans" parents_only < "$test_tmp/unit-audit.out" \
   > "$test_tmp/unit-audit.proof"
+"$repo_dir/bin/prooftrans" parents_only < "$test_tmp/unit-tree-audit.out" \
+  > "$test_tmp/unit-tree-audit.proof"
 "$repo_dir/bin/prooftrans" parents_only < "$test_tmp/unit-compact.out" \
   > "$test_tmp/unit-compact.proof"
 "$repo_dir/bin/prooftrans" parents_only < "$test_tmp/back-demod-audit.out" \
@@ -96,6 +108,8 @@ sed -n '/^% Length of proof:/,/^============================== end of proof/p' \
 sed -n '/^% Length of proof:/,/^============================== end of proof/p' \
   "$test_tmp/unit-audit.proof" > "$test_tmp/unit-audit.norm"
 sed -n '/^% Length of proof:/,/^============================== end of proof/p' \
+  "$test_tmp/unit-tree-audit.proof" > "$test_tmp/unit-tree-audit.norm"
+sed -n '/^% Length of proof:/,/^============================== end of proof/p' \
   "$test_tmp/unit-compact.proof" > "$test_tmp/unit-compact.norm"
 sed -n '/^% Length of proof:/,/^============================== end of proof/p' \
   "$test_tmp/back-demod-audit.proof" > "$test_tmp/back-demod-audit.norm"
@@ -104,17 +118,19 @@ sed -n '/^% Length of proof:/,/^============================== end of proof/p' \
 cmp "$test_tmp/reference.norm" "$test_tmp/audit.norm"
 cmp "$test_tmp/reference.norm" "$test_tmp/compact.norm"
 cmp "$test_tmp/reference.norm" "$test_tmp/unit-audit.norm"
+cmp "$test_tmp/reference.norm" "$test_tmp/unit-tree-audit.norm"
 cmp "$test_tmp/reference.norm" "$test_tmp/unit-compact.norm"
 cmp "$test_tmp/reference.norm" "$test_tmp/back-demod-audit.norm"
 cmp "$test_tmp/reference.norm" "$test_tmp/back-demod-compact.norm"
 
-for run in reference audit compact unit-audit unit-compact back-demod-audit back-demod-compact; do
+for run in reference audit compact unit-audit unit-tree-audit unit-compact back-demod-audit back-demod-compact; do
   grep '^Given=' "$test_tmp/$run.out" | tail -n 1 > "$test_tmp/$run.search"
   grep '^Usable=' "$test_tmp/$run.out" | tail -n 1 >> "$test_tmp/$run.search"
 done
 cmp "$test_tmp/reference.search" "$test_tmp/audit.search"
 cmp "$test_tmp/reference.search" "$test_tmp/compact.search"
 cmp "$test_tmp/reference.search" "$test_tmp/unit-audit.search"
+cmp "$test_tmp/reference.search" "$test_tmp/unit-tree-audit.search"
 cmp "$test_tmp/reference.search" "$test_tmp/unit-compact.search"
 cmp "$test_tmp/reference.search" "$test_tmp/back-demod-audit.search"
 cmp "$test_tmp/reference.search" "$test_tmp/back-demod-compact.search"
