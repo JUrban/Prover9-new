@@ -82,6 +82,16 @@ assign(stats,all).' "$repo_dir/prover9.examples/x2.in" | \
   "$repo_dir/bin/prover9" > "$test_tmp/back-hot-root-audit.out" 2> "$test_tmp/back-hot-root-audit.err"
 
 sed '1i\
+assign(compact_back_demod_strategy,position).\
+assign(compact_back_tree_admit_work,1).\
+assign(compact_back_tree_budget_kb,65536).\
+set(compact_otter_demodulation).\
+set(compact_otter_unit_index).\
+set(compact_back_demod_audit).\
+assign(stats,all).' "$repo_dir/prover9.examples/x2.in" | \
+  "$repo_dir/bin/prover9" > "$test_tmp/back-position-audit.out" 2> "$test_tmp/back-position-audit.err"
+
+sed '1i\
 set(compact_otter_demodulation).\
 set(compact_otter_unit_index).\
 set(compact_otter_back_demod_index).\
@@ -99,6 +109,7 @@ grep -q 'THEOREM PROVED' "$test_tmp/back-signature-audit.out"
 grep -q 'THEOREM PROVED' "$test_tmp/back-tree-audit.out"
 grep -q 'THEOREM PROVED' "$test_tmp/back-hybrid-audit.out"
 grep -q 'THEOREM PROVED' "$test_tmp/back-hot-root-audit.out"
+grep -q 'THEOREM PROVED' "$test_tmp/back-position-audit.out"
 grep -q 'THEOREM PROVED' "$test_tmp/back-demod-compact.out"
 grep -Eq 'Compact_otter_audit: queries=[1-9][0-9]*, failures=0, current_rules=[1-9][0-9]*,' \
   "$test_tmp/audit.out"
@@ -120,6 +131,8 @@ grep -Eq 'Compact_back_demod: mode=audit, strategy=hybrid_tree, failures=0, acti
   "$test_tmp/back-hybrid-audit.out"
 grep -Eq 'Compact_back_demod: mode=audit, strategy=hot_root_tree, failures=0, active=[1-9][0-9]*, peak=[1-9][0-9]*,' \
   "$test_tmp/back-hot-root-audit.out"
+grep -Eq 'Compact_back_demod: mode=audit, strategy=position, failures=0, active=[1-9][0-9]*, peak=[1-9][0-9]*,' \
+  "$test_tmp/back-position-audit.out"
 grep -Eq 'Compact_back_demod: mode=authoritative, strategy=mask8, failures=0, active=[1-9][0-9]*, peak=[1-9][0-9]*,' \
   "$test_tmp/back-demod-compact.out"
 if grep -q 'compact_otter_audit: demodulation mismatch' "$test_tmp/audit.err"; then
@@ -144,6 +157,10 @@ if grep -q 'compact_back_demod_audit: mismatch' "$test_tmp/back-hybrid-audit.err
 fi
 if grep -q 'compact_back_demod_audit: mismatch' "$test_tmp/back-hot-root-audit.err"; then
   cat "$test_tmp/back-hot-root-audit.err" >&2
+  exit 1
+fi
+if grep -q 'compact_back_demod_audit: mismatch' "$test_tmp/back-position-audit.err"; then
+  cat "$test_tmp/back-position-audit.err" >&2
   exit 1
 fi
 

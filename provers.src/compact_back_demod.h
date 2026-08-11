@@ -12,7 +12,8 @@ typedef enum {
   COMPACT_BACK_DEMOD_SIGNATURE32,
   COMPACT_BACK_DEMOD_CODE_TREE,
   COMPACT_BACK_DEMOD_HYBRID_TREE,
-  COMPACT_BACK_DEMOD_HOT_ROOT_TREE
+  COMPACT_BACK_DEMOD_HOT_ROOT_TREE,
+  COMPACT_BACK_DEMOD_POSITION
 } Compact_back_demod_strategy;
 
 struct compact_back_demod_stats {
@@ -44,6 +45,20 @@ struct compact_back_demod_stats {
   unsigned tree_min_tokens;
   unsigned tree_admit_work;
   BOOL tree_complete;
+  unsigned long long position_features;
+  unsigned long long position_postings;
+  unsigned long long position_queries;
+  unsigned long long position_records_examined;
+  unsigned long long position_admissions;
+  unsigned long long position_rejections;
+  unsigned long long position_backfill_records;
+  unsigned long long position_budget_bytes;
+  unsigned long long position_estimated_bytes;
+  unsigned long long position_budget_exhaustions;
+  unsigned position_budget_pct;
+  unsigned position_admit_work;
+  unsigned position_min_gain;
+  BOOL position_complete;
   unsigned long long symbol_occurrences;
   unsigned long long posting_groups_examined;
   unsigned long long occurrences_examined;
@@ -89,6 +104,11 @@ void compact_back_demod_set_tree_min_tokens(unsigned tokens);
 void compact_back_demod_set_tree_budget_kb(unsigned kilobytes);
 
 void compact_back_demod_set_tree_admit_work(unsigned groups);
+
+void compact_back_demod_set_position_options(unsigned admit_work,
+                                             unsigned min_gain,
+                                             unsigned budget_kb,
+                                             unsigned budget_pct);
 
 BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause);
 

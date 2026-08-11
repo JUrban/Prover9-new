@@ -250,6 +250,41 @@ Phase-3 candidate must be the planned exact-position posting index, where one
 occurrence participates only in selected structural facts and queries intersect
 the rarest safe facts rather than materializing a second complete term index.
 
+The first such candidate is exposed as
+`compact_back_demod_strategy=position`.  The complete `mask8` occurrence index
+remains authoritative.  When one fallback query examines at least
+`compact_back_tree_admit_work` groups, the index performs one sequential scan
+of compact records and counts every rigid `(root, relative-path, symbol)` fact
+from that query.  It admits only the rarest fact when its clause posting is at
+least four times smaller than the observed fallback work.  A 64-bit hash
+represents an arbitrary-depth child path; collisions merge postings and can
+only add final compact matches.  The admitted posting stores each matching
+clause plus the exact root-occurrence offsets carrying the fact, so subsequent
+queries do not rescan the complete clause.  Later clauses, deletion, encoded
+and materialized rebuilding, and decreasing proof-ID order retain the same
+semantics.
+
+Position metadata is bounded by the stricter of
+`compact_back_tree_budget_kb` and 20% of the complete fallback index bytes.
+Admission is conservatively preflighted.  If later growth would cross that
+cap, the position partition is marked incomplete and every query returns to
+the complete fallback; a partial posting is never queried.  The focused test
+covers a rare arbitrary-depth fact, multiple same-feature occurrences in one
+clause, later insertion, deletion, forced compaction, and budget rejection;
+the whole-search legacy audit reports zero mismatches.
+
+This is a checkpoint rather than a promoted policy.  At 100 given, threshold
+256 admitted three features and used 217,200 bytes versus 216,688 for an inert
+position control and 209,520 for `mask8`; only one later query reused a
+feature.  At 300 given, threshold 1,024 admitted 13 features, used 588,870
+bytes, and reduced examined groups from 351,722 to 301,769 and occurrences
+from 295,055 to 258,461 relative to the same-strategy inert run.  Its 81,948
+record examinations for census, backfill, and feature lookup made the short
+run slower (17.32 versus 15.90 user seconds in parallel measurements).  The
+next gate asks whether reuse amortizes that deterministic construction cost at
+1,000 given; otherwise admission needs a bounded repeated-use probation stage,
+not another problem-specific threshold.
+
 Setting `P9_MATRIX_ALLOW_HOLDOUT=1` is required even when a holdout case is
 named explicitly.  Do this only for a recorded phase-promotion commit, never
 while selecting features or thresholds.

@@ -46,6 +46,11 @@ void configure_compact_back_demod_tree(unsigned min_tokens,
                                        unsigned budget_kb,
                                        unsigned admit_work);
 
+void configure_compact_back_demod_position(unsigned admit_work,
+                                           unsigned min_gain,
+                                           unsigned budget_kb,
+                                           unsigned budget_pct);
+
 unsigned long long compact_back_demod_active_count(void);
 
 unsigned long long compact_back_demod_physical_count(void);

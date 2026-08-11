@@ -90,6 +90,15 @@ void configure_compact_back_demod_tree(unsigned min_tokens,
   compact_back_demod_set_tree_admit_work(admit_work);
 }
 
+void configure_compact_back_demod_position(unsigned admit_work,
+                                           unsigned min_gain,
+                                           unsigned budget_kb,
+                                           unsigned budget_pct)
+{
+  compact_back_demod_set_position_options(
+    admit_work, min_gain, budget_kb, budget_pct);
+}
+
 static BOOL compact_back_demod_mode(void)
 {
   return Compact_back_demod_audit || Compact_back_demod_authoritative;
@@ -623,6 +632,13 @@ void fprint_compact_back_demod(FILE *fp)
           "tree_admit_work=%u, tree_root_admissions=%llu, "
           "tree_root_rejections=%llu, tree_backfill_groups=%llu, "
           "tree_backfill_occurrences=%llu, tree_fallback_work=%llu, "
+          "position_features=%llu, position_postings=%llu, "
+          "position_queries=%llu, position_records_examined=%llu, "
+          "position_admissions=%llu, position_rejections=%llu, "
+          "position_backfill_records=%llu, position_complete=%s, "
+          "position_budget=%llu, position_budget_pct=%u, "
+          "position_estimated=%llu, position_budget_exhaustions=%llu, "
+          "position_admit_work=%u, position_min_gain=%u, "
           "symbol_occurrences=%llu, groups_examined=%llu, "
           "occurrences_examined=%llu, path_checks=%llu, "
           "path_rejects=%llu, file_snapshots=%llu, snapshot_ids=%llu, "
@@ -635,6 +651,7 @@ void fprint_compact_back_demod(FILE *fp)
           stats.strategy == COMPACT_BACK_DEMOD_CODE_TREE ? "code_tree" :
           stats.strategy == COMPACT_BACK_DEMOD_HYBRID_TREE ? "hybrid_tree" :
           stats.strategy == COMPACT_BACK_DEMOD_HOT_ROOT_TREE ? "hot_root_tree" :
+          stats.strategy == COMPACT_BACK_DEMOD_POSITION ? "position" :
             "mask8",
           Compact_back_demod_failures, stats.active, stats.peak,
           stats.retired, stats.physical, stats.compactions,
@@ -649,6 +666,15 @@ void fprint_compact_back_demod(FILE *fp)
           stats.tree_admit_work, stats.tree_root_admissions,
           stats.tree_root_rejections, stats.tree_root_backfill_groups,
           stats.tree_root_backfill_occurrences, stats.tree_fallback_work,
+          stats.position_features, stats.position_postings,
+          stats.position_queries, stats.position_records_examined,
+          stats.position_admissions, stats.position_rejections,
+          stats.position_backfill_records,
+          stats.position_complete ? "yes" : "no",
+          stats.position_budget_bytes, stats.position_budget_pct,
+          stats.position_estimated_bytes,
+          stats.position_budget_exhaustions,
+          stats.position_admit_work, stats.position_min_gain,
           stats.symbol_occurrences,
           stats.posting_groups_examined, stats.occurrences_examined,
           stats.path_filter_checks, stats.path_filter_rejects,

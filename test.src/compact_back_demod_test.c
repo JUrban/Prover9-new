@@ -395,6 +395,111 @@ int main(void)
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
   }
 
+  {
+    enum { POSITION_FAMILY = 128, POSITION_TARGET = 73 };
+    Compact_back_demod_index position;
+    struct compact_back_demod_stats position_stats;
+    Topform clauses[POSITION_FAMILY], rule, later, multi;
+    char text[160];
+    int j;
+    compact_back_demod_set_position_options(1, 4, 65536, 20);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_POSITION);
+    position = compact_back_demod_init();
+    for (j = 0; j < POSITION_FAMILY; j++) {
+      (void) snprintf(text, sizeof(text),
+                      "w(f(a,g(h(j(c%d))))).", j);
+      clauses[j] = indexed_clause(text);
+      CHECK(compact_back_demod_add(position, clauses[j]),
+            "add exact-position family");
+    }
+    (void) snprintf(text, sizeof(text),
+                    "f(a,g(h(j(c%d)))) = a.", POSITION_TARGET);
+    rule = indexed_clause(text);
+    ids = compact_back_demod_candidate_ids(
+      position, rule, ORIENTED, &count);
+    CHECK(count == 1 && ids[0] == clauses[POSITION_TARGET]->id,
+          "position admission query retains the fallback answer");
+    safe_free(ids);
+    compact_back_demod_get_stats(position, &position_stats);
+    CHECK(position_stats.position_admissions == 1 &&
+          position_stats.position_features == 1 &&
+          position_stats.position_queries == 0 &&
+          position_stats.position_complete &&
+          position_stats.position_postings == 1,
+          "broad fallback admits one rare complete position feature");
+    ids = compact_back_demod_candidate_ids(
+      position, rule, ORIENTED, &count);
+    CHECK(count == 1 && ids[0] == clauses[POSITION_TARGET]->id,
+          "admitted position feature returns the exact same answer");
+    safe_free(ids);
+    later = indexed_clause("w(f(a,g(h(j(c73))))).");
+    CHECK(compact_back_demod_add(position, later),
+          "add later clause to admitted position feature");
+    ids = compact_back_demod_candidate_ids(
+      position, rule, ORIENTED, &count);
+    CHECK(count == 2 && ids[0] == later->id &&
+          ids[1] == clauses[POSITION_TARGET]->id,
+          "position feature remains complete after later insertion");
+    safe_free(ids);
+    multi = indexed_clause(
+      "w(k(f(b,g(h(j(c73)))),f(a,g(h(j(c73)))))).");
+    CHECK(compact_back_demod_add(position, multi),
+          "add two same-feature occurrences to admitted position feature");
+    ids = compact_back_demod_candidate_ids(
+      position, rule, ORIENTED, &count);
+    CHECK(count == 3 && ids[0] == multi->id && ids[1] == later->id &&
+          ids[2] == clauses[POSITION_TARGET]->id,
+          "position posting retains every matching root occurrence");
+    safe_free(ids);
+    CHECK(compact_back_demod_remove(position, later->id),
+          "remove later exact-position clause");
+    CHECK(compact_back_demod_remove(position, multi->id),
+          "remove multi-occurrence exact-position clause");
+    compact_back_demod_compact_all_stale(position);
+    ids = compact_back_demod_candidate_ids(
+      position, rule, ORIENTED, &count);
+    CHECK(count == 1 && ids[0] == clauses[POSITION_TARGET]->id,
+          "position feature remains complete after forced compaction");
+    safe_free(ids);
+    compact_back_demod_free(position);
+    delete_clause(rule);
+    delete_clause(later);
+    delete_clause(multi);
+    for (j = 0; j < POSITION_FAMILY; j++)
+      delete_clause(clauses[j]);
+    compact_back_demod_set_position_options(4096, 4, 65536, 20);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
+  }
+
+  {
+    Compact_back_demod_index bounded;
+    struct compact_back_demod_stats bounded_stats;
+    Topform clause, rule;
+    compact_back_demod_set_position_options(1, 1, 1, 20);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_POSITION);
+    bounded = compact_back_demod_init();
+    clause = indexed_clause("w(f(a,g(h(j(c))))).");
+    rule = indexed_clause("f(a,g(h(j(c)))) = a.");
+    CHECK(compact_back_demod_add(bounded, clause),
+          "add exact-position byte-budget subject");
+    ids = compact_back_demod_candidate_ids(
+      bounded, rule, ORIENTED, &count);
+    CHECK(count == 1 && ids[0] == clause->id,
+          "position byte-budget rejection retains fallback answer");
+    safe_free(ids);
+    compact_back_demod_get_stats(bounded, &bounded_stats);
+    CHECK(bounded_stats.position_features == 0 &&
+          bounded_stats.position_rejections == 1 &&
+          bounded_stats.position_budget_exhaustions == 1 &&
+          bounded_stats.position_complete,
+          "position admission is rejected before exceeding its byte cap");
+    compact_back_demod_free(bounded);
+    delete_clause(clause);
+    delete_clause(rule);
+    compact_back_demod_set_position_options(4096, 4, 65536, 20);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
+  }
+
   delete_clause(first);
   delete_clause(second);
   delete_clause(irrelevant);

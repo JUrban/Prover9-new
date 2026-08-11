@@ -13,12 +13,18 @@
 #define CBD_TREE_TERMINAL UINT32_C(0x80000000)
 #define CBD_TREE_INDEX_MASK UINT32_C(0x7fffffff)
 #define CBD_TREE_DIRECT_RECORD UINT32_C(0x80000000)
+#define CBD_POSITION_BLOCK_PAYLOAD 24
 
 static unsigned Compaction_stale_pct = 25;
 static Compact_back_demod_strategy Back_demod_strategy =
   COMPACT_BACK_DEMOD_MASK8;
 static unsigned Back_demod_tree_min_tokens = 8;
 static unsigned Back_demod_tree_admit_work = 4096;
+static unsigned Back_demod_position_admit_work = 4096;
+static unsigned Back_demod_position_min_gain = 4;
+static unsigned Back_demod_position_budget_pct = 20;
+static unsigned long long Back_demod_position_budget_bytes =
+  UINT64_C(64) * 1024 * 1024;
 static unsigned long long Back_demod_tree_budget_bytes =
   UINT64_C(64) * 1024 * 1024;
 
@@ -86,6 +92,39 @@ struct cbd_tree_root_state {
   unsigned char rejected;
 };
 
+/* Exact rigid-position postings are admitted lazily.  The 64-bit path is a
+   deterministic hash of child numbers below ROOT_SYMBOL.  A collision only
+   merges safe posting lists and therefore adds final compact matches; it can
+   never omit a possible redex. */
+struct cbd_position_bucket {
+  uint64_t path;
+  uint32_t root_symbol;
+  uint32_t symbol;
+  uint32_t next_root;
+  uint32_t posting_head;
+  uint32_t posting_tail;
+  uint32_t inline_record;
+  uint32_t inline_occurrence;
+  uint32_t inline_length;
+  uint32_t last_record;
+  uint32_t last_occurrence;
+  uint32_t posting_count;
+};
+
+struct cbd_position_block {
+  uint32_t next;
+  uint16_t used;
+  uint16_t count;
+  unsigned char data[CBD_POSITION_BLOCK_PAYLOAD];
+};
+
+struct cbd_position_query_feature {
+  uint64_t path;
+  uint32_t symbol;
+  uint32_t bucket;
+  unsigned long long matching_records;
+};
+
 struct cbd_record {
   unsigned long long proof_id;
   uint32_t token_offset;
@@ -116,6 +155,18 @@ struct compact_back_demod_index {
   size_t tree_posting_list_capacity;
   struct cbd_tree_root_state *tree_roots;
   size_t tree_root_capacity;
+  struct cbd_position_bucket *position_buckets;
+  size_t position_bucket_count;
+  size_t position_bucket_capacity;
+  uint32_t *position_bucket_hash;
+  size_t position_bucket_hash_capacity;
+  uint32_t *position_root_buckets;
+  size_t position_root_capacity;
+  struct cbd_position_block *position_blocks;
+  size_t position_block_count;
+  size_t position_block_capacity;
+  struct cbd_position_query_feature *position_query;
+  size_t position_query_capacity;
   unsigned char *occurrences;
   size_t occurrence_count;
   size_t occurrence_capacity;
@@ -160,6 +211,19 @@ struct compact_back_demod_index {
   unsigned tree_admit_work;
   unsigned long long tree_budget_bytes;
   BOOL tree_complete;
+  unsigned long long position_posting_count;
+  unsigned long long position_queries;
+  unsigned long long position_records_examined;
+  unsigned long long position_admissions;
+  unsigned long long position_rejections;
+  unsigned long long position_backfill_records;
+  unsigned long long position_budget_exhaustions;
+  unsigned position_admit_work;
+  unsigned position_min_gain;
+  unsigned position_budget_pct;
+  unsigned long long position_budget_bytes;
+  BOOL position_complete;
+  BOOL position_rebuilding;
   unsigned long long inactive_groups_examined;
   unsigned long long duplicate_groups_examined;
   unsigned long long posting_bytes_decoded;
@@ -186,6 +250,9 @@ struct cbd_symbol_set {
   size_t occurrence_count;
   size_t occurrence_capacity;
 };
+
+static void append_admitted_position_features(
+  Compact_back_demod_index index, uint32_t record_index);
 
 static size_t grow_capacity(size_t current, size_t item_size,
                             const char *message)
@@ -260,7 +327,19 @@ static BOOL strategy_uses_mask8(Compact_back_demod_strategy strategy)
 {
   return strategy == COMPACT_BACK_DEMOD_MASK8 ||
     strategy == COMPACT_BACK_DEMOD_HYBRID_TREE ||
-    strategy == COMPACT_BACK_DEMOD_HOT_ROOT_TREE;
+    strategy == COMPACT_BACK_DEMOD_HOT_ROOT_TREE ||
+    strategy == COMPACT_BACK_DEMOD_POSITION;
+}
+
+static unsigned long long position_estimated_bytes(
+  Compact_back_demod_index index)
+{
+  return index->position_bucket_capacity *
+      sizeof(*index->position_buckets) +
+    index->position_bucket_hash_capacity *
+      sizeof(*index->position_bucket_hash) +
+    index->position_root_capacity * sizeof(*index->position_root_buckets) +
+    index->position_block_capacity * sizeof(*index->position_blocks);
 }
 
 static unsigned long long tree_estimated_bytes(
@@ -290,12 +369,18 @@ static unsigned long long index_bytes(Compact_back_demod_index index)
     index->tree_posting_list_capacity *
       sizeof(*index->tree_posting_lists) +
     index->tree_root_capacity * sizeof(*index->tree_roots) +
+    index->position_bucket_capacity * sizeof(*index->position_buckets) +
+    index->position_bucket_hash_capacity *
+      sizeof(*index->position_bucket_hash) +
+    index->position_root_capacity * sizeof(*index->position_root_buckets) +
+    index->position_block_capacity * sizeof(*index->position_blocks) +
     index->occurrence_capacity * sizeof(*index->occurrences) +
     index->record_capacity * sizeof(*index->records) +
     (index->owns_term_pool ? terms.total_bytes : 0) +
     compact_id_map_bytes(index->id_map) +
     index->result_capacity * sizeof(*index->results) +
-    index->query_capacity * sizeof(*index->query);
+    index->query_capacity * sizeof(*index->query) +
+    index->position_query_capacity * sizeof(*index->position_query);
 }
 
 static void update_peak(Compact_back_demod_index index)
@@ -340,6 +425,16 @@ static void ensure_symbols(Compact_back_demod_index index, unsigned symbol)
     memset(index->tree_roots + old_roots, 0,
            (index->tree_root_capacity - old_roots) *
              sizeof(*index->tree_roots));
+  }
+  if (index->strategy == COMPACT_BACK_DEMOD_POSITION) {
+    size_t old_roots = index->position_root_capacity;
+    index->position_root_capacity = index->symbol_capacity;
+    index->position_root_buckets = safe_realloc(
+      index->position_root_buckets,
+      index->position_root_capacity * sizeof(*index->position_root_buckets));
+    memset(index->position_root_buckets + old_roots, 0,
+           (index->position_root_capacity - old_roots) *
+             sizeof(*index->position_root_buckets));
   }
 }
 
@@ -493,6 +588,233 @@ static uint32_t find_or_add_path_bucket(Compact_back_demod_index index,
   index->symbol_buckets[symbol] = bucket;
   index->path_bucket_hash[at] = bucket;
   return bucket;
+}
+
+static uint64_t position_feature_key(uint32_t root_symbol, uint64_t path,
+                                     uint32_t symbol)
+{
+  return hash_id(path ^
+    ((uint64_t) root_symbol * UINT64_C(0x9e3779b97f4a7c15)) ^
+    ((uint64_t) symbol * UINT64_C(0x85ebca77c2b2ae63)));
+}
+
+static size_t position_hash_slot(Compact_back_demod_index index,
+                                 uint32_t root_symbol, uint64_t path,
+                                 uint32_t symbol)
+{
+  size_t at = (size_t) position_feature_key(root_symbol, path, symbol) &
+    (index->position_bucket_hash_capacity - 1);
+  for (;;) {
+    uint32_t bucket = index->position_bucket_hash[at];
+    if (bucket == CBD_NONE ||
+        (index->position_buckets[bucket].root_symbol == root_symbol &&
+         index->position_buckets[bucket].path == path &&
+         index->position_buckets[bucket].symbol == symbol))
+      return at;
+    at = (at + 1) & (index->position_bucket_hash_capacity - 1);
+  }
+}
+
+static void rehash_position_buckets(Compact_back_demod_index index,
+                                    size_t capacity)
+{
+  uint32_t *old_hash = index->position_bucket_hash;
+  size_t i;
+  index->position_bucket_hash = safe_calloc(
+    capacity, sizeof(*index->position_bucket_hash));
+  index->position_bucket_hash_capacity = capacity;
+  for (i = 1; i < index->position_bucket_count; i++) {
+    struct cbd_position_bucket *bucket = &index->position_buckets[i];
+    size_t at = position_hash_slot(index, bucket->root_symbol,
+                                   bucket->path, bucket->symbol);
+    index->position_bucket_hash[at] = (uint32_t) i;
+  }
+  safe_free(old_hash);
+}
+
+static uint32_t lookup_position_bucket(Compact_back_demod_index index,
+                                       uint32_t root_symbol, uint64_t path,
+                                       uint32_t symbol)
+{
+  size_t at;
+  if (index->position_bucket_hash_capacity == 0)
+    return CBD_NONE;
+  at = position_hash_slot(index, root_symbol, path, symbol);
+  return index->position_bucket_hash[at];
+}
+
+static uint32_t add_position_bucket(Compact_back_demod_index index,
+                                    uint32_t root_symbol, uint64_t path,
+                                    uint32_t symbol)
+{
+  size_t at;
+  uint32_t bucket;
+  ensure_symbols(index, root_symbol);
+  if (index->position_bucket_hash_capacity == 0)
+    rehash_position_buckets(index, 128);
+  else if ((index->position_bucket_count + 1) * 20 >=
+           index->position_bucket_hash_capacity * 17) {
+    if (index->position_bucket_hash_capacity > SIZE_MAX / 2)
+      fatal_error("compact_back_demod: position hash overflow");
+    rehash_position_buckets(index,
+                            index->position_bucket_hash_capacity * 2);
+  }
+  at = position_hash_slot(index, root_symbol, path, symbol);
+  bucket = index->position_bucket_hash[at];
+  if (bucket != CBD_NONE)
+    return bucket;
+  if (index->position_bucket_count == index->position_bucket_capacity) {
+    index->position_bucket_capacity = grow_record_capacity(
+      index->position_bucket_capacity, sizeof(*index->position_buckets),
+      "compact_back_demod: position bucket overflow");
+    index->position_buckets = safe_realloc(
+      index->position_buckets,
+      index->position_bucket_capacity * sizeof(*index->position_buckets));
+  }
+  if (index->position_bucket_count > UINT32_MAX)
+    fatal_error("compact_back_demod: position bucket offsets exceed 32 bits");
+  bucket = (uint32_t) index->position_bucket_count++;
+  memset(&index->position_buckets[bucket], 0,
+         sizeof(index->position_buckets[bucket]));
+  index->position_buckets[bucket].root_symbol = root_symbol;
+  index->position_buckets[bucket].path = path;
+  index->position_buckets[bucket].symbol = symbol;
+  index->position_buckets[bucket].next_root =
+    index->position_root_buckets[root_symbol];
+  index->position_root_buckets[root_symbol] = bucket;
+  index->position_bucket_hash[at] = bucket;
+  return bucket;
+}
+
+static uint32_t new_position_block(Compact_back_demod_index index)
+{
+  uint32_t block;
+  if (index->position_block_count == index->position_block_capacity) {
+    index->position_block_capacity = grow_record_capacity(
+      index->position_block_capacity, sizeof(*index->position_blocks),
+      "compact_back_demod: position block overflow");
+    index->position_blocks = safe_realloc(
+      index->position_blocks,
+      index->position_block_capacity * sizeof(*index->position_blocks));
+  }
+  if (index->position_block_count > UINT32_MAX)
+    fatal_error("compact_back_demod: position block offsets exceed 32 bits");
+  block = (uint32_t) index->position_block_count++;
+  memset(&index->position_blocks[block], 0,
+         sizeof(index->position_blocks[block]));
+  return block;
+}
+
+static void append_position_group(Compact_back_demod_index index,
+                                  uint32_t bucket_index, uint32_t record,
+                                  uint32_t occurrence_offset,
+                                  uint32_t occurrence_length)
+{
+  unsigned char encoded[15];
+  size_t length = 0;
+  uint32_t block;
+  struct cbd_position_bucket *bucket =
+    &index->position_buckets[bucket_index];
+  struct cbd_position_block *tail;
+  if (record <= bucket->last_record)
+    fatal_error("compact_back_demod: nonmonotone position posting");
+  if (occurrence_offset < bucket->last_occurrence || occurrence_length == 0)
+    fatal_error("compact_back_demod: invalid position occurrence posting");
+  if (bucket->inline_record == CBD_NONE) {
+    bucket->inline_record = record;
+    bucket->inline_occurrence = occurrence_offset;
+    bucket->inline_length = occurrence_length;
+    bucket->last_record = record;
+    bucket->last_occurrence = occurrence_offset;
+    bucket->posting_count = 1;
+    index->position_posting_count++;
+    return;
+  }
+  length += encode_u32(encoded + length, record - bucket->last_record);
+  length += encode_u32(encoded + length,
+                       occurrence_offset - bucket->last_occurrence);
+  length += encode_u32(encoded + length, occurrence_length);
+  block = bucket->posting_tail;
+  if (block == CBD_NONE ||
+      index->position_blocks[block].used + length >
+        CBD_POSITION_BLOCK_PAYLOAD) {
+    uint32_t added = new_position_block(index);
+    if (block == CBD_NONE)
+      bucket->posting_head = added;
+    else
+      index->position_blocks[block].next = added;
+    bucket->posting_tail = added;
+    block = added;
+  }
+  tail = &index->position_blocks[block];
+  memcpy(tail->data + tail->used, encoded, length);
+  tail->used += (uint16_t) length;
+  tail->count++;
+  bucket->last_record = record;
+  bucket->last_occurrence = occurrence_offset;
+  bucket->posting_count++;
+  index->position_posting_count++;
+}
+
+static size_t projected_record_capacity(size_t capacity, size_t needed,
+                                        size_t item_size,
+                                        const char *message)
+{
+  while (needed > capacity)
+    capacity = grow_record_capacity(capacity, item_size, message);
+  return capacity;
+}
+
+static size_t projected_position_hash_capacity(
+  Compact_back_demod_index index, size_t bucket_count)
+{
+  size_t capacity = index->position_bucket_hash_capacity;
+  if (capacity == 0)
+    capacity = 128;
+  while ((bucket_count + 1) * 20 >= capacity * 17) {
+    if (capacity > SIZE_MAX / 2)
+      fatal_error("compact_back_demod: projected position hash overflow");
+    capacity *= 2;
+  }
+  return capacity;
+}
+
+static unsigned long long projected_position_bytes(
+  Compact_back_demod_index index, size_t added_buckets,
+  size_t added_blocks)
+{
+  size_t buckets = projected_record_capacity(
+    index->position_bucket_capacity,
+    index->position_bucket_count + added_buckets,
+    sizeof(*index->position_buckets),
+    "compact_back_demod: projected position bucket overflow");
+  size_t blocks = projected_record_capacity(
+    index->position_block_capacity,
+    index->position_block_count + added_blocks,
+    sizeof(*index->position_blocks),
+    "compact_back_demod: projected position block overflow");
+  size_t hash = projected_position_hash_capacity(
+    index, index->position_bucket_count + added_buckets);
+  return buckets * sizeof(*index->position_buckets) +
+    blocks * sizeof(*index->position_blocks) +
+    hash * sizeof(*index->position_bucket_hash) +
+    index->position_root_capacity * sizeof(*index->position_root_buckets);
+}
+
+static BOOL position_budget_allows(Compact_back_demod_index index,
+                                   unsigned long long projected)
+{
+  unsigned long long base, relative = ULLONG_MAX;
+  unsigned long long current = position_estimated_bytes(index);
+  unsigned long long total = index_bytes(index);
+  base = total >= current ? total - current : 0;
+  if (index->position_budget_pct != 0) {
+    relative = base > ULLONG_MAX / index->position_budget_pct ?
+      ULLONG_MAX : base * index->position_budget_pct / 100;
+  }
+  return (index->position_budget_bytes == 0 ||
+          projected <= index->position_budget_bytes) &&
+    (index->position_budget_pct == 0 || projected <= relative);
 }
 
 static int tree_code_compare(int32_t a, int32_t b)
@@ -1036,6 +1358,11 @@ static Compact_back_demod_index compact_back_demod_init_with_pool_strategy(
   index->tree_admit_work = Back_demod_tree_admit_work;
   index->tree_budget_bytes = Back_demod_tree_budget_bytes;
   index->tree_complete = TRUE;
+  index->position_admit_work = Back_demod_position_admit_work;
+  index->position_min_gain = Back_demod_position_min_gain;
+  index->position_budget_pct = Back_demod_position_budget_pct;
+  index->position_budget_bytes = Back_demod_position_budget_bytes;
+  index->position_complete = TRUE;
   index->tokens = compact_term_pool_tokens(pool);
   index->id_map = compact_id_map_init(1);
   index->lookup_clock = clock_init("compact_back_demod_lookup");
@@ -1054,6 +1381,16 @@ static Compact_back_demod_index compact_back_demod_init_with_pool_strategy(
                  "compact_back_demod: path bucket overflow");
     memset(&index->path_buckets[0], 0, sizeof(index->path_buckets[0]));
     index->path_bucket_count = 1;
+  }
+  if (strategy == COMPACT_BACK_DEMOD_POSITION) {
+    ENSURE_ARRAY(index, position_buckets, position_bucket_count,
+                 position_bucket_capacity,
+                 "compact_back_demod: position bucket overflow");
+    memset(&index->position_buckets[0], 0,
+           sizeof(index->position_buckets[0]));
+    index->position_bucket_count = 1;
+    if (new_position_block(index) != CBD_NONE)
+      fatal_error("compact_back_demod: invalid position block sentinel");
   }
   ensure_records(index);
   memset(&index->records[0], 0, sizeof(index->records[0]));
@@ -1085,7 +1422,8 @@ void compact_back_demod_set_strategy(Compact_back_demod_strategy strategy)
       strategy != COMPACT_BACK_DEMOD_SIGNATURE32 &&
       strategy != COMPACT_BACK_DEMOD_CODE_TREE &&
       strategy != COMPACT_BACK_DEMOD_HYBRID_TREE &&
-      strategy != COMPACT_BACK_DEMOD_HOT_ROOT_TREE)
+      strategy != COMPACT_BACK_DEMOD_HOT_ROOT_TREE &&
+      strategy != COMPACT_BACK_DEMOD_POSITION)
     fatal_error("compact_back_demod: invalid strategy");
   Back_demod_strategy = strategy;
 }
@@ -1108,6 +1446,20 @@ void compact_back_demod_set_tree_admit_work(unsigned groups)
   if (groups == 0)
     fatal_error("compact_back_demod: tree admission work must be positive");
   Back_demod_tree_admit_work = groups;
+}
+
+void compact_back_demod_set_position_options(unsigned admit_work,
+                                             unsigned min_gain,
+                                             unsigned budget_kb,
+                                             unsigned budget_pct)
+{
+  if (admit_work == 0 || min_gain == 0 || budget_pct > 1000)
+    fatal_error("compact_back_demod: invalid position options");
+  Back_demod_position_admit_work = admit_work;
+  Back_demod_position_min_gain = min_gain;
+  Back_demod_position_budget_bytes =
+    (unsigned long long) budget_kb * 1024;
+  Back_demod_position_budget_pct = budget_pct;
 }
 
 BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
@@ -1189,6 +1541,8 @@ BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
       i = j;
     }
   }
+
+  append_admitted_position_features(index, record_index);
 
   if (strategy_uses_tree(index->strategy) && index->tree_complete) {
     size_t i = 0;
@@ -1383,6 +1737,176 @@ static BOOL occurrence_matches(Compact_back_demod_index index,
   uint32_t position = token_offset;
   memset(bindings, 0, sizeof(bindings));
   return match_token_term(index, pattern, &position, bindings);
+}
+
+static uint64_t position_child_path(uint64_t path, unsigned child)
+{
+  return hash_id(path ^
+    (UINT64_C(0x9e3779b97f4a7c15) * ((uint64_t) child + 1)));
+}
+
+static void ensure_position_query(Compact_back_demod_index index,
+                                  size_t needed)
+{
+  while (needed > index->position_query_capacity) {
+    index->position_query_capacity = grow_record_capacity(
+      index->position_query_capacity, sizeof(*index->position_query),
+      "compact_back_demod: position query overflow");
+    index->position_query = safe_realloc(
+      index->position_query,
+      index->position_query_capacity * sizeof(*index->position_query));
+  }
+}
+
+static void collect_pattern_position_features_rec(
+  Compact_back_demod_index index, Term term, uint64_t path, size_t *count)
+{
+  int i;
+  if (VARIABLE(term))
+    return;
+  for (i = 0; i < ARITY(term); i++) {
+    Term child = ARG(term, i);
+    uint64_t child_path = position_child_path(path, (unsigned) i);
+    if (!VARIABLE(child)) {
+      size_t j;
+      uint32_t symbol = (uint32_t) SYMNUM(child);
+      for (j = 0; j < *count; j++)
+        if (index->position_query[j].path == child_path &&
+            index->position_query[j].symbol == symbol)
+          break;
+      if (j == *count) {
+        ensure_position_query(index, *count + 1);
+        memset(&index->position_query[*count], 0,
+               sizeof(index->position_query[*count]));
+        index->position_query[*count].path = child_path;
+        index->position_query[*count].symbol = symbol;
+        (*count)++;
+      }
+      collect_pattern_position_features_rec(
+        index, child, child_path, count);
+    }
+  }
+}
+
+static size_t collect_pattern_position_features(
+  Compact_back_demod_index index, Term pattern)
+{
+  size_t count = 0;
+  if (!VARIABLE(pattern))
+    collect_pattern_position_features_rec(index, pattern, 0, &count);
+  return count;
+}
+
+static uint32_t mark_subject_position_features_rec(
+  Compact_back_demod_index index, uint32_t position, uint64_t path,
+  struct cbd_position_query_feature *features, size_t feature_count,
+  unsigned char *matched)
+{
+  int32_t code;
+  int i, arity;
+  if ((size_t) position >= index->token_limit)
+    fatal_error("compact_back_demod: corrupt position subject");
+  code = index->tokens[position++];
+  arity = code < 0 ? 0 : sn_to_arity(code);
+  for (i = 0; i < arity; i++) {
+    uint32_t child_start = position;
+    uint64_t child_path = position_child_path(path, (unsigned) i);
+    int32_t child_code;
+    size_t j;
+    if ((size_t) child_start >= index->token_limit)
+      fatal_error("compact_back_demod: corrupt position child");
+    child_code = index->tokens[child_start];
+    if (child_code >= 0)
+      for (j = 0; j < feature_count; j++)
+        if (!matched[j] && features[j].path == child_path &&
+            features[j].symbol == (uint32_t) child_code)
+          matched[j] = TRUE;
+    position = mark_subject_position_features_rec(
+      index, child_start, child_path, features, feature_count, matched);
+  }
+  return position;
+}
+
+static void record_position_features(
+  Compact_back_demod_index index, struct cbd_record *record,
+  uint32_t root_symbol, struct cbd_position_query_feature *features,
+  size_t feature_count, unsigned char *matched)
+{
+  uint32_t i, end;
+  memset(matched, 0, feature_count);
+  if (record->token_length > UINT32_MAX - record->token_offset)
+    fatal_error("compact_back_demod: corrupt position record length");
+  end = record->token_offset + record->token_length;
+  if ((size_t) end > index->token_limit)
+    fatal_error("compact_back_demod: corrupt position record slice");
+  for (i = record->token_offset; i < end; i++)
+    if (index->tokens[i] >= 0 &&
+        (uint32_t) index->tokens[i] == root_symbol)
+      (void) mark_subject_position_features_rec(
+        index, i, 0, features, feature_count, matched);
+}
+
+static void record_position_occurrences(
+  Compact_back_demod_index index, struct cbd_record *record,
+  uint32_t root_symbol, struct cbd_position_query_feature *feature,
+  struct cbd_symbol_set *occurrences)
+{
+  uint32_t i, end;
+  if (record->token_length > UINT32_MAX - record->token_offset)
+    fatal_error("compact_back_demod: corrupt position occurrence length");
+  end = record->token_offset + record->token_length;
+  if ((size_t) end > index->token_limit)
+    fatal_error("compact_back_demod: corrupt position occurrence slice");
+  for (i = record->token_offset; i < end; i++)
+    if (index->tokens[i] >= 0 &&
+        (uint32_t) index->tokens[i] == root_symbol) {
+      unsigned char matched = FALSE;
+      (void) mark_subject_position_features_rec(
+        index, i, 0, feature, 1, &matched);
+      if (matched)
+        note_symbol(occurrences, root_symbol,
+                    i - record->token_offset, 0, 0);
+    }
+}
+
+static BOOL append_record_position_feature(
+  Compact_back_demod_index index, uint32_t bucket_index,
+  uint32_t record_index)
+{
+  struct cbd_position_bucket *bucket =
+    &index->position_buckets[bucket_index];
+  struct cbd_position_query_feature feature;
+  struct cbd_symbol_set occurrences;
+  uint32_t stream_offset, previous = 0;
+  size_t i;
+  memset(&feature, 0, sizeof(feature));
+  feature.path = bucket->path;
+  feature.symbol = bucket->symbol;
+  memset(&occurrences, 0, sizeof(occurrences));
+  occurrences.occurrence_values = occurrences.occurrence_fixed;
+  occurrences.occurrence_capacity =
+    sizeof(occurrences.occurrence_fixed) /
+      sizeof(occurrences.occurrence_fixed[0]);
+  record_position_occurrences(
+    index, &index->records[record_index], bucket->root_symbol,
+    &feature, &occurrences);
+  if (occurrences.occurrence_count == 0) {
+    if (occurrences.occurrence_values != occurrences.occurrence_fixed)
+      safe_free(occurrences.occurrence_values);
+    return FALSE;
+  }
+  stream_offset = (uint32_t) index->occurrence_count;
+  for (i = 0; i < occurrences.occurrence_count; i++) {
+    uint32_t offset = occurrences.occurrence_values[i].offset;
+    append_occurrence_delta(index, i == 0 ? offset : offset - previous);
+    previous = offset;
+  }
+  append_position_group(
+    index, bucket_index, record_index, stream_offset,
+    (uint32_t) index->occurrence_count - stream_offset);
+  if (occurrences.occurrence_values != occurrences.occurrence_fixed)
+    safe_free(occurrences.occurrence_values);
+  return TRUE;
 }
 
 static uint32_t decode_occurrence_delta(Compact_back_demod_index index,
@@ -1876,6 +2400,229 @@ static void collect_tree(Compact_back_demod_index index, Term pattern,
   }
 }
 
+static uint32_t decode_position_value(
+  const struct cbd_position_block *block, uint16_t *position)
+{
+  uint32_t value = 0;
+  unsigned shift = 0;
+  while (*position < block->used) {
+    unsigned char byte = block->data[(*position)++];
+    if (shift == 28 && (byte & 0xf0U) != 0)
+      fatal_error("compact_back_demod: corrupt position delta");
+    value |= (uint32_t) (byte & 0x7fU) << shift;
+    if ((byte & 0x80U) == 0)
+      return value;
+    shift += 7;
+    if (shift > 28)
+      fatal_error("compact_back_demod: corrupt position value");
+  }
+  fatal_error("compact_back_demod: truncated position value");
+  return 0;
+}
+
+static void collect_position_bucket(Compact_back_demod_index index,
+                                    uint32_t bucket_index, Term pattern,
+                                    unsigned long long exclude_id,
+                                    size_t *count)
+{
+  struct cbd_position_bucket *bucket =
+    &index->position_buckets[bucket_index];
+  uint32_t record_index = bucket->inline_record;
+  uint32_t occurrence_offset = bucket->inline_occurrence;
+  uint32_t block;
+  index->position_queries++;
+  if (record_index == CBD_NONE)
+    return;
+  if (bucket->inline_length == 0)
+    fatal_error("compact_back_demod: missing position occurrence list");
+  index->position_records_examined++;
+  index->posting_bytes_decoded += 3 * sizeof(uint32_t);
+  index->query_bytes_decoded += 3 * sizeof(uint32_t);
+  examine_posting_group(index, record_index, occurrence_offset,
+                        bucket->inline_length, pattern,
+                        (int32_t) bucket->root_symbol, exclude_id, count);
+  for (block = bucket->posting_head; block != CBD_NONE;
+       block = index->position_blocks[block].next) {
+    const struct cbd_position_block *current;
+    uint16_t position = 0;
+    uint16_t entries = 0;
+    if (block >= index->position_block_count)
+      fatal_error("compact_back_demod: corrupt position block");
+    current = &index->position_blocks[block];
+    index->posting_bytes_decoded += current->used;
+    index->query_bytes_decoded += current->used;
+    while (position < current->used) {
+      uint32_t delta = decode_position_value(current, &position);
+      uint32_t occurrence_delta;
+      uint32_t occurrence_length;
+      if (delta > UINT32_MAX - record_index)
+        fatal_error("compact_back_demod: position record overflow");
+      record_index += delta;
+      occurrence_delta = decode_position_value(current, &position);
+      if (occurrence_delta > UINT32_MAX - occurrence_offset)
+        fatal_error("compact_back_demod: position occurrence overflow");
+      occurrence_offset += occurrence_delta;
+      occurrence_length = decode_position_value(current, &position);
+      index->position_records_examined++;
+      examine_posting_group(index, record_index, occurrence_offset,
+                            occurrence_length, pattern,
+                            (int32_t) bucket->root_symbol,
+                            exclude_id, count);
+      entries++;
+    }
+    if (position != current->used || entries != current->count)
+      fatal_error("compact_back_demod: corrupt position block contents");
+  }
+}
+
+static BOOL record_has_position_bucket(
+  Compact_back_demod_index index, struct cbd_record *record,
+  struct cbd_position_bucket *bucket)
+{
+  struct cbd_position_query_feature feature;
+  unsigned char matched = FALSE;
+  memset(&feature, 0, sizeof(feature));
+  feature.path = bucket->path;
+  feature.symbol = bucket->symbol;
+  record_position_features(index, record, bucket->root_symbol,
+                           &feature, 1, &matched);
+  return matched;
+}
+
+static void append_admitted_position_features(
+  Compact_back_demod_index index, uint32_t record_index)
+{
+  struct cbd_record *record = &index->records[record_index];
+  size_t i, added_blocks = 0;
+  if (index->strategy != COMPACT_BACK_DEMOD_POSITION ||
+      !index->position_complete || index->position_bucket_count <= 1)
+    return;
+  for (i = 1; i < index->position_bucket_count; i++) {
+    struct cbd_position_bucket *bucket = &index->position_buckets[i];
+    if (record_has_position_bucket(index, record, bucket) &&
+        bucket->inline_record != CBD_NONE)
+      added_blocks++;
+  }
+  if (!index->position_rebuilding && added_blocks != 0 &&
+      !position_budget_allows(index, projected_position_bytes(
+        index, 0, added_blocks))) {
+    index->position_complete = FALSE;
+    index->position_budget_exhaustions++;
+    return;
+  }
+  for (i = 1; i < index->position_bucket_count; i++) {
+    (void) append_record_position_feature(
+      index, (uint32_t) i, record_index);
+  }
+}
+
+static void maybe_admit_position_feature(Compact_back_demod_index index,
+                                         Term pattern,
+                                         unsigned long long query_work)
+{
+  size_t feature_count, i, best = SIZE_MAX;
+  unsigned char *matched;
+  uint32_t root;
+  unsigned long long matches, blocks;
+  if (index->strategy != COMPACT_BACK_DEMOD_POSITION ||
+      !index->position_complete || VARIABLE(pattern) ||
+      query_work < index->position_admit_work)
+    return;
+  feature_count = collect_pattern_position_features(index, pattern);
+  if (feature_count == 0)
+    return;
+  root = (uint32_t) SYMNUM(pattern);
+  for (i = 0; i < feature_count; i++) {
+    index->position_query[i].bucket = lookup_position_bucket(
+      index, root, index->position_query[i].path,
+      index->position_query[i].symbol);
+    index->position_query[i].matching_records = 0;
+  }
+  matched = safe_malloc(feature_count);
+  clock_start(index->maintenance_clock);
+  for (i = 1; i < index->record_count; i++)
+    if (index->records[i].active) {
+      size_t j;
+      record_position_features(index, &index->records[i], root,
+                               index->position_query, feature_count, matched);
+      index->position_records_examined++;
+      for (j = 0; j < feature_count; j++)
+        if (matched[j])
+          index->position_query[j].matching_records++;
+    }
+  for (i = 0; i < feature_count; i++)
+    if (index->position_query[i].bucket == CBD_NONE &&
+        (best == SIZE_MAX ||
+         index->position_query[i].matching_records <
+           index->position_query[best].matching_records))
+      best = i;
+  if (best == SIZE_MAX) {
+    safe_free(matched);
+    clock_stop(index->maintenance_clock);
+    return;
+  }
+  matches = index->position_query[best].matching_records;
+  if (matches > query_work / index->position_min_gain) {
+    index->position_rejections++;
+    safe_free(matched);
+    clock_stop(index->maintenance_clock);
+    return;
+  }
+  blocks = matches <= 1 ? 0 : matches - 1;
+  if (blocks > SIZE_MAX ||
+      !position_budget_allows(index, projected_position_bytes(
+        index, 1, (size_t) blocks))) {
+    index->position_rejections++;
+    index->position_budget_exhaustions++;
+    safe_free(matched);
+    clock_stop(index->maintenance_clock);
+    return;
+  }
+  {
+    uint32_t bucket = add_position_bucket(
+      index, root, index->position_query[best].path,
+      index->position_query[best].symbol);
+    struct cbd_position_query_feature feature = index->position_query[best];
+    for (i = 1; i < index->record_count; i++)
+      if (index->records[i].active) {
+        unsigned char selected = FALSE;
+        record_position_features(index, &index->records[i], root,
+                                 &feature, 1, &selected);
+        index->position_backfill_records++;
+        if (selected)
+          (void) append_record_position_feature(
+            index, bucket, (uint32_t) i);
+      }
+  }
+  index->position_admissions++;
+  update_peak(index);
+  safe_free(matched);
+  clock_stop(index->maintenance_clock);
+}
+
+static uint32_t best_position_bucket(Compact_back_demod_index index,
+                                     Term pattern)
+{
+  size_t count, i;
+  uint32_t root, best = CBD_NONE;
+  if (index->strategy != COMPACT_BACK_DEMOD_POSITION ||
+      !index->position_complete || VARIABLE(pattern))
+    return CBD_NONE;
+  count = collect_pattern_position_features(index, pattern);
+  root = (uint32_t) SYMNUM(pattern);
+  for (i = 0; i < count; i++) {
+    uint32_t bucket = lookup_position_bucket(
+      index, root, index->position_query[i].path,
+      index->position_query[i].symbol);
+    if (bucket != CBD_NONE &&
+        (best == CBD_NONE ||
+         index->position_buckets[bucket].posting_count <
+           index->position_buckets[best].posting_count))
+      best = bucket;
+  }
+  return best;
+}
+
 static void collect_symbol(Compact_back_demod_index index, Term pattern,
                            unsigned long long exclude_id, size_t *count)
 {
@@ -1963,11 +2710,17 @@ static void collect_pattern(Compact_back_demod_index index, Term pattern,
                             unsigned long long exclude_id, size_t *count)
 {
   unsigned long long before = index->query_work;
-  if (use_tree_for_pattern(index, pattern))
+  uint32_t position_bucket = best_position_bucket(index, pattern);
+  if (position_bucket != CBD_NONE)
+    collect_position_bucket(index, position_bucket, pattern,
+                            exclude_id, count);
+  else if (use_tree_for_pattern(index, pattern))
     collect_tree(index, pattern, exclude_id, count);
   else {
     collect_symbol(index, pattern, exclude_id, count);
     maybe_admit_hot_root(index, pattern, index->query_work - before);
+    maybe_admit_position_feature(index, pattern,
+                                 index->query_work - before);
   }
 }
 
@@ -2097,6 +2850,34 @@ static void copy_hot_root_states(Compact_back_demod_index destination,
          source->tree_root_capacity * sizeof(*source->tree_roots));
 }
 
+static void copy_position_definitions(Compact_back_demod_index destination,
+                                      Compact_back_demod_index source)
+{
+  size_t i;
+  if (source->strategy != COMPACT_BACK_DEMOD_POSITION)
+    return;
+  destination->position_complete = source->position_complete;
+  if (!source->position_complete)
+    return;
+  for (i = 1; i < source->position_bucket_count; i++) {
+    struct cbd_position_bucket *bucket = &source->position_buckets[i];
+    (void) add_position_bucket(destination, bucket->root_symbol,
+                               bucket->path, bucket->symbol);
+  }
+}
+
+static void finish_position_rebuild(Compact_back_demod_index index)
+{
+  if (index->strategy != COMPACT_BACK_DEMOD_POSITION)
+    return;
+  index->position_rebuilding = FALSE;
+  if (index->position_complete &&
+      !position_budget_allows(index, position_estimated_bytes(index))) {
+    index->position_complete = FALSE;
+    index->position_budget_exhaustions++;
+  }
+}
+
 static void compact_back_demod_compact_internal(
   Compact_back_demod_index index, BOOL force)
 {
@@ -2131,6 +2912,8 @@ static void compact_back_demod_compact_internal(
     index->term_pool, index->strategy);
   replacement->tree_complete = index->tree_complete;
   copy_hot_root_states(replacement, index);
+  copy_position_definitions(replacement, index);
+  replacement->position_rebuilding = TRUE;
   replacement->tokens = compact_term_pool_tokens(index->term_pool);
   replacement->token_limit = compact_term_pool_token_count(index->term_pool);
   record_map = safe_calloc(index->record_count, sizeof(*record_map));
@@ -2149,7 +2932,9 @@ static void compact_back_demod_compact_internal(
       if (!compact_id_map_put(replacement->id_map, record->proof_id, &added))
         fatal_error("compact_back_demod: duplicate compacted proof ID");
       replacement->active++;
+      append_admitted_position_features(replacement, added);
     }
+  finish_position_rebuild(replacement);
   if (strategy_uses_tree(index->strategy) && index->tree_complete) {
     for (i = 1; i < index->tree_posting_list_count; i++) {
       struct cbd_tree_posting_list *list =
@@ -2264,6 +3049,11 @@ static void compact_back_demod_compact_internal(
   safe_free(old.tree_nodes);
   safe_free(old.tree_posting_lists);
   safe_free(old.tree_roots);
+  safe_free(old.position_buckets);
+  safe_free(old.position_bucket_hash);
+  safe_free(old.position_root_buckets);
+  safe_free(old.position_blocks);
+  safe_free(old.position_query);
   safe_free(old.occurrences);
   safe_free(old.records);
   compact_id_map_free(old.id_map);
@@ -2289,6 +3079,12 @@ static void compact_back_demod_compact_internal(
   index->tree_root_backfill_occurrences =
     old.tree_root_backfill_occurrences;
   index->tree_fallback_work = old.tree_fallback_work;
+  index->position_queries = old.position_queries;
+  index->position_records_examined = old.position_records_examined;
+  index->position_admissions = old.position_admissions;
+  index->position_rejections = old.position_rejections;
+  index->position_backfill_records = old.position_backfill_records;
+  index->position_budget_exhaustions += old.position_budget_exhaustions;
   index->inactive_groups_examined = old.inactive_groups_examined;
   index->duplicate_groups_examined = old.duplicate_groups_examined;
   index->posting_bytes_decoded = old.posting_bytes_decoded;
@@ -2406,7 +3202,14 @@ void compact_back_demod_compact_materialized(
   replacement = compact_back_demod_init_with_pool_strategy(
     old.term_pool, old.strategy);
   copy_hot_root_states(replacement, &old);
+  copy_position_definitions(replacement, &old);
+  replacement->position_rebuilding = TRUE;
   safe_free(old.tree_roots);
+  safe_free(old.position_buckets);
+  safe_free(old.position_bucket_hash);
+  safe_free(old.position_root_buckets);
+  safe_free(old.position_blocks);
+  safe_free(old.position_query);
   replacement->owns_term_pool = old.owns_term_pool;
   while (rebuilt < count) {
     unsigned long long *batch;
@@ -2432,6 +3235,7 @@ void compact_back_demod_compact_materialized(
       advise(batch, amount, context);
     rebuilt += amount;
   }
+  finish_position_rebuild(replacement);
   if (id_file != NULL)
     fclose(id_file);
   safe_free(ids);
@@ -2461,6 +3265,12 @@ void compact_back_demod_compact_materialized(
   index->tree_root_backfill_occurrences =
     old.tree_root_backfill_occurrences;
   index->tree_fallback_work = old.tree_fallback_work;
+  index->position_queries = old.position_queries;
+  index->position_records_examined = old.position_records_examined;
+  index->position_admissions = old.position_admissions;
+  index->position_rejections = old.position_rejections;
+  index->position_backfill_records = old.position_backfill_records;
+  index->position_budget_exhaustions += old.position_budget_exhaustions;
   index->inactive_groups_examined = old.inactive_groups_examined;
   index->duplicate_groups_examined = old.duplicate_groups_examined;
   index->posting_bytes_decoded = old.posting_bytes_decoded;
@@ -2573,6 +3383,21 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->tree_min_tokens = index->tree_min_tokens;
   stats->tree_admit_work = index->tree_admit_work;
   stats->tree_complete = index->tree_complete;
+  stats->position_features = index->position_bucket_count == 0 ? 0 :
+    index->position_bucket_count - 1;
+  stats->position_postings = index->position_posting_count;
+  stats->position_queries = index->position_queries;
+  stats->position_records_examined = index->position_records_examined;
+  stats->position_admissions = index->position_admissions;
+  stats->position_rejections = index->position_rejections;
+  stats->position_backfill_records = index->position_backfill_records;
+  stats->position_budget_bytes = index->position_budget_bytes;
+  stats->position_estimated_bytes = position_estimated_bytes(index);
+  stats->position_budget_exhaustions = index->position_budget_exhaustions;
+  stats->position_budget_pct = index->position_budget_pct;
+  stats->position_admit_work = index->position_admit_work;
+  stats->position_min_gain = index->position_min_gain;
+  stats->position_complete = index->position_complete;
   stats->symbol_occurrences = index->symbol_occurrences;
   stats->posting_groups_examined = index->posting_groups_examined;
   stats->occurrences_examined = index->occurrences_examined;
@@ -2592,7 +3417,8 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->materialized_snapshot_ids = index->materialized_snapshot_ids;
   stats->posting_bytes =
     index->posting_block_capacity * sizeof(*index->posting_blocks) +
-    index->occurrence_capacity * sizeof(*index->occurrences);
+    index->occurrence_capacity * sizeof(*index->occurrences) +
+    index->position_block_capacity * sizeof(*index->position_blocks);
   stats->posting_stream_used = index->posting_stream_used;
   stats->posting_stream_bytes =
     index->posting_block_capacity * sizeof(*index->posting_blocks);
@@ -2607,11 +3433,16 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
     index->tree_node_capacity * sizeof(*index->tree_nodes) +
     index->tree_posting_list_capacity *
       sizeof(*index->tree_posting_lists) +
-    index->tree_root_capacity * sizeof(*index->tree_roots);
+    index->tree_root_capacity * sizeof(*index->tree_roots) +
+    index->position_bucket_capacity * sizeof(*index->position_buckets) +
+    index->position_bucket_hash_capacity *
+      sizeof(*index->position_bucket_hash) +
+    index->position_root_capacity * sizeof(*index->position_root_buckets);
   stats->token_bytes = index->owns_term_pool ? terms.token_bytes : 0;
   stats->hash_bytes = compact_id_map_bytes(index->id_map);
   stats->scratch_bytes = index->result_capacity * sizeof(*index->results) +
-    index->query_capacity * sizeof(*index->query);
+    index->query_capacity * sizeof(*index->query) +
+    index->position_query_capacity * sizeof(*index->position_query);
   stats->total_bytes = index_bytes(index);
   stats->peak_bytes = index->peak_bytes;
 }
@@ -2627,6 +3458,11 @@ void compact_back_demod_free(Compact_back_demod_index index)
   safe_free(index->tree_nodes);
   safe_free(index->tree_posting_lists);
   safe_free(index->tree_roots);
+  safe_free(index->position_buckets);
+  safe_free(index->position_bucket_hash);
+  safe_free(index->position_root_buckets);
+  safe_free(index->position_blocks);
+  safe_free(index->position_query);
   safe_free(index->occurrences);
   safe_free(index->records);
   if (index->owns_term_pool)
