@@ -144,6 +144,16 @@ static BOOL compressed_passive_mode(void)
           str_ident(stringparm1(Opt->passive_store), "dense"));
 }
 
+/* A configured compact back-demod index has no logical consumer when backward
+   demodulation itself is disabled.  Treat it as an inactive capability rather
+   than allocating and populating a dead index or rejecting a general compact
+   configuration on non-demodulation workloads. */
+static BOOL compact_back_demod_authoritative_mode(void)
+{
+  return Opt != NULL && flag(Opt->back_demod) &&
+         flag(Opt->compact_otter_back_demod_index);
+}
+
 static BOOL dense_passive_mode(void)
 {
   return Opt != NULL &&
@@ -152,7 +162,8 @@ static BOOL dense_passive_mode(void)
           (!discount_mode() &&
            flag(Opt->compact_otter_demodulation) &&
            flag(Opt->compact_otter_unit_index) &&
-           flag(Opt->compact_otter_back_demod_index) &&
+           (!flag(Opt->back_demod) ||
+            flag(Opt->compact_otter_back_demod_index)) &&
            flag(Opt->compact_otter_nonunit_index)));
 }
 
@@ -2996,6 +3007,10 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
   if (flag(Opt->compact_back_demod_audit) ||
       flag(Opt->compact_otter_back_demod_index))
     fprint_compact_back_demod(fp);
+  if (flag(Opt->compact_otter_back_demod_index) && !flag(Opt->back_demod))
+    fprintf(fp,
+            "Compact_index_inactive: component=back_demod, "
+            "reason=back_demod_disabled.\n");
   if (flag(Opt->compact_nonunit_subsumption_audit) ||
       flag(Opt->compact_otter_nonunit_index))
     fprint_compact_nonunit_index(fp);
@@ -10681,7 +10696,7 @@ static void configure_search_indexes(void)
                                   compact_otter_release_clause, NULL);
   configure_compact_back_demod(
     flag(Opt->compact_back_demod_audit),
-    flag(Opt->compact_otter_back_demod_index));
+    compact_back_demod_authoritative_mode());
   configure_compact_back_demod_term_pool(Compact_terms);
   configure_compact_back_demod_access(compact_otter_resolve_clause,
                                       compact_otter_release_clause,
@@ -15732,7 +15747,7 @@ Prover_results search(Prover_input p)
           flag(Opt->compact_unit_subsumption_audit) ||
           flag(Opt->compact_otter_unit_index) ||
           flag(Opt->compact_back_demod_audit) ||
-          flag(Opt->compact_otter_back_demod_index)))
+          compact_back_demod_authoritative_mode()))
       fatal_error("compact_term_sharing_stats requires a compact term index");
     if (compact_otter_audit_mode()) {
       if (discount_mode())
@@ -15791,8 +15806,6 @@ Prover_results search(Prover_input p)
         fatal_error("compact_otter_back_demod_index requires search_loop=otter");
       if (!str_ident(stringparm1(Opt->inference_frontier), "clauses"))
         fatal_error("compact_otter_back_demod_index requires inference_frontier=clauses");
-      if (!flag(Opt->back_demod))
-        fatal_error("compact_otter_back_demod_index requires set(back_demod)");
       if (flag(Opt->compact_back_demod_audit))
         fatal_error("compact_otter_back_demod_index and its audit are mutually exclusive");
     }
@@ -15968,7 +15981,7 @@ Prover_results search(Prover_input p)
        flag(Opt->compact_unit_subsumption_audit) ||
        flag(Opt->compact_otter_unit_index) ||
        flag(Opt->compact_back_demod_audit) ||
-       flag(Opt->compact_otter_back_demod_index)) ?
+       compact_back_demod_authoritative_mode()) ?
       compact_term_pool_init() : NULL;
     Compact_term_next_reclaim_serialization = 0;
     Compact_term_reclaim_cooldown_skips = 0;
