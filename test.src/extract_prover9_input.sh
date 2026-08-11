@@ -33,7 +33,11 @@ trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
 
 gzip -cd -- "$source_gz" |
   sed -n '/^============================== INPUT /,/^============================== end of input /p' |
-  sed '1d;$d' > "$temporary"
+  sed '1d;$d' |
+  # Prover9 writes parser/option diagnostics before closing its echoed INPUT
+  # section.  They were not present in the source file and are not terms, so
+  # retaining them makes an otherwise exact historical input unparsable.
+  sed '/^WARNING, /d' > "$temporary"
 
 if test ! -s "$temporary"; then
   echo "no echoed Prover9 input found in: $source_gz" >&2

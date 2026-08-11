@@ -23,11 +23,13 @@ test.src/extract_prover9_input.sh \
   /project/bob/chat_test.new.out3.gz \
   /path/to/frozen-chat-test-new.in \
   2b7ab154323801bd541962d2314a23a5861def3fde53271330e4ebd2a54d340e \
-  30528567ef7aacc51b438ff638672a7b26afa63ab7b670017f8da021750b2dcf
+  dfd5df473b9b1dcae073e324297cdcbb11c0535e838ca86422bdefc75d8ea84e
 ```
 
-The reconstructed file has 18,401 lines and 901,712 bytes.  The extraction
-removes only the two Prover9 section-marker lines surrounding the echoed input.
+The reconstructed file has 18,400 lines and 901,624 bytes.  The extraction
+removes the two Prover9 section-marker lines and a Prover9-generated `WARNING,`
+line emitted after the final input list but before the closing marker.  That
+diagnostic was not part of the original source and is not a parseable term.
 
 ## Holdout discipline
 
