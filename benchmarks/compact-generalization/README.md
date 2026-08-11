@@ -175,6 +175,28 @@ gets the sparse benefit without taxing singleton terminals.  The no-demodulation
 nil3/mbol controls remained inert at 100 given, and x2 retained the same proof
 and candidate answers under legacy audit.
 
+The required 1,000-given Osborn gate rejects promotion of the full packed tree.
+It returned the same 6,755 candidates and cut posting groups from 9,556,812 to
+10,977 (870.62x) and occurrence/terminal matches from 7,960,042 to 55,041
+(144.62x).  Lookup time improved only from 3.386 to 2.993 seconds because tree
+traversal visited 26.099 million nodes.  More importantly, the back index grew
+to 4,847,144 bytes versus 3,078,680 for `mask8` (+57.44%); tree nodes and
+terminals alone occupied 2,773,920 bytes.  Whole user CPU was 80.82 versus
+77.14 seconds (+4.77%).  Peak process RSS differed by only 564 KiB at this
+small absolute scale because the large hint set dominates, but the linear
+unique-term metadata would become material in a long search.
+
+This is the deliberate generalization failure the staged gates are intended
+to expose: passing 100/300 does not make a representation production-safe.
+The next prototype must keep a complete compact fallback for every occurrence
+and place structural retrieval behind an explicit byte budget.  A partially
+populated tree can never be queried as if complete.  Safe choices are either
+(1) a length-partitioned tree that indexes every subject above a current
+cutoff and uses the fallback below it, rebuilding deterministically when the
+budget raises the cutoff, or (2) sealed structural generations plus fallback
+retrieval for every uncovered generation.  Budget exhaustion must degrade to
+the complete fallback, never silently omit candidates.
+
 Setting `P9_MATRIX_ALLOW_HOLDOUT=1` is required even when a holdout case is
 named explicitly.  Do this only for a recorded phase-promotion commit, never
 while selecting features or thresholds.
