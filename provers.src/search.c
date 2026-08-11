@@ -2189,6 +2189,11 @@ Prover_options init_prover_options(void)
 				     "compressed",
 				     "dense");
 
+  p->compact_unit_strategy =
+    init_stringparm("compact_unit_strategy", 2,
+                    "root_scan",
+                    "position");
+
   p->discount_demodulation =
     init_stringparm("discount_demodulation", 3,
 			"selected",
@@ -10683,6 +10688,9 @@ static void configure_search_indexes(void)
     (unsigned) parm(Opt->compact_index_stale_pct));
   configure_compact_unit_stale_pct(
     (unsigned) parm(Opt->compact_index_stale_pct));
+  compact_unit_index_set_strategy(
+    str_ident(stringparm1(Opt->compact_unit_strategy), "position") ?
+      COMPACT_UNIT_POSITION : COMPACT_UNIT_ROOT_SCAN);
   configure_compact_back_demod_stale_pct(
     (unsigned) parm(Opt->compact_index_stale_pct));
   configure_compact_unit_term_pool(Compact_terms);

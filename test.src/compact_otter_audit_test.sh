@@ -56,9 +56,9 @@ grep -Eq 'Compact_otter_audit: queries=[1-9][0-9]*, failures=0, current_rules=[1
   "$test_tmp/audit.out"
 grep -Eq 'Compact_otter_demodulation: current_rules=[1-9][0-9]*, peak_rules=[1-9][0-9]*,' \
   "$test_tmp/compact.out"
-grep -Eq 'Compact_unit_index: mode=audit, failures=0, active=[1-9][0-9]*, peak=[1-9][0-9]*,' \
+grep -Eq 'Compact_unit_index: mode=audit, strategy=root_scan, failures=0, active=[1-9][0-9]*, peak=[1-9][0-9]*,' \
   "$test_tmp/unit-audit.out"
-grep -Eq 'Compact_unit_index: mode=authoritative, failures=0, active=[1-9][0-9]*, peak=[1-9][0-9]*,' \
+grep -Eq 'Compact_unit_index: mode=authoritative, strategy=root_scan, failures=0, active=[1-9][0-9]*, peak=[1-9][0-9]*,' \
   "$test_tmp/unit-compact.out"
 grep -Eq 'Compact_back_demod: mode=audit, failures=0, active=[1-9][0-9]*, peak=[1-9][0-9]*,' \
   "$test_tmp/back-demod-audit.out"

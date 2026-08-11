@@ -7,6 +7,7 @@
 #define CUI_NONE 0U
 
 static unsigned Compaction_stale_pct = 25;
+static Compact_unit_strategy Unit_strategy = COMPACT_UNIT_ROOT_SCAN;
 
 struct cui_node {
   uint32_t token_offset;
@@ -28,8 +29,21 @@ struct cui_record {
   uint32_t token_offset;
   uint32_t token_length;
   uint32_t next_root;
+  uint32_t query_stamp;
   unsigned char sign;
   unsigned char active;
+};
+
+struct cui_feature_bucket {
+  uint64_t key;
+  uint32_t first_posting;
+  uint32_t last_posting;
+  uint32_t count;
+};
+
+struct cui_feature_posting {
+  uint32_t record;
+  uint32_t next;
 };
 
 struct cui_query_term {
@@ -38,6 +52,7 @@ struct cui_query_term {
 };
 
 struct compact_unit_index {
+  Compact_unit_strategy strategy;
   struct cui_node *nodes;
   size_t node_count;
   size_t node_capacity;
@@ -50,6 +65,14 @@ struct compact_unit_index {
   size_t record_capacity;
   uint32_t *unifier_heads[2];
   size_t unifier_symbol_capacity;
+  struct cui_feature_bucket *feature_buckets;
+  size_t feature_bucket_count;
+  size_t feature_bucket_capacity;
+  uint32_t *feature_hash;
+  size_t feature_hash_capacity;
+  struct cui_feature_posting *feature_postings;
+  size_t feature_posting_count;
+  size_t feature_posting_capacity;
   Compact_term_pool term_pool;
   const int32_t *tokens;
   BOOL owns_term_pool;
@@ -58,6 +81,11 @@ struct compact_unit_index {
   size_t query_capacity;
   unsigned long long *result_ids;
   size_t result_capacity;
+  uint64_t *path_stack;
+  size_t path_capacity;
+  uint64_t *selected_variable_keys;
+  size_t selected_variable_capacity;
+  uint32_t query_stamp;
   unsigned long long active;
   unsigned long long peak;
   unsigned long long retired;
@@ -68,6 +96,10 @@ struct compact_unit_index {
   unsigned long long instance_exact_tests;
   unsigned long long unifier_queries;
   unsigned long long unifier_exact_tests;
+  unsigned long long position_queries;
+  unsigned long long position_fallback_queries;
+  unsigned long long position_postings_examined;
+  unsigned long long position_duplicate_postings;
   struct compact_query_profile generalization_profile;
   struct compact_query_profile instance_profile;
   struct compact_query_profile unifier_profile;
@@ -135,6 +167,164 @@ static uint64_t symbol_bit(unsigned symbol)
   return UINT64_C(1) << ((symbol * UINT32_C(2654435761)) >> 26);
 }
 
+static uint64_t mix64(uint64_t value)
+{
+  value ^= value >> 30;
+  value *= UINT64_C(0xbf58476d1ce4e5b9);
+  value ^= value >> 27;
+  value *= UINT64_C(0x94d049bb133111eb);
+  value ^= value >> 31;
+  return value;
+}
+
+static uint64_t child_path(uint64_t parent, unsigned child)
+{
+  return mix64(parent ^ (UINT64_C(0x9e3779b97f4a7c15) + child));
+}
+
+/* Hash collisions only merge posting lists and therefore add candidates; the
+   direct compressed unifier remains authoritative and prevents false answers. */
+static uint64_t exact_feature_key(uint64_t path, unsigned symbol, BOOL sign)
+{
+  uint64_t key = mix64(path ^ (UINT64_C(0x4558414354) << 16) ^
+                       ((uint64_t) symbol * UINT64_C(0x9e3779b97f4a7c15)) ^
+                       (sign ? UINT64_C(0x7369676e) : 0));
+  return key == 0 ? 1 : key;
+}
+
+static uint64_t variable_feature_key(uint64_t path, BOOL sign)
+{
+  uint64_t key = mix64(path ^ (UINT64_C(0x5641524941424c45)) ^
+                       (sign ? UINT64_C(0x7369676e) : 0));
+  return key == 0 ? 1 : key;
+}
+
+static size_t feature_hash_slot(Compact_unit_index index, uint64_t key)
+{
+  size_t at = (size_t) mix64(key) & (index->feature_hash_capacity - 1);
+  for (;;) {
+    uint32_t bucket = index->feature_hash[at];
+    if (bucket == CUI_NONE || index->feature_buckets[bucket].key == key)
+      return at;
+    at = (at + 1) & (index->feature_hash_capacity - 1);
+  }
+}
+
+static void rehash_features(Compact_unit_index index, size_t capacity)
+{
+  uint32_t *old = index->feature_hash;
+  size_t i;
+  index->feature_hash = safe_calloc(capacity, sizeof(*index->feature_hash));
+  index->feature_hash_capacity = capacity;
+  for (i = 1; i < index->feature_bucket_count; i++) {
+    size_t at = feature_hash_slot(index, index->feature_buckets[i].key);
+    index->feature_hash[at] = (uint32_t) i;
+  }
+  safe_free(old);
+}
+
+static uint32_t find_feature_bucket(Compact_unit_index index, uint64_t key)
+{
+  size_t at;
+  if (index->feature_hash_capacity == 0)
+    return CUI_NONE;
+  at = feature_hash_slot(index, key);
+  return index->feature_hash[at];
+}
+
+static uint32_t find_or_add_feature_bucket(Compact_unit_index index,
+                                           uint64_t key)
+{
+  size_t at;
+  uint32_t bucket;
+  if (index->feature_hash_capacity == 0)
+    rehash_features(index, 128);
+  else if ((index->feature_bucket_count + 1) * 20 >=
+           index->feature_hash_capacity * 17) {
+    if (index->feature_hash_capacity > SIZE_MAX / 2)
+      fatal_error("compact_unit_index: feature hash overflow");
+    rehash_features(index, index->feature_hash_capacity * 2);
+  }
+  at = feature_hash_slot(index, key);
+  bucket = index->feature_hash[at];
+  if (bucket != CUI_NONE)
+    return bucket;
+  if (index->feature_bucket_count == index->feature_bucket_capacity) {
+    index->feature_bucket_capacity = grow_dense_capacity(
+      index->feature_bucket_capacity, sizeof(*index->feature_buckets),
+      "compact_unit_index: feature bucket overflow");
+    index->feature_buckets = safe_realloc(
+      index->feature_buckets,
+      index->feature_bucket_capacity * sizeof(*index->feature_buckets));
+  }
+  if (index->feature_bucket_count > UINT32_MAX)
+    fatal_error("compact_unit_index: feature bucket offsets exceed 32 bits");
+  bucket = (uint32_t) index->feature_bucket_count++;
+  memset(&index->feature_buckets[bucket], 0,
+         sizeof(index->feature_buckets[bucket]));
+  index->feature_buckets[bucket].key = key;
+  index->feature_hash[at] = bucket;
+  return bucket;
+}
+
+static void append_feature_posting(Compact_unit_index index, uint64_t key,
+                                   uint32_t record)
+{
+  uint32_t bucket = find_or_add_feature_bucket(index, key);
+  uint32_t posting;
+  struct cui_feature_bucket *b = &index->feature_buckets[bucket];
+  if (index->feature_posting_count == index->feature_posting_capacity) {
+    index->feature_posting_capacity = grow_dense_capacity(
+      index->feature_posting_capacity, sizeof(*index->feature_postings),
+      "compact_unit_index: feature posting overflow");
+    index->feature_postings = safe_realloc(
+      index->feature_postings,
+      index->feature_posting_capacity * sizeof(*index->feature_postings));
+  }
+  if (index->feature_posting_count > UINT32_MAX || b->count == UINT32_MAX)
+    fatal_error("compact_unit_index: feature postings exceed 32 bits");
+  posting = (uint32_t) index->feature_posting_count++;
+  index->feature_postings[posting].record = record;
+  index->feature_postings[posting].next = CUI_NONE;
+  if (b->first_posting == CUI_NONE)
+    b->first_posting = posting;
+  else
+    index->feature_postings[b->last_posting].next = posting;
+  b->last_posting = posting;
+  b->count++;
+}
+
+static uint32_t index_token_features(Compact_unit_index index,
+                                     uint32_t record, uint32_t position,
+                                     uint32_t end, uint64_t path,
+                                     unsigned depth)
+{
+  int32_t code;
+  int i, arity;
+  if (position >= end)
+    fatal_error("compact_unit_index: truncated feature term");
+  code = index->tokens[position++];
+  if (code < 0) {
+    if (depth != 0)
+      append_feature_posting(index,
+                             variable_feature_key(
+                               path, index->records[record].sign),
+                             record);
+    return position;
+  }
+  if (depth != 0)
+    append_feature_posting(index,
+                           exact_feature_key(path, (unsigned) code,
+                                             index->records[record].sign),
+                           record);
+  arity = sn_to_arity(code);
+  for (i = 0; i < arity; i++)
+    position = index_token_features(index, record, position, end,
+                                    child_path(path, (unsigned) i),
+                                    depth + 1);
+  return position;
+}
+
 static unsigned long long index_bytes(Compact_unit_index index)
 {
   struct compact_term_pool_stats terms;
@@ -148,10 +338,16 @@ static unsigned long long index_bytes(Compact_unit_index index)
     index->unifier_symbol_capacity *
       (sizeof(*index->unifier_heads[0]) +
        sizeof(*index->unifier_heads[1])) +
+    index->feature_bucket_capacity * sizeof(*index->feature_buckets) +
+    index->feature_hash_capacity * sizeof(*index->feature_hash) +
+    index->feature_posting_capacity * sizeof(*index->feature_postings) +
     (index->owns_term_pool ? terms.total_bytes : 0) +
     compact_id_map_bytes(index->id_map) +
     index->query_capacity * sizeof(*index->query) +
-    index->result_capacity * sizeof(*index->result_ids);
+    index->result_capacity * sizeof(*index->result_ids) +
+    index->path_capacity * sizeof(*index->path_stack) +
+    index->selected_variable_capacity *
+      sizeof(*index->selected_variable_keys);
 }
 
 static void update_peak(Compact_unit_index index)
@@ -353,14 +549,22 @@ static void index_record(Compact_unit_index index, uint32_t record)
   else
     index->postings[index->nodes[node].last_posting].next = posting;
   index->nodes[node].last_posting = posting;
+  if (index->strategy == COMPACT_UNIT_POSITION &&
+      index_token_features(index, record, r->token_offset,
+                           r->token_offset + r->token_length,
+                           UINT64_C(0x726f6f745f706174), 0) !=
+        r->token_offset + r->token_length)
+    fatal_error("compact_unit_index: malformed feature term");
 }
 
-Compact_unit_index compact_unit_index_init_with_pool(Compact_term_pool pool)
+static Compact_unit_index compact_unit_index_init_with_pool_strategy(
+  Compact_term_pool pool, Compact_unit_strategy strategy)
 {
   Compact_unit_index index = safe_calloc(1, sizeof(*index));
   if (pool == NULL)
     fatal_error("compact_unit_index_init_with_pool: null term pool");
   index->term_pool = pool;
+  index->strategy = strategy;
   index->tokens = compact_term_pool_tokens(pool);
   index->id_map = compact_id_map_init(1);
   index->generalization_clock = clock_init("compact_unit_generalization");
@@ -379,8 +583,27 @@ Compact_unit_index compact_unit_index_init_with_pool(Compact_term_pool pool)
                "compact_unit_index: record overflow");
   memset(&index->records[0], 0, sizeof(index->records[0]));
   index->record_count = 1;
+  if (index->strategy == COMPACT_UNIT_POSITION) {
+    ENSURE_ARRAY(index, feature_buckets, feature_bucket_count,
+                 feature_bucket_capacity,
+                 "compact_unit_index: feature bucket overflow");
+    memset(&index->feature_buckets[0], 0,
+           sizeof(index->feature_buckets[0]));
+    index->feature_bucket_count = 1;
+    ENSURE_ARRAY(index, feature_postings, feature_posting_count,
+                 feature_posting_capacity,
+                 "compact_unit_index: feature posting overflow");
+    memset(&index->feature_postings[0], 0,
+           sizeof(index->feature_postings[0]));
+    index->feature_posting_count = 1;
+  }
   update_peak(index);
   return index;
+}
+
+Compact_unit_index compact_unit_index_init_with_pool(Compact_term_pool pool)
+{
+  return compact_unit_index_init_with_pool_strategy(pool, Unit_strategy);
 }
 
 Compact_unit_index compact_unit_index_init(void)
@@ -463,6 +686,7 @@ static void copy_live_record(Compact_unit_index destination,
   record = &destination->records[at_record];
   *record = saved;
   record->next_root = CUI_NONE;
+  record->query_stamp = 0;
   {
     unsigned root = (unsigned)
       destination->tokens[record->token_offset];
@@ -497,6 +721,14 @@ void compact_unit_index_set_compaction_stale_pct(unsigned percentage)
   if (percentage == 0 || percentage > 1000)
     fatal_error("compact_unit_index: invalid stale percentage");
   Compaction_stale_pct = percentage;
+}
+
+void compact_unit_index_set_strategy(Compact_unit_strategy strategy)
+{
+  if (strategy != COMPACT_UNIT_ROOT_SCAN &&
+      strategy != COMPACT_UNIT_POSITION)
+    fatal_error("compact_unit_index: invalid strategy");
+  Unit_strategy = strategy;
 }
 
 static void compact_unit_index_compact_internal(Compact_unit_index index,
@@ -544,14 +776,20 @@ static void compact_unit_index_compact_internal(Compact_unit_index index,
   safe_free(old.postings);
   safe_free(old.unifier_heads[0]);
   safe_free(old.unifier_heads[1]);
+  safe_free(old.feature_buckets);
+  safe_free(old.feature_hash);
+  safe_free(old.feature_postings);
   compact_id_map_free(old.id_map);
   safe_free(old.query);
   safe_free(old.result_ids);
+  safe_free(old.path_stack);
+  safe_free(old.selected_variable_keys);
   old.records = safe_realloc(
     old.records, packed * sizeof(*old.records));
   old.record_capacity = packed;
   old.record_count = packed;
-  replacement = compact_unit_index_init_with_pool(old.term_pool);
+  replacement = compact_unit_index_init_with_pool_strategy(
+    old.term_pool, old.strategy);
   replacement->owns_term_pool = old.owns_term_pool;
   replacement->tokens = compact_term_pool_tokens(old.term_pool);
   safe_free(replacement->records);
@@ -581,6 +819,10 @@ static void compact_unit_index_compact_internal(Compact_unit_index index,
   index->instance_exact_tests = instance_exact_tests;
   index->unifier_queries = unifier_queries;
   index->unifier_exact_tests = unifier_exact_tests;
+  index->position_queries = old.position_queries;
+  index->position_fallback_queries = old.position_fallback_queries;
+  index->position_postings_examined = old.position_postings_examined;
+  index->position_duplicate_postings = old.position_duplicate_postings;
   index->generalization_profile = old.generalization_profile;
   index->instance_profile = old.instance_profile;
   index->unifier_profile = old.unifier_profile;
@@ -1109,6 +1351,132 @@ static BOOL resident_unifies_record(Compact_unit_index index, Term query,
   return unify_exprs(&state, resident, token);
 }
 
+struct cui_feature_choice {
+  uint64_t exact_key;
+  unsigned long long score;
+  size_t variable_count;
+  BOOL found;
+};
+
+static void ensure_u64_scratch(uint64_t **values, size_t *capacity,
+                               size_t needed, const char *message)
+{
+  while (needed > *capacity) {
+    *capacity = grow_capacity(*capacity, sizeof(**values), message);
+    *values = safe_realloc(*values, *capacity * sizeof(**values));
+  }
+}
+
+static unsigned long long feature_posting_count(Compact_unit_index index,
+                                                uint64_t key)
+{
+  uint32_t bucket = find_feature_bucket(index, key);
+  return bucket == CUI_NONE ? 0 : index->feature_buckets[bucket].count;
+}
+
+static void select_unifier_feature(Compact_unit_index index, Term term,
+                                   BOOL sign, uint64_t path, size_t depth,
+                                   struct cui_feature_choice *choice)
+{
+  int i;
+  unsigned long long score;
+  uint64_t exact_key;
+  if (choice->found && choice->score == 0)
+    return;
+  ensure_u64_scratch(&index->path_stack, &index->path_capacity, depth + 1,
+                     "compact_unit_index: query path overflow");
+  index->path_stack[depth] = path;
+  if (VARIABLE(term))
+    return;
+  if (depth != 0) {
+    size_t ancestor;
+    exact_key = exact_feature_key(path, (unsigned) SYMNUM(term), sign);
+    score = feature_posting_count(index, exact_key);
+    for (ancestor = 1; ancestor <= depth; ancestor++) {
+      unsigned long long n = feature_posting_count(
+        index, variable_feature_key(index->path_stack[ancestor], sign));
+      if (ULLONG_MAX - score < n)
+        score = ULLONG_MAX;
+      else
+        score += n;
+    }
+    if (!choice->found || score < choice->score) {
+      ensure_u64_scratch(&index->selected_variable_keys,
+                         &index->selected_variable_capacity, depth,
+                         "compact_unit_index: selected path overflow");
+      for (ancestor = 1; ancestor <= depth; ancestor++)
+        index->selected_variable_keys[ancestor - 1] =
+          variable_feature_key(index->path_stack[ancestor], sign);
+      choice->exact_key = exact_key;
+      choice->score = score;
+      choice->variable_count = depth;
+      choice->found = TRUE;
+    }
+  }
+  for (i = 0; i < ARITY(term); i++)
+    select_unifier_feature(index, ARG(term, i), sign,
+                           child_path(path, (unsigned) i), depth + 1,
+                           choice);
+}
+
+static void begin_position_query(Compact_unit_index index)
+{
+  size_t i;
+  index->query_stamp++;
+  if (index->query_stamp == 0) {
+    for (i = 1; i < index->record_count; i++)
+      index->records[i].query_stamp = 0;
+    index->query_stamp = 1;
+  }
+}
+
+static void collect_position_bucket(
+  Compact_unit_index index, uint64_t key, Term query, BOOL sign,
+  unsigned long long exclude_id, size_t *found,
+  unsigned long long *visited, unsigned long long *live,
+  unsigned long long *dead, unsigned long long *duplicates)
+{
+  uint32_t bucket = find_feature_bucket(index, key);
+  uint32_t posting;
+  if (bucket == CUI_NONE)
+    return;
+  for (posting = index->feature_buckets[bucket].first_posting;
+       posting != CUI_NONE;
+       posting = index->feature_postings[posting].next) {
+    struct cui_record *record =
+      &index->records[index->feature_postings[posting].record];
+    (*visited)++;
+    index->position_postings_examined++;
+    if (record->query_stamp == index->query_stamp) {
+      (*duplicates)++;
+      index->position_duplicate_postings++;
+      continue;
+    }
+    record->query_stamp = index->query_stamp;
+    if (!record->active) {
+      (*dead)++;
+      continue;
+    }
+    (*live)++;
+    if (record->sign != (unsigned char) sign ||
+        record->proof_id == exclude_id || record->token_length == 0 ||
+        index->tokens[record->token_offset] != SYMNUM(query))
+      continue;
+    index->unifier_exact_tests++;
+    if (resident_unifies_record(index, query, record)) {
+      if (*found == index->result_capacity) {
+        index->result_capacity = grow_capacity(
+          index->result_capacity, sizeof(*index->result_ids),
+          "compact_unit_index: result overflow");
+        index->result_ids = safe_realloc(
+          index->result_ids,
+          index->result_capacity * sizeof(*index->result_ids));
+      }
+      index->result_ids[(*found)++] = record->proof_id;
+    }
+  }
+}
+
 unsigned long long *compact_unit_unifier_ids(
   Compact_unit_index index, Term query, BOOL sign,
   unsigned long long exclude_id, size_t *count)
@@ -1117,6 +1485,8 @@ unsigned long long *compact_unit_unifier_ids(
   uint32_t i;
   int query_root;
   unsigned long long tests_before, visited = 0, live = 0, dead = 0;
+  unsigned long long duplicates = 0;
+  struct cui_feature_choice choice;
   if (count == NULL)
     return NULL;
   *count = 0;
@@ -1133,29 +1503,50 @@ unsigned long long *compact_unit_unifier_ids(
     clock_stop(index->unifier_clock);
     return NULL;
   }
-  for (i = index->unifier_heads[sign ? 1 : 0][query_root];
-       i != CUI_NONE; i = index->records[i].next_root) {
-    struct cui_record *record = &index->records[i];
-    visited++;
-    if (record->active)
-      live++;
-    else
-      dead++;
-    if (!record->active || record->sign != (unsigned char) sign ||
-        record->proof_id == exclude_id || record->token_length == 0 ||
-        index->tokens[record->token_offset] != query_root)
-      continue;
-    index->unifier_exact_tests++;
-    if (resident_unifies_record(index, query, record)) {
-      if (found == index->result_capacity) {
-        index->result_capacity = grow_capacity(
-          index->result_capacity, sizeof(*index->result_ids),
-          "compact_unit_index: result overflow");
-        index->result_ids = safe_realloc(
-          index->result_ids,
-          index->result_capacity * sizeof(*index->result_ids));
+  memset(&choice, 0, sizeof(choice));
+  if (index->strategy == COMPACT_UNIT_POSITION) {
+    size_t key_at;
+    index->position_queries++;
+    select_unifier_feature(index, query, sign,
+                           UINT64_C(0x726f6f745f706174), 0, &choice);
+    if (choice.found) {
+      begin_position_query(index);
+      collect_position_bucket(index, choice.exact_key, query, sign,
+                              exclude_id, &found, &visited, &live, &dead,
+                              &duplicates);
+      for (key_at = 0; key_at < choice.variable_count; key_at++)
+        collect_position_bucket(
+          index, index->selected_variable_keys[key_at], query, sign,
+          exclude_id, &found, &visited, &live, &dead, &duplicates);
+    }
+  }
+  if (index->strategy == COMPACT_UNIT_ROOT_SCAN || !choice.found) {
+    if (index->strategy == COMPACT_UNIT_POSITION)
+      index->position_fallback_queries++;
+    for (i = index->unifier_heads[sign ? 1 : 0][query_root];
+         i != CUI_NONE; i = index->records[i].next_root) {
+      struct cui_record *record = &index->records[i];
+      visited++;
+      if (record->active)
+        live++;
+      else
+        dead++;
+      if (!record->active || record->sign != (unsigned char) sign ||
+          record->proof_id == exclude_id || record->token_length == 0 ||
+          index->tokens[record->token_offset] != query_root)
+        continue;
+      index->unifier_exact_tests++;
+      if (resident_unifies_record(index, query, record)) {
+        if (found == index->result_capacity) {
+          index->result_capacity = grow_capacity(
+            index->result_capacity, sizeof(*index->result_ids),
+            "compact_unit_index: result overflow");
+          index->result_ids = safe_realloc(
+            index->result_ids,
+            index->result_capacity * sizeof(*index->result_ids));
+        }
+        index->result_ids[found++] = record->proof_id;
       }
-      index->result_ids[found++] = record->proof_id;
     }
   }
   if (found > 1) {
@@ -1167,7 +1558,7 @@ unsigned long long *compact_unit_unifier_ids(
   compact_profile_note(
     &index->unifier_profile,
     index->unifier_exact_tests - tests_before,
-    visited, live, dead, 0, found, 0);
+    visited, live, dead, duplicates, found, 0);
   compact_profile_note_exact(
     &index->unifier_profile,
     index->unifier_exact_tests - tests_before, found, 0);
@@ -1194,6 +1585,7 @@ void compact_unit_index_get_stats(Compact_unit_index index,
   if (index == NULL)
     return;
   compact_term_pool_get_stats(index->term_pool, &terms);
+  stats->strategy = index->strategy;
   stats->active = index->active;
   stats->peak = index->peak;
   stats->retired = index->retired;
@@ -1205,6 +1597,14 @@ void compact_unit_index_get_stats(Compact_unit_index index,
   stats->instance_exact_tests = index->instance_exact_tests;
   stats->unifier_queries = index->unifier_queries;
   stats->unifier_exact_tests = index->unifier_exact_tests;
+  stats->position_queries = index->position_queries;
+  stats->position_fallback_queries = index->position_fallback_queries;
+  stats->position_postings_examined = index->position_postings_examined;
+  stats->position_duplicate_postings = index->position_duplicate_postings;
+  stats->feature_items = index->feature_bucket_count == 0 ? 0 :
+    index->feature_bucket_count - 1;
+  stats->feature_posting_items = index->feature_posting_count == 0 ? 0 :
+    index->feature_posting_count - 1;
   stats->generalization_profile = index->generalization_profile;
   stats->instance_profile = index->instance_profile;
   stats->unifier_profile = index->unifier_profile;
@@ -1221,11 +1621,18 @@ void compact_unit_index_get_stats(Compact_unit_index index,
   stats->root_bytes = index->unifier_symbol_capacity *
     (sizeof(*index->unifier_heads[0]) +
      sizeof(*index->unifier_heads[1]));
+  stats->feature_bytes =
+    index->feature_bucket_capacity * sizeof(*index->feature_buckets) +
+    index->feature_hash_capacity * sizeof(*index->feature_hash) +
+    index->feature_posting_capacity * sizeof(*index->feature_postings);
   stats->token_bytes = index->owns_term_pool ? terms.token_bytes : 0;
   stats->hash_bytes = compact_id_map_bytes(index->id_map);
   stats->scratch_bytes =
     index->query_capacity * sizeof(*index->query) +
-    index->result_capacity * sizeof(*index->result_ids);
+    index->result_capacity * sizeof(*index->result_ids) +
+    index->path_capacity * sizeof(*index->path_stack) +
+    index->selected_variable_capacity *
+      sizeof(*index->selected_variable_keys);
   stats->total_bytes = index_bytes(index);
   stats->peak_bytes = index->peak_bytes;
 }
@@ -1239,11 +1646,16 @@ void compact_unit_index_free(Compact_unit_index index)
   safe_free(index->records);
   safe_free(index->unifier_heads[0]);
   safe_free(index->unifier_heads[1]);
+  safe_free(index->feature_buckets);
+  safe_free(index->feature_hash);
+  safe_free(index->feature_postings);
   if (index->owns_term_pool)
     compact_term_pool_free(index->term_pool);
   compact_id_map_free(index->id_map);
   safe_free(index->query);
   safe_free(index->result_ids);
+  safe_free(index->path_stack);
+  safe_free(index->selected_variable_keys);
   free_clock(index->generalization_clock);
   free_clock(index->instance_clock);
   free_clock(index->unifier_clock);

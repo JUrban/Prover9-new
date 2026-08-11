@@ -7,7 +7,13 @@
 
 typedef struct compact_unit_index * Compact_unit_index;
 
+typedef enum {
+  COMPACT_UNIT_ROOT_SCAN,
+  COMPACT_UNIT_POSITION
+} Compact_unit_strategy;
+
 struct compact_unit_index_stats {
+  Compact_unit_strategy strategy;
   unsigned long long active;
   unsigned long long peak;
   unsigned long long retired;
@@ -19,6 +25,12 @@ struct compact_unit_index_stats {
   unsigned long long instance_exact_tests;
   unsigned long long unifier_queries;
   unsigned long long unifier_exact_tests;
+  unsigned long long position_queries;
+  unsigned long long position_fallback_queries;
+  unsigned long long position_postings_examined;
+  unsigned long long position_duplicate_postings;
+  unsigned long long feature_items;
+  unsigned long long feature_posting_items;
   struct compact_query_profile generalization_profile;
   struct compact_query_profile instance_profile;
   struct compact_query_profile unifier_profile;
@@ -33,6 +45,7 @@ struct compact_unit_index_stats {
   unsigned long long posting_bytes;
   unsigned long long record_bytes;
   unsigned long long root_bytes;
+  unsigned long long feature_bytes;
   unsigned long long token_bytes;
   unsigned long long hash_bytes;
   unsigned long long scratch_bytes;
@@ -45,6 +58,8 @@ Compact_unit_index compact_unit_index_init(void);
 Compact_unit_index compact_unit_index_init_with_pool(Compact_term_pool pool);
 
 void compact_unit_index_set_compaction_stale_pct(unsigned percentage);
+
+void compact_unit_index_set_strategy(Compact_unit_strategy strategy);
 
 BOOL compact_unit_index_add(Compact_unit_index index, Topform unit);
 

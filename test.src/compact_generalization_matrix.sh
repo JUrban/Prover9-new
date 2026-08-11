@@ -93,6 +93,7 @@ prepare_input()
     /^assign\((max_given|max_seconds|max_minutes|max_hours|max_days|max_megs|report|stats),/ { next }
     /^assign\((search_loop|passive_store|hint_index|inference_frontier|ancestor_store),/ { next }
     /^assign\((compact_term_reclaim_kb|compact_index_stale_pct|compact_passive_cache),/ { next }
+    /^assign\(compact_unit_strategy,/ { next }
     /^(set|clear)\(compact_otter_[a-z_]+\)\./ { next }
     /^(set|clear)\((clocks|hint_match_stats|print_gen|print_kept|print_given|print_initial_clauses)\)\./ { next }
     { print }
@@ -143,6 +144,11 @@ emit_variant()
       emit_variant packed_only
       echo 'set(compact_otter_unit_index).'
       ;;
+    compact_unit_position)
+      emit_variant packed_only
+      echo 'assign(compact_unit_strategy,position).'
+      echo 'set(compact_otter_unit_index).'
+      ;;
     compact_back_only)
       emit_variant packed_only
       echo 'set(compact_otter_back_demod_index).'
@@ -151,15 +157,21 @@ emit_variant()
       emit_variant packed_only
       echo 'set(compact_otter_nonunit_index).'
       ;;
-    compact_full|compact_dense_file)
+    compact_full|compact_dense_file|compact_full_position|compact_dense_file_position)
       echo 'assign(search_loop,otter).'
-      if test "$1" = compact_dense_file; then
-        echo 'assign(passive_store,dense).'
-        echo 'assign(ancestor_store,file).'
-      else
-        echo 'assign(passive_store,full).'
-        echo 'assign(ancestor_store,off).'
-      fi
+      case "$1" in
+        compact_dense_file*)
+          echo 'assign(passive_store,dense).'
+          echo 'assign(ancestor_store,file).'
+          ;;
+        *)
+          echo 'assign(passive_store,full).'
+          echo 'assign(ancestor_store,off).'
+          ;;
+      esac
+      case "$1" in
+        *_position) echo 'assign(compact_unit_strategy,position).' ;;
+      esac
       echo 'assign(hint_index,packed_fast).'
       echo 'assign(inference_frontier,clauses).'
       echo 'set(compact_otter_demodulation).'
@@ -188,9 +200,9 @@ run_one()
     emit_common
     emit_variant "$variant"
     awk '{ print }' "$base"
-    if test "$variant" = compact_dense_file; then
-      echo 'assign(sos_limit,-1).'
-    fi
+    case "$variant" in
+      compact_dense_file*) echo 'assign(sos_limit,-1).' ;;
+    esac
   } > "$input"
   case "$variant" in
     old_p9) prover=$old_prover ;;

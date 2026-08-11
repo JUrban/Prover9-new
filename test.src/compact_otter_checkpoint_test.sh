@@ -77,7 +77,7 @@ for checkpoint_given in 0 2; do
     "$case_dir/resumed.out"
   grep -Eq 'Compact_otter_demodulation: current_rules=[1-9][0-9]*,' \
     "$case_dir/resumed.out"
-  grep -Eq 'Compact_unit_index: mode=authoritative, failures=0,' \
+  grep -Eq 'Compact_unit_index: mode=authoritative, strategy=root_scan, failures=0,' \
     "$case_dir/resumed.out"
   grep -Eq 'Compact_back_demod: mode=authoritative, failures=0,' \
     "$case_dir/resumed.out"

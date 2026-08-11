@@ -229,22 +229,32 @@ void fprint_compact_unit_index(FILE *fp)
     return;
   compact_unit_index_get_stats(Compact_units, &stats);
   fprintf(fp,
-          "Compact_unit_index: mode=%s, failures=%llu, active=%llu, "
+          "Compact_unit_index: mode=%s, strategy=%s, failures=%llu, active=%llu, "
           "peak=%llu, retired=%llu, physical=%llu, compactions=%llu, "
           "reclaimed=%llu, forward_queries=%llu, "
           "back_queries=%llu, back_exact_tests=%llu, conflict_queries=%llu, "
-          "conflict_exact_tests=%llu, node_items=%llu, posting_items=%llu, "
+          "conflict_exact_tests=%llu, position_queries=%llu, "
+          "position_fallbacks=%llu, position_postings=%llu, "
+          "position_duplicates=%llu, node_items=%llu, posting_items=%llu, "
+          "feature_items=%llu, feature_posting_items=%llu, "
           "nodes=%llu, postings=%llu, "
-          "records=%llu, roots=%llu, tokens=%llu, hash=%llu, scratch=%llu, bytes=%llu, "
+          "records=%llu, roots=%llu, features=%llu, tokens=%llu, hash=%llu, scratch=%llu, bytes=%llu, "
           "peak_bytes=%llu.\n",
           Compact_unit_authoritative ? "authoritative" : "audit",
+          stats.strategy == COMPACT_UNIT_POSITION ? "position" : "root_scan",
           Compact_unit_audit_failures, stats.active, stats.peak,
           stats.retired, stats.physical, stats.compactions,
           stats.bytes_reclaimed, stats.generalization_queries,
           stats.instance_queries, stats.instance_exact_tests,
           stats.unifier_queries, stats.unifier_exact_tests,
-          stats.node_items, stats.posting_items, stats.node_bytes,
+          stats.position_queries, stats.position_fallback_queries,
+          stats.position_postings_examined,
+          stats.position_duplicate_postings,
+          stats.node_items, stats.posting_items,
+          stats.feature_items, stats.feature_posting_items,
+          stats.node_bytes,
           stats.posting_bytes, stats.record_bytes, stats.root_bytes,
+          stats.feature_bytes,
           stats.token_bytes,
           stats.hash_bytes, stats.scratch_bytes,
           stats.total_bytes, stats.peak_bytes);

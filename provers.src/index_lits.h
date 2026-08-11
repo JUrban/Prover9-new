@@ -22,7 +22,7 @@
 #include "../ladr/clock.h"
 #include "../ladr/subsume.h"
 #include "../ladr/di_tree.h"
-#include "compact_term_pool.h"
+#include "compact_unit_index.h"
 
 /* INTRODUCTION
 */

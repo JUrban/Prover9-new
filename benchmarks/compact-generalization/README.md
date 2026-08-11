@@ -63,7 +63,14 @@ Results include the complete generated input, binary/input hashes,
 machine-readable `profiles.tsv`/`profiles.json`.  Component-isolation variants
 are `compact_demod_only`, `compact_unit_only`, `compact_back_only`, and
 `compact_nonunit_only`; they retain full passive bodies so the other legacy
-indexes remain valid.
+indexes remain valid.  The experimental position-compatible unit retrieval is
+selected by `compact_unit_position`, `compact_full_position`, or
+`compact_dense_file_position`; the corresponding variants without the suffix
+remain root-scan controls.  This first prototype is intentionally not the
+default: at 100 givens it reduced unit-unification exact tests from 5,935 to 53
+on the Osborn training case and from 4,620 to 76 on nil3, but increased the
+reported unit-index bytes by 94% and 29%, respectively.  It establishes a
+selectivity oracle while failing the 20% index-metadata promotion gate.
 
 Setting `P9_MATRIX_ALLOW_HOLDOUT=1` is required even when a holdout case is
 named explicitly.  Do this only for a recorded phase-promotion commit, never
