@@ -1926,6 +1926,8 @@ Prover_options init_prover_options(void)
     init_flag("compact_back_demod_audit", FALSE);
   p->compact_otter_back_demod_index =
     init_flag("compact_otter_back_demod_index", FALSE);
+  p->compact_back_position_admission =
+    init_flag("compact_back_position_admission", FALSE);
   p->compact_nonunit_subsumption_audit =
     init_flag("compact_nonunit_subsumption_audit", FALSE);
   p->compact_otter_nonunit_index =
@@ -10729,8 +10731,10 @@ static void configure_search_indexes(void)
   configure_compact_back_demod_position(
     (unsigned) parm(Opt->compact_back_tree_admit_work),
     4,
+    8,
     (unsigned) parm(Opt->compact_back_tree_budget_kb),
-    20);
+    20,
+    flag(Opt->compact_back_position_admission));
   configure_compact_unit_term_pool(Compact_terms);
   configure_compact_unit_index(
     flag(Opt->compact_unit_subsumption_audit),

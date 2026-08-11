@@ -287,6 +287,38 @@ next gate asks whether reuse amortizes that deterministic construction cost at
 1,000 given; otherwise admission needs a bounded repeated-use probation stage,
 not another problem-specific threshold.
 
+The raw one-query admission rule fails that gate.  At 1,000 given, threshold
+2,048 admitted 198 features, reduced groups from 8.422 million to 7.155
+million and occurrences from 7.044 million to 6.187 million, and used 3.364 MB
+versus 3.087 MB (+8.95%).  But 3.708 million backfill-record scans raised user
+CPU from 77.68 to 81.51 seconds in the bounded parallel comparison.  The
+representation is compact enough; speculative construction is the deeper
+problem.
+
+Position admission therefore now has two workload-independent gates.  A
+byte-bounded two-choice heavy-hitter table first accumulates fallback work for
+exact query features.  A feature must occur in at least two broad queries and
+its cumulative work must cover eight complete live-record passes before any
+census.  The table receives at most one quarter of the auxiliary metadata
+budget, capped at 128 KiB, and its state survives index rebuilding.  The
+subsequent census retains the fourfold selectivity and total-byte gates.
+`compact_back_position_admission` explicitly enables this probation policy;
+it is clear by default.  Matrix variants ending in `_back_position_off` provide
+the same-strategy, same-option-value control.
+
+The fair 1,000-given Osborn comparison keeps the policy diagnostic rather than
+promoting it.  With threshold 1,024, admission-off and admission-on had
+identical fallback structure and examined exactly 7,955,664 groups and
+6,580,140 occurrences.  Probation admitted no features, attempted three
+censuses that failed selectivity, added 8,192 bytes, and used 84.46 versus
+82.15 user seconds.  At 300 given on the corrected `chat-new-11k` training
+case, it performed only 17 counter updates, admitted nothing, and added 16 KiB;
+the search work was identical.  The no-demodulation nil3/mbol training cases
+allocated no probation index.  Thus exact positions remain a correct,
+byte-bounded research path, but the recommended backward-demodulation strategy
+remains `mask8` until a representation can eliminate construction overhead on
+more than one rewrite-heavy training workload.
+
 Setting `P9_MATRIX_ALLOW_HOLDOUT=1` is required even when a holdout case is
 named explicitly.  Do this only for a recorded phase-promotion commit, never
 while selecting features or thresholds.

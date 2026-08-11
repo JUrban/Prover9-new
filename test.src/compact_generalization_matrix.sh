@@ -17,6 +17,7 @@ back_tree_budget_kb=${P9_MATRIX_BACK_TREE_BUDGET_KB:-65536}
 back_tree_admit_work=${P9_MATRIX_BACK_TREE_ADMIT_WORK:-4096}
 back_position_admit_work=${P9_MATRIX_BACK_POSITION_ADMIT_WORK:-4096}
 back_position_budget_kb=${P9_MATRIX_BACK_POSITION_BUDGET_KB:-65536}
+back_position_admission=${P9_MATRIX_BACK_POSITION_ADMISSION:-1}
 detected_cpu=$(taskset -pc $$ 2>/dev/null | sed 's/^.*: //;s/,.*//;s/-.*//' || true)
 cpu=${P9_MATRIX_CPU:-${detected_cpu:-0}}
 allow_holdout=${P9_MATRIX_ALLOW_HOLDOUT:-0}
@@ -100,6 +101,7 @@ prepare_input()
     /^assign\((compact_term_reclaim_kb|compact_index_stale_pct|compact_passive_cache|compact_back_tree_min_tokens|compact_back_tree_budget_kb|compact_back_tree_admit_work),/ { next }
     /^assign\(compact_unit_strategy,/ { next }
     /^assign\(compact_back_demod_strategy,/ { next }
+    /^(set|clear)\(compact_back_position_admission\)\./ { next }
     /^(set|clear)\(compact_otter_[a-z_]+\)\./ { next }
     /^(set|clear)\((clocks|hint_match_stats|print_gen|print_kept|print_given|print_initial_clauses)\)\./ { next }
     { print }
@@ -195,13 +197,26 @@ emit_variant()
       echo 'assign(compact_back_demod_strategy,position).'
       echo "assign(compact_back_tree_admit_work,$back_position_admit_work)."
       echo "assign(compact_back_tree_budget_kb,$back_position_budget_kb)."
+      if test "$back_position_admission" = 1; then
+        echo 'set(compact_back_position_admission).'
+      else
+        echo 'clear(compact_back_position_admission).'
+      fi
+      echo 'set(compact_otter_back_demod_index).'
+      ;;
+    compact_back_position_off)
+      emit_variant packed_only
+      echo 'assign(compact_back_demod_strategy,position).'
+      echo "assign(compact_back_tree_admit_work,$back_position_admit_work)."
+      echo "assign(compact_back_tree_budget_kb,$back_position_budget_kb)."
+      echo 'clear(compact_back_position_admission).'
       echo 'set(compact_otter_back_demod_index).'
       ;;
     compact_nonunit_only)
       emit_variant packed_only
       echo 'set(compact_otter_nonunit_index).'
       ;;
-    compact_full|compact_dense_file|compact_full_position|compact_dense_file_position|compact_full_code_tree|compact_dense_file_code_tree|compact_full_signature|compact_dense_file_signature|compact_full_code_tree_signature|compact_dense_file_code_tree_signature|compact_full_back_tree|compact_dense_file_back_tree|compact_full_code_tree_back_tree|compact_dense_file_code_tree_back_tree|compact_full_back_hybrid|compact_dense_file_back_hybrid|compact_full_code_tree_back_hybrid|compact_dense_file_code_tree_back_hybrid|compact_full_back_hot_root|compact_dense_file_back_hot_root|compact_full_code_tree_back_hot_root|compact_dense_file_code_tree_back_hot_root|compact_full_back_position|compact_dense_file_back_position|compact_full_code_tree_back_position|compact_dense_file_code_tree_back_position)
+    compact_full|compact_dense_file|compact_full_position|compact_dense_file_position|compact_full_code_tree|compact_dense_file_code_tree|compact_full_signature|compact_dense_file_signature|compact_full_code_tree_signature|compact_dense_file_code_tree_signature|compact_full_back_tree|compact_dense_file_back_tree|compact_full_code_tree_back_tree|compact_dense_file_code_tree_back_tree|compact_full_back_hybrid|compact_dense_file_back_hybrid|compact_full_code_tree_back_hybrid|compact_dense_file_code_tree_back_hybrid|compact_full_back_hot_root|compact_dense_file_back_hot_root|compact_full_code_tree_back_hot_root|compact_dense_file_code_tree_back_hot_root|compact_full_back_position|compact_dense_file_back_position|compact_full_code_tree_back_position|compact_dense_file_code_tree_back_position|compact_full_back_position_off|compact_dense_file_back_position_off|compact_full_code_tree_back_position_off|compact_dense_file_code_tree_back_position_off)
       echo 'assign(search_loop,otter).'
       case "$1" in
         compact_dense_file*)
@@ -237,6 +252,17 @@ emit_variant()
           echo 'assign(compact_back_demod_strategy,position).'
           echo "assign(compact_back_tree_admit_work,$back_position_admit_work)."
           echo "assign(compact_back_tree_budget_kb,$back_position_budget_kb)."
+          if test "$back_position_admission" = 1; then
+            echo 'set(compact_back_position_admission).'
+          else
+            echo 'clear(compact_back_position_admission).'
+          fi
+          ;;
+        *_back_position_off)
+          echo 'assign(compact_back_demod_strategy,position).'
+          echo "assign(compact_back_tree_admit_work,$back_position_admit_work)."
+          echo "assign(compact_back_tree_budget_kb,$back_position_budget_kb)."
+          echo 'clear(compact_back_position_admission).'
           ;;
         *) echo 'assign(compact_back_demod_strategy,mask8).' ;;
       esac
@@ -314,6 +340,7 @@ done
   echo "back_tree_admit_work=$back_tree_admit_work"
   echo "back_position_admit_work=$back_position_admit_work"
   echo "back_position_budget_kb=$back_position_budget_kb"
+  echo "back_position_admission=$back_position_admission"
   echo "back_position_min_gain=4"
   echo "back_position_budget_pct=20"
   echo "cpu=$cpu"

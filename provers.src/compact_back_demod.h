@@ -51,13 +51,19 @@ struct compact_back_demod_stats {
   unsigned long long position_records_examined;
   unsigned long long position_admissions;
   unsigned long long position_rejections;
+  unsigned long long position_cost_deferrals;
+  unsigned long long position_probation_updates;
+  unsigned long long position_probation_replacements;
   unsigned long long position_backfill_records;
   unsigned long long position_budget_bytes;
   unsigned long long position_estimated_bytes;
+  unsigned long long position_probation_bytes;
   unsigned long long position_budget_exhaustions;
   unsigned position_budget_pct;
   unsigned position_admit_work;
   unsigned position_min_gain;
+  unsigned position_build_factor;
+  BOOL position_admission_enabled;
   BOOL position_complete;
   unsigned long long symbol_occurrences;
   unsigned long long posting_groups_examined;
@@ -107,8 +113,10 @@ void compact_back_demod_set_tree_admit_work(unsigned groups);
 
 void compact_back_demod_set_position_options(unsigned admit_work,
                                              unsigned min_gain,
+                                             unsigned build_factor,
                                              unsigned budget_kb,
-                                             unsigned budget_pct);
+                                             unsigned budget_pct,
+                                             BOOL admission_enabled);
 
 BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause);
 

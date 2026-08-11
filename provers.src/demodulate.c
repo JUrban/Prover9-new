@@ -92,11 +92,14 @@ void configure_compact_back_demod_tree(unsigned min_tokens,
 
 void configure_compact_back_demod_position(unsigned admit_work,
                                            unsigned min_gain,
+                                           unsigned build_factor,
                                            unsigned budget_kb,
-                                           unsigned budget_pct)
+                                           unsigned budget_pct,
+                                           BOOL admission_enabled)
 {
   compact_back_demod_set_position_options(
-    admit_work, min_gain, budget_kb, budget_pct);
+    admit_work, min_gain, build_factor, budget_kb, budget_pct,
+    admission_enabled);
 }
 
 static BOOL compact_back_demod_mode(void)
@@ -635,10 +638,15 @@ void fprint_compact_back_demod(FILE *fp)
           "position_features=%llu, position_postings=%llu, "
           "position_queries=%llu, position_records_examined=%llu, "
           "position_admissions=%llu, position_rejections=%llu, "
+          "position_cost_deferrals=%llu, "
+          "position_probation_updates=%llu, "
+          "position_probation_replacements=%llu, "
           "position_backfill_records=%llu, position_complete=%s, "
           "position_budget=%llu, position_budget_pct=%u, "
-          "position_estimated=%llu, position_budget_exhaustions=%llu, "
+          "position_estimated=%llu, position_probation_bytes=%llu, "
+          "position_budget_exhaustions=%llu, "
           "position_admit_work=%u, position_min_gain=%u, "
+          "position_build_factor=%u, position_admission=%s, "
           "symbol_occurrences=%llu, groups_examined=%llu, "
           "occurrences_examined=%llu, path_checks=%llu, "
           "path_rejects=%llu, file_snapshots=%llu, snapshot_ids=%llu, "
@@ -669,12 +677,18 @@ void fprint_compact_back_demod(FILE *fp)
           stats.position_features, stats.position_postings,
           stats.position_queries, stats.position_records_examined,
           stats.position_admissions, stats.position_rejections,
+          stats.position_cost_deferrals,
+          stats.position_probation_updates,
+          stats.position_probation_replacements,
           stats.position_backfill_records,
           stats.position_complete ? "yes" : "no",
           stats.position_budget_bytes, stats.position_budget_pct,
           stats.position_estimated_bytes,
+          stats.position_probation_bytes,
           stats.position_budget_exhaustions,
           stats.position_admit_work, stats.position_min_gain,
+          stats.position_build_factor,
+          stats.position_admission_enabled ? "yes" : "no",
           stats.symbol_occurrences,
           stats.posting_groups_examined, stats.occurrences_examined,
           stats.path_filter_checks, stats.path_filter_rejects,

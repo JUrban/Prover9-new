@@ -402,7 +402,7 @@ int main(void)
     Topform clauses[POSITION_FAMILY], rule, later, multi;
     char text[160];
     int j;
-    compact_back_demod_set_position_options(1, 4, 65536, 20);
+    compact_back_demod_set_position_options(1, 4, 1, 65536, 20, TRUE);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_POSITION);
     position = compact_back_demod_init();
     for (j = 0; j < POSITION_FAMILY; j++) {
@@ -418,6 +418,11 @@ int main(void)
     ids = compact_back_demod_candidate_ids(
       position, rule, ORIENTED, &count);
     CHECK(count == 1 && ids[0] == clauses[POSITION_TARGET]->id,
+          "position probation query retains the fallback answer");
+    safe_free(ids);
+    ids = compact_back_demod_candidate_ids(
+      position, rule, ORIENTED, &count);
+    CHECK(count == 1 && ids[0] == clauses[POSITION_TARGET]->id,
           "position admission query retains the fallback answer");
     safe_free(ids);
     compact_back_demod_get_stats(position, &position_stats);
@@ -425,7 +430,9 @@ int main(void)
           position_stats.position_features == 1 &&
           position_stats.position_queries == 0 &&
           position_stats.position_complete &&
-          position_stats.position_postings == 1,
+          position_stats.position_postings == 1 &&
+          position_stats.position_probation_updates > 0 &&
+          position_stats.position_probation_bytes > 0,
           "broad fallback admits one rare complete position feature");
     ids = compact_back_demod_candidate_ids(
       position, rule, ORIENTED, &count);
@@ -467,7 +474,8 @@ int main(void)
     delete_clause(multi);
     for (j = 0; j < POSITION_FAMILY; j++)
       delete_clause(clauses[j]);
-    compact_back_demod_set_position_options(4096, 4, 65536, 20);
+    compact_back_demod_set_position_options(
+      4096, 4, 8, 65536, 20, TRUE);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
   }
 
@@ -475,7 +483,7 @@ int main(void)
     Compact_back_demod_index bounded;
     struct compact_back_demod_stats bounded_stats;
     Topform clause, rule;
-    compact_back_demod_set_position_options(1, 1, 1, 20);
+    compact_back_demod_set_position_options(1, 1, 1, 8, 20, TRUE);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_POSITION);
     bounded = compact_back_demod_init();
     clause = indexed_clause("w(f(a,g(h(j(c))))).");
@@ -487,6 +495,11 @@ int main(void)
     CHECK(count == 1 && ids[0] == clause->id,
           "position byte-budget rejection retains fallback answer");
     safe_free(ids);
+    ids = compact_back_demod_candidate_ids(
+      bounded, rule, ORIENTED, &count);
+    CHECK(count == 1 && ids[0] == clause->id,
+          "repeated budgeted query retains fallback answer");
+    safe_free(ids);
     compact_back_demod_get_stats(bounded, &bounded_stats);
     CHECK(bounded_stats.position_features == 0 &&
           bounded_stats.position_rejections == 1 &&
@@ -496,7 +509,8 @@ int main(void)
     compact_back_demod_free(bounded);
     delete_clause(clause);
     delete_clause(rule);
-    compact_back_demod_set_position_options(4096, 4, 65536, 20);
+    compact_back_demod_set_position_options(
+      4096, 4, 8, 65536, 20, TRUE);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
   }
 

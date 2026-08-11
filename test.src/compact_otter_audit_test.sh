@@ -85,6 +85,7 @@ sed '1i\
 assign(compact_back_demod_strategy,position).\
 assign(compact_back_tree_admit_work,1).\
 assign(compact_back_tree_budget_kb,65536).\
+set(compact_back_position_admission).\
 set(compact_otter_demodulation).\
 set(compact_otter_unit_index).\
 set(compact_back_demod_audit).\

@@ -48,8 +48,10 @@ void configure_compact_back_demod_tree(unsigned min_tokens,
 
 void configure_compact_back_demod_position(unsigned admit_work,
                                            unsigned min_gain,
+                                           unsigned build_factor,
                                            unsigned budget_kb,
-                                           unsigned budget_pct);
+                                           unsigned budget_pct,
+                                           BOOL admission_enabled);
 
 unsigned long long compact_back_demod_active_count(void);
 

@@ -22,6 +22,8 @@ static unsigned Back_demod_tree_min_tokens = 8;
 static unsigned Back_demod_tree_admit_work = 4096;
 static unsigned Back_demod_position_admit_work = 4096;
 static unsigned Back_demod_position_min_gain = 4;
+static unsigned Back_demod_position_build_factor = 8;
+static BOOL Back_demod_position_admission = FALSE;
 static unsigned Back_demod_position_budget_pct = 20;
 static unsigned long long Back_demod_position_budget_bytes =
   UINT64_C(64) * 1024 * 1024;
@@ -125,6 +127,15 @@ struct cbd_position_query_feature {
   unsigned long long matching_records;
 };
 
+struct cbd_position_probation {
+  uint64_t path;
+  unsigned long long work;
+  uint32_t root_symbol;
+  uint32_t symbol;
+  uint32_t hits;
+  unsigned char occupied;
+};
+
 struct cbd_record {
   unsigned long long proof_id;
   uint32_t token_offset;
@@ -167,6 +178,8 @@ struct compact_back_demod_index {
   size_t position_block_capacity;
   struct cbd_position_query_feature *position_query;
   size_t position_query_capacity;
+  struct cbd_position_probation *position_probation;
+  size_t position_probation_capacity;
   unsigned char *occurrences;
   size_t occurrence_count;
   size_t occurrence_capacity;
@@ -216,14 +229,19 @@ struct compact_back_demod_index {
   unsigned long long position_records_examined;
   unsigned long long position_admissions;
   unsigned long long position_rejections;
+  unsigned long long position_cost_deferrals;
+  unsigned long long position_probation_updates;
+  unsigned long long position_probation_replacements;
   unsigned long long position_backfill_records;
   unsigned long long position_budget_exhaustions;
   unsigned position_admit_work;
   unsigned position_min_gain;
+  unsigned position_build_factor;
   unsigned position_budget_pct;
   unsigned long long position_budget_bytes;
   BOOL position_complete;
   BOOL position_rebuilding;
+  BOOL position_admission_enabled;
   unsigned long long inactive_groups_examined;
   unsigned long long duplicate_groups_examined;
   unsigned long long posting_bytes_decoded;
@@ -339,7 +357,8 @@ static unsigned long long position_estimated_bytes(
     index->position_bucket_hash_capacity *
       sizeof(*index->position_bucket_hash) +
     index->position_root_capacity * sizeof(*index->position_root_buckets) +
-    index->position_block_capacity * sizeof(*index->position_blocks);
+    index->position_block_capacity * sizeof(*index->position_blocks) +
+    index->position_probation_capacity * sizeof(*index->position_probation);
 }
 
 static unsigned long long tree_estimated_bytes(
@@ -374,6 +393,7 @@ static unsigned long long index_bytes(Compact_back_demod_index index)
       sizeof(*index->position_bucket_hash) +
     index->position_root_capacity * sizeof(*index->position_root_buckets) +
     index->position_block_capacity * sizeof(*index->position_blocks) +
+    index->position_probation_capacity * sizeof(*index->position_probation) +
     index->occurrence_capacity * sizeof(*index->occurrences) +
     index->record_capacity * sizeof(*index->records) +
     (index->owns_term_pool ? terms.total_bytes : 0) +
@@ -798,11 +818,12 @@ static unsigned long long projected_position_bytes(
   return buckets * sizeof(*index->position_buckets) +
     blocks * sizeof(*index->position_blocks) +
     hash * sizeof(*index->position_bucket_hash) +
-    index->position_root_capacity * sizeof(*index->position_root_buckets);
+    index->position_root_capacity * sizeof(*index->position_root_buckets) +
+    index->position_probation_capacity * sizeof(*index->position_probation);
 }
 
-static BOOL position_budget_allows(Compact_back_demod_index index,
-                                   unsigned long long projected)
+static unsigned long long position_budget_limit(
+  Compact_back_demod_index index)
 {
   unsigned long long base, relative = ULLONG_MAX;
   unsigned long long current = position_estimated_bytes(index);
@@ -812,9 +833,119 @@ static BOOL position_budget_allows(Compact_back_demod_index index,
     relative = base > ULLONG_MAX / index->position_budget_pct ?
       ULLONG_MAX : base * index->position_budget_pct / 100;
   }
-  return (index->position_budget_bytes == 0 ||
-          projected <= index->position_budget_bytes) &&
-    (index->position_budget_pct == 0 || projected <= relative);
+  if (index->position_budget_bytes == 0)
+    return relative;
+  if (index->position_budget_pct == 0)
+    return index->position_budget_bytes;
+  return index->position_budget_bytes < relative ?
+    index->position_budget_bytes : relative;
+}
+
+static BOOL position_budget_allows(Compact_back_demod_index index,
+                                   unsigned long long projected)
+{
+  return projected <= position_budget_limit(index);
+}
+
+static void ensure_position_probation(Compact_back_demod_index index)
+{
+  unsigned long long bytes, limit;
+  size_t slots = 1;
+  if (index->position_probation_capacity != 0)
+    return;
+  limit = position_budget_limit(index);
+  bytes = limit == ULLONG_MAX ? UINT64_C(131072) : limit / 4;
+  if (bytes > UINT64_C(131072))
+    bytes = UINT64_C(131072);
+  while (slots <= SIZE_MAX / 2 &&
+         (unsigned long long) (slots * 2) <=
+           bytes / sizeof(*index->position_probation))
+    slots *= 2;
+  if (slots < 64)
+    return;
+  index->position_probation = safe_calloc(
+    slots, sizeof(*index->position_probation));
+  index->position_probation_capacity = slots;
+  update_peak(index);
+}
+
+static BOOL same_position_probation(struct cbd_position_probation *entry,
+                                    uint32_t root_symbol, uint64_t path,
+                                    uint32_t symbol)
+{
+  return entry->occupied && entry->root_symbol == root_symbol &&
+    entry->path == path && entry->symbol == symbol;
+}
+
+static unsigned long long note_position_probation(
+  Compact_back_demod_index index, uint32_t root_symbol, uint64_t path,
+  uint32_t symbol, unsigned long long work, unsigned *hits)
+{
+  uint64_t key = position_feature_key(root_symbol, path, symbol);
+  size_t mask, first, second;
+  struct cbd_position_probation *entry, *alternative;
+  ensure_position_probation(index);
+  if (index->position_probation_capacity == 0) {
+    *hits = 0;
+    return 0;
+  }
+  mask = index->position_probation_capacity - 1;
+  first = (size_t) key & mask;
+  second = (size_t) hash_id(key ^ UINT64_C(0xd6e8feb86659fd93)) & mask;
+  entry = &index->position_probation[first];
+  alternative = &index->position_probation[second];
+  if (same_position_probation(entry, root_symbol, path, symbol)) {
+    /* use ENTRY */
+  }
+  else if (same_position_probation(alternative, root_symbol, path, symbol))
+    entry = alternative;
+  else if (!entry->occupied) {
+    /* use empty ENTRY */
+  }
+  else if (!alternative->occupied)
+    entry = alternative;
+  else {
+    if (alternative->work < entry->work)
+      entry = alternative;
+    index->position_probation_replacements++;
+    memset(entry, 0, sizeof(*entry));
+  }
+  if (!entry->occupied) {
+    entry->occupied = TRUE;
+    entry->root_symbol = root_symbol;
+    entry->path = path;
+    entry->symbol = symbol;
+  }
+  entry->work = ULLONG_MAX - entry->work < work ?
+    ULLONG_MAX : entry->work + work;
+  if (entry->hits != UINT32_MAX)
+    entry->hits++;
+  index->position_probation_updates++;
+  *hits = entry->hits;
+  return entry->work;
+}
+
+static void clear_position_probation(Compact_back_demod_index index,
+                                     uint32_t root_symbol, uint64_t path,
+                                     uint32_t symbol)
+{
+  uint64_t key;
+  size_t mask, first, second;
+  if (index->position_probation_capacity == 0)
+    return;
+  key = position_feature_key(root_symbol, path, symbol);
+  mask = index->position_probation_capacity - 1;
+  first = (size_t) key & mask;
+  second = (size_t) hash_id(key ^ UINT64_C(0xd6e8feb86659fd93)) & mask;
+  if (same_position_probation(&index->position_probation[first],
+                              root_symbol, path, symbol))
+    memset(&index->position_probation[first], 0,
+           sizeof(index->position_probation[first]));
+  if (second != first &&
+      same_position_probation(&index->position_probation[second],
+                              root_symbol, path, symbol))
+    memset(&index->position_probation[second], 0,
+           sizeof(index->position_probation[second]));
 }
 
 static int tree_code_compare(int32_t a, int32_t b)
@@ -1360,9 +1491,11 @@ static Compact_back_demod_index compact_back_demod_init_with_pool_strategy(
   index->tree_complete = TRUE;
   index->position_admit_work = Back_demod_position_admit_work;
   index->position_min_gain = Back_demod_position_min_gain;
+  index->position_build_factor = Back_demod_position_build_factor;
   index->position_budget_pct = Back_demod_position_budget_pct;
   index->position_budget_bytes = Back_demod_position_budget_bytes;
   index->position_complete = TRUE;
+  index->position_admission_enabled = Back_demod_position_admission;
   index->tokens = compact_term_pool_tokens(pool);
   index->id_map = compact_id_map_init(1);
   index->lookup_clock = clock_init("compact_back_demod_lookup");
@@ -1450,16 +1583,21 @@ void compact_back_demod_set_tree_admit_work(unsigned groups)
 
 void compact_back_demod_set_position_options(unsigned admit_work,
                                              unsigned min_gain,
+                                             unsigned build_factor,
                                              unsigned budget_kb,
-                                             unsigned budget_pct)
+                                             unsigned budget_pct,
+                                             BOOL admission_enabled)
 {
-  if (admit_work == 0 || min_gain == 0 || budget_pct > 1000)
+  if (admit_work == 0 || min_gain == 0 || build_factor == 0 ||
+      budget_pct > 1000)
     fatal_error("compact_back_demod: invalid position options");
   Back_demod_position_admit_work = admit_work;
   Back_demod_position_min_gain = min_gain;
+  Back_demod_position_build_factor = build_factor;
   Back_demod_position_budget_bytes =
     (unsigned long long) budget_kb * 1024;
   Back_demod_position_budget_pct = budget_pct;
+  Back_demod_position_admission = admission_enabled;
 }
 
 BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
@@ -2523,15 +2661,38 @@ static void maybe_admit_position_feature(Compact_back_demod_index index,
   size_t feature_count, i, best = SIZE_MAX;
   unsigned char *matched;
   uint32_t root;
-  unsigned long long matches, blocks;
+  unsigned long long matches, blocks, build_floor;
   if (index->strategy != COMPACT_BACK_DEMOD_POSITION ||
-      !index->position_complete || VARIABLE(pattern) ||
+      !index->position_complete || !index->position_admission_enabled ||
+      VARIABLE(pattern) ||
       query_work < index->position_admit_work)
     return;
+  build_floor = index->active >
+      ULLONG_MAX / index->position_build_factor ? ULLONG_MAX :
+    index->active * index->position_build_factor;
   feature_count = collect_pattern_position_features(index, pattern);
   if (feature_count == 0)
     return;
   root = (uint32_t) SYMNUM(pattern);
+  {
+    size_t qualified = 0;
+    for (i = 0; i < feature_count; i++) {
+      unsigned hits;
+      unsigned long long work = note_position_probation(
+        index, root, index->position_query[i].path,
+        index->position_query[i].symbol, query_work, &hits);
+      if (hits >= 2 && work >= build_floor) {
+        if (qualified != i)
+          index->position_query[qualified] = index->position_query[i];
+        qualified++;
+      }
+    }
+    feature_count = qualified;
+  }
+  if (feature_count == 0) {
+    index->position_cost_deferrals++;
+    return;
+  }
   for (i = 0; i < feature_count; i++) {
     index->position_query[i].bucket = lookup_position_bucket(
       index, root, index->position_query[i].path,
@@ -2557,6 +2718,10 @@ static void maybe_admit_position_feature(Compact_back_demod_index index,
            index->position_query[best].matching_records))
       best = i;
   if (best == SIZE_MAX) {
+    for (i = 0; i < feature_count; i++)
+      clear_position_probation(index, root,
+                               index->position_query[i].path,
+                               index->position_query[i].symbol);
     safe_free(matched);
     clock_stop(index->maintenance_clock);
     return;
@@ -2564,6 +2729,10 @@ static void maybe_admit_position_feature(Compact_back_demod_index index,
   matches = index->position_query[best].matching_records;
   if (matches > query_work / index->position_min_gain) {
     index->position_rejections++;
+    for (i = 0; i < feature_count; i++)
+      clear_position_probation(index, root,
+                               index->position_query[i].path,
+                               index->position_query[i].symbol);
     safe_free(matched);
     clock_stop(index->maintenance_clock);
     return;
@@ -2574,6 +2743,10 @@ static void maybe_admit_position_feature(Compact_back_demod_index index,
         index, 1, (size_t) blocks))) {
     index->position_rejections++;
     index->position_budget_exhaustions++;
+    for (i = 0; i < feature_count; i++)
+      clear_position_probation(index, root,
+                               index->position_query[i].path,
+                               index->position_query[i].symbol);
     safe_free(matched);
     clock_stop(index->maintenance_clock);
     return;
@@ -2595,6 +2768,10 @@ static void maybe_admit_position_feature(Compact_back_demod_index index,
       }
   }
   index->position_admissions++;
+  for (i = 0; i < feature_count; i++)
+    clear_position_probation(index, root,
+                             index->position_query[i].path,
+                             index->position_query[i].symbol);
   update_peak(index);
   safe_free(matched);
   clock_stop(index->maintenance_clock);
@@ -2864,6 +3041,16 @@ static void copy_position_definitions(Compact_back_demod_index destination,
     (void) add_position_bucket(destination, bucket->root_symbol,
                                bucket->path, bucket->symbol);
   }
+  if (source->position_probation_capacity != 0) {
+    destination->position_probation = safe_malloc(
+      source->position_probation_capacity *
+        sizeof(*source->position_probation));
+    memcpy(destination->position_probation, source->position_probation,
+           source->position_probation_capacity *
+             sizeof(*source->position_probation));
+    destination->position_probation_capacity =
+      source->position_probation_capacity;
+  }
 }
 
 static void finish_position_rebuild(Compact_back_demod_index index)
@@ -3054,6 +3241,7 @@ static void compact_back_demod_compact_internal(
   safe_free(old.position_root_buckets);
   safe_free(old.position_blocks);
   safe_free(old.position_query);
+  safe_free(old.position_probation);
   safe_free(old.occurrences);
   safe_free(old.records);
   compact_id_map_free(old.id_map);
@@ -3083,6 +3271,10 @@ static void compact_back_demod_compact_internal(
   index->position_records_examined = old.position_records_examined;
   index->position_admissions = old.position_admissions;
   index->position_rejections = old.position_rejections;
+  index->position_cost_deferrals = old.position_cost_deferrals;
+  index->position_probation_updates = old.position_probation_updates;
+  index->position_probation_replacements =
+    old.position_probation_replacements;
   index->position_backfill_records = old.position_backfill_records;
   index->position_budget_exhaustions += old.position_budget_exhaustions;
   index->inactive_groups_examined = old.inactive_groups_examined;
@@ -3210,6 +3402,7 @@ void compact_back_demod_compact_materialized(
   safe_free(old.position_root_buckets);
   safe_free(old.position_blocks);
   safe_free(old.position_query);
+  safe_free(old.position_probation);
   replacement->owns_term_pool = old.owns_term_pool;
   while (rebuilt < count) {
     unsigned long long *batch;
@@ -3269,6 +3462,10 @@ void compact_back_demod_compact_materialized(
   index->position_records_examined = old.position_records_examined;
   index->position_admissions = old.position_admissions;
   index->position_rejections = old.position_rejections;
+  index->position_cost_deferrals = old.position_cost_deferrals;
+  index->position_probation_updates = old.position_probation_updates;
+  index->position_probation_replacements =
+    old.position_probation_replacements;
   index->position_backfill_records = old.position_backfill_records;
   index->position_budget_exhaustions += old.position_budget_exhaustions;
   index->inactive_groups_examined = old.inactive_groups_examined;
@@ -3390,13 +3587,21 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->position_records_examined = index->position_records_examined;
   stats->position_admissions = index->position_admissions;
   stats->position_rejections = index->position_rejections;
+  stats->position_cost_deferrals = index->position_cost_deferrals;
+  stats->position_probation_updates = index->position_probation_updates;
+  stats->position_probation_replacements =
+    index->position_probation_replacements;
   stats->position_backfill_records = index->position_backfill_records;
   stats->position_budget_bytes = index->position_budget_bytes;
   stats->position_estimated_bytes = position_estimated_bytes(index);
+  stats->position_probation_bytes = index->position_probation_capacity *
+    sizeof(*index->position_probation);
   stats->position_budget_exhaustions = index->position_budget_exhaustions;
   stats->position_budget_pct = index->position_budget_pct;
   stats->position_admit_work = index->position_admit_work;
   stats->position_min_gain = index->position_min_gain;
+  stats->position_build_factor = index->position_build_factor;
+  stats->position_admission_enabled = index->position_admission_enabled;
   stats->position_complete = index->position_complete;
   stats->symbol_occurrences = index->symbol_occurrences;
   stats->posting_groups_examined = index->posting_groups_examined;
@@ -3438,6 +3643,8 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
     index->position_bucket_hash_capacity *
       sizeof(*index->position_bucket_hash) +
     index->position_root_capacity * sizeof(*index->position_root_buckets);
+  stats->root_bytes += index->position_probation_capacity *
+    sizeof(*index->position_probation);
   stats->token_bytes = index->owns_term_pool ? terms.token_bytes : 0;
   stats->hash_bytes = compact_id_map_bytes(index->id_map);
   stats->scratch_bytes = index->result_capacity * sizeof(*index->results) +
@@ -3463,6 +3670,7 @@ void compact_back_demod_free(Compact_back_demod_index index)
   safe_free(index->position_root_buckets);
   safe_free(index->position_blocks);
   safe_free(index->position_query);
+  safe_free(index->position_probation);
   safe_free(index->occurrences);
   safe_free(index->records);
   if (index->owns_term_pool)
