@@ -208,15 +208,16 @@ Interpretation:
   reclaim tombstones.
 
 For mmap accounting, report anonymous and file-backed memory separately.  The
-passive file is created with `mkstemp()` under `$TMPDIR` (normally `/tmp`) and
-unlinked immediately.  While running, find it through `/proc/<pid>/fd` and
+current passive store calls `mkstemp()` on a hard-coded
+`/tmp/prover9-passive-XXXXXX` name and unlinks it immediately; it does not yet
+consult `TMPDIR`.  While running, find it through `/proc/<pid>/fd` and
 `/proc/<pid>/smaps`.  Its logical size, allocated disk blocks, and resident
 file-backed pages are different quantities.
 
-For a long run, put temporary storage on a filesystem with enough space:
+For a long run, ensure that the filesystem containing `/tmp` has enough space:
 
 ```sh
-TMPDIR=/local/p9-tmp /usr/bin/time -v /path/to/prover9 < osborn.in \
+/usr/bin/time -v /path/to/prover9 < osborn.in \
   > osborn-new-demod.out 2> osborn-new-demod.err
 ```
 

@@ -30,7 +30,9 @@ assign(compact_term_reclaim_kb,2048).
 ```
 
 Start this configuration with `P9_COMPACT_HEAP=1`; the environment switch is
-part of the measured product boundary, not an input assignment.
+part of the measured product boundary, not an input assignment.  Archive files
+are currently created under hard-coded `/tmp` names and unlinked immediately;
+the implementation does not yet honor `TMPDIR`.
 
 ## Final Phase-5 acceptance (2026-08-11)
 
@@ -76,8 +78,10 @@ Frozen terminal accounting names 111,970,683 resident bytes (106.78 MiB):
 the four compact indexes, shared term pool, dense selector, packed hint
 index/bodies, ancestor and clause-ID handles, reserved P9 slabs, and non-anon
 process pages.  Against 112,809-KiB PSS (110.17 MiB), this explains **96.93%**
-of resident memory.  The 84,404,096-byte ancestor file is logical backing,
-not RAM, and is therefore reported separately.
+of resident memory.  The 84,404,096-byte ancestor value is logical disk-file
+length rather than process-resident RAM and is reported separately.  Reclaimable
+kernel page cache is outside PSS and needs cgroup accounting for a total-job
+measurement.
 
 The completion audit also closes the file-checkpoint state gate.  Format 3
 continues to omit dead pre-elimination clauses with ID 0, but now records

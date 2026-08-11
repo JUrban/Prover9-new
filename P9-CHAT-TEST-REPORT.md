@@ -207,8 +207,9 @@ The measured binary SHA-256 is
 
 The run passes the 128,000-KiB hard RSS gate by only 580 KiB, so the exact
 number should be remeasured after changing libc or machine.  Frozen terminal
-accounting explains 96.93% of PSS; the 84,404,096-byte ancestor file is disk
-backing, not RAM.
+accounting explains 96.93% of PSS; the 84,404,096-byte ancestor value is a
+logical disk-file length, not process-resident RAM.  Reclaimable kernel page
+cache requires cgroup accounting if the desired quantity is total job memory.
 
 ## Full-hint guarded policy runs before the fingerprint optimization
 
@@ -517,9 +518,11 @@ Here `chat_test.compact.in` is a complete copy of the problem with the block
 above placed after its automatic/legacy option assignments.
 
 Use `/usr/bin/time -v` or a cgroup for the comparison; the historical
-`Megabytes` counter omits important mmap/file-backed state.  Put `TMPDIR` on
-a local filesystem with enough space.  The accepted proof used about 84.4 MB
-of logical ancestor backing.
+`Megabytes` counter omits important mmap/file-backed state.  The current
+archive code creates and immediately unlinks its backing file under the
+hard-coded `/tmp` directory; it does not yet consult `TMPDIR`.  Ensure that
+the filesystem containing `/tmp` has enough space.  The accepted proof used
+about 84.4 MB of logical ancestor backing.
 
 For a raw old-P9 compatibility control, keep the full/FPA configuration:
 
@@ -560,6 +563,8 @@ assign(rewrite_refresh_raw_budget,64).
 assign(rewrite_refresh_inference_ratio,8).
 ```
 
-For long mmap-backed runs, place `TMPDIR` on a filesystem with sufficient
-space.  Measure anonymous and file-backed RSS through `/proc/<pid>/smaps` or a
-cgroup; Prover9's historical `Megabytes` counter does not include every mmap.
+For long mmap-backed runs, ensure that the filesystem containing `/tmp` has
+sufficient space.  The current implementation hard-codes `/tmp` and unlinks
+the file after opening it, so changing `TMPDIR` has no effect.  Measure
+anonymous and file-backed RSS through `/proc/<pid>/smaps` or a cgroup;
+Prover9's historical `Megabytes` counter does not include every mmap.

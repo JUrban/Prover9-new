@@ -125,8 +125,9 @@ sum to 111,970,683 bytes (106.78 MiB).  Terminal PSS is 112,809 KiB
 (110.17 MiB), giving 96.93% coverage.  The sampled transient peak is 123,084
 KiB RSS; the more authoritative external high-water mark is 127,420 KiB.
 
-The ancestor file has 84,404,096 logical bytes and a 4-KiB I/O buffer.  It is
-disk backing and is not included as resident RAM.
+The ancestor file has 84,404,096 logical bytes and a 4-KiB I/O buffer.  Its
+logical length is disk backing and is not included as process-resident RAM;
+reclaimable kernel page cache is outside this PSS accounting.
 
 ## Regression evidence
 
