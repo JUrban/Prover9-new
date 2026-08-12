@@ -36,11 +36,11 @@ static unsigned Back_demod_tree_admit_work = 4096;
 static unsigned Back_demod_tree_build_factor = 8;
 static unsigned Back_demod_position_admit_work = 4096;
 static unsigned Back_demod_position_min_gain = 4;
-static unsigned Back_demod_position_build_factor = 8;
+static unsigned Back_demod_position_build_factor = 64;
 static BOOL Back_demod_position_admission = FALSE;
 static unsigned Back_demod_position_budget_pct = 20;
 static unsigned long long Back_demod_position_budget_bytes =
-  UINT64_C(64) * 1024 * 1024;
+  UINT64_C(16) * 1024 * 1024;
 static unsigned long long Back_demod_tree_budget_bytes =
   UINT64_C(64) * 1024 * 1024;
 
@@ -167,6 +167,7 @@ struct cbd_position_query_feature {
   uint64_t path;
   uint32_t symbol;
   uint32_t bucket;
+  uint32_t depth;
   unsigned long long matching_records;
   unsigned long long joint_records;
 };
@@ -174,6 +175,7 @@ struct cbd_position_query_feature {
 struct cbd_position_probation {
   uint64_t path;
   unsigned long long work;
+  unsigned long long retry_population;
   uint32_t root_symbol;
   uint32_t symbol;
   uint32_t hits;
@@ -330,7 +332,14 @@ struct compact_back_demod_index {
   unsigned long long position_cost_deferrals;
   unsigned long long position_probation_updates;
   unsigned long long position_probation_replacements;
+  unsigned long long position_retry_deferrals;
   unsigned long long position_backfill_records;
+  unsigned long long position_census_records;
+  unsigned long long position_credit_balance;
+  unsigned long long position_credit_earned;
+  unsigned long long position_credit_spent;
+  unsigned long long position_credit_reservations;
+  unsigned long long position_admission_freezes;
   unsigned long long position_budget_exhaustions;
   unsigned position_admit_work;
   unsigned position_min_gain;
@@ -342,6 +351,7 @@ struct compact_back_demod_index {
   BOOL position_complete;
   BOOL position_rebuilding;
   BOOL position_admission_enabled;
+  BOOL position_admission_frozen;
   unsigned long long inactive_groups_examined;
   unsigned long long duplicate_groups_examined;
   unsigned long long posting_bytes_decoded;
@@ -1092,7 +1102,7 @@ static void ensure_position_probation(Compact_back_demod_index index)
          (unsigned long long) (slots * 2) <=
            bytes / sizeof(*index->position_probation))
     slots *= 2;
-  if (slots < 64)
+  if (slots < 32)
     return;
   index->position_probation = safe_calloc(
     slots, sizeof(*index->position_probation));
@@ -1148,6 +1158,17 @@ static unsigned long long note_position_probation(
     entry->path = path;
     entry->symbol = symbol;
   }
+  if (entry->retry_population != 0) {
+    if (entry->retry_population == ULLONG_MAX ||
+        index->active < entry->retry_population) {
+      index->position_retry_deferrals++;
+      *hits = 0;
+      return 0;
+    }
+    entry->retry_population = 0;
+    entry->work = 0;
+    entry->hits = 0;
+  }
   entry->work = ULLONG_MAX - entry->work < work ?
     ULLONG_MAX : entry->work + work;
   if (entry->hits != UINT32_MAX)
@@ -1155,6 +1176,49 @@ static unsigned long long note_position_probation(
   index->position_probation_updates++;
   *hits = entry->hits;
   return entry->work;
+}
+
+static void defer_position_probation(Compact_back_demod_index index,
+                                     uint32_t root_symbol, uint64_t path,
+                                     uint32_t symbol,
+                                     unsigned long long retry_population)
+{
+  uint64_t key;
+  size_t mask, first, second;
+  struct cbd_position_probation *entry = NULL;
+  if (index->position_probation_capacity == 0)
+    return;
+  key = position_feature_key(index, root_symbol, path, symbol);
+  mask = index->position_probation_capacity - 1;
+  first = (size_t) key & mask;
+  second = (size_t) hash_id(key ^ UINT64_C(0xd6e8feb86659fd93)) & mask;
+  if (same_position_probation(&index->position_probation[first],
+                              root_symbol, path, symbol))
+    entry = &index->position_probation[first];
+  else if (same_position_probation(&index->position_probation[second],
+                                   root_symbol, path, symbol))
+    entry = &index->position_probation[second];
+  if (entry != NULL) {
+    entry->work = 0;
+    entry->hits = 0;
+    entry->retry_population = retry_population;
+  }
+}
+
+static unsigned long long doubled_position_population(
+  Compact_back_demod_index index)
+{
+  if (index->active == 0)
+    return 1;
+  return index->active > ULLONG_MAX / 2 ? ULLONG_MAX : index->active * 2;
+}
+
+static void freeze_position_admission(Compact_back_demod_index index)
+{
+  if (!index->position_admission_frozen) {
+    index->position_admission_frozen = TRUE;
+    index->position_admission_freezes++;
+  }
 }
 
 static void clear_position_probation(Compact_back_demod_index index,
@@ -2400,7 +2464,8 @@ static void ensure_position_query(Compact_back_demod_index index,
 }
 
 static void collect_pattern_position_features_rec(
-  Compact_back_demod_index index, Term term, uint64_t path, size_t *count)
+  Compact_back_demod_index index, Term term, uint64_t path, unsigned depth,
+  size_t *count)
 {
   int i;
   if (VARIABLE(term))
@@ -2421,10 +2486,11 @@ static void collect_pattern_position_features_rec(
                sizeof(index->position_query[*count]));
         index->position_query[*count].path = child_path;
         index->position_query[*count].symbol = symbol;
+        index->position_query[*count].depth = depth + 1;
         (*count)++;
       }
       collect_pattern_position_features_rec(
-        index, child, child_path, count);
+        index, child, child_path, depth + 1, count);
     }
   }
 }
@@ -2434,7 +2500,7 @@ static size_t collect_pattern_position_features(
 {
   size_t count = 0;
   if (!VARIABLE(pattern))
-    collect_pattern_position_features_rec(index, pattern, 0, &count);
+    collect_pattern_position_features_rec(index, pattern, 0, 0, &count);
   return count;
 }
 
@@ -3523,12 +3589,15 @@ static void append_admitted_position_features(
       struct cbd_position_bucket *bucket = &index->position_buckets[i];
       if (bucket->active && record_has_position_bucket(index, record, bucket)) {
         bucket->active = FALSE;
+        defer_position_probation(index, bucket->root_symbol, bucket->path,
+                                 bucket->symbol, ULLONG_MAX);
         index->position_demotions++;
         if (index->position_generation != ULLONG_MAX)
           index->position_generation++;
       }
     }
     index->position_budget_exhaustions++;
+    freeze_position_admission(index);
     return;
   }
   for (i = 1; i < index->position_bucket_count; i++) {
@@ -3538,18 +3607,47 @@ static void append_admitted_position_features(
   }
 }
 
+static unsigned long long position_construction_cost(
+  Compact_back_demod_index index)
+{
+  unsigned long long cost;
+  if (index->active > ULLONG_MAX / index->position_build_factor)
+    return ULLONG_MAX;
+  cost = index->active * index->position_build_factor;
+  return cost > ULLONG_MAX / 2 ? ULLONG_MAX : cost * 2;
+}
+
 static void maybe_admit_position_feature(Compact_back_demod_index index,
                                          Term pattern,
-                                         unsigned long long query_work)
+                                         unsigned long long query_work,
+                                         BOOL fund_construction)
 {
   size_t feature_count, i, best = SIZE_MAX;
-  unsigned char *matched;
+  struct cbd_position_query_feature candidate;
   uint32_t root;
-  unsigned long long matches, blocks, build_floor, bitmap_bytes;
+  unsigned long long best_work = 0, matches, blocks, build_floor;
+  unsigned long long bitmap_bytes, construction_cost;
+  unsigned char matched;
   if (!strategy_uses_position(index->strategy) ||
       !index->position_complete || !index->position_admission_enabled ||
-      VARIABLE(pattern) || query_work == 0)
+      query_work == 0)
     return;
+
+  /* Query work enters one global construction ledger exactly once.  Feature
+     count cannot multiply the right to perform archive-wide maintenance;
+     selective position queries may slowly fund a complementary intersection
+     feature, but only from the work they actually perform. */
+  if (fund_construction) {
+    index->position_credit_earned =
+      ULLONG_MAX - index->position_credit_earned < query_work ? ULLONG_MAX :
+      index->position_credit_earned + query_work;
+    index->position_credit_balance =
+      ULLONG_MAX - index->position_credit_balance < query_work ? ULLONG_MAX :
+      index->position_credit_balance + query_work;
+  }
+  if (index->position_admission_frozen || VARIABLE(pattern))
+    return;
+
   build_floor = index->active >
       ULLONG_MAX / index->position_build_factor ? ULLONG_MAX :
     index->active * index->position_build_factor;
@@ -3559,33 +3657,53 @@ static void maybe_admit_position_feature(Compact_back_demod_index index,
   if (feature_count == 0)
     return;
   root = (uint32_t) SYMNUM(pattern);
-  {
-    size_t qualified = 0;
-    for (i = 0; i < feature_count; i++) {
-      unsigned hits;
-      unsigned long long work = note_position_probation(
-        index, root, index->position_query[i].path,
-        index->position_query[i].symbol, query_work, &hits);
-      if (hits >= 2 && work >= build_floor) {
-        if (qualified != i)
-          index->position_query[qualified] = index->position_query[i];
-        qualified++;
-      }
+  for (i = 0; i < feature_count; i++) {
+    unsigned hits;
+    unsigned long long work;
+    uint32_t bucket = lookup_position_bucket(
+      index, root, index->position_query[i].path,
+      index->position_query[i].symbol);
+    if (bucket != CBD_NONE)
+      continue;
+    work = note_position_probation(
+      index, root, index->position_query[i].path,
+      index->position_query[i].symbol, query_work, &hits);
+    if (hits >= 2 && work >= build_floor &&
+        (best == SIZE_MAX ||
+         index->position_query[i].depth >
+           index->position_query[best].depth ||
+         (index->position_query[i].depth ==
+            index->position_query[best].depth && work > best_work))) {
+      best = i;
+      best_work = work;
     }
-    feature_count = qualified;
   }
-  if (feature_count == 0) {
+  if (best == SIZE_MAX) {
     index->position_cost_deferrals++;
     return;
   }
-  for (i = 0; i < feature_count; i++) {
+  candidate = index->position_query[best];
+  construction_cost = position_construction_cost(index);
+  if (index->position_credit_balance < construction_cost) {
+    index->position_cost_deferrals++;
+    return;
+  }
+  index->position_credit_balance -= construction_cost;
+  index->position_credit_spent =
+    ULLONG_MAX - index->position_credit_spent < construction_cost ?
+    ULLONG_MAX : index->position_credit_spent + construction_cost;
+  index->position_credit_reservations++;
+
+  /* Recollect only to identify already-admitted complementary constraints.
+     The archive census itself evaluates one candidate feature, never every
+     rigid position that happened to occur in the triggering query. */
+  feature_count = collect_pattern_position_features(index, pattern);
+  for (i = 0; i < feature_count; i++)
     index->position_query[i].bucket = lookup_position_bucket(
       index, root, index->position_query[i].path,
       index->position_query[i].symbol);
-    index->position_query[i].matching_records = 0;
-    index->position_query[i].joint_records = 0;
-  }
-  matched = safe_malloc(feature_count);
+  candidate.matching_records = 0;
+  candidate.joint_records = 0;
   clock_start(index->maintenance_clock);
   for (i = 1; i < index->record_count; i++)
     if (index->records[i].active) {
@@ -3599,43 +3717,25 @@ static void maybe_admit_position_feature(Compact_back_demod_index index,
           baseline_match = FALSE;
       }
       record_position_features(index, &index->records[i], root,
-                               index->position_query, feature_count, matched);
+                               &candidate, 1, &matched);
       index->position_records_examined++;
-      for (j = 0; j < feature_count; j++)
-        if (matched[j]) {
-          index->position_query[j].matching_records++;
-          if (baseline_match)
-            index->position_query[j].joint_records++;
-        }
+      index->position_census_records++;
+      if (matched) {
+        candidate.matching_records++;
+        if (baseline_match)
+          candidate.joint_records++;
+      }
     }
-  for (i = 0; i < feature_count; i++)
-    if (index->position_query[i].bucket == CBD_NONE &&
-        (best == SIZE_MAX ||
-         index->position_query[i].joint_records <
-           index->position_query[best].joint_records))
-      best = i;
-  if (best == SIZE_MAX) {
-    for (i = 0; i < feature_count; i++)
-      clear_position_probation(index, root,
-                               index->position_query[i].path,
-                               index->position_query[i].symbol);
-    safe_free(matched);
-    clock_stop(index->maintenance_clock);
-    return;
-  }
-  matches = index->position_query[best].joint_records;
+  matches = candidate.joint_records;
   if (matches > query_work / index->position_min_gain) {
     index->position_rejections++;
-    for (i = 0; i < feature_count; i++)
-      clear_position_probation(index, root,
-                               index->position_query[i].path,
-                               index->position_query[i].symbol);
-    safe_free(matched);
+    defer_position_probation(index, root, candidate.path, candidate.symbol,
+                             doubled_position_population(index));
     clock_stop(index->maintenance_clock);
     return;
   }
-  blocks = index->position_query[best].matching_records <= 1 ? 0 :
-    index->position_query[best].matching_records - 1;
+  blocks = candidate.matching_records <= 1 ? 0 :
+    candidate.matching_records - 1;
   bitmap_bytes = (unsigned long long) projected_position_bitmap_capacity(
     0, (uint32_t) (index->record_count - 1)) * sizeof(uint64_t);
   if (blocks > SIZE_MAX ||
@@ -3643,24 +3743,20 @@ static void maybe_admit_position_feature(Compact_back_demod_index index,
         index, 1, (size_t) blocks, bitmap_bytes))) {
     index->position_rejections++;
     index->position_budget_exhaustions++;
-    for (i = 0; i < feature_count; i++)
-      clear_position_probation(index, root,
-                               index->position_query[i].path,
-                               index->position_query[i].symbol);
-    safe_free(matched);
+    defer_position_probation(index, root, candidate.path, candidate.symbol,
+                             ULLONG_MAX);
+    freeze_position_admission(index);
     clock_stop(index->maintenance_clock);
     return;
   }
   {
     uint32_t bucket = add_position_bucket(
-      index, root, index->position_query[best].path,
-      index->position_query[best].symbol);
-    struct cbd_position_query_feature feature = index->position_query[best];
+      index, root, candidate.path, candidate.symbol);
     for (i = 1; i < index->record_count; i++)
       if (index->records[i].active) {
         unsigned char selected = FALSE;
         record_position_features(index, &index->records[i], root,
-                                 &feature, 1, &selected);
+                                 &candidate, 1, &selected);
         index->position_backfill_records++;
         if (selected)
           (void) append_record_position_feature(
@@ -3670,12 +3766,8 @@ static void maybe_admit_position_feature(Compact_back_demod_index index,
   index->position_admissions++;
   if (index->position_generation != ULLONG_MAX)
     index->position_generation++;
-  for (i = 0; i < feature_count; i++)
-    clear_position_probation(index, root,
-                             index->position_query[i].path,
-                             index->position_query[i].symbol);
+  clear_position_probation(index, root, candidate.path, candidate.symbol);
   update_peak(index);
-  safe_free(matched);
   clock_stop(index->maintenance_clock);
 }
 
@@ -4339,7 +4431,7 @@ static void collect_pattern(Compact_back_demod_index index, Term pattern,
         population[CBD_ROUTE_POSITION]);
       index->route_candidates[CBD_ROUTE_POSITION] = saturating_add(
         index->route_candidates[CBD_ROUTE_POSITION], *count - count_before);
-      maybe_admit_position_feature(index, pattern, observed);
+      maybe_admit_position_feature(index, pattern, observed, TRUE);
       return;
     }
 
@@ -4359,7 +4451,7 @@ static void collect_pattern(Compact_back_demod_index index, Term pattern,
       index->route_candidates[CBD_ROUTE_MASK] = saturating_add(
         index->route_candidates[CBD_ROUTE_MASK], *count - count_before);
       maybe_admit_hot_root(index, pattern, index->query_work - before);
-      maybe_admit_position_feature(index, pattern, observed);
+      maybe_admit_position_feature(index, pattern, observed, TRUE);
       return;
     }
 
@@ -4381,7 +4473,7 @@ static void collect_pattern(Compact_back_demod_index index, Term pattern,
       index->route_candidates[CBD_ROUTE_MASK] = saturating_add(
         index->route_candidates[CBD_ROUTE_MASK], *count - count_before);
       maybe_admit_hot_root(index, pattern, index->query_work - before);
-      maybe_admit_position_feature(index, pattern, observed);
+      maybe_admit_position_feature(index, pattern, observed, TRUE);
       return;
     }
     route = choose_adaptive_route(
@@ -4400,15 +4492,13 @@ static void collect_pattern(Compact_back_demod_index index, Term pattern,
       if (route == CBD_ROUTE_MASK)
         maybe_admit_hot_root(
           index, pattern, index->query_work - before);
-      /* Any expensive complete route can fund a missing selective position.
-         Position itself can likewise reveal that another intersection key is
-         needed as the population evolves. */
-      maybe_admit_position_feature(index, pattern, observed);
+      /* Each completed non-position lookup funds the shared construction
+         ledger once; the number of rigid query features is irrelevant. */
+      maybe_admit_position_feature(index, pattern, observed, TRUE);
     }
     return;
   }
   if (position_bucket != CBD_NONE) {
-    unsigned long long observed;
     if (selected_positions > 1 && use_dense_position_intersection(
           index, position_bucket, position_feature_count))
       collect_position_bitmap_intersection(
@@ -4421,9 +4511,8 @@ static void collect_pattern(Compact_back_demod_index index, Term pattern,
     else
       collect_position_bucket(index, position_bucket, pattern,
                               exclude_id, count);
-    observed = index->query_work - before;
-    if (observed >= index->position_admit_work)
-      maybe_admit_position_feature(index, pattern, observed);
+    maybe_admit_position_feature(
+      index, pattern, index->query_work - before, TRUE);
   }
   else if (use_tree_for_pattern(index, pattern)) {
     unsigned long long nodes_before = index->tree_nodes_examined;
@@ -4436,13 +4525,13 @@ static void collect_pattern(Compact_back_demod_index index, Term pattern,
       observed += index->query_work - before;
     /* In adaptive mode, a tree which fans out before a selective rigid
        position supplies the evidence for a complementary position posting. */
-    maybe_admit_position_feature(index, pattern, observed);
+    maybe_admit_position_feature(index, pattern, observed, TRUE);
   }
   else {
     collect_symbol(index, pattern, exclude_id, count);
     maybe_admit_hot_root(index, pattern, index->query_work - before);
     maybe_admit_position_feature(index, pattern,
-                                 index->query_work - before);
+                                 index->query_work - before, TRUE);
   }
 }
 
@@ -4667,6 +4756,18 @@ static void copy_position_definitions(Compact_back_demod_index destination,
   destination->position_complete = source->position_complete;
   destination->position_budget_high_water =
     source->position_budget_high_water;
+  destination->position_credit_balance = source->position_credit_balance;
+  destination->position_credit_earned = source->position_credit_earned;
+  destination->position_credit_spent = source->position_credit_spent;
+  destination->position_credit_reservations =
+    source->position_credit_reservations;
+  destination->position_census_records = source->position_census_records;
+  destination->position_retry_deferrals =
+    source->position_retry_deferrals;
+  destination->position_admission_freezes =
+    source->position_admission_freezes;
+  destination->position_admission_frozen =
+    source->position_admission_frozen;
   if (!source->position_complete)
     return;
   for (i = 1; i < source->position_bucket_count; i++) {
@@ -4696,6 +4797,7 @@ static void finish_position_rebuild(Compact_back_demod_index index)
       !position_budget_allows(index, position_estimated_bytes(index))) {
     index->position_complete = FALSE;
     index->position_budget_exhaustions++;
+    freeze_position_admission(index);
   }
 }
 
@@ -5280,9 +5382,14 @@ BOOL compact_back_demod_write_adaptive_state(
   for (i = 0; i < index->route_frequency_capacity * 2; i++)
     if (index->route_frequency[i] != 0)
       frequencies++;
-  fprintf(fp, "P9_COMPACT_BACK_ADAPTIVE 2\n");
+  fprintf(fp, "P9_COMPACT_BACK_ADAPTIVE 3\n");
   fprintf(fp, "GENERATION %llu %llu\n",
           index->position_generation, index->position_budget_high_water);
+  fprintf(fp, "POSITION_LEDGER %llu %llu %llu %llu %u %llu\n",
+          index->position_credit_balance, index->position_credit_earned,
+          index->position_credit_spent, index->position_credit_reservations,
+          (unsigned) index->position_admission_frozen,
+          index->position_admission_freezes);
   fprintf(fp, "SEQUENCE %llu\n", index->route_sequence);
   fprintf(fp, "ROOTS %lu\n", (unsigned long) roots);
   for (i = 0; i < index->tree_root_capacity; i++) {
@@ -5307,9 +5414,10 @@ BOOL compact_back_demod_write_adaptive_state(
     struct cbd_position_probation *entry =
       &index->position_probation[i];
     if (entry->occupied)
-      fprintf(fp, "B %lu %016llx %llu %u %u %u\n",
+      fprintf(fp, "B %lu %016llx %llu %u %u %u %llu\n",
               (unsigned long) i, (unsigned long long) entry->path,
-              entry->work, entry->root_symbol, entry->symbol, entry->hits);
+              entry->work, entry->root_symbol, entry->symbol, entry->hits,
+              entry->retry_population);
   }
   fprintf(fp, "ROUTES %lu %lu\n",
           (unsigned long) index->route_profile_capacity,
@@ -5359,6 +5467,10 @@ BOOL compact_back_demod_read_adaptive_state(
   unsigned long route_capacity, route_count, at, i;
   unsigned long long generation, budget_high_water;
   unsigned long long route_sequence = 0;
+  unsigned long long credit_balance = 0, credit_earned = 0;
+  unsigned long long credit_spent = 0, credit_reservations = 0;
+  unsigned long long admission_freezes = 0;
+  unsigned admission_frozen = 0;
   if (index == NULL || index->strategy != COMPACT_BACK_DEMOD_ADAPTIVE)
     return TRUE;
   if (!adaptive_state_path(path, sizeof(path), directory))
@@ -5368,9 +5480,18 @@ BOOL compact_back_demod_read_adaptive_state(
     return TRUE;  /* An older checkpoint starts with safe cold calibration. */
   if (fscanf(fp, " %31s %u", label, &version) != 2 ||
       strcmp(label, "P9_COMPACT_BACK_ADAPTIVE") != 0 ||
-      (version != 1 && version != 2) ||
+      (version < 1 || version > 3) ||
       fscanf(fp, " %31s %llu %llu", label, &generation,
              &budget_high_water) != 3 || strcmp(label, "GENERATION") != 0) {
+    fclose(fp);
+    return FALSE;
+  }
+  if (version >= 3 &&
+      (fscanf(fp, " %31s %llu %llu %llu %llu %u %llu", label,
+              &credit_balance, &credit_earned, &credit_spent,
+              &credit_reservations, &admission_frozen,
+              &admission_freezes) != 7 ||
+       strcmp(label, "POSITION_LEDGER") != 0 || admission_frozen > 1)) {
     fclose(fp);
     return FALSE;
   }
@@ -5445,10 +5566,14 @@ BOOL compact_back_demod_read_adaptive_state(
   index->position_probation_capacity = probation_capacity;
   for (i = 0; i < probation_count; i++) {
     unsigned root, symbol, hits;
-    unsigned long long path_value, work;
+    unsigned long long path_value, work, retry_population = 0;
     struct cbd_position_probation *entry;
-    if (fscanf(fp, " %31s %lu %llx %llu %u %u %u", label, &at,
-               &path_value, &work, &root, &symbol, &hits) != 7 ||
+    int fields = fscanf(fp, version >= 3 ?
+                       " %31s %lu %llx %llu %u %u %u %llu" :
+                       " %31s %lu %llx %llu %u %u %u",
+                       label, &at, &path_value, &work, &root, &symbol,
+                       &hits, &retry_population);
+    if (fields != (version >= 3 ? 8 : 7) ||
         strcmp(label, "B") != 0 || at >= probation_capacity ||
         index->position_probation[at].occupied) {
       fclose(fp);
@@ -5461,6 +5586,7 @@ BOOL compact_back_demod_read_adaptive_state(
     entry->root_symbol = root;
     entry->symbol = symbol;
     entry->hits = hits;
+    entry->retry_population = retry_population;
   }
   if (fscanf(fp, " %31s %lu %lu", label, &route_capacity,
              &route_count) != 3 || strcmp(label, "ROUTES") != 0 ||
@@ -5551,6 +5677,12 @@ BOOL compact_back_demod_read_adaptive_state(
   if (fclose(fp) != 0)
     return FALSE;
   index->position_generation = generation;
+  index->position_credit_balance = credit_balance;
+  index->position_credit_earned = credit_earned;
+  index->position_credit_spent = credit_spent;
+  index->position_credit_reservations = credit_reservations;
+  index->position_admission_frozen = (BOOL) admission_frozen;
+  index->position_admission_freezes = admission_freezes;
   index->route_sequence = route_sequence;
   update_peak(index);
   return TRUE;
@@ -5642,7 +5774,14 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->position_probation_updates = index->position_probation_updates;
   stats->position_probation_replacements =
     index->position_probation_replacements;
+  stats->position_retry_deferrals = index->position_retry_deferrals;
   stats->position_backfill_records = index->position_backfill_records;
+  stats->position_census_records = index->position_census_records;
+  stats->position_credit_balance = index->position_credit_balance;
+  stats->position_credit_earned = index->position_credit_earned;
+  stats->position_credit_spent = index->position_credit_spent;
+  stats->position_credit_reservations = index->position_credit_reservations;
+  stats->position_admission_freezes = index->position_admission_freezes;
   stats->position_budget_bytes = index->position_budget_bytes;
   stats->position_effective_budget_bytes =
     index->position_budget_high_water;
@@ -5656,6 +5795,7 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->position_min_gain = index->position_min_gain;
   stats->position_build_factor = index->position_build_factor;
   stats->position_admission_enabled = index->position_admission_enabled;
+  stats->position_admission_frozen = index->position_admission_frozen;
   stats->position_complete = index->position_complete;
   stats->route_profile_capacity = index->route_profile_capacity;
   stats->route_profile_occupied = index->route_profile_occupied;

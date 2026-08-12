@@ -2132,6 +2132,10 @@ Prover_options init_prover_options(void)
     init_parm("compact_back_tree_admit_work", 4096, 1, INT_MAX);
   p->compact_back_tree_build_factor =
     init_parm("compact_back_tree_build_factor", 8, 1, INT_MAX);
+  p->compact_back_position_budget_kb =
+    init_parm("compact_back_position_budget_kb", 16384, 0, INT_MAX);
+  p->compact_back_position_build_factor =
+    init_parm("compact_back_position_build_factor", 64, 1, INT_MAX);
   p->fpa_depth =        init_parm("fpa_depth",            10,      1,    100);
   p->candidate_warn_limit = init_parm("candidate_warn_limit", -1,   -1,INT_MAX);
   p->candidate_hard_limit = init_parm("candidate_hard_limit", -1,   -1,INT_MAX);
@@ -10930,8 +10934,8 @@ static void configure_search_indexes(void)
   configure_compact_back_demod_position(
     (unsigned) parm(Opt->compact_back_tree_admit_work),
     4,
-    8,
-    (unsigned) parm(Opt->compact_back_tree_budget_kb),
+    (unsigned) parm(Opt->compact_back_position_build_factor),
+    (unsigned) parm(Opt->compact_back_position_budget_kb),
     20,
     flag(Opt->compact_back_position_admission) ||
       str_ident(stringparm1(Opt->compact_back_demod_strategy), "adaptive"));

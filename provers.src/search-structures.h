@@ -256,6 +256,8 @@ struct prover_options {
     compact_back_tree_budget_kb, // hard structural metadata budget (0=unlimited)
     compact_back_tree_admit_work, // fallback groups before hot-root backfill
     compact_back_tree_build_factor, // observed work/build cost for hot roots
+    compact_back_position_budget_kb, // independent exact-position RAM cap
+    compact_back_position_build_factor, // lookup work per census/backfill unit
     fpa_depth,     // FPA index depth (higher = more selective, more memory)
     candidate_warn_limit,  // warn when candidates exceed this
     candidate_hard_limit,  // skip inference when candidates exceed this

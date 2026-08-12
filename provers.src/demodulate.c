@@ -674,7 +674,11 @@ void fprint_compact_back_demod(FILE *fp)
           "position_cost_deferrals=%llu, "
           "position_probation_updates=%llu, "
           "position_probation_replacements=%llu, "
-          "position_backfill_records=%llu, position_complete=%s, "
+          "position_retry_deferrals=%llu, "
+          "position_backfill_records=%llu, position_census_records=%llu, "
+          "position_credit_balance=%llu, position_credit_earned=%llu, "
+          "position_credit_spent=%llu, position_credit_reservations=%llu, "
+          "position_admission_freezes=%llu, position_complete=%s, "
           "position_budget=%llu, position_effective_budget=%llu, "
           "position_budget_pct=%u, "
           "position_estimated=%llu, position_probation_bytes=%llu, "
@@ -682,6 +686,7 @@ void fprint_compact_back_demod(FILE *fp)
           "position_budget_exhaustions=%llu, "
           "position_admit_work=%u, position_min_gain=%u, "
           "position_build_factor=%u, position_admission=%s, "
+          "position_admission_frozen=%s, "
           "symbol_occurrences=%llu, groups_examined=%llu, "
           "occurrences_examined=%llu, path_checks=%llu, "
           "path_rejects=%llu, query_input=%016llx, "
@@ -736,7 +741,12 @@ void fprint_compact_back_demod(FILE *fp)
           stats.position_cost_deferrals,
           stats.position_probation_updates,
           stats.position_probation_replacements,
+          stats.position_retry_deferrals,
           stats.position_backfill_records,
+          stats.position_census_records,
+          stats.position_credit_balance, stats.position_credit_earned,
+          stats.position_credit_spent, stats.position_credit_reservations,
+          stats.position_admission_freezes,
           stats.position_complete ? "yes" : "no",
           stats.position_budget_bytes,
           stats.position_effective_budget_bytes,
@@ -748,6 +758,7 @@ void fprint_compact_back_demod(FILE *fp)
           stats.position_admit_work, stats.position_min_gain,
           stats.position_build_factor,
           stats.position_admission_enabled ? "yes" : "no",
+          stats.position_admission_frozen ? "yes" : "no",
           stats.symbol_occurrences,
           stats.posting_groups_examined, stats.occurrences_examined,
           stats.path_filter_checks, stats.path_filter_rejects,

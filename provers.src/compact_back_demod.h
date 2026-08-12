@@ -76,7 +76,14 @@ struct compact_back_demod_stats {
   unsigned long long position_cost_deferrals;
   unsigned long long position_probation_updates;
   unsigned long long position_probation_replacements;
+  unsigned long long position_retry_deferrals;
   unsigned long long position_backfill_records;
+  unsigned long long position_census_records;
+  unsigned long long position_credit_balance;
+  unsigned long long position_credit_earned;
+  unsigned long long position_credit_spent;
+  unsigned long long position_credit_reservations;
+  unsigned long long position_admission_freezes;
   unsigned long long position_budget_bytes;
   unsigned long long position_effective_budget_bytes;
   unsigned long long position_estimated_bytes;
@@ -88,6 +95,7 @@ struct compact_back_demod_stats {
   unsigned position_min_gain;
   unsigned position_build_factor;
   BOOL position_admission_enabled;
+  BOOL position_admission_frozen;
   BOOL position_complete;
   unsigned long long route_profile_capacity;
   unsigned long long route_profile_occupied;

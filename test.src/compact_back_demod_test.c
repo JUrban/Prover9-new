@@ -961,7 +961,7 @@ int main(void)
             "add correlated position-intersection family");
     }
     rule = indexed_clause("f(a,z(h(j(a0)),h(j(b0)))) = a.");
-    for (round = 0; round < 35; round++) {
+    for (round = 0; round < 67; round++) {
       ids = compact_back_demod_candidate_ids(
         intersected, rule, ORIENTED, &count);
       CHECK(count == 1,
@@ -976,6 +976,11 @@ int main(void)
           before_compact.position_intersection_scans == 4 &&
           before_compact.position_intersection_bit_checks == 4 &&
           before_compact.position_intersection_records == 1 &&
+          before_compact.position_credit_reservations == 2 &&
+          before_compact.position_census_records ==
+            2 * INTERSECTION_FAMILY &&
+          before_compact.position_backfill_records ==
+            2 * INTERSECTION_FAMILY &&
           before_compact.position_bitmap_bytes > 0,
           "two broad features use a bounded bitmap intersection");
     later = indexed_clause("w(f(a,z(h(j(a0)),h(j(b0))))).");
@@ -1030,7 +1035,7 @@ int main(void)
             "add dense position-intersection family");
     }
     rule = indexed_clause("d(a,z(h(j(da0)),h(j(db0)))) = a.");
-    for (round = 0; round < 8; round++) {
+    for (round = 0; round < 12; round++) {
       ids = compact_back_demod_candidate_ids(
         dense_intersection, rule, ORIENTED, &count);
       CHECK(count == DENSE_INTERSECTION_FAMILY / 16,
@@ -1081,7 +1086,7 @@ int main(void)
     }
     f_rule = indexed_clause("f(a,g(h(j(fc31)))) = a.");
     s_rule = indexed_clause("s(a,g(h(j(sc31)))) = a.");
-    for (rounds = 0; rounds < 4; rounds++) {
+    for (rounds = 0; rounds < 6; rounds++) {
       ids = compact_back_demod_candidate_ids(
         bounded_position, f_rule, ORIENTED, &count);
       safe_free(ids);
@@ -1106,6 +1111,8 @@ int main(void)
           bounded_stats.position_features == 1 &&
           bounded_stats.position_physical_features == 2 &&
           bounded_stats.position_budget_exhaustions == 1 &&
+          bounded_stats.position_admission_frozen &&
+          bounded_stats.position_admission_freezes == 1 &&
           bounded_stats.position_complete,
           "position growth demotes only its affected feature");
     compact_back_demod_get_stats(bounded_position, &before_s);
