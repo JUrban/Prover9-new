@@ -268,11 +268,12 @@ off until an independent paired long interval establishes a benefit.
 
 The completed 2,100-second prefixes now separate the useful short-run work
 from the remaining mature defect.  At the common endpoint, the adaptive
-depth-four run had processed 7,298 givens and the older mask run 7,363.  The
+demand-position run (`out71`) had processed 7,298 givens and the comparable
+mask run (`out81`) 7,097.  The
 adaptive run was slightly faster in the final interval (1.487 versus 1.397
 givens/second) and reduced mean back-index work from about 9,081 to 6,006
 posting groups/query, so the retained indexes are doing useful work.  They
-are not population-stable: all 144 shallow position features had been
+are not population-stable: all 144 demand-built position features had been
 demoted, and thousands of records still reached the exact matcher per
 query.  Raising the fixed depth merely moves that failure and multiplies
 ancestor/path postings.
