@@ -43,6 +43,7 @@ The changes are split into reviewable commits:
 | `4ddf9ed` | bounded compact forward-rewrite hot-path acceleration |
 | `b12c84c` | bounded dense intersections for packed-fast hint back-demodulation |
 | `f40023b` | conservative deep fingerprints before back-hint materialization |
+| `f797729` | sanitizer-found zero-candidate `qsort` contract fix |
 
 Candidate completeness and decreasing-ID order remain authoritative in the
 mask/tree/position paths.  Scheduling, wall time, and cache residency never
@@ -389,6 +390,12 @@ materializations are 2,483,191 after 7,622,948 conservative fingerprint
 rejections; the dense-intersection-only binary would have materialized all
 10,106,139 candidates.  This remains a bounded prefix, so the supplied
 multi-hour comparison is still required.
+
+The focused hint tests pass under AddressSanitizer and UBSan with leak checking
+disabled for LADR's process-global registries.  UBSan exposed one independent
+zero-candidate edge: the packed path called `qsort` with a null base and zero
+elements.  Commit `f797729` skips sorting vectors shorter than two; it does not
+change candidate order or any measured nonempty workload.
 
 The separate factor-search endpoints were:
 
