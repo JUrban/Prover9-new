@@ -807,7 +807,7 @@ def markdown(label, rows, summary, total_samples=None):
             fmt(row.get("back_child_hit_pct"), 1),
             fmt(row.get("back_mib"), 1)))
     print()
-    if any(row.get("back_route_capacity") is not None for row in rows):
+    if any(number(row, "back_route_capacity", 0) > 0 for row in rows):
         print("| CPU s | Mask route % | Tree route % | Position route % | "
               "Mask cost/choice | Tree cost/choice | Position cost/choice | "
               "Switches | Reversions | Hysteresis holds |")
@@ -838,7 +838,7 @@ def markdown_summary(summary):
     print("Peak memory={} MiB ({}).".format(
         fmt(summary.get("peak_rss_mib"), 1),
         fmt(summary.get("peak_rss_source"))))
-    if summary.get("last_back_route_profile_capacity") is not None:
+    if number(summary, "last_back_route_profile_capacity", 0) > 0:
         print("Final adaptive route table={}/{} entries ({} bytes); last "
               "interval route mix: mask={}%, tree={}%, position={}%.".format(
                   fmt(summary.get("last_back_route_profile_occupied")),
