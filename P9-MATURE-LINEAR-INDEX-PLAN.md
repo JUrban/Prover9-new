@@ -1,9 +1,10 @@
 # Mature-run CPU recovery: linear-space indexes, not expiring caches
 
-Status: implementation plan derived from the complete large CHAT run and the
-new `out61`, `out71`, and `out81` measurements.  Short prefixes remain useful
-for correctness and profiling, but they are not performance acceptance
-evidence for this work.
+Status: the first retained-linear implementation landed in `950b230`, derived
+from the complete large CHAT run and the `out61`, `out71`, and `out81`
+measurements.  Short prefixes remain useful for correctness and profiling,
+but they are not performance acceptance evidence for this work.  A new full
+CHAT run is still required before the CPU gate can be claimed.
 
 ## Corrected diagnosis
 
@@ -57,6 +58,16 @@ Consequently, changing admission factors or repeating 1,500/2,000-given runs
 cannot close the mature gate.  A fixed-memory selective cache must eventually
 become a linear scan as an unbounded active corpus grows.
 
+`out61` also contains a separate configuration regression.  It did not set
+`compact_unit_strategy=code_tree` or `compact_nonunit_path_filter`.  At its
+11,015-given endpoint, its unit root scan has performed 14,107,951,845 exact
+conflict tests and accounts for 3,252.106 sampled seconds.  `out4` reaches its
+proof with 39,944,680 code-tree conflict candidates and 173.981 sampled
+seconds.  The missing unit option alone therefore prevents `out61` from being
+a fair measurement of the then-current recommended configuration.  Its
+adaptive collapse is nevertheless real and independently visible: all eight
+trees demote and all 80 position features demote and freeze.
+
 ## Required invariants
 
 The replacement design must satisfy all of these invariants.
@@ -94,7 +105,69 @@ The replacement design must satisfy all of these invariants.
    population so work/query versus population can be plotted through the
    proof endpoint.
 
-## Implementation sequence
+## Implementation status
+
+### Implemented first retained-linear stage
+
+Commit `950b230` implements the representation and lifetime changes needed
+to avoid the specific fixed-cap collapse:
+
+- `compact_back_sparse_positions` removes per-feature record bitmaps.  The
+  narrowest exact sparse stream is a complete candidate source, and admitted
+  streams remain live while new records are appended.
+- `compact_back_position_budget_pct` supplies a population-relative soft
+  allowance when the absolute position budget is zero.  Admission reserves
+  growth space and temporary early-prefix failures are retried after the live
+  population doubles instead of freezing admission forever.
+- `compact_back_tree_budget_pct` makes the retained-tree allowance grow with
+  the complete fallback index.  Existing complete trees do not demote merely
+  because a fixed 64 MiB prefix ceiling was reached.
+- `compact_rewrite_deep_cache_kb` exposes a bounded internal radix-child
+  cache, but defaults to zero.  Its first bounded pairs did not establish a
+  CPU win after accounting for telemetry overhead, so it is deliberately not
+  part of the main mature configuration.
+
+The focused suite passes under ASan/UBSan.  The accelerated 10,000-subject
+variable-prefix probe returns the same sole answer while reducing steady
+fallback work from 10,000 groups/query to one sparse posting group/query;
+it reports one retained sparse feature, zero bitmap bytes, and zero
+demotions.  A 600-given real CHAT smoke test preserved the expected trajectory
+and reported the intended code-tree unit, nonunit path-filter, sparse-position
+and population-relative-tree modes.  These results validate invariants and
+early overhead only; they do not replace the proof-endpoint run.
+
+The benefit-density eviction/rebuild policy described below is not yet
+implemented.  Relative allowances in `950b230` are intentionally soft for an
+already-admitted complete index: correctness and retention take precedence
+over enforcing a transient byte cap.  This guarantees linear rather than
+product space, but a general workload with a worse tree/base ratio still
+needs the density-aware rebuild to impose a tighter constant.
+
+The first full CHAT validation should retain the existing compact/file store
+settings and add the following complete strategy block:
+
+```prolog
+assign(compact_unit_strategy,code_tree).
+set(compact_nonunit_path_filter).
+assign(compact_back_demod_strategy,adaptive).
+set(compact_back_sparse_positions).
+assign(compact_back_position_budget_kb,0).
+assign(compact_back_position_budget_pct,50).
+assign(compact_back_position_build_factor,32).
+assign(compact_back_tree_budget_kb,65536).
+assign(compact_back_tree_budget_pct,200).
+assign(compact_rewrite_deep_cache_kb,0).
+```
+
+The 64 MiB tree value is an initial floor in this configuration, not the old
+lifetime ceiling.  The 200% value is deliberately conservative for the first
+general validation; it permits retained tree metadata to grow to twice the
+non-tree/non-position back-index bytes.  That is a CPU experiment, not yet a
+final RAM constant.  The sparse position allowance is 50% of the base index
+and contains no record-sized per-feature bitmap.  The rewrite cache remains
+off until an independent paired long interval establishes a benefit.
+
+## Remaining implementation sequence
 
 ### 1. Count and bound mature radix fanout
 
@@ -170,4 +243,3 @@ d8d84965d0f7f98c0e910b710c851bf2f21ea4f25987f34dfd4848c24207ebd2  chat_test.new.
 30385cfc520bad1e230db7cd4ab84f709e492cd309e5703df6d8e9e62598223f  chat_test.new.out71
 90f6c33cd5e3dad312ee43fc8ffaeb0a8d7b2e8732939ff02e2d0302462b1187  chat_test.new.out81
 ```
-
