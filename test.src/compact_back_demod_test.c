@@ -608,7 +608,7 @@ int main(void)
     compact_back_demod_set_tree_admit_work(1);
     compact_back_demod_set_tree_build_factor(1);
     compact_back_demod_set_position_options(
-      4096, 4, 64, 16384, 20, FALSE);
+      4096, 4, 64, 16384, 20, FALSE, FALSE);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_ADAPTIVE);
     bounded_probe = compact_back_demod_init();
     for (j = 0; j < PROBE_FAMILY; j++) {
@@ -641,7 +641,7 @@ int main(void)
     compact_back_demod_set_tree_admit_work(4096);
     compact_back_demod_set_tree_build_factor(8);
     compact_back_demod_set_position_options(
-      4096, 4, 64, 16384, 20, TRUE);
+      4096, 4, 64, 16384, 20, TRUE, FALSE);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
   }
 
@@ -710,7 +710,7 @@ int main(void)
     compact_back_demod_set_tree_budget_kb(65536);
     compact_back_demod_set_tree_admit_work(1);
     compact_back_demod_set_tree_build_factor(1);
-    compact_back_demod_set_position_options(4096, 4, 8, 65536, 20, FALSE);
+    compact_back_demod_set_position_options(4096, 4, 8, 65536, 20, FALSE, FALSE);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_ADAPTIVE);
     adaptive = compact_back_demod_init();
     for (j = 0; j < ROUTE_FAMILY; j++) {
@@ -895,7 +895,7 @@ int main(void)
     compact_back_demod_set_tree_admit_work(4096);
     compact_back_demod_set_tree_build_factor(8);
     compact_back_demod_set_position_options(
-      4096, 4, 8, 65536, 20, TRUE);
+      4096, 4, 8, 65536, 20, TRUE, FALSE);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
   }
 
@@ -975,6 +975,56 @@ int main(void)
   }
 
   {
+    enum { LINEAR_TREE_GROWTH = 512 };
+    Compact_back_demod_index retained;
+    struct compact_back_demod_stats retained_stats;
+    Topform clauses[LINEAR_TREE_GROWTH + 1], rule;
+    char text[96];
+    int j;
+    compact_back_demod_set_tree_budget_kb(16);
+    compact_back_demod_set_tree_budget_pct(200);
+    compact_back_demod_set_tree_admit_work(1);
+    compact_back_demod_set_tree_build_factor(1);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_HOT_ROOT_TREE);
+    retained = compact_back_demod_init();
+    clauses[0] = indexed_clause("w(linear_root(a)).");
+    CHECK(compact_back_demod_add(retained, clauses[0]),
+          "add seed for population-relative retained tree");
+    rule = indexed_clause("linear_root(a) = a.");
+    ids = compact_back_demod_candidate_ids(
+      retained, rule, ORIENTED, &count);
+    safe_free(ids);
+    for (j = 0; j < LINEAR_TREE_GROWTH; j++) {
+      (void) snprintf(text, sizeof(text), "w(linear_root(q%d)).", j);
+      clauses[j + 1] = indexed_clause(text);
+      CHECK(compact_back_demod_add(retained, clauses[j + 1]),
+            "grow retained tree with its complete fallback index");
+    }
+    compact_back_demod_get_stats(retained, &retained_stats);
+    CHECK(retained_stats.tree_root_admissions == 1 &&
+          retained_stats.tree_root_demotions == 0 &&
+          retained_stats.tree_budget_pct == 200 &&
+          retained_stats.tree_effective_budget_bytes > 16 * 1024 &&
+          retained_stats.tree_estimated_bytes <=
+            retained_stats.tree_effective_budget_bytes,
+          "relative tree allowance grows linearly instead of expiring");
+    ids = compact_back_demod_candidate_ids(
+      retained, rule, ORIENTED, &count);
+    CHECK(count == 1 && ids[0] == clauses[0]->id,
+          "retained linear tree remains a complete candidate source");
+    safe_free(ids);
+    compact_back_demod_free(retained);
+    delete_clause(rule);
+    for (j = 0; j <= LINEAR_TREE_GROWTH; j++)
+      delete_clause(clauses[j]);
+    compact_back_demod_set_tree_budget_pct(0);
+    compact_back_demod_set_tree_budget_kb(65536);
+    compact_back_demod_set_tree_admit_work(4096);
+    compact_back_demod_set_tree_build_factor(8);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
+  }
+
+  {
     enum { COLD_ROUTE_CLASSES = 10000, HOT_ROUTE_CLASSES = 5000 };
     Compact_back_demod_index churn;
     struct compact_back_demod_stats churn_stats;
@@ -985,7 +1035,7 @@ int main(void)
     compact_back_demod_set_tree_budget_kb(65536);
     compact_back_demod_set_tree_admit_work(1);
     compact_back_demod_set_tree_build_factor(1);
-    compact_back_demod_set_position_options(4096, 4, 64, 16384, 20, FALSE);
+    compact_back_demod_set_position_options(4096, 4, 64, 16384, 20, FALSE, FALSE);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_ADAPTIVE);
     churn = compact_back_demod_init();
     for (j = 0; j < COLD_ROUTE_CLASSES; j++) {
@@ -1047,7 +1097,7 @@ int main(void)
     compact_back_demod_set_tree_admit_work(4096);
     compact_back_demod_set_tree_build_factor(8);
     compact_back_demod_set_position_options(
-      4096, 4, 64, 16384, 20, TRUE);
+      4096, 4, 64, 16384, 20, TRUE, FALSE);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
   }
 
@@ -1067,7 +1117,7 @@ int main(void)
     compact_back_demod_set_tree_budget_kb(65536);
     compact_back_demod_set_tree_admit_work(1);
     compact_back_demod_set_tree_build_factor(1);
-    compact_back_demod_set_position_options(4096, 4, 64, 16384, 20, FALSE);
+    compact_back_demod_set_position_options(4096, 4, 64, 16384, 20, FALSE, FALSE);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_ADAPTIVE);
     aged_churn = compact_back_demod_init();
     for (j = 0; j <= AGED_COLD_ROUTE_CLASSES; j++) {
@@ -1118,7 +1168,7 @@ int main(void)
     compact_back_demod_set_tree_admit_work(4096);
     compact_back_demod_set_tree_build_factor(8);
     compact_back_demod_set_position_options(
-      4096, 4, 64, 16384, 20, TRUE);
+      4096, 4, 64, 16384, 20, TRUE, FALSE);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
   }
 
@@ -1129,7 +1179,7 @@ int main(void)
     Topform clauses[POSITION_FAMILY], rule, later, multi;
     char text[160];
     int j;
-    compact_back_demod_set_position_options(1, 4, 1, 65536, 20, TRUE);
+    compact_back_demod_set_position_options(1, 4, 1, 0, 50, TRUE, TRUE);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_POSITION);
     position = compact_back_demod_init();
     for (j = 0; j < POSITION_FAMILY; j++) {
@@ -1158,6 +1208,8 @@ int main(void)
           position_stats.position_queries == 0 &&
           position_stats.position_complete &&
           position_stats.position_postings == 1 &&
+          position_stats.position_sparse &&
+          position_stats.position_bitmap_bytes == 0 &&
           position_stats.position_probation_updates > 0 &&
           position_stats.position_probation_bytes > 0,
           "broad fallback admits one rare complete position feature");
@@ -1195,6 +1247,11 @@ int main(void)
     CHECK(count == 1 && ids[0] == clauses[POSITION_TARGET]->id,
           "position feature remains complete after forced compaction");
     safe_free(ids);
+    compact_back_demod_get_stats(position, &position_stats);
+    CHECK(position_stats.position_features == 1 &&
+          position_stats.position_bitmap_bytes == 0 &&
+          position_stats.position_demotions == 0,
+          "sparse feature remains retained without record-sized bitmaps");
     compact_back_demod_free(position);
     delete_clause(rule);
     delete_clause(later);
@@ -1202,7 +1259,7 @@ int main(void)
     for (j = 0; j < POSITION_FAMILY; j++)
       delete_clause(clauses[j]);
     compact_back_demod_set_position_options(
-      4096, 4, 8, 65536, 20, TRUE);
+      4096, 4, 8, 65536, 20, TRUE, FALSE);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
   }
 
@@ -1210,7 +1267,7 @@ int main(void)
     Compact_back_demod_index bounded;
     struct compact_back_demod_stats bounded_stats;
     Topform clause, rule;
-    compact_back_demod_set_position_options(1, 1, 1, 8, 20, TRUE);
+    compact_back_demod_set_position_options(1, 1, 1, 8, 20, TRUE, FALSE);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_POSITION);
     bounded = compact_back_demod_init();
     clause = indexed_clause("w(f(a,g(h(j(c))))).");
@@ -1239,7 +1296,7 @@ int main(void)
     delete_clause(clause);
     delete_clause(rule);
     compact_back_demod_set_position_options(
-      4096, 4, 8, 65536, 20, TRUE);
+      4096, 4, 8, 65536, 20, TRUE, FALSE);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
   }
 
@@ -1257,7 +1314,7 @@ int main(void)
     Topform matched;
     char text[128];
     int j, round;
-    compact_back_demod_set_position_options(1, 4, 1, 65536, 20, TRUE);
+    compact_back_demod_set_position_options(1, 4, 1, 65536, 20, TRUE, FALSE);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_POSITION);
     appended = compact_back_demod_init();
     for (j = 0; j < APPEND_FAMILY; j++) {
@@ -1327,7 +1384,7 @@ int main(void)
     for (j = 0; j < APPEND_FAMILY; j++)
       delete_clause(family[j]);
     compact_back_demod_set_position_options(
-      4096, 4, 64, 16384, 20, TRUE);
+      4096, 4, 64, 16384, 20, TRUE, FALSE);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
   }
 
@@ -1337,7 +1394,7 @@ int main(void)
     Topform clause, rule;
     char state_dir[128], state_path[180];
     int round;
-    compact_back_demod_set_position_options(1, 1, 1, 8, 0, TRUE);
+    compact_back_demod_set_position_options(1, 1, 1, 8, 0, TRUE, FALSE);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_ADAPTIVE);
     frozen = compact_back_demod_init();
     clause = indexed_clause("w(checkpoint_freeze(shared)).");
@@ -1395,7 +1452,7 @@ int main(void)
     delete_clause(clause);
     delete_clause(rule);
     compact_back_demod_set_position_options(
-      4096, 4, 64, 16384, 20, TRUE);
+      4096, 4, 64, 16384, 20, TRUE, FALSE);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
   }
 
@@ -1405,7 +1462,7 @@ int main(void)
     struct compact_back_demod_stats rejected, cooled, retried;
     Topform clauses[RETRY_FAMILY * 2], rule;
     int j, round;
-    compact_back_demod_set_position_options(1, 4, 1, 65536, 20, TRUE);
+    compact_back_demod_set_position_options(1, 4, 1, 65536, 20, TRUE, FALSE);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_POSITION);
     retry_position = compact_back_demod_init();
     for (j = 0; j < RETRY_FAMILY; j++) {
@@ -1462,7 +1519,7 @@ int main(void)
     for (j = 0; j < RETRY_FAMILY * 2; j++)
       delete_clause(clauses[j]);
     compact_back_demod_set_position_options(
-      4096, 4, 8, 65536, 20, TRUE);
+      4096, 4, 8, 65536, 20, TRUE, FALSE);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
   }
 
@@ -1473,7 +1530,7 @@ int main(void)
     Topform clauses[INTERSECTION_FAMILY], rule, later;
     char text[160];
     int j, round;
-    compact_back_demod_set_position_options(1, 4, 1, 65536, 20, TRUE);
+    compact_back_demod_set_position_options(1, 4, 1, 65536, 20, TRUE, FALSE);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_POSITION);
     intersected = compact_back_demod_init();
     for (j = 0; j < INTERSECTION_FAMILY; j++) {
@@ -1546,7 +1603,7 @@ int main(void)
     for (j = 0; j < INTERSECTION_FAMILY; j++)
       delete_clause(clauses[j]);
     compact_back_demod_set_position_options(
-      4096, 4, 8, 65536, 20, TRUE);
+      4096, 4, 8, 65536, 20, TRUE, FALSE);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
   }
 
@@ -1557,7 +1614,7 @@ int main(void)
     Topform clauses[DENSE_INTERSECTION_FAMILY], rule;
     char text[160];
     int j, round;
-    compact_back_demod_set_position_options(1, 4, 1, 65536, 20, TRUE);
+    compact_back_demod_set_position_options(1, 4, 1, 65536, 20, TRUE, FALSE);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_POSITION);
     dense_intersection = compact_back_demod_init();
     for (j = 0; j < DENSE_INTERSECTION_FAMILY; j++) {
@@ -1602,7 +1659,7 @@ int main(void)
     for (j = 0; j < DENSE_INTERSECTION_FAMILY; j++)
       delete_clause(clauses[j]);
     compact_back_demod_set_position_options(
-      4096, 4, 8, 65536, 20, TRUE);
+      4096, 4, 8, 65536, 20, TRUE, FALSE);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
   }
 
@@ -1614,7 +1671,7 @@ int main(void)
     Topform f_rule, s_rule;
     char text[160];
     int added = POSITION_ROOT_FAMILY * 2, j, rounds;
-    compact_back_demod_set_position_options(1, 4, 1, 352, 0, TRUE);
+    compact_back_demod_set_position_options(1, 4, 1, 352, 0, TRUE, FALSE);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_POSITION);
     bounded_position = compact_back_demod_init();
     for (j = 0; j < POSITION_ROOT_FAMILY; j++) {
@@ -1716,7 +1773,7 @@ int main(void)
     for (j = 0; j < added; j++)
       delete_clause(clauses[j]);
     compact_back_demod_set_position_options(
-      4096, 4, 8, 65536, 20, TRUE);
+      4096, 4, 8, 65536, 20, TRUE, FALSE);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
   }
 
@@ -1724,7 +1781,7 @@ int main(void)
   compact_back_demod_set_tree_budget_kb(65536);
   compact_back_demod_set_tree_admit_work(1);
   compact_back_demod_set_tree_build_factor(1);
-  compact_back_demod_set_position_options(1, 1, 1, 65536, 20, TRUE);
+  compact_back_demod_set_position_options(1, 1, 1, 65536, 20, TRUE, FALSE);
   check_high_base_strategy(COMPACT_BACK_DEMOD_MASK8);
   check_high_base_strategy(COMPACT_BACK_DEMOD_SIGNATURE32);
   check_high_base_strategy(COMPACT_BACK_DEMOD_CODE_TREE);
@@ -1735,7 +1792,7 @@ int main(void)
   compact_back_demod_set_tree_min_tokens(8);
   compact_back_demod_set_tree_admit_work(4096);
   compact_back_demod_set_tree_build_factor(8);
-  compact_back_demod_set_position_options(4096, 4, 8, 65536, 20, TRUE);
+  compact_back_demod_set_position_options(4096, 4, 8, 65536, 20, TRUE, FALSE);
   compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
 
   delete_clause(first);

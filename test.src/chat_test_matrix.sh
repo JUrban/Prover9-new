@@ -15,10 +15,13 @@ compact_term_reclaim_kb=${CHAT_COMPACT_TERM_RECLAIM_KB:-8192}
 compact_index_stale_pct=${CHAT_COMPACT_INDEX_STALE_PCT:-25}
 compact_back_position_build_factor=${CHAT_COMPACT_BACK_POSITION_BUILD_FACTOR:-32}
 compact_back_position_budget_kb=${CHAT_COMPACT_BACK_POSITION_BUDGET_KB:-16384}
+compact_back_position_budget_pct=${CHAT_COMPACT_BACK_POSITION_BUDGET_PCT:-50}
+compact_back_tree_budget_kb=${CHAT_COMPACT_BACK_TREE_BUDGET_KB:-65536}
+compact_back_tree_budget_pct=${CHAT_COMPACT_BACK_TREE_BUDGET_PCT:-200}
 passive_selector_buffer=${CHAT_PASSIVE_SELECTOR_BUFFER:-65536}
 new_prover=${CHAT_NEW_PROVER:-"$repo_dir/bin/prover9"}
 old_prover=${CHAT_OLD_PROVER:-/project/Prover9-old-LADR-2026-6A/bin/prover9}
-all_cases='old_otter new_otter_fpa new_otter_packed new_otter_packed_fast new_otter_compact_full new_otter_compact_packed_fast new_otter_compact_file_mask new_otter_compact_file_signature new_otter_compact_file_heap new_otter_compact_file_runs discount_clauses_selected discount_clauses_eager collective_balanced_selected collective_balanced_legacy collective_balanced_eager'
+all_cases='old_otter new_otter_fpa new_otter_packed new_otter_packed_fast new_otter_compact_full new_otter_compact_packed_fast new_otter_compact_file_mask new_otter_compact_file_signature new_otter_compact_file_heap new_otter_compact_file_runs new_otter_compact_file_linear discount_clauses_selected discount_clauses_eager collective_balanced_selected collective_balanced_legacy collective_balanced_eager'
 selected_cases=${CHAT_CASES:-$all_cases}
 reference_output=${CHAT_REFERENCE_OUTPUT:-}
 compare_max_cpu_ratio=${CHAT_COMPARE_MAX_CPU_RATIO:-1.25}
@@ -83,6 +86,9 @@ esac
   echo "compact_index_stale_pct=$compact_index_stale_pct"
   echo "compact_back_position_build_factor=$compact_back_position_build_factor"
   echo "compact_back_position_budget_kb=$compact_back_position_budget_kb"
+  echo "compact_back_position_budget_pct=$compact_back_position_budget_pct"
+  echo "compact_back_tree_budget_kb=$compact_back_tree_budget_kb"
+  echo "compact_back_tree_budget_pct=$compact_back_tree_budget_pct"
   echo "passive_selector_buffer=$passive_selector_buffer"
   echo "cases=$selected_cases"
   echo "reference_output=${reference_output:-none}"
@@ -104,10 +110,15 @@ awk '
   /^assign\(passive_selector_buffer,/ { next }
   /^assign\(compact_term_reclaim_kb,/ { next }
   /^assign\(compact_index_stale_pct,/ { next }
-  /^assign\(compact_back_position_(build_factor|budget_kb),/ { next }
+  /^assign\(compact_rewrite_deep_cache_kb,/ { next }
+  /^assign\(compact_(unit_strategy|back_demod_strategy),/ { next }
+  /^assign\(compact_back_position_(build_factor|budget_kb|budget_pct),/ { next }
+  /^assign\(compact_back_tree_(budget_kb|budget_pct),/ { next }
   /^assign\((collective_[a-z_]+|rewrite_refresh_[a-z_]+),/ { next }
   /^(set|clear)\(collective_[a-z_]+\)\./ { next }
   /^(set|clear)\(compact_otter_[a-z_]+\)\./ { next }
+  /^(set|clear)\(compact_back_sparse_positions\)\./ { next }
+  /^(set|clear)\(compact_nonunit_path_filter\)\./ { next }
   /^(set|clear)\(print_(gen|kept|given|initial_clauses)\)\./ { next }
   { print }
 ' "$input" > "$base_input"
@@ -142,6 +153,15 @@ write_case()
     echo "assign(max_megs,$max_megs)."
     printf '%s\n' "$policy"
     case "$name" in
+      new_otter_compact_file_linear)
+        echo "assign(compact_term_reclaim_kb,$compact_term_reclaim_kb)."
+        echo "assign(compact_index_stale_pct,$compact_index_stale_pct)."
+        echo "assign(compact_back_position_build_factor,$compact_back_position_build_factor)."
+        echo 'assign(compact_back_position_budget_kb,0).'
+        echo "assign(compact_back_position_budget_pct,$compact_back_position_budget_pct)."
+        echo "assign(compact_back_tree_budget_kb,$compact_back_tree_budget_kb)."
+        echo "assign(compact_back_tree_budget_pct,$compact_back_tree_budget_pct)."
+        ;;
       new_otter_compact_*)
         echo "assign(compact_term_reclaim_kb,$compact_term_reclaim_kb)."
         echo "assign(compact_index_stale_pct,$compact_index_stale_pct)."
@@ -254,6 +274,24 @@ set(compact_otter_unit_index).
 set(compact_otter_back_demod_index).
 set(compact_otter_nonunit_index).
 assign(compact_back_demod_strategy,adaptive).'
+
+write_case new_otter_compact_file_linear '
+assign(search_loop,otter).
+assign(passive_store,dense).
+assign(passive_directory,file).
+assign(passive_selector_store,file).
+assign(passive_selector_buffer,65536).
+assign(hint_index,packed_fast).
+assign(inference_frontier,clauses).
+assign(ancestor_store,file).
+set(compact_otter_demodulation).
+set(compact_otter_unit_index).
+set(compact_otter_back_demod_index).
+set(compact_otter_nonunit_index).
+assign(compact_unit_strategy,code_tree).
+set(compact_nonunit_path_filter).
+assign(compact_back_demod_strategy,adaptive).
+set(compact_back_sparse_positions).'
 
 write_case discount_clauses_selected '
 assign(search_loop,discount).

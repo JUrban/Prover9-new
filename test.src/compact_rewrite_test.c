@@ -78,6 +78,7 @@ int main(void)
   init_standard_ladr();
   Index_clock = clock_init("compact rewrite test index");
   init_demodulator_index(DISCRIM_BIND, ORDINARY_UNIF, 0);
+  compact_rewrite_set_deep_child_cache_kb(8192);
   bank = compact_rewrite_init();
 
   types[0] = ORIENTED;
@@ -189,6 +190,33 @@ int main(void)
     for (i = 0; i < 9; i++) {
       index_demodulator(wide_rules[i], ORIENTED, DELETE, Index_clock);
       delete_clause(wide_rules[i]);
+    }
+  }
+
+  {
+    Topform deep_rules[40];
+    struct compact_rewrite_stats first, second;
+    char text[96];
+    for (i = 0; i < 40; i++) {
+      (void) snprintf(text, sizeof(text), "deep(q%d(x)) = x.", i);
+      deep_rules[i] = make_rule(
+        text, 700 + (unsigned long long) i, ORIENTED, bank);
+    }
+    compare_case(bank, "p(deep(q39(a))).");
+    compact_rewrite_get_stats(bank, &first);
+    compare_case(bank, "p(deep(q39(a))).");
+    compact_rewrite_get_stats(bank, &second);
+    CHECK(first.deep_child_cache_parents > 0 &&
+          first.deep_child_cache_capacity > 0 &&
+          first.deep_child_cache_bytes <= 8 * 1024 * 1024,
+          "wide internal radix parent enables a bounded child cache");
+    CHECK(second.deep_child_cache_lookups >
+            first.deep_child_cache_lookups &&
+          second.deep_child_cache_hits > first.deep_child_cache_hits,
+          "repeated internal rigid lookup hits the deep child cache");
+    for (i = 0; i < 40; i++) {
+      index_demodulator(deep_rules[i], ORIENTED, DELETE, Index_clock);
+      delete_clause(deep_rules[i]);
     }
   }
 

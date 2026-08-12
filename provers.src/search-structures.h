@@ -94,6 +94,7 @@ struct prover_options {
     compact_back_demod_audit, // compare stable-ID/legacy redex answers
     compact_otter_back_demod_index, // pointer-free redex index authoritative
     compact_back_position_admission, // enable bounded exact-feature probation
+    compact_back_sparse_positions, // compressed postings, no bitmap/feature
     compact_nonunit_subsumption_audit, // compare compact/legacy feature trie
     compact_otter_nonunit_index, // stable-ID nonunit feature trie authoritative
     compact_nonunit_path_filter, // rigid-path prefilter before materialization
@@ -252,11 +253,14 @@ struct prover_options {
     passive_selector_buffer, // entries per file-backed selector buffer
     compact_term_reclaim_kb, // minimum estimated stale token payload to compact
     compact_index_stale_pct, // inactive physical records before index rebuild
+    compact_rewrite_deep_cache_kb, // optional bounded internal radix cache
     compact_back_tree_min_tokens, // complete structural partition cutoff
     compact_back_tree_budget_kb, // hard structural metadata budget (0=unlimited)
+    compact_back_tree_budget_pct, // retained tree allowance vs fallback index
     compact_back_tree_admit_work, // fallback groups before hot-root backfill
     compact_back_tree_build_factor, // observed work/build cost for hot roots
     compact_back_position_budget_kb, // independent exact-position RAM cap
+    compact_back_position_budget_pct, // relative live/base-index allowance
     compact_back_position_build_factor, // lookup work per census/backfill unit
     fpa_depth,     // FPA index depth (higher = more selective, more memory)
     candidate_warn_limit,  // warn when candidates exceed this
@@ -399,6 +403,17 @@ struct prover_stats {
     compact_rewrite_posting_bytes,
     compact_rewrite_child_cache_bytes,
     compact_rewrite_child_cache_capacity,
+    compact_rewrite_deep_child_cache_bytes,
+    compact_rewrite_deep_child_cache_budget_bytes,
+    compact_rewrite_deep_child_cache_capacity,
+    compact_rewrite_deep_child_cache_parents,
+    compact_rewrite_deep_child_cache_lookups,
+    compact_rewrite_deep_child_cache_hits,
+    compact_rewrite_deep_child_cache_misses,
+    compact_rewrite_deep_child_cache_replacements,
+    compact_rewrite_deep_child_cache_growth_denials,
+    compact_rewrite_variable_sibling_checks,
+    compact_rewrite_rigid_sibling_checks,
     compact_rewrite_occurrence_bytes,
     compact_rewrite_occurrence_stream_used,
     compact_rewrite_occurrence_stream_bytes,

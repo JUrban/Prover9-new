@@ -48,6 +48,7 @@ struct compact_back_demod_stats {
   unsigned long long tree_insert_cache_misses;
   unsigned long long tree_posting_groups;
   unsigned long long tree_budget_bytes;
+  unsigned long long tree_effective_budget_bytes;
   unsigned long long tree_estimated_bytes;
   unsigned long long tree_budget_exhaustions;
   unsigned long long tree_root_admissions;
@@ -62,6 +63,7 @@ struct compact_back_demod_stats {
   unsigned tree_min_tokens;
   unsigned tree_admit_work;
   unsigned tree_build_factor;
+  unsigned tree_budget_pct;
   BOOL tree_complete;
   unsigned long long position_features;
   unsigned long long position_physical_features;
@@ -107,6 +109,7 @@ struct compact_back_demod_stats {
   BOOL position_admission_enabled;
   BOOL position_admission_frozen;
   BOOL position_complete;
+  BOOL position_sparse;
   unsigned long long route_profile_capacity;
   unsigned long long route_profile_occupied;
   unsigned long long route_profile_bytes;
@@ -193,6 +196,8 @@ void compact_back_demod_set_tree_min_tokens(unsigned tokens);
 
 void compact_back_demod_set_tree_budget_kb(unsigned kilobytes);
 
+void compact_back_demod_set_tree_budget_pct(unsigned percentage);
+
 void compact_back_demod_set_tree_admit_work(unsigned groups);
 
 void compact_back_demod_set_tree_build_factor(unsigned factor);
@@ -202,7 +207,8 @@ void compact_back_demod_set_position_options(unsigned admit_work,
                                              unsigned build_factor,
                                              unsigned budget_kb,
                                              unsigned budget_pct,
-                                             BOOL admission_enabled);
+                                             BOOL admission_enabled,
+                                             BOOL sparse_positions);
 
 BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause);
 

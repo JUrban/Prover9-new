@@ -44,6 +44,7 @@ void configure_compact_back_demod_strategy(
 
 void configure_compact_back_demod_tree(unsigned min_tokens,
                                        unsigned budget_kb,
+                                       unsigned budget_pct,
                                        unsigned admit_work,
                                        unsigned build_factor);
 
@@ -52,7 +53,8 @@ void configure_compact_back_demod_position(unsigned admit_work,
                                            unsigned build_factor,
                                            unsigned budget_kb,
                                            unsigned budget_pct,
-                                           BOOL admission_enabled);
+                                           BOOL admission_enabled,
+                                           BOOL sparse_positions);
 
 unsigned long long compact_back_demod_active_count(void);
 

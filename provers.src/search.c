@@ -1935,6 +1935,8 @@ Prover_options init_prover_options(void)
     init_flag("compact_otter_back_demod_index", FALSE);
   p->compact_back_position_admission =
     init_flag("compact_back_position_admission", FALSE);
+  p->compact_back_sparse_positions =
+    init_flag("compact_back_sparse_positions", FALSE);
   p->compact_nonunit_subsumption_audit =
     init_flag("compact_nonunit_subsumption_audit", FALSE);
   p->compact_otter_nonunit_index =
@@ -2124,16 +2126,22 @@ Prover_options init_prover_options(void)
     init_parm("compact_term_reclaim_kb", 8192, 1, INT_MAX);
   p->compact_index_stale_pct =
     init_parm("compact_index_stale_pct", 25, 1, 1000);
+  p->compact_rewrite_deep_cache_kb =
+    init_parm("compact_rewrite_deep_cache_kb", 0, 0, 8192);
   p->compact_back_tree_min_tokens =
     init_parm("compact_back_tree_min_tokens", 8, 1, INT_MAX);
   p->compact_back_tree_budget_kb =
     init_parm("compact_back_tree_budget_kb", 65536, 0, INT_MAX);
+  p->compact_back_tree_budget_pct =
+    init_parm("compact_back_tree_budget_pct", 0, 0, 1000);
   p->compact_back_tree_admit_work =
     init_parm("compact_back_tree_admit_work", 4096, 1, INT_MAX);
   p->compact_back_tree_build_factor =
     init_parm("compact_back_tree_build_factor", 8, 1, INT_MAX);
   p->compact_back_position_budget_kb =
     init_parm("compact_back_position_budget_kb", 16384, 0, INT_MAX);
+  p->compact_back_position_budget_pct =
+    init_parm("compact_back_position_budget_pct", 20, 0, 1000);
   p->compact_back_position_build_factor =
     init_parm("compact_back_position_build_factor", 32, 1, INT_MAX);
   p->fpa_depth =        init_parm("fpa_depth",            10,      1,    100);
@@ -3120,6 +3128,23 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             "Compact_rewrite_root_cache: capacity=%llu, bytes=%llu.\n",
             s.compact_rewrite_child_cache_capacity,
             s.compact_rewrite_child_cache_bytes);
+    fprintf(fp,
+            "Compact_rewrite_deep_cache: budget_bytes=%llu, "
+            "capacity=%llu, bytes=%llu, "
+            "parents=%llu, lookups=%llu, hits=%llu, misses=%llu, "
+            "replacements=%llu, growth_denials=%llu, "
+            "variable_sibling_checks=%llu, rigid_sibling_checks=%llu.\n",
+            s.compact_rewrite_deep_child_cache_budget_bytes,
+            s.compact_rewrite_deep_child_cache_capacity,
+            s.compact_rewrite_deep_child_cache_bytes,
+            s.compact_rewrite_deep_child_cache_parents,
+            s.compact_rewrite_deep_child_cache_lookups,
+            s.compact_rewrite_deep_child_cache_hits,
+            s.compact_rewrite_deep_child_cache_misses,
+            s.compact_rewrite_deep_child_cache_replacements,
+            s.compact_rewrite_deep_child_cache_growth_denials,
+            s.compact_rewrite_variable_sibling_checks,
+            s.compact_rewrite_rigid_sibling_checks);
     fprintf(fp,
             "Compact_rewrite_occurrence_stream: used=%s, bytes=%s.\n",
             comma_num(s.compact_rewrite_occurrence_stream_used),
@@ -5923,6 +5948,28 @@ static void update_rewrite_only_stats(void)
   Stats.compact_rewrite_posting_bytes = compact.posting_bytes;
   Stats.compact_rewrite_child_cache_bytes = compact.child_cache_bytes;
   Stats.compact_rewrite_child_cache_capacity = compact.child_cache_capacity;
+  Stats.compact_rewrite_deep_child_cache_bytes =
+    compact.deep_child_cache_bytes;
+  Stats.compact_rewrite_deep_child_cache_budget_bytes =
+    compact.deep_child_cache_budget_bytes;
+  Stats.compact_rewrite_deep_child_cache_capacity =
+    compact.deep_child_cache_capacity;
+  Stats.compact_rewrite_deep_child_cache_parents =
+    compact.deep_child_cache_parents;
+  Stats.compact_rewrite_deep_child_cache_lookups =
+    compact.deep_child_cache_lookups;
+  Stats.compact_rewrite_deep_child_cache_hits =
+    compact.deep_child_cache_hits;
+  Stats.compact_rewrite_deep_child_cache_misses =
+    compact.deep_child_cache_misses;
+  Stats.compact_rewrite_deep_child_cache_replacements =
+    compact.deep_child_cache_replacements;
+  Stats.compact_rewrite_deep_child_cache_growth_denials =
+    compact.deep_child_cache_growth_denials;
+  Stats.compact_rewrite_variable_sibling_checks =
+    compact.variable_sibling_checks;
+  Stats.compact_rewrite_rigid_sibling_checks =
+    compact.rigid_sibling_checks;
   Stats.compact_rewrite_occurrence_bytes = compact.occurrence_bytes;
   Stats.compact_rewrite_occurrence_stream_used =
     compact.occurrence_stream_used;
@@ -10908,6 +10955,8 @@ static void configure_search_indexes(void)
 {
   compact_rewrite_set_compaction_stale_pct(
     (unsigned) parm(Opt->compact_index_stale_pct));
+  compact_rewrite_set_deep_child_cache_kb(
+    (unsigned) parm(Opt->compact_rewrite_deep_cache_kb));
   configure_compact_unit_stale_pct(
     (unsigned) parm(Opt->compact_index_stale_pct));
   configure_compact_nonunit_stale_pct(
@@ -10935,6 +10984,7 @@ static void configure_search_indexes(void)
   configure_compact_back_demod_tree(
     (unsigned) parm(Opt->compact_back_tree_min_tokens),
     (unsigned) parm(Opt->compact_back_tree_budget_kb),
+    (unsigned) parm(Opt->compact_back_tree_budget_pct),
     (unsigned) parm(Opt->compact_back_tree_admit_work),
     (unsigned) parm(Opt->compact_back_tree_build_factor));
   configure_compact_back_demod_position(
@@ -10942,9 +10992,10 @@ static void configure_search_indexes(void)
     4,
     (unsigned) parm(Opt->compact_back_position_build_factor),
     (unsigned) parm(Opt->compact_back_position_budget_kb),
-    20,
+    (unsigned) parm(Opt->compact_back_position_budget_pct),
     flag(Opt->compact_back_position_admission) ||
-      str_ident(stringparm1(Opt->compact_back_demod_strategy), "adaptive"));
+      str_ident(stringparm1(Opt->compact_back_demod_strategy), "adaptive"),
+    flag(Opt->compact_back_sparse_positions));
   configure_compact_unit_term_pool(Compact_terms);
   configure_compact_unit_index(
     flag(Opt->compact_unit_subsumption_audit),

@@ -122,6 +122,7 @@ static void back_demod_longevity(size_t population, size_t queries)
   mask = compact_back_demod_init();
   compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_HOT_ROOT_TREE);
   compact_back_demod_set_tree_budget_kb(64U * 1024U);
+  compact_back_demod_set_tree_budget_pct(200);
   compact_back_demod_set_tree_admit_work(4096);
   compact_back_demod_set_tree_build_factor(8);
   hot = compact_back_demod_init();
@@ -278,10 +279,11 @@ static void back_demod_variable_prefix_probe(size_t population,
   mask = compact_back_demod_init();
   compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_HOT_ROOT_TREE);
   compact_back_demod_set_tree_budget_kb(64U * 1024U);
+  compact_back_demod_set_tree_budget_pct(200);
   compact_back_demod_set_tree_admit_work(4096);
   compact_back_demod_set_tree_build_factor(8);
   hot = compact_back_demod_init();
-  compact_back_demod_set_position_options(4096, 4, 64, 16384, 20, TRUE);
+  compact_back_demod_set_position_options(4096, 4, 32, 0, 50, TRUE, TRUE);
   compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_ADAPTIVE);
   position = compact_back_demod_init();
   for (i = 0; i < population; i++) {
@@ -399,6 +401,9 @@ static void back_demod_variable_prefix_probe(size_t population,
          hot_combined <= ULLONG_MAX / 2 && hot_combined * 2 < mask_work ?
     "pass" : "fail";
   adaptive_gate = position_final.position_admissions > 0 &&
+    position_final.position_sparse &&
+    position_final.position_bitmap_bytes == 0 &&
+    position_final.position_demotions == 0 &&
     adaptive_combined <= ULLONG_MAX / 10 &&
     adaptive_combined * 10 < mask_work ?
     "pass" : "fail";
@@ -419,6 +424,8 @@ static void back_demod_variable_prefix_probe(size_t population,
          "\"adaptive_combined_work_per_query\":%.3f,"
          "\"mask_bytes\":%llu,\"hot_bytes\":%llu,"
          "\"adaptive_bytes\":%llu,\"position_admissions\":%llu,"
+         "\"position_demotions\":%llu,\"position_bitmap_bytes\":%llu,"
+         "\"position_effective_budget\":%llu,"
          "\"hot_gate\":\"%s\",\"adaptive_gate\":\"%s\"}\n",
          (unsigned long long) population, (unsigned long long) queries,
          (unsigned long long) hot_count,
@@ -434,6 +441,9 @@ static void back_demod_variable_prefix_probe(size_t population,
          (double) adaptive_combined / queries,
          mask_final.total_bytes, hot_final.total_bytes,
          position_final.total_bytes, position_final.position_admissions,
+         position_final.position_demotions,
+         position_final.position_bitmap_bytes,
+         position_final.position_effective_budget_bytes,
          hot_gate, adaptive_gate);
 
   compact_back_demod_free(mask);
@@ -443,6 +453,9 @@ static void back_demod_variable_prefix_probe(size_t population,
   for (i = 0; i < population; i++)
     delete_clause(clauses[i]);
   safe_free(clauses);
+  compact_back_demod_set_tree_budget_pct(0);
+  compact_back_demod_set_position_options(
+    4096, 4, 32, 16384, 20, TRUE, FALSE);
 }
 
 /* A rigid lookup beneath one very broad parent used to scan a linked sibling

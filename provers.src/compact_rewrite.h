@@ -21,6 +21,17 @@ struct compact_rewrite_stats {
   unsigned long long posting_bytes;
   unsigned long long child_cache_bytes;
   unsigned long long child_cache_capacity;
+  unsigned long long deep_child_cache_bytes;
+  unsigned long long deep_child_cache_budget_bytes;
+  unsigned long long deep_child_cache_capacity;
+  unsigned long long deep_child_cache_parents;
+  unsigned long long deep_child_cache_lookups;
+  unsigned long long deep_child_cache_hits;
+  unsigned long long deep_child_cache_misses;
+  unsigned long long deep_child_cache_replacements;
+  unsigned long long deep_child_cache_growth_denials;
+  unsigned long long variable_sibling_checks;
+  unsigned long long rigid_sibling_checks;
   unsigned long long occurrence_bytes;
   unsigned long long occurrence_stream_used;
   unsigned long long occurrence_stream_bytes;
@@ -39,6 +50,8 @@ Compact_rewrite_bank compact_rewrite_init(void);
 Compact_rewrite_bank compact_rewrite_init_with_pool(Compact_term_pool pool);
 
 void compact_rewrite_set_compaction_stale_pct(unsigned percentage);
+
+void compact_rewrite_set_deep_child_cache_kb(unsigned kilobytes);
 
 BOOL compact_rewrite_add(Compact_rewrite_bank bank, Topform clause, int type);
 

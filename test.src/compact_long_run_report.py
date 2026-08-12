@@ -31,6 +31,8 @@ GNU_TIME_USER_RE = re.compile(
     r"^\s*User time \(seconds\):\s*([0-9]+(?:\.[0-9]+)?)\s*$")
 GNU_TIME_RSS_RE = re.compile(
     r"^\s*Maximum resident set size \(kbytes\):\s*([0-9]+)\s*$")
+DEMOD_RE = re.compile(
+    r"^Demod_attempts=([0-9]+)\. Demod_rewrites=([0-9]+)\.$")
 
 PREFIXES = (
     ("Compact_back_demod:", "back"),
@@ -41,6 +43,9 @@ PREFIXES = (
     ("Ancestor_store:", "ancestor"),
     ("Process_residency_kb:", "residency"),
     ("Compact_otter_demodulation:", "rewrite"),
+    ("Compact_rewrite_shape:", "rewrite_shape"),
+    ("Compact_rewrite_root_cache:", "rewrite_root_cache"),
+    ("Compact_rewrite_deep_cache:", "rewrite_deep_cache"),
 )
 
 STATISTICS_FORMAT_MARKER = "Statistics_format:"
@@ -90,6 +95,11 @@ CUMULATIVE_KEYS = (
     "back_position_credit_earned", "back_position_credit_spent",
     "back_position_credit_reservations",
     "back_position_admission_freezes",
+    "rewrite_deep_cache_lookups", "rewrite_deep_cache_hits",
+    "rewrite_deep_cache_misses", "rewrite_deep_cache_replacements",
+    "rewrite_deep_cache_growth_denials",
+    "rewrite_deep_cache_variable_sibling_checks",
+    "rewrite_deep_cache_rigid_sibling_checks",
     "clock_infer", "clock_preprocess", "clock_demod", "clock_hints",
     "clock_subsume", "clock_back_demod", "ancestor_file_reads_bytes",
     "ancestor_file_writes_bytes", "selector_reads_bytes",
@@ -187,10 +197,10 @@ def parse_stream(lines, source="<stream>"):
             sample["system_cpu"] = values.get("System_CPU")
             sample["wall_clock"] = values.get("Wall_clock")
             continue
-        if line.startswith("Demod_attempts="):
-            values = assignments(line)
-            sample["demod_attempts"] = values.get("Demod_attempts")
-            sample["demod_rewrites"] = values.get("Demod_rewrites")
+        demod_match = DEMOD_RE.match(line)
+        if demod_match:
+            sample["demod_attempts"] = int(demod_match.group(1))
+            sample["demod_rewrites"] = int(demod_match.group(2))
             continue
         if line.startswith("Megabytes="):
             sample["reported_megabytes"] = scalar(line.split("=", 1)[1])
@@ -401,6 +411,12 @@ def derive_intervals(samples):
             row["back_lookup_seconds_per_answer_unit"] * 1000000.0
             if row["back_lookup_seconds_per_answer_unit"] is not None
             else None)
+        row["rewrite_deep_lookups_per_demod_attempt"] = safe_ratio(
+            row.get("delta_rewrite_deep_cache_lookups"),
+            row.get("delta_demod_attempts"))
+        row["rewrite_rigid_sibling_checks_per_demod_attempt"] = safe_ratio(
+            row.get("delta_rewrite_deep_cache_rigid_sibling_checks"),
+            row.get("delta_demod_attempts"))
         child_hits = number(sample, "back_tree_child_hits", None)
         child_lookups = number(sample, "back_tree_child_lookups", None)
         row["back_child_hit_pct"] = safe_ratio(child_hits, child_lookups)

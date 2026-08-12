@@ -40,11 +40,13 @@ static unsigned Back_demod_position_admit_work = 4096;
 static unsigned Back_demod_position_min_gain = 4;
 static unsigned Back_demod_position_build_factor = 32;
 static BOOL Back_demod_position_admission = FALSE;
+static BOOL Back_demod_sparse_positions = FALSE;
 static unsigned Back_demod_position_budget_pct = 20;
 static unsigned long long Back_demod_position_budget_bytes =
   UINT64_C(16) * 1024 * 1024;
 static unsigned long long Back_demod_tree_budget_bytes =
   UINT64_C(64) * 1024 * 1024;
+static unsigned Back_demod_tree_budget_pct = 0;
 
 typedef uint32_t cbd_path_mask;
 
@@ -337,6 +339,8 @@ struct compact_back_demod_index {
   unsigned tree_admit_work;
   unsigned tree_build_factor;
   unsigned long long tree_budget_bytes;
+  unsigned long long tree_budget_high_water;
+  unsigned tree_budget_pct;
   BOOL tree_complete;
   unsigned long long position_posting_count;
   unsigned long long position_queries;
@@ -378,6 +382,7 @@ struct compact_back_demod_index {
   BOOL position_rebuilding;
   BOOL position_admission_enabled;
   BOOL position_admission_frozen;
+  BOOL position_sparse;
   unsigned long long inactive_groups_examined;
   unsigned long long duplicate_groups_examined;
   unsigned long long posting_bytes_decoded;
@@ -572,6 +577,38 @@ static unsigned long long index_bytes(Compact_back_demod_index index)
     index->position_query_capacity * sizeof(*index->position_query) +
     index->position_append_match_capacity *
       sizeof(*index->position_append_matches);
+}
+
+static unsigned long long tree_budget_limit(Compact_back_demod_index index)
+{
+  unsigned long long tree = tree_estimated_bytes(index);
+  unsigned long long position = position_estimated_bytes(index);
+  unsigned long long total = index_bytes(index);
+  unsigned long long base = total;
+  unsigned long long relative = 0, limit;
+  if (base >= tree)
+    base -= tree;
+  else
+    base = 0;
+  if (base >= position)
+    base -= position;
+  else
+    base = 0;
+  if (index->tree_budget_pct != 0)
+    relative = base > ULLONG_MAX / index->tree_budget_pct ?
+      ULLONG_MAX : base * index->tree_budget_pct / 100;
+  if (index->tree_budget_pct == 0)
+    limit = index->tree_budget_bytes == 0 ?
+      ULLONG_MAX : index->tree_budget_bytes;
+  else
+    limit = relative > index->tree_budget_bytes ?
+      relative : index->tree_budget_bytes;
+  /* Once live growth has earned an allowance, a stale-record compaction may
+     not invalidate a still-complete retained tree merely because its base
+     arrays became denser. */
+  if (limit > index->tree_budget_high_water)
+    index->tree_budget_high_water = limit;
+  return index->tree_budget_high_water;
 }
 
 static void update_peak(Compact_back_demod_index index)
@@ -1136,6 +1173,18 @@ static BOOL position_budget_allows(Compact_back_demod_index index,
   return projected <= position_budget_limit(index);
 }
 
+static BOOL position_admission_budget_allows(
+  Compact_back_demod_index index, unsigned long long projected)
+{
+  unsigned long long limit = position_budget_limit(index);
+  if (!index->position_sparse || limit == ULLONG_MAX)
+    return projected <= limit;
+  /* Sparse postings need room to remain complete as the live corpus grows.
+     Admission may consume at most 80% of the current relative allowance;
+     existing streams own the remainder. */
+  return projected <= limit - limit / 5;
+}
+
 static void ensure_position_probation(Compact_back_demod_index index)
 {
   unsigned long long bytes, limit;
@@ -1328,9 +1377,9 @@ static unsigned long long tree_child_cache_max_bytes(
   Compact_back_demod_index index)
 {
   unsigned long long max_bytes = CBD_TREE_CHILD_CACHE_MAX_BYTES;
-  if (index->tree_budget_bytes != 0 &&
-      index->tree_budget_bytes / 8 < max_bytes)
-    max_bytes = index->tree_budget_bytes / 8;
+  unsigned long long budget = tree_budget_limit(index);
+  if (budget != ULLONG_MAX && budget / 8 < max_bytes)
+    max_bytes = budget / 8;
   return max_bytes;
 }
 
@@ -1342,6 +1391,7 @@ static BOOL tree_child_cache_enable_parent(Compact_back_demod_index index,
     size_t old_words = index->tree_child_cache_parent_words;
     size_t new_words = ((size_t) index->tree_node_count + 63) / 64;
     unsigned long long estimated = tree_estimated_bytes(index);
+    unsigned long long budget = tree_budget_limit(index);
     unsigned long long cache_bytes, delta;
     if (new_words <= word)
       new_words = word + 1;
@@ -1354,9 +1404,8 @@ static BOOL tree_child_cache_enable_parent(Compact_back_demod_index index,
       old_words * sizeof(*index->tree_child_cache_parents);
     if (cache_bytes > tree_child_cache_max_bytes(index) ||
         delta > tree_child_cache_max_bytes(index) - cache_bytes ||
-        (index->tree_budget_bytes != 0 &&
-        (estimated > index->tree_budget_bytes ||
-         delta > index->tree_budget_bytes - estimated))) {
+        (budget != ULLONG_MAX &&
+        (estimated > budget || delta > budget - estimated))) {
       index->tree_child_cache_growth_denials++;
       return FALSE;
     }
@@ -1401,7 +1450,7 @@ static void maybe_grow_tree_child_cache(Compact_back_demod_index index)
   struct cbd_tree_child_cache_entry *old, *replacement;
   size_t old_capacity, desired = 64, max_entries, i;
   unsigned long long max_bytes = tree_child_cache_max_bytes(index);
-  unsigned long long estimated, delta;
+  unsigned long long estimated, delta, budget;
   if (index->tree_child_cache_growth_blocked)
     return;
   if (index->tree_child_cache_parent_words >
@@ -1424,12 +1473,12 @@ static void maybe_grow_tree_child_cache(Compact_back_demod_index index)
     return;
   }
   estimated = tree_estimated_bytes(index);
+  budget = tree_budget_limit(index);
   while (desired > old_capacity) {
     delta = (desired - old_capacity) *
       sizeof(*index->tree_child_cache);
-    if (index->tree_budget_bytes == 0 ||
-        (estimated <= index->tree_budget_bytes &&
-         delta <= index->tree_budget_bytes - estimated))
+    if (budget == ULLONG_MAX ||
+        (estimated <= budget && delta <= budget - estimated))
       break;
     desired /= 2;
   }
@@ -2114,6 +2163,7 @@ static Compact_back_demod_index compact_back_demod_init_with_pool_strategy(
   index->tree_admit_work = Back_demod_tree_admit_work;
   index->tree_build_factor = Back_demod_tree_build_factor;
   index->tree_budget_bytes = Back_demod_tree_budget_bytes;
+  index->tree_budget_pct = Back_demod_tree_budget_pct;
   index->tree_complete = TRUE;
   index->position_admit_work = Back_demod_position_admit_work;
   index->position_min_gain = Back_demod_position_min_gain;
@@ -2122,6 +2172,7 @@ static Compact_back_demod_index compact_back_demod_init_with_pool_strategy(
   index->position_budget_bytes = Back_demod_position_budget_bytes;
   index->position_complete = TRUE;
   index->position_admission_enabled = Back_demod_position_admission;
+  index->position_sparse = Back_demod_sparse_positions;
   if (strategy == COMPACT_BACK_DEMOD_ADAPTIVE) {
     index->route_profile_capacity = CBD_ROUTE_PROFILE_CAPACITY;
     index->route_profiles = safe_calloc(
@@ -2207,6 +2258,13 @@ void compact_back_demod_set_tree_budget_kb(unsigned kilobytes)
     (unsigned long long) kilobytes * 1024;
 }
 
+void compact_back_demod_set_tree_budget_pct(unsigned percentage)
+{
+  if (percentage > 1000)
+    fatal_error("compact_back_demod: invalid tree budget percentage");
+  Back_demod_tree_budget_pct = percentage;
+}
+
 void compact_back_demod_set_tree_admit_work(unsigned groups)
 {
   if (groups == 0)
@@ -2226,7 +2284,8 @@ void compact_back_demod_set_position_options(unsigned admit_work,
                                              unsigned build_factor,
                                              unsigned budget_kb,
                                              unsigned budget_pct,
-                                             BOOL admission_enabled)
+                                             BOOL admission_enabled,
+                                             BOOL sparse_positions)
 {
   if (admit_work == 0 || min_gain == 0 || build_factor == 0 ||
       budget_pct > 1000)
@@ -2238,6 +2297,7 @@ void compact_back_demod_set_position_options(unsigned admit_work,
     (unsigned long long) budget_kb * 1024;
   Back_demod_position_budget_pct = budget_pct;
   Back_demod_position_admission = admission_enabled;
+  Back_demod_sparse_positions = sparse_positions;
 }
 
 BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
@@ -2365,26 +2425,27 @@ BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
                           symbols.occurrence_values,
                           tree_occurrence_count);
     if (index->strategy == COMPACT_BACK_DEMOD_HYBRID_TREE) {
-      unsigned long long worst;
+      unsigned long long worst, estimated, budget;
       worst = eligible > (ULLONG_MAX - 4096) / 96 ? ULLONG_MAX :
         4096 + (unsigned long long) eligible * 96;
-      if (eligible != 0 && index->tree_budget_bytes != 0 &&
-          (tree_estimated_bytes(index) > index->tree_budget_bytes ||
-           worst > index->tree_budget_bytes -
-             tree_estimated_bytes(index))) {
+      estimated = tree_estimated_bytes(index);
+      budget = tree_budget_limit(index);
+      if (eligible != 0 && budget != ULLONG_MAX &&
+          (estimated > budget || worst > budget - estimated)) {
         index->tree_complete = FALSE;
         index->tree_budget_exhaustions++;
         tree_occurrence_count = 0;
       }
     }
     else if (strategy_uses_hot_tree(index->strategy)) {
-      unsigned long long worst;
+      unsigned long long worst, estimated, budget;
       worst = eligible > (ULLONG_MAX - 4096) / 96 ? ULLONG_MAX :
         4096 + (unsigned long long) eligible * 96;
-      if (eligible != 0 && index->tree_budget_bytes != 0 &&
-          (tree_estimated_bytes(index) > index->tree_budget_bytes ||
-           worst > index->tree_budget_bytes -
-             tree_estimated_bytes(index))) {
+      estimated = tree_estimated_bytes(index);
+      budget = tree_budget_limit(index);
+      if (index->tree_budget_pct == 0 &&
+          eligible != 0 && budget != ULLONG_MAX &&
+          (estimated > budget || worst > budget - estimated)) {
         /* A hot-root tree is only an optimization over the complete path
            index.  If later growth will not fit, demote the affected roots;
            do not globally disable unrelated trees and retain their bytes. */
@@ -2744,7 +2805,8 @@ static BOOL append_record_position_feature(
       safe_free(occurrences.occurrence_values);
     return FALSE;
   }
-  add_position_bitmap_record(index, bucket, record_index);
+  if (!index->position_sparse)
+    add_position_bitmap_record(index, bucket, record_index);
   stream_offset = (uint32_t) index->occurrence_count;
   for (i = 0; i < occurrences.occurrence_count; i++) {
     uint32_t offset = occurrences.occurrence_values[i].offset;
@@ -3128,7 +3190,7 @@ static void maybe_admit_hot_root(Compact_back_demod_index index,
 {
   unsigned symbol;
   struct cbd_tree_root_state *state;
-  unsigned long long occurrences, worst, estimated, required_work;
+  unsigned long long occurrences, worst, estimated, required_work, budget;
   if (!strategy_uses_hot_tree(index->strategy) ||
       VARIABLE(pattern))
     return;
@@ -3174,11 +3236,20 @@ static void maybe_admit_hot_root(Compact_back_demod_index index,
   worst = occurrences > (ULLONG_MAX - 4096) / 96 ? ULLONG_MAX :
     4096 + occurrences * 96;
   estimated = tree_estimated_bytes(index);
-  if (index->tree_budget_bytes != 0 &&
-      (estimated > index->tree_budget_bytes ||
-       worst > index->tree_budget_bytes - estimated)) {
-    state->rejected = TRUE;
-    index->tree_root_rejections++;
+  budget = tree_budget_limit(index);
+  if (index->tree_budget_pct != 0 && budget != ULLONG_MAX)
+    budget -= budget / 5;
+  if (budget != ULLONG_MAX &&
+      (estimated > budget || worst > budget - estimated)) {
+    if (index->tree_budget_pct != 0) {
+      state->next_check_work = state->fallback_work > ULLONG_MAX / 2 ?
+        ULLONG_MAX : state->fallback_work * 2;
+      index->tree_root_cost_deferrals++;
+    }
+    else {
+      state->rejected = TRUE;
+      index->tree_root_rejections++;
+    }
   }
   else {
     (void) process_root_postings(index, symbol, TRUE);
@@ -3863,8 +3934,8 @@ static void append_admitted_position_features(
     uint32_t bucket_index = index->position_append_matches[i].bucket;
     struct cbd_position_bucket *bucket =
       &index->position_buckets[bucket_index];
-    unsigned long long growth = position_bitmap_growth(
-      bucket, record_index);
+    unsigned long long growth = index->position_sparse ? 0 :
+      position_bitmap_growth(bucket, record_index);
     if (ULLONG_MAX - bitmap_growth < growth)
       fatal_error("compact_back_demod: projected bitmap byte overflow");
     bitmap_growth += growth;
@@ -3876,6 +3947,7 @@ static void append_admitted_position_features(
   }
   if (!index->position_rebuilding &&
       (added_blocks != 0 || bitmap_growth != 0) &&
+      (!index->position_sparse || index->position_budget_bytes != 0) &&
       !position_budget_allows(index, projected_position_bytes(
         index, 0, added_blocks, bitmap_growth))) {
     /* Position postings are optional refinements over the complete path
@@ -3921,7 +3993,8 @@ static void append_admitted_position_features(
       previous = offset;
       i++;
     }
-    add_position_bitmap_record(index, bucket, record_index);
+    if (!index->position_sparse)
+      add_position_bitmap_record(index, bucket, record_index);
     append_position_group(
       index, bucket_index, record_index, stream_offset,
       (uint32_t) index->occurrence_count - stream_offset);
@@ -4031,13 +4104,14 @@ static void maybe_admit_position_feature(Compact_back_demod_index index,
     if (index->records[i].active) {
       size_t j;
       BOOL baseline_match = TRUE;
-      for (j = 0; j < feature_count && baseline_match; j++) {
-        uint32_t bucket = index->position_query[j].bucket;
-        if (bucket != CBD_NONE && index->position_buckets[bucket].active &&
-            !position_bitmap_contains(
-              &index->position_buckets[bucket], (uint32_t) i))
-          baseline_match = FALSE;
-      }
+      if (!index->position_sparse)
+        for (j = 0; j < feature_count && baseline_match; j++) {
+          uint32_t bucket = index->position_query[j].bucket;
+          if (bucket != CBD_NONE && index->position_buckets[bucket].active &&
+              !position_bitmap_contains(
+                &index->position_buckets[bucket], (uint32_t) i))
+            baseline_match = FALSE;
+        }
       record_position_features(index, &index->records[i], root,
                                &candidate, 1, &matched);
       index->position_records_examined++;
@@ -4058,16 +4132,25 @@ static void maybe_admit_position_feature(Compact_back_demod_index index,
   }
   blocks = candidate.matching_records <= 1 ? 0 :
     candidate.matching_records - 1;
-  bitmap_bytes = (unsigned long long) projected_position_bitmap_capacity(
-    0, (uint32_t) (index->record_count - 1)) * sizeof(uint64_t);
+  bitmap_bytes = index->position_sparse ? 0 :
+    (unsigned long long) projected_position_bitmap_capacity(
+      0, (uint32_t) (index->record_count - 1)) * sizeof(uint64_t);
   if (blocks > SIZE_MAX ||
-      !position_budget_allows(index, projected_position_bytes(
+      !position_admission_budget_allows(index, projected_position_bytes(
         index, 1, (size_t) blocks, bitmap_bytes))) {
     index->position_rejections++;
     index->position_budget_exhaustions++;
-    defer_position_probation(index, root, candidate.path, candidate.symbol,
-                             ULLONG_MAX);
-    freeze_position_admission(index);
+    if (index->position_sparse && index->position_budget_bytes == 0)
+      /* The relative allowance grows with the complete live fallback index.
+         Reconsider once that population doubles; an early prefix must not
+         permanently freeze mature admission. */
+      defer_position_probation(index, root, candidate.path, candidate.symbol,
+                               doubled_position_population(index));
+    else {
+      defer_position_probation(index, root, candidate.path, candidate.symbol,
+                               ULLONG_MAX);
+      freeze_position_admission(index);
+    }
     clock_stop(index->maintenance_clock);
     return;
   }
@@ -4121,6 +4204,8 @@ static uint32_t best_position_bucket(Compact_back_demod_index index,
         best = bucket;
     }
   }
+  if (index->position_sparse && best != CBD_NONE)
+    *selected = 1;
   return best;
 }
 
@@ -5158,6 +5243,7 @@ static void copy_hot_root_states(Compact_back_demod_index destination,
                  (unsigned) source->tree_root_capacity - 1);
   memcpy(destination->tree_roots, source->tree_roots,
          source->tree_root_capacity * sizeof(*source->tree_roots));
+  destination->tree_budget_high_water = source->tree_budget_high_water;
   {
     size_t i;
     /* The replacement path index repopulates this physical-work metric. */
@@ -6232,6 +6318,7 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->tree_insert_cache_misses = index->tree_insert_cache_misses;
   stats->tree_posting_groups = index->tree_posting_count;
   stats->tree_budget_bytes = index->tree_budget_bytes;
+  stats->tree_effective_budget_bytes = tree_budget_limit(index);
   stats->tree_estimated_bytes = tree_estimated_bytes(index);
   stats->tree_budget_exhaustions = index->tree_budget_exhaustions;
   stats->tree_root_admissions = index->tree_root_admissions;
@@ -6248,6 +6335,7 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->tree_min_tokens = index->tree_min_tokens;
   stats->tree_admit_work = index->tree_admit_work;
   stats->tree_build_factor = index->tree_build_factor;
+  stats->tree_budget_pct = index->tree_budget_pct;
   stats->tree_complete = index->tree_complete;
   stats->position_physical_features = index->position_bucket_count == 0 ? 0 :
     index->position_bucket_count - 1;
@@ -6293,7 +6381,7 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->position_admission_freezes = index->position_admission_freezes;
   stats->position_budget_bytes = index->position_budget_bytes;
   stats->position_effective_budget_bytes =
-    index->position_budget_high_water;
+    position_budget_limit(index);
   stats->position_estimated_bytes = position_estimated_bytes(index);
   stats->position_probation_bytes = index->position_probation_capacity *
     sizeof(*index->position_probation);
@@ -6306,6 +6394,7 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->position_admission_enabled = index->position_admission_enabled;
   stats->position_admission_frozen = index->position_admission_frozen;
   stats->position_complete = index->position_complete;
+  stats->position_sparse = index->position_sparse;
   stats->route_profile_capacity = index->route_profile_capacity;
   stats->route_profile_occupied = index->route_profile_occupied;
   stats->route_profile_bytes = index->route_profile_capacity *

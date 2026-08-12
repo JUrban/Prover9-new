@@ -126,10 +126,11 @@ prepare_input()
   awk '
     /^assign\((max_given|max_seconds|max_minutes|max_hours|max_days|max_megs|report|stats),/ { next }
     /^assign\((search_loop|passive_store|hint_index|inference_frontier|ancestor_store),/ { next }
-    /^assign\((compact_term_reclaim_kb|compact_index_stale_pct|compact_passive_cache|compact_back_tree_min_tokens|compact_back_tree_budget_kb|compact_back_tree_admit_work|hint_cache_kb|hint_rebuild_scan_ratio),/ { next }
+    /^assign\((compact_term_reclaim_kb|compact_index_stale_pct|compact_rewrite_deep_cache_kb|compact_passive_cache|compact_back_tree_min_tokens|compact_back_tree_budget_kb|compact_back_tree_budget_pct|compact_back_tree_admit_work|compact_back_position_budget_kb|compact_back_position_budget_pct|compact_back_position_build_factor|hint_cache_kb|hint_rebuild_scan_ratio),/ { next }
     /^assign\(compact_unit_strategy,/ { next }
     /^assign\(compact_back_demod_strategy,/ { next }
     /^(set|clear)\(compact_back_position_admission\)\./ { next }
+    /^(set|clear)\(compact_back_sparse_positions\)\./ { next }
     /^(set|clear)\(compact_nonunit_path_filter\)\./ { next }
     /^(set|clear)\(compact_otter_[a-z_]+\)\./ { next }
     /^(set|clear)\((clocks|hint_match_stats|print_gen|print_kept|print_given|print_initial_clauses)\)\./ { next }

@@ -6,6 +6,7 @@
 #include <string.h>
 
 static unsigned Compaction_stale_pct = 25;
+static unsigned long long Deep_child_cache_budget_bytes = 0;
 
 #define CR_NONE 0U
 #define CR_OCCURRENCE_BLOCK_PAYLOAD 248
@@ -14,6 +15,9 @@ static unsigned Compaction_stale_pct = 25;
 #define CR_RULE_TYPE_SHIFT 60
 #define CR_RULE_TYPE_MASK UINT64_C(0x7000000000000000)
 #define CR_RULE_ACTIVE UINT64_C(0x8000000000000000)
+#define CR_DEEP_CHILD_CACHE_MAX_BYTES (UINT64_C(8) * 1024 * 1024)
+#define CR_DEEP_CHILD_CACHE_MIN_SCAN 32
+#define CR_DEEP_CHILD_CACHE_EMPTY UINT32_MAX
 
 struct cr_node {
   Compact_term_slice tokens;
@@ -34,6 +38,17 @@ struct cr_occurrence_block {
   uint16_t used;
   uint16_t count;
   unsigned char data[CR_OCCURRENCE_BLOCK_PAYLOAD];
+};
+
+/* A bounded positive/negative cache for rigid children below the radix root.
+   It is never an answer authority: collision and eviction are ordinary cache
+   misses followed by the exact ordered sibling traversal.  CR_NONE is a
+   cached negative result; parent==CR_DEEP_CHILD_CACHE_EMPTY is an unused
+   slot. */
+struct cr_deep_child_cache_entry {
+  uint32_t parent;
+  int32_t code;
+  uint32_t child;
 };
 
 struct cr_rule {
@@ -76,6 +91,20 @@ struct compact_rewrite_bank {
   unsigned long long query_logical_base;
   uint32_t *child_cache;
   size_t child_cache_capacity;
+  struct cr_deep_child_cache_entry *deep_child_cache;
+  size_t deep_child_cache_capacity;
+  uint64_t *deep_child_cache_parents;
+  size_t deep_child_cache_parent_words;
+  size_t deep_child_cache_parent_count;
+  BOOL deep_child_cache_growth_blocked;
+  unsigned long long deep_child_cache_budget_bytes;
+  unsigned long long variable_sibling_checks;
+  unsigned long long rigid_sibling_checks;
+  unsigned long long deep_child_cache_lookups;
+  unsigned long long deep_child_cache_hits;
+  unsigned long long deep_child_cache_misses;
+  unsigned long long deep_child_cache_replacements;
+  unsigned long long deep_child_cache_growth_denials;
   unsigned long long active_rules;
   unsigned long long peak_rules;
   unsigned long long retired_rules;
@@ -207,7 +236,10 @@ static unsigned long long bank_bytes(Compact_rewrite_bank bank)
     (bank->owns_term_pool ? terms.total_bytes : 0) +
     compact_id_map_bytes(bank->id_map) +
     bank->query_capacity * sizeof(*bank->query) +
-    bank->child_cache_capacity * sizeof(*bank->child_cache);
+    bank->child_cache_capacity * sizeof(*bank->child_cache) +
+    bank->deep_child_cache_capacity * sizeof(*bank->deep_child_cache) +
+    bank->deep_child_cache_parent_words *
+      sizeof(*bank->deep_child_cache_parents);
 }
 
 static void update_peak(Compact_rewrite_bank bank)
@@ -415,6 +447,167 @@ static BOOL child_cache_get(Compact_rewrite_bank bank, uint32_t parent,
   return FALSE;
 }
 
+static size_t deep_child_cache_slot(uint32_t parent, int32_t code,
+                                    size_t capacity)
+{
+  uint64_t mixed =
+    (uint64_t) parent * UINT64_C(0x9e3779b97f4a7c15) ^
+    (uint64_t) (uint32_t) code * UINT64_C(0xbf58476d1ce4e5b9);
+  mixed ^= mixed >> 32;
+  return (size_t) mixed & (capacity - 1);
+}
+
+static BOOL deep_child_cache_parent_enabled(Compact_rewrite_bank bank,
+                                            uint32_t parent)
+{
+  size_t word = (size_t) parent / 64;
+  return word < bank->deep_child_cache_parent_words &&
+    (bank->deep_child_cache_parents[word] &
+     (UINT64_C(1) << (parent % 64))) != 0;
+}
+
+static BOOL deep_child_cache_enable_parent(Compact_rewrite_bank bank,
+                                           uint32_t parent)
+{
+  size_t word = (size_t) parent / 64;
+  if (parent == 0 || bank->deep_child_cache_budget_bytes == 0)
+    return FALSE;
+  if (word >= bank->deep_child_cache_parent_words) {
+    size_t old_words = bank->deep_child_cache_parent_words;
+    size_t new_words = (bank->node_count + 63) / 64;
+    unsigned long long entry_bytes =
+      bank->deep_child_cache_capacity * sizeof(*bank->deep_child_cache);
+    unsigned long long new_parent_bytes;
+    if (new_words <= word)
+      new_words = word + 1;
+    if (new_words > SIZE_MAX / sizeof(*bank->deep_child_cache_parents))
+      fatal_error("compact_rewrite: deep child parent map overflow");
+    new_parent_bytes = (unsigned long long) new_words *
+      sizeof(*bank->deep_child_cache_parents);
+    if (new_parent_bytes > bank->deep_child_cache_budget_bytes ||
+        entry_bytes > bank->deep_child_cache_budget_bytes -
+          new_parent_bytes) {
+      bank->deep_child_cache_growth_denials++;
+      return FALSE;
+    }
+    bank->deep_child_cache_parents = safe_realloc(
+      bank->deep_child_cache_parents,
+      new_words * sizeof(*bank->deep_child_cache_parents));
+    memset(bank->deep_child_cache_parents + old_words, 0,
+           (new_words - old_words) *
+             sizeof(*bank->deep_child_cache_parents));
+    bank->deep_child_cache_parent_words = new_words;
+  }
+  if (!deep_child_cache_parent_enabled(bank, parent)) {
+    bank->deep_child_cache_parents[word] |=
+      UINT64_C(1) << (parent % 64);
+    bank->deep_child_cache_parent_count++;
+  }
+  return TRUE;
+}
+
+static void deep_child_cache_put(Compact_rewrite_bank bank,
+                                 uint32_t parent, int32_t code,
+                                 uint32_t child, BOOL count_replacement)
+{
+  struct cr_deep_child_cache_entry *entry;
+  size_t slot;
+  if (parent == 0 || code < 0 ||
+      bank->deep_child_cache_capacity == 0 ||
+      !deep_child_cache_parent_enabled(bank, parent))
+    return;
+  slot = deep_child_cache_slot(
+    parent, code, bank->deep_child_cache_capacity);
+  entry = &bank->deep_child_cache[slot];
+  if (count_replacement &&
+      entry->parent != CR_DEEP_CHILD_CACHE_EMPTY &&
+      (entry->parent != parent || entry->code != code))
+    bank->deep_child_cache_replacements++;
+  entry->parent = parent;
+  entry->code = code;
+  entry->child = child;
+}
+
+static void maybe_grow_deep_child_cache(Compact_rewrite_bank bank)
+{
+  struct cr_deep_child_cache_entry *old, *replacement;
+  size_t old_capacity = bank->deep_child_cache_capacity;
+  size_t desired = 64, target, max_entries, i;
+  unsigned long long parent_bytes =
+    bank->deep_child_cache_parent_words *
+      sizeof(*bank->deep_child_cache_parents);
+  if (bank->deep_child_cache_growth_blocked)
+    return;
+  if (parent_bytes >= bank->deep_child_cache_budget_bytes) {
+    bank->deep_child_cache_growth_blocked = TRUE;
+    bank->deep_child_cache_growth_denials++;
+    return;
+  }
+  max_entries = (size_t) ((bank->deep_child_cache_budget_bytes -
+    parent_bytes) /
+    sizeof(*bank->deep_child_cache));
+  target = bank->deep_child_cache_parent_count > SIZE_MAX / 16 ?
+    SIZE_MAX : bank->deep_child_cache_parent_count * 16;
+  while (desired < target && desired <= SIZE_MAX / 2)
+    desired *= 2;
+  while (desired > max_entries && desired > 1)
+    desired /= 2;
+  if (desired <= old_capacity)
+    return;
+  if (desired < 64) {
+    bank->deep_child_cache_growth_blocked = TRUE;
+    bank->deep_child_cache_growth_denials++;
+    return;
+  }
+  replacement = safe_malloc(desired * sizeof(*replacement));
+  for (i = 0; i < desired; i++) {
+    replacement[i].parent = CR_DEEP_CHILD_CACHE_EMPTY;
+    replacement[i].code = 0;
+    replacement[i].child = CR_NONE;
+  }
+  old = bank->deep_child_cache;
+  bank->deep_child_cache = replacement;
+  bank->deep_child_cache_capacity = desired;
+  for (i = 0; i < old_capacity; i++)
+    if (old[i].parent != CR_DEEP_CHILD_CACHE_EMPTY)
+      deep_child_cache_put(bank, old[i].parent, old[i].code,
+                           old[i].child, FALSE);
+  safe_free(old);
+  update_peak(bank);
+}
+
+static BOOL deep_child_cache_get(Compact_rewrite_bank bank,
+                                 uint32_t parent, int32_t code,
+                                 uint32_t *child)
+{
+  struct cr_deep_child_cache_entry *entry;
+  size_t slot;
+  bank->deep_child_cache_lookups++;
+  if (bank->deep_child_cache_capacity == 0) {
+    bank->deep_child_cache_misses++;
+    return FALSE;
+  }
+  slot = deep_child_cache_slot(
+    parent, code, bank->deep_child_cache_capacity);
+  entry = &bank->deep_child_cache[slot];
+  if (entry->parent == parent && entry->code == code) {
+    bank->deep_child_cache_hits++;
+    *child = entry->child;
+    return TRUE;
+  }
+  bank->deep_child_cache_misses++;
+  return FALSE;
+}
+
+static void cached_child_put(Compact_rewrite_bank bank, uint32_t parent,
+                             int32_t code, uint32_t child)
+{
+  if (parent == 0)
+    child_cache_put(bank, parent, code, child);
+  else
+    deep_child_cache_put(bank, parent, code, child, TRUE);
+}
+
 /* Insert an immutable prefix-token slice as a radix path.  Siblings remain
    ordered by their first token exactly as in the former token-per-node trie.
    Splitting only changes the representation: terminal posting order is still
@@ -453,7 +646,7 @@ static uint32_t insert_token_path(Compact_rewrite_bank bank, uint32_t root,
           bank->nodes[previous].next_sibling;
         bank->nodes[previous].next_sibling = added;
       }
-      child_cache_put(bank, parent, wanted, added);
+      cached_child_put(bank, parent, wanted, added);
       return added;
     }
     else {
@@ -466,7 +659,7 @@ static uint32_t insert_token_path(Compact_rewrite_bank bank, uint32_t root,
              old_tokens[common] == tokens[position + common])
         common++;
       if (common == old_length) {
-        child_cache_put(bank, parent, wanted, current);
+        cached_child_put(bank, parent, wanted, current);
         position += common;
         parent = current;
       }
@@ -492,8 +685,8 @@ static uint32_t insert_token_path(Compact_rewrite_bank bank, uint32_t root,
           compact_term_pool_slice_tokens(bank->term_pool, old_suffix)[0];
         bank->nodes[current].next_sibling = CR_NONE;
         bank->nodes[split].first_child = current;
-        child_cache_put(bank, parent, wanted, split);
-        child_cache_put(bank, split, first_code(bank, current), current);
+        cached_child_put(bank, parent, wanted, split);
+        cached_child_put(bank, split, first_code(bank, current), current);
         position += common;
         if (position == length)
           return split;
@@ -511,7 +704,7 @@ static uint32_t insert_token_path(Compact_rewrite_bank bank, uint32_t root,
         }
         else
           bank->nodes[current].next_sibling = added;
-        child_cache_put(bank, split, first_code(bank, added), added);
+        cached_child_put(bank, split, first_code(bank, added), added);
         return added;
       }
     }
@@ -633,6 +826,7 @@ Compact_rewrite_bank compact_rewrite_init_with_pool(Compact_term_pool pool)
   if (pool == NULL)
     fatal_error("compact_rewrite_init_with_pool: null term pool");
   bank->term_pool = pool;
+  bank->deep_child_cache_budget_bytes = Deep_child_cache_budget_bytes;
   bank->id_map = compact_id_map_init(1);
   (void) new_node(bank, 0);
   ensure_postings(bank);
@@ -747,6 +941,15 @@ void compact_rewrite_set_compaction_stale_pct(unsigned percentage)
   Compaction_stale_pct = percentage;
 }
 
+void compact_rewrite_set_deep_child_cache_kb(unsigned kilobytes)
+{
+  if ((unsigned long long) kilobytes * 1024 >
+      CR_DEEP_CHILD_CACHE_MAX_BYTES)
+    fatal_error("compact_rewrite: deep child cache exceeds 8 MiB");
+  Deep_child_cache_budget_bytes =
+    (unsigned long long) kilobytes * 1024;
+}
+
 static void compact_rewrite_compact_internal(Compact_rewrite_bank bank,
                                              BOOL force)
 {
@@ -754,6 +957,9 @@ static void compact_rewrite_compact_internal(Compact_rewrite_bank bank,
   struct compact_rewrite_bank old;
   unsigned long long old_bytes, old_peak, old_peak_rules;
   unsigned long long attempts, rewrites, retired, compactions, reclaimed;
+  unsigned long long variable_sibling_checks, rigid_sibling_checks;
+  unsigned long long deep_lookups, deep_hits, deep_misses;
+  unsigned long long deep_replacements, deep_growth_denials;
   size_t i, packed;
   if (bank == NULL ||
       (!force && !compact_rewrite_compaction_needed(bank)) ||
@@ -767,6 +973,13 @@ static void compact_rewrite_compact_internal(Compact_rewrite_bank bank,
   retired = bank->retired_rules;
   compactions = bank->compactions;
   reclaimed = bank->bytes_reclaimed;
+  variable_sibling_checks = bank->variable_sibling_checks;
+  rigid_sibling_checks = bank->rigid_sibling_checks;
+  deep_lookups = bank->deep_child_cache_lookups;
+  deep_hits = bank->deep_child_cache_hits;
+  deep_misses = bank->deep_child_cache_misses;
+  deep_replacements = bank->deep_child_cache_replacements;
+  deep_growth_denials = bank->deep_child_cache_growth_denials;
   /* A rule record plus the shared token pool is a complete rebuild recipe.
      Pack live records in predecessor order, release all search structures,
      shrink and reuse that record array as the replacement, and rebuild its
@@ -791,6 +1004,8 @@ static void compact_rewrite_compact_internal(Compact_rewrite_bank bank,
   compact_id_map_free(old.id_map);
   safe_free(old.query);
   safe_free(old.child_cache);
+  safe_free(old.deep_child_cache);
+  safe_free(old.deep_child_cache_parents);
   old.rules = safe_realloc(old.rules, packed * sizeof(*old.rules));
   old.rule_capacity = packed;
   old.rule_count = packed;
@@ -808,6 +1023,13 @@ static void compact_rewrite_compact_internal(Compact_rewrite_bank bank,
     compact_term_pool_free(old.term_pool);
   bank->attempts = attempts;
   bank->rewrites = rewrites;
+  bank->variable_sibling_checks = variable_sibling_checks;
+  bank->rigid_sibling_checks = rigid_sibling_checks;
+  bank->deep_child_cache_lookups = deep_lookups;
+  bank->deep_child_cache_hits = deep_hits;
+  bank->deep_child_cache_misses = deep_misses;
+  bank->deep_child_cache_replacements = deep_replacements;
+  bank->deep_child_cache_growth_denials = deep_growth_denials;
   bank->retired_rules = retired;
   bank->compactions = compactions + 1;
   bank->bytes_reclaimed = reclaimed +
@@ -1335,6 +1557,8 @@ static BOOL retrieve_rec(Compact_rewrite_bank bank, uint32_t node,
                          struct cr_match_result *result)
 {
   uint32_t child, rigid_start;
+  unsigned rigid_scanned = 0;
+  BOOL deep_cache_enabled = bank->deep_child_cache_budget_bytes != 0;
   Term query_term;
   int32_t query_code;
   if (position == end)
@@ -1347,6 +1571,8 @@ static BOOL retrieve_rec(Compact_rewrite_bank bank, uint32_t node,
   for (child = bank->nodes[node].first_child; child != CR_NONE &&
        first_code(bank, child) < 0;
        child = bank->nodes[child].next_sibling) {
+    if (deep_cache_enabled)
+      bank->variable_sibling_checks++;
     if (retrieve_child(bank, child, query, position, end, bindings, bound,
                        binding_trail, trail_count, target, lex_order_vars,
                        reduced_flag, result))
@@ -1360,20 +1586,49 @@ static BOOL retrieve_rec(Compact_rewrite_bank bank, uint32_t node,
     return retrieve_child(bank, child, query, position, end, bindings, bound,
                           binding_trail, trail_count, target, lex_order_vars,
                           reduced_flag, result);
+  if (deep_cache_enabled && node != 0 &&
+      deep_child_cache_parent_enabled(bank, node) &&
+      deep_child_cache_get(bank, node, query_code, &child)) {
+    if (child == CR_NONE)
+      return FALSE;
+    return retrieve_child(bank, child, query, position, end, bindings, bound,
+                          binding_trail, trail_count, target, lex_order_vars,
+                          reduced_flag, result);
+  }
 
   /* A cache miss is semantically uninteresting: search the same ordered
      sibling chain as the original implementation and refresh the slot. */
   for (child = rigid_start; child != CR_NONE;
        child = bank->nodes[child].next_sibling) {
     int32_t edge_code = first_code(bank, child);
+    if (deep_cache_enabled) {
+      rigid_scanned++;
+      bank->rigid_sibling_checks++;
+    }
     if (edge_code > query_code)
       break;
     if (edge_code < query_code)
       continue;
-    child_cache_put(bank, node, query_code, child);
+    if (node == 0)
+      child_cache_put(bank, node, query_code, child);
+    else if (deep_cache_enabled &&
+             (deep_child_cache_parent_enabled(bank, node) ||
+              rigid_scanned >= CR_DEEP_CHILD_CACHE_MIN_SCAN)) {
+      if (deep_child_cache_enable_parent(bank, node)) {
+        maybe_grow_deep_child_cache(bank);
+        deep_child_cache_put(bank, node, query_code, child, TRUE);
+      }
+    }
     return retrieve_child(bank, child, query, position, end, bindings, bound,
                           binding_trail, trail_count, target, lex_order_vars,
                           reduced_flag, result);
+  }
+  if (deep_cache_enabled && node != 0 &&
+      (deep_child_cache_parent_enabled(bank, node) ||
+       rigid_scanned >= CR_DEEP_CHILD_CACHE_MIN_SCAN) &&
+      deep_child_cache_enable_parent(bank, node)) {
+    maybe_grow_deep_child_cache(bank);
+    deep_child_cache_put(bank, node, query_code, CR_NONE, TRUE);
   }
   return FALSE;
 }
@@ -1524,6 +1779,23 @@ void compact_rewrite_get_stats(Compact_rewrite_bank bank,
   stats->child_cache_bytes =
     bank->child_cache_capacity * sizeof(*bank->child_cache);
   stats->child_cache_capacity = bank->child_cache_capacity;
+  stats->deep_child_cache_bytes =
+    bank->deep_child_cache_capacity * sizeof(*bank->deep_child_cache) +
+    bank->deep_child_cache_parent_words *
+      sizeof(*bank->deep_child_cache_parents);
+  stats->deep_child_cache_budget_bytes =
+    bank->deep_child_cache_budget_bytes;
+  stats->deep_child_cache_capacity = bank->deep_child_cache_capacity;
+  stats->deep_child_cache_parents = bank->deep_child_cache_parent_count;
+  stats->deep_child_cache_lookups = bank->deep_child_cache_lookups;
+  stats->deep_child_cache_hits = bank->deep_child_cache_hits;
+  stats->deep_child_cache_misses = bank->deep_child_cache_misses;
+  stats->deep_child_cache_replacements =
+    bank->deep_child_cache_replacements;
+  stats->deep_child_cache_growth_denials =
+    bank->deep_child_cache_growth_denials;
+  stats->variable_sibling_checks = bank->variable_sibling_checks;
+  stats->rigid_sibling_checks = bank->rigid_sibling_checks;
   stats->occurrence_bytes =
     bank->occurrence_block_capacity * sizeof(*bank->occurrence_blocks) +
     bank->occurrence_symbol_capacity *
@@ -1556,5 +1828,7 @@ void compact_rewrite_free(Compact_rewrite_bank bank)
   compact_id_map_free(bank->id_map);
   safe_free(bank->query);
   safe_free(bank->child_cache);
+  safe_free(bank->deep_child_cache);
+  safe_free(bank->deep_child_cache_parents);
   safe_free(bank);
 }

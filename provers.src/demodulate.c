@@ -83,11 +83,13 @@ void configure_compact_back_demod_strategy(
 
 void configure_compact_back_demod_tree(unsigned min_tokens,
                                        unsigned budget_kb,
+                                       unsigned budget_pct,
                                        unsigned admit_work,
                                        unsigned build_factor)
 {
   compact_back_demod_set_tree_min_tokens(min_tokens);
   compact_back_demod_set_tree_budget_kb(budget_kb);
+  compact_back_demod_set_tree_budget_pct(budget_pct);
   compact_back_demod_set_tree_admit_work(admit_work);
   compact_back_demod_set_tree_build_factor(build_factor);
 }
@@ -97,11 +99,12 @@ void configure_compact_back_demod_position(unsigned admit_work,
                                            unsigned build_factor,
                                            unsigned budget_kb,
                                            unsigned budget_pct,
-                                           BOOL admission_enabled)
+                                           BOOL admission_enabled,
+                                           BOOL sparse_positions)
 {
   compact_back_demod_set_position_options(
     admit_work, min_gain, build_factor, budget_kb, budget_pct,
-    admission_enabled);
+    admission_enabled, sparse_positions);
 }
 
 static BOOL compact_back_demod_mode(void)
@@ -655,7 +658,9 @@ void fprint_compact_back_demod(FILE *fp)
           "tree_insert_cache_lookups=%llu, tree_insert_cache_hits=%llu, "
           "tree_insert_cache_misses=%llu, "
           "tree_posting_groups=%llu, tree_min_tokens=%u, "
-          "tree_complete=%s, tree_budget=%llu, tree_estimated=%llu, "
+          "tree_complete=%s, tree_budget=%llu, "
+          "tree_effective_budget=%llu, tree_budget_pct=%u, "
+          "tree_estimated=%llu, "
           "tree_budget_exhaustions=%llu, "
           "tree_admit_work=%u, tree_root_admissions=%llu, "
           "tree_build_factor=%u, tree_root_rejections=%llu, "
@@ -687,6 +692,7 @@ void fprint_compact_back_demod(FILE *fp)
           "position_credit_balance=%llu, position_credit_earned=%llu, "
           "position_credit_spent=%llu, position_credit_reservations=%llu, "
           "position_admission_freezes=%llu, position_complete=%s, "
+          "position_store=%s, "
           "position_budget=%llu, position_effective_budget=%llu, "
           "position_budget_pct=%u, "
           "position_estimated=%llu, position_probation_bytes=%llu, "
@@ -731,7 +737,8 @@ void fprint_compact_back_demod(FILE *fp)
           stats.tree_insert_cache_misses,
           stats.tree_posting_groups, stats.tree_min_tokens,
           stats.tree_complete ? "yes" : "no",
-          stats.tree_budget_bytes, stats.tree_estimated_bytes,
+          stats.tree_budget_bytes, stats.tree_effective_budget_bytes,
+          stats.tree_budget_pct, stats.tree_estimated_bytes,
           stats.tree_budget_exhaustions,
           stats.tree_admit_work, stats.tree_root_admissions,
           stats.tree_build_factor, stats.tree_root_rejections,
@@ -766,6 +773,7 @@ void fprint_compact_back_demod(FILE *fp)
           stats.position_credit_spent, stats.position_credit_reservations,
           stats.position_admission_freezes,
           stats.position_complete ? "yes" : "no",
+          stats.position_sparse ? "sparse" : "bitmap",
           stats.position_budget_bytes,
           stats.position_effective_budget_bytes,
           stats.position_budget_pct,
