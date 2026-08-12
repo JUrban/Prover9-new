@@ -561,6 +561,54 @@ int main(void)
   }
 
   {
+    enum { PROBE_FAMILY = 128, PROBE_QUERIES = 40 };
+    Compact_back_demod_index bounded_probe;
+    struct compact_back_demod_stats probe_stats;
+    Topform clauses[PROBE_FAMILY], rule;
+    char text[96];
+    int j, round;
+    compact_back_demod_set_tree_budget_kb(65536);
+    compact_back_demod_set_tree_admit_work(1);
+    compact_back_demod_set_tree_build_factor(1);
+    compact_back_demod_set_position_options(
+      4096, 4, 64, 16384, 20, FALSE);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_ADAPTIVE);
+    bounded_probe = compact_back_demod_init();
+    for (j = 0; j < PROBE_FAMILY; j++) {
+      (void) snprintf(text, sizeof(text), "w(f(probe_%d,a)).", j);
+      clauses[j] = indexed_clause(text);
+      CHECK(compact_back_demod_add(bounded_probe, clauses[j]),
+            "add variable-prefix calibration family");
+    }
+    rule = indexed_clause("f(x,a) = a.");
+    for (round = 0; round < PROBE_QUERIES; round++) {
+      ids = compact_back_demod_candidate_ids(
+        bounded_probe, rule, ORIENTED, &count);
+      CHECK(count == PROBE_FAMILY && ids[0] == clauses[PROBE_FAMILY - 1]->id &&
+            ids[PROBE_FAMILY - 1] == clauses[0]->id,
+            "bounded tree calibration falls back to the complete mask order");
+      safe_free(ids);
+    }
+    compact_back_demod_get_stats(bounded_probe, &probe_stats);
+    CHECK(probe_stats.tree_root_admissions == 1 &&
+          probe_stats.route_tree_probes == 1 &&
+          probe_stats.route_tree_probe_aborts == 1 &&
+          probe_stats.route_tree_probe_budget > 0 &&
+          probe_stats.route_tree_probe_discarded_candidates > 0 &&
+          probe_stats.route_tree_candidates == 0,
+          "variable-prefix calibration is stopped at its mask-derived budget");
+    compact_back_demod_free(bounded_probe);
+    delete_clause(rule);
+    for (j = 0; j < PROBE_FAMILY; j++)
+      delete_clause(clauses[j]);
+    compact_back_demod_set_tree_admit_work(4096);
+    compact_back_demod_set_tree_build_factor(8);
+    compact_back_demod_set_position_options(
+      4096, 4, 64, 16384, 20, TRUE);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
+  }
+
+  {
     enum { COST_FAMILY = 64 };
     Compact_back_demod_index cost_aware;
     struct compact_back_demod_stats cost_stats;
@@ -716,12 +764,14 @@ int main(void)
     CHECK(growth_stats.route_profile_occupied ==
             renamed_stats.route_profile_occupied + 1 &&
           growth_stats.route_mask_choices ==
-            renamed_stats.route_mask_choices + 32 &&
+            renamed_stats.route_mask_choices + 33 &&
           growth_stats.route_tree_choices ==
             renamed_stats.route_tree_choices + 1 &&
           growth_stats.route_tree_probes ==
-            renamed_stats.route_tree_probes + 1,
-          "doubling population admits a hot class and samples tree once");
+            renamed_stats.route_tree_probes + 1 &&
+          growth_stats.route_tree_probe_aborts ==
+            renamed_stats.route_tree_probe_aborts + 1,
+          "doubling population bounds one tree sample and falls back once");
     growth_probe_stats = growth_stats;
     ids = compact_back_demod_candidate_ids(
       adaptive, broad, ORIENTED, &count);

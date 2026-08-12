@@ -797,7 +797,9 @@ void fprint_compact_back_demod(FILE *fp)
           "admission_attempts=%llu, admission_rejections=%llu, "
           "aged_replacements=%llu, frequency_decays=%llu, "
           "tree_choices=%llu, position_choices=%llu, mask_probes=%llu, "
-          "tree_probes=%llu, position_probes=%llu, switches=%llu, "
+          "tree_probes=%llu, position_probes=%llu, "
+          "tree_probe_aborts=%llu, tree_probe_budget=%llu, "
+          "tree_probe_discarded_candidates=%llu, switches=%llu, "
           "reversions=%llu, hysteresis_holds=%llu, "
           "mask_observed_cost=%llu, tree_observed_cost=%llu, "
           "position_observed_cost=%llu, mask_estimated_cost=%llu, "
@@ -814,7 +816,10 @@ void fprint_compact_back_demod(FILE *fp)
           stats.route_frequency_decays,
           stats.route_tree_choices, stats.route_position_choices,
           stats.route_mask_probes, stats.route_tree_probes,
-          stats.route_position_probes, stats.route_switches,
+          stats.route_position_probes, stats.route_tree_probe_aborts,
+          stats.route_tree_probe_budget,
+          stats.route_tree_probe_discarded_candidates,
+          stats.route_switches,
           stats.route_reversions, stats.route_hysteresis_holds,
           stats.route_mask_observed_cost, stats.route_tree_observed_cost,
           stats.route_position_observed_cost,

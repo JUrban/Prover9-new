@@ -275,6 +275,9 @@ struct compact_back_demod_index {
   unsigned long long route_observed_cost[CBD_ROUTE_COUNT];
   unsigned long long route_estimated_cost[CBD_ROUTE_COUNT];
   unsigned long long route_candidates[CBD_ROUTE_COUNT];
+  unsigned long long route_tree_probe_aborts;
+  unsigned long long route_tree_probe_budget;
+  unsigned long long route_tree_probe_discarded_candidates;
   unsigned long long position_generation;
   unsigned char *occurrences;
   size_t occurrence_count;
@@ -381,6 +384,9 @@ struct compact_back_demod_index {
   unsigned long long query_dead;
   unsigned long long query_duplicates;
   unsigned long long query_bytes_decoded;
+  unsigned long long tree_probe_remaining;
+  BOOL tree_probe_active;
+  BOOL tree_probe_aborted;
   unsigned long long worst_query_id;
   unsigned long long worst_query_groups;
   unsigned long long worst_query_occurrences;
@@ -2482,6 +2488,33 @@ static void collect_record(Compact_back_demod_index index, uint32_t at,
   index->results[(*count)++] = record->proof_id;
 }
 
+/* Calibration is allowed to inspect only as much tree work as could still
+   satisfy the twofold promotion margin.  Normal selected-tree retrieval is
+   unlimited.  Charge before doing an operation, so an aborted probe never
+   exceeds its demonstrated mask-derived allowance in the logical work
+   units used by route selection. */
+static BOOL tree_probe_charge(Compact_back_demod_index index,
+                              unsigned long long work)
+{
+  if (!index->tree_probe_active)
+    return TRUE;
+  if (index->tree_probe_aborted)
+    return FALSE;
+  if (work > index->tree_probe_remaining) {
+    index->tree_probe_aborted = TRUE;
+    return FALSE;
+  }
+  index->tree_probe_remaining -= work;
+  return TRUE;
+}
+
+static BOOL tree_probe_charge_bytes(Compact_back_demod_index index,
+                                    size_t bytes)
+{
+  unsigned long long work = ((unsigned long long) bytes + 15) / 16;
+  return tree_probe_charge(index, work);
+}
+
 static uint32_t token_term_end(const int32_t *tokens, uint32_t position,
                                uint32_t end)
 {
@@ -2882,6 +2915,8 @@ static void examine_tree_group(Compact_back_demod_index index,
                                size_t *count)
 {
   struct cbd_record *record;
+  if (!tree_probe_charge(index, 1))
+    return;
   if (record_index == CBD_NONE || record_index >= index->record_count)
     fatal_error("compact_back_demod: corrupt tree posting record");
   record = &index->records[record_index];
@@ -2917,14 +2952,22 @@ static void collect_tree_posting_list(
   token_length = compact_term_slice_length(representative->tokens);
   if (list->inline_relative >= token_length)
     fatal_error("compact_back_demod: corrupt tree representative offset");
+  if (!tree_probe_charge(index, 1))
+    return;
   index->occurrences_examined++;
   if (!occurrence_matches(tokens, token_length, pattern,
                           list->inline_relative))
     return;
+  if (!tree_probe_charge_bytes(index, sizeof(uint32_t)))
+    return;
   index->posting_bytes_decoded += sizeof(uint32_t);
   index->query_bytes_decoded += sizeof(uint32_t);
   examine_tree_group(index, list->inline_record, exclude_id, count);
+  if (index->tree_probe_aborted)
+    return;
   if ((list->posting_head & CBD_TREE_DIRECT_RECORD) != 0) {
+    if (!tree_probe_charge_bytes(index, sizeof(uint32_t)))
+      return;
     index->posting_bytes_decoded += sizeof(uint32_t);
     index->query_bytes_decoded += sizeof(uint32_t);
     examine_tree_group(index,
@@ -2940,11 +2983,15 @@ static void collect_tree_posting_list(
     if (block >= index->posting_block_count)
       fatal_error("compact_back_demod: corrupt tree posting block");
     current = &index->posting_blocks[block];
+    if (!tree_probe_charge_bytes(index, current->used))
+      return;
     index->posting_bytes_decoded += current->used;
     index->query_bytes_decoded += current->used;
     while (position < current->used) {
       uint32_t record_index = decode_posting_value(current, &position);
       examine_tree_group(index, record_index, exclude_id, count);
+      if (index->tree_probe_aborted)
+        return;
       entries++;
     }
     if (position != current->used || entries != current->count)
@@ -3177,6 +3224,8 @@ static void collect_tree_candidates(Compact_back_demod_index index,
     index->term_pool, edge->tokens);
   uint32_t token_length = compact_term_slice_length(edge->tokens);
   uint32_t at, child;
+  if (!tree_probe_charge(index, 1))
+    return;
   index->tree_nodes_examined++;
   for (at = 0; at < token_length; at++) {
     int32_t code = tokens[at];
@@ -3231,9 +3280,13 @@ static void collect_tree_candidates(Compact_back_demod_index index,
   if (pending == 0 && query_position < query_end &&
       !VARIABLE(index->query[query_position].term)) {
     int32_t wanted = SYMNUM(index->query[query_position].term);
-    uint32_t cached = tree_child_cache_parent_enabled(index, node) ?
-      tree_child_cache_get(index, node, wanted) : CBD_NONE;
+    uint32_t cached = CBD_NONE;
     unsigned scanned = 0;
+    if (tree_child_cache_parent_enabled(index, node)) {
+      if (!tree_probe_charge(index, 1))
+        return;
+      cached = tree_child_cache_get(index, node, wanted);
+    }
     /* Sibling edges are ordered by their first token and radix insertion
        gives them distinct first tokens.  A rigid query token can therefore
        enter only the equal-code edge; the bounded positive cache avoids the
@@ -3244,6 +3297,8 @@ static void collect_tree_candidates(Compact_back_demod_index index,
     else
       while (child != CBD_NONE) {
         int32_t actual = tree_first_code(index, child);
+        if (!tree_probe_charge(index, 1))
+          return;
         scanned++;
         index->tree_sibling_checks++;
         if (tree_code_compare(actual, wanted) < 0)
@@ -3256,6 +3311,8 @@ static void collect_tree_candidates(Compact_back_demod_index index,
             tree_child_cache_put(index, node, wanted, child, TRUE);
             collect_tree_candidates(index, child, query_position, query_end,
                                     pending, exclude_id, count);
+            if (index->tree_probe_aborted)
+              return;
           }
           break;
         }
@@ -3264,9 +3321,13 @@ static void collect_tree_candidates(Compact_back_demod_index index,
   else
     for (; child != CBD_NONE;
          child = index->tree_nodes[child].next_sibling) {
+      if (!tree_probe_charge(index, 1))
+        return;
       index->tree_sibling_checks++;
       collect_tree_candidates(index, child, query_position, query_end,
                               pending, exclude_id, count);
+      if (index->tree_probe_aborted)
+        return;
     }
 }
 
@@ -3283,8 +3344,12 @@ static void collect_tree(Compact_back_demod_index index, Term pattern,
   symbol = SYMNUM(pattern);
   flatten_tree_query(index, pattern, &query_count);
   index->tree_queries++;
-  child = tree_child_cache_parent_enabled(index, CBD_NONE) ?
-    tree_child_cache_get(index, CBD_NONE, symbol) : CBD_NONE;
+  child = CBD_NONE;
+  if (tree_child_cache_parent_enabled(index, CBD_NONE)) {
+    if (!tree_probe_charge(index, 1))
+      return;
+    child = tree_child_cache_get(index, CBD_NONE, symbol);
+  }
   if (child != CBD_NONE) {
     collect_tree_candidates(index, child, 0, (uint32_t) query_count,
                             0, exclude_id, count);
@@ -3295,6 +3360,8 @@ static void collect_tree(Compact_back_demod_index index, Term pattern,
     for (child = tree_first_child(index, CBD_NONE);
        child != CBD_NONE; child = index->tree_nodes[child].next_sibling) {
       int32_t root = tree_first_code(index, child);
+      if (!tree_probe_charge(index, 1))
+        return;
       scanned++;
       index->tree_sibling_checks++;
       if (root < symbol)
@@ -4463,6 +4530,44 @@ static unsigned long long route_estimate(
                       population);
 }
 
+static void begin_tree_probe(Compact_back_demod_index index,
+                             unsigned long long budget)
+{
+  if (index->tree_probe_active)
+    fatal_error("compact_back_demod: nested bounded tree probe");
+  index->tree_probe_active = TRUE;
+  index->tree_probe_aborted = FALSE;
+  index->tree_probe_remaining = budget;
+}
+
+static BOOL end_tree_probe(Compact_back_demod_index index)
+{
+  BOOL aborted;
+  if (!index->tree_probe_active)
+    fatal_error("compact_back_demod: missing bounded tree probe");
+  aborted = index->tree_probe_aborted;
+  index->tree_probe_active = FALSE;
+  index->tree_probe_aborted = FALSE;
+  index->tree_probe_remaining = 0;
+  return aborted;
+}
+
+static void discard_tree_probe_results(Compact_back_demod_index index,
+                                       size_t count_before, size_t *count)
+{
+  size_t i;
+  if (*count < count_before)
+    fatal_error("compact_back_demod: invalid tree probe result rollback");
+  for (i = count_before; i < *count; i++) {
+    uint32_t record = lookup_record(index, index->results[i]);
+    if (record == CBD_NONE ||
+        index->records[record].query_stamp != index->query_stamp)
+      fatal_error("compact_back_demod: lost tree probe result");
+    index->records[record].query_stamp = 0;
+  }
+  *count = count_before;
+}
+
 static enum cbd_route route_raw_best(
   const struct cbd_route_profile *profile,
   const unsigned char available[CBD_ROUTE_COUNT],
@@ -4558,20 +4663,21 @@ static enum cbd_route choose_adaptive_route(
 static void note_adaptive_route(
   Compact_back_demod_index index, struct cbd_route_profile *profile,
   enum cbd_route route, unsigned long long population,
-  unsigned long long observed, size_t candidates,
+  unsigned long long sampled, unsigned long long accounted,
+  size_t candidates,
   const unsigned char available[CBD_ROUTE_COUNT],
   const unsigned long long populations[CBD_ROUTE_COUNT])
 {
   if (profile->samples[route] == 0)
-    profile->cost[route] = observed;
+    profile->cost[route] = sampled;
   else
-    profile->cost[route] = route_ewma(profile->cost[route], observed);
+    profile->cost[route] = route_ewma(profile->cost[route], sampled);
   profile->population[route] = population;
   profile->last_sample[route] = profile->queries;
   if (profile->samples[route] != UINT32_MAX)
     profile->samples[route]++;
   index->route_observed_cost[route] = saturating_add(
-    index->route_observed_cost[route], observed);
+    index->route_observed_cost[route], accounted);
   index->route_candidates[route] = saturating_add(
     index->route_candidates[route], candidates);
   route_update_preference(index, profile, available, populations);
@@ -4759,7 +4865,51 @@ adaptive_nonposition:
     route = choose_adaptive_route(
       index, profile, available, population, &probe);
     work_before = route_work_snapshot(index);
-    if (route == CBD_ROUTE_TREE)
+    if (route == CBD_ROUTE_TREE && probe) {
+      unsigned long long mask_cost = route_estimate(
+        profile, CBD_ROUTE_MASK, population[CBD_ROUTE_MASK]);
+      unsigned long long budget = mask_cost / 2;
+      unsigned long long failed_sample;
+      size_t discarded;
+      index->route_tree_probe_budget = saturating_add(
+        index->route_tree_probe_budget, budget);
+      begin_tree_probe(index, budget);
+      collect_tree(index, pattern, exclude_id, count);
+      if (end_tree_probe(index)) {
+        struct cbd_route_work_snapshot fallback_before, fallback_after;
+        unsigned long long tree_observed, mask_observed;
+        work_after = route_work_snapshot(index);
+        tree_observed = route_observed_work(&work_before, &work_after);
+        discarded = *count - count_before;
+        discard_tree_probe_results(index, count_before, count);
+        index->route_tree_probe_aborts++;
+        index->route_tree_probe_discarded_candidates = saturating_add(
+          index->route_tree_probe_discarded_candidates, discarded);
+        failed_sample = budget == ULLONG_MAX ? ULLONG_MAX : budget + 1;
+        note_adaptive_route(
+          index, profile, CBD_ROUTE_TREE, population[CBD_ROUTE_TREE],
+          failed_sample, tree_observed, 0, available, population);
+
+        /* The incomplete tree prefix is never a candidate answer.  Clear
+           only stamps added by this pattern, then execute the complete mask
+           route under the same query stamp so an earlier LEX_DEP direction
+           remains deduplicated. */
+        fallback_before = route_work_snapshot(index);
+        collect_symbol(index, pattern, exclude_id, count);
+        fallback_after = route_work_snapshot(index);
+        mask_observed = route_observed_work(
+          &fallback_before, &fallback_after);
+        index->route_choices[CBD_ROUTE_MASK]++;
+        note_adaptive_route(
+          index, profile, CBD_ROUTE_MASK, population[CBD_ROUTE_MASK],
+          mask_observed, mask_observed, *count - count_before,
+          available, population);
+        observed = route_observed_work(&work_before, &fallback_after);
+        maybe_admit_position_feature(index, pattern, observed, TRUE);
+        return;
+      }
+    }
+    else if (route == CBD_ROUTE_TREE)
       collect_tree(index, pattern, exclude_id, count);
     else
       collect_symbol(index, pattern, exclude_id, count);
@@ -4767,7 +4917,7 @@ adaptive_nonposition:
     {
       observed = route_observed_work(&work_before, &work_after);
       note_adaptive_route(
-        index, profile, route, population[route], observed,
+        index, profile, route, population[route], observed, observed,
         *count - count_before, available, population);
       if (route == CBD_ROUTE_MASK)
         maybe_admit_hot_root(
@@ -5025,6 +5175,12 @@ static void copy_route_profiles(Compact_back_demod_index destination,
          sizeof(source->route_estimated_cost));
   memcpy(destination->route_candidates, source->route_candidates,
          sizeof(source->route_candidates));
+  destination->route_tree_probe_aborts =
+    source->route_tree_probe_aborts;
+  destination->route_tree_probe_budget =
+    source->route_tree_probe_budget;
+  destination->route_tree_probe_discarded_candidates =
+    source->route_tree_probe_discarded_candidates;
   destination->position_generation = source->position_generation;
 }
 
@@ -6133,6 +6289,10 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->route_mask_probes = index->route_probes[CBD_ROUTE_MASK];
   stats->route_tree_probes = index->route_probes[CBD_ROUTE_TREE];
   stats->route_position_probes = index->route_probes[CBD_ROUTE_POSITION];
+  stats->route_tree_probe_aborts = index->route_tree_probe_aborts;
+  stats->route_tree_probe_budget = index->route_tree_probe_budget;
+  stats->route_tree_probe_discarded_candidates =
+    index->route_tree_probe_discarded_candidates;
   stats->route_switches = index->route_switches;
   stats->route_reversions = index->route_reversions;
   stats->route_hysteresis_holds = index->route_hysteresis_holds;

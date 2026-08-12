@@ -127,6 +127,9 @@ struct compact_back_demod_stats {
   unsigned long long route_mask_probes;
   unsigned long long route_tree_probes;
   unsigned long long route_position_probes;
+  unsigned long long route_tree_probe_aborts;
+  unsigned long long route_tree_probe_budget;
+  unsigned long long route_tree_probe_discarded_candidates;
   unsigned long long route_switches;
   unsigned long long route_reversions;
   unsigned long long route_hysteresis_holds;
