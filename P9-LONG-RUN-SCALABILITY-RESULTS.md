@@ -1087,8 +1087,19 @@ Source hashes for reproduction:
 9781ee07691bc62e01f67534208620ca0be3f026f55248a227e9161f1ed17e6c  chat_test.in
 309074bb18e63cfb98034c9524a4c21e8e2f769e56c780ab4f37b49bfcab47c6  chat_test.new.out4
 66bf2e3e67f2794d0725bbec39976db9b81b78540d01452c24657e1f1b26b146  chat_test.new.out41
-8c3345918095bff029de85544660003d3453d678ee55fb290d9830353fe7e702  development prover9 binary
+8b23f30b8478bdf6dab216f8799dd52ffb330038a12f80358d0c6a106314a1df  final release prover9 binary
 ```
+
+Final validation was repeated after restoring the accepted position policy.
+The production and focused-test sources are byte-identical to accepted commit
+`f2e663a`; later branch changes are reporting and documentation only.
+`compact_back_demod_test` and the 10,000-record `compact_long_run_test` pass in
+both optimized and isolated ASan/UBSan builds.  The compact-OTTER audit,
+checkpoint/restart differential, semantic-symbol stability differential,
+eager-demodulation proof test, report-parser suite, complete release build, and
+ordinary `make test1` proof smoke all pass.  Sanitizer leak detection is
+disabled because the repository retains documented process-lifetime LADR
+tables; there were no address or undefined-behavior findings in the new code.
 
 ### Running the decisive large-chat comparison
 
