@@ -59,6 +59,63 @@ Consequently, changing admission factors or repeating 1,500/2,000-given runs
 cannot close the mature gate.  A fixed-memory selective cache must eventually
 become a linear scan as an unbounded active corpus grows.
 
+### Completed `out7`/`out8` verdict
+
+The completed `chat_test.new.out7` and `chat_test.new.out8` files remove the
+uncertainty in the earlier `out71`/`out81` prefix comparison.  Both prove with
+the same compact search endpoint: 11,369 given, 253,302,129 generated,
+2,207,014 kept, 6,099,749,689 demodulation attempts, and 981,820,709
+rewrites.  The comparison is therefore not explained by a changed search
+trajectory.
+
+| Run | Strategy | User CPU | Final PSS | Back-index bytes | Groups examined | Back lookup |
+|:---|:---|---:|---:|---:|---:|---:|
+| `out7` | capped adaptive | 11,282.22 s | 977.45 MiB | 226.80 MiB | 24,706,113,608 | 4,752.070 s |
+| `out8` | mask8 | 10,459.17 s | 917.44 MiB | 159.87 MiB | 27,413,156,188 | 4,278.491 s |
+| `out4` | earlier mask8 | 9,573.63 s | 919.03 MiB | 159.94 MiB | 20,764,898,738 | 3,607.118 s |
+
+The capped adaptive run is 7.9% slower than its simultaneous mask8 control
+and retains about 60 MiB more PSS.  It reads 9.9% fewer fallback groups, but
+that saving does not repay 831,348,485 tree-node visits, 1,126,983,223
+tree-sibling checks, construction and demotion, and the retained 67,104,616
+bytes of tree data.  All eight admitted roots and all 144 admitted position
+features have been demoted by the proof endpoint.  The final report interval
+routes 100% of its queries through mask8.  Thus the complete files strengthen
+the fixed-budget-collapse diagnosis: the selective routes disappear at
+maturity while their storage and previous CPU cost remain.
+
+The mask-only control also exposes an independent regression.  Relative to
+`out4`, `out8` uses 9.25% more user CPU, examines 32.0% more back-index groups,
+and spends 18.6% more sampled back-index lookup CPU, despite the same proof
+endpoint, same 1,941,156 backward queries, same 695,309 exact candidates,
+same 18,696,326 indexed symbol occurrences, and essentially unchanged
+back-index bytes.  `out7` and `out8` predate the retained depth-four sparse
+position index (`1f1643d`) and atom-linear rewrite traversal (`9819b5f`), so
+they reject the capped adaptive implementation but do not measure the latest
+candidate.
+
+The main source of the mask-only selectivity regression is now experimentally
+confirmed, not inferred solely from the full reports.  On detached commit
+`52eed69`, a 600-given A/B changed only `path_feature_bits()` from the stable
+name/arity hash back to the former parser symbol number.  The exact search
+counters and returned-candidate count remained 601 / 497,430 / 16,974 and
+3,775.  Raw IDs reduced groups from 1,048,333 to 902,116 (-14.0%), sampled
+lookup CPU from 0.367 to 0.322 seconds (-12.3%), and user CPU from 31.13 to
+28.35 seconds (-8.9%).  They also produced 1,663 rather than 1,330 path
+buckets.  The diagnostic binary SHA-256 was
+`a09e7023f608d4493cc8f436312eca0dfae962f513df7c273038f41d3875b9a2` and
+the generated input SHA-256 was
+`3282f1cc4056f226acd78b68f2e81c6338821dbce08855e5ea69bc1dde1dce06`.
+
+Reverting to raw symbol IDs is not a general fix: unrelated option constants
+then change symbol numbers and hence the lossy signature collision pattern.
+The next baseline repair should retain stable name/arity hashing but use the
+already-stored 32-bit shallow mask rather than only eight bits.  This does not
+enlarge `cbd_path_bucket` or a record; it should reduce collision-driven
+bucket scans without coupling behavior to parser order.  It must be introduced
+as a separately named strategy and pass paired shuffled-symbol, short-prefix,
+and mature-slope gates before replacing mask8.
+
 `out61` also contains a separate configuration regression.  It did not set
 `compact_unit_strategy=code_tree` or `compact_nonunit_path_filter`.  At its
 11,015-given endpoint, its unit root scan has performed 14,107,951,845 exact
@@ -397,4 +454,6 @@ fd7a07f0a8ec1feafacb2672b664a393368ce728d0918c5e2708c7919d4a4406  chat_test.new.
 d8d84965d0f7f98c0e910b710c851bf2f21ea4f25987f34dfd4848c24207ebd2  chat_test.new.out61
 30385cfc520bad1e230db7cd4ab84f709e492cd309e5703df6d8e9e62598223f  chat_test.new.out71
 90f6c33cd5e3dad312ee43fc8ffaeb0a8d7b2e8732939ff02e2d0302462b1187  chat_test.new.out81
+b9a670db3bede219aced81fc493d2ee2b2c4583a4bebc94ccba1b5e895d0e8f9  chat_test.new.out7
+4422011561e06b6868a27086f23908623506cf91b7f4e1b2e41b8e2897fcdf15  chat_test.new.out8
 ```
