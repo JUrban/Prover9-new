@@ -143,6 +143,9 @@ int main(void)
     CHECK(after.attempts == before.attempts +
           (unsigned long long) depth + 2,
           "deep no-match subject still probes every rigid subterm");
+    CHECK(after.subject_target_nodes == before.subject_target_nodes +
+          (unsigned long long) (depth + 2) * (depth + 3) / 2,
+          "avoided per-target flattening work is measured exactly");
     safe_free(text);
   }
 

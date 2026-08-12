@@ -17,6 +17,7 @@ struct compact_rewrite_stats {
   unsigned long long rewrites;
   unsigned long long subject_atoms;
   unsigned long long subject_initial_nodes;
+  unsigned long long subject_target_nodes;
   unsigned long long node_items;
   unsigned long long posting_items;
   unsigned long long node_bytes;
@@ -98,6 +99,7 @@ void compact_rewrite_restore_counters(Compact_rewrite_bank bank,
                                       unsigned long long rewrites,
                                       unsigned long long subject_atoms,
                                       unsigned long long subject_initial_nodes,
+                                      unsigned long long subject_target_nodes,
                                       unsigned long long compactions,
                                       unsigned long long bytes_reclaimed);
 

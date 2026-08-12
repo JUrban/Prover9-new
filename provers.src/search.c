@@ -3153,9 +3153,10 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             comma_num(s.compact_rewrite_occurrence_stream_bytes));
     fprintf(fp,
             "Compact_rewrite_subjects: atoms=%s, initial_nodes=%s, "
-            "attempts=%s.\n",
+            "target_nodes=%s, attempts=%s.\n",
             comma_num(s.compact_rewrite_subject_atoms),
             comma_num(s.compact_rewrite_subject_initial_nodes),
+            comma_num(s.compact_rewrite_subject_target_nodes),
             comma_num(s.compact_rewrite_attempts));
   }
   if (flag(Opt->compact_unit_subsumption_audit) ||
@@ -5953,6 +5954,7 @@ static void update_rewrite_only_stats(void)
   Stats.compact_rewrite_subject_atoms = compact.subject_atoms;
   Stats.compact_rewrite_subject_initial_nodes =
     compact.subject_initial_nodes;
+  Stats.compact_rewrite_subject_target_nodes = compact.subject_target_nodes;
   Stats.compact_rewrite_node_items = compact.node_items;
   Stats.compact_rewrite_posting_items = compact.posting_items;
   Stats.compact_rewrite_node_bytes = compact.node_bytes;
@@ -8045,6 +8047,7 @@ static void restore_compact_rewrite_bank(void)
     Stats.compact_rewrite_rules_retired, Stats.compact_rewrite_attempts,
     Stats.compact_rewrite_rewrites, Stats.compact_rewrite_subject_atoms,
     Stats.compact_rewrite_subject_initial_nodes,
+    Stats.compact_rewrite_subject_target_nodes,
     Stats.compact_rewrite_compactions,
     Stats.compact_rewrite_bytes_reclaimed);
   for (i = 0; i < count; i++) {
@@ -13616,6 +13619,8 @@ void write_checkpoint(void)
             Stats.compact_rewrite_subject_atoms);
     fprintf(fp, "compact_rewrite_subject_initial_nodes %llu\n",
             Stats.compact_rewrite_subject_initial_nodes);
+    fprintf(fp, "compact_rewrite_subject_target_nodes %llu\n",
+            Stats.compact_rewrite_subject_target_nodes);
     fprintf(fp, "compact_rewrite_compactions %llu\n",
             Stats.compact_rewrite_compactions);
     fprintf(fp, "compact_rewrite_bytes_reclaimed %llu\n",
@@ -14617,6 +14622,9 @@ void resume_load_clauses(const char *dir)
   rewind(fp); (void) read_metadata_ull_if_present(
     fp, "compact_rewrite_subject_initial_nodes",
     &Stats.compact_rewrite_subject_initial_nodes);
+  rewind(fp); (void) read_metadata_ull_if_present(
+    fp, "compact_rewrite_subject_target_nodes",
+    &Stats.compact_rewrite_subject_target_nodes);
   rewind(fp); (void) read_metadata_ull_if_present(
     fp, "compact_rewrite_compactions",
     &Stats.compact_rewrite_compactions);

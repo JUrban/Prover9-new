@@ -400,6 +400,7 @@ struct prover_stats {
     compact_rewrite_rewrites,
     compact_rewrite_subject_atoms,
     compact_rewrite_subject_initial_nodes,
+    compact_rewrite_subject_target_nodes,
     compact_rewrite_node_items,
     compact_rewrite_posting_items,
     compact_rewrite_node_bytes,

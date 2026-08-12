@@ -18,6 +18,7 @@ static unsigned long long Deep_child_cache_budget_bytes = 0;
 #define CR_DEEP_CHILD_CACHE_MAX_BYTES (UINT64_C(8) * 1024 * 1024)
 #define CR_DEEP_CHILD_CACHE_MIN_SCAN 32
 #define CR_DEEP_CHILD_CACHE_EMPTY UINT32_MAX
+#define CR_SUBJECT_BLOCK_NODES 1024
 
 struct cr_node {
   Compact_term_slice tokens;
@@ -49,6 +50,14 @@ struct cr_deep_child_cache_entry {
   uint32_t parent;
   int32_t code;
   uint32_t child;
+};
+
+/* Transient rewrite subjects need stable links while subterms are replaced.
+   Recycle these nodes inside the bank instead of sending every atom node
+   through LADR's general allocator. */
+struct cr_subject_block {
+  struct cr_subject_block *next;
+  struct flatterm nodes[CR_SUBJECT_BLOCK_NODES];
 };
 
 struct cr_rule {
@@ -87,6 +96,11 @@ struct compact_rewrite_bank {
   Compact_id_map id_map;
   const int32_t *query_token_base;
   unsigned long long query_logical_base;
+  struct cr_subject_block *subject_blocks;
+  Flatterm subject_free_nodes;
+  size_t subject_block_count;
+  size_t subject_live_nodes;
+  size_t subject_peak_live_nodes;
   uint32_t *child_cache;
   size_t child_cache_capacity;
   struct cr_deep_child_cache_entry *deep_child_cache;
@@ -110,6 +124,7 @@ struct compact_rewrite_bank {
   unsigned long long rewrites;
   unsigned long long subject_atoms;
   unsigned long long subject_initial_nodes;
+  unsigned long long subject_target_nodes;
   unsigned long long peak_bytes;
   unsigned long long compactions;
   unsigned long long bytes_reclaimed;
@@ -230,6 +245,7 @@ static unsigned long long bank_bytes(Compact_rewrite_bank bank)
     bank->rule_capacity * sizeof(*bank->rules) +
     (bank->owns_term_pool ? terms.total_bytes : 0) +
     compact_id_map_bytes(bank->id_map) +
+    bank->subject_block_count * sizeof(*bank->subject_blocks) +
     bank->child_cache_capacity * sizeof(*bank->child_cache) +
     bank->deep_child_cache_capacity * sizeof(*bank->deep_child_cache) +
     bank->deep_child_cache_parent_words *
@@ -243,6 +259,110 @@ static void update_peak(Compact_rewrite_bank bank)
     bank->peak_bytes = bytes;
   if (bank->active_rules > bank->peak_rules)
     bank->peak_rules = bank->active_rules;
+}
+
+static Flatterm subject_get_node(Compact_rewrite_bank bank)
+{
+  Flatterm node;
+  if (bank->subject_free_nodes == NULL) {
+    struct cr_subject_block *block = safe_malloc(sizeof(*block));
+    int i;
+    block->next = bank->subject_blocks;
+    bank->subject_blocks = block;
+    bank->subject_block_count++;
+    for (i = 0; i < CR_SUBJECT_BLOCK_NODES; i++) {
+      block->nodes[i].next = bank->subject_free_nodes;
+      bank->subject_free_nodes = &block->nodes[i];
+    }
+    update_peak(bank);
+  }
+  node = bank->subject_free_nodes;
+  bank->subject_free_nodes = node->next;
+  node->prev = NULL;
+  node->next = NULL;
+  node->varnum_bound_to = -1;
+  node->alternative = NULL;
+  node->reduced_flag = FALSE;
+  node->size = 0;
+  bank->subject_live_nodes++;
+  if (bank->subject_live_nodes > bank->subject_peak_live_nodes)
+    bank->subject_peak_live_nodes = bank->subject_live_nodes;
+  return node;
+}
+
+static void subject_free_node(Compact_rewrite_bank bank, Flatterm node)
+{
+  if (bank->subject_live_nodes == 0)
+    fatal_error("compact_rewrite: subject arena underflow");
+  node->next = bank->subject_free_nodes;
+  bank->subject_free_nodes = node;
+  bank->subject_live_nodes--;
+}
+
+static void subject_zap(Compact_rewrite_bank bank, Flatterm subject)
+{
+  Flatterm current = subject;
+  Flatterm after = subject->end->next;
+  while (current != after) {
+    Flatterm next = current->next;
+    subject_free_node(bank, current);
+    current = next;
+  }
+}
+
+static void subject_free_blocks(Compact_rewrite_bank bank)
+{
+  struct cr_subject_block *block = bank->subject_blocks;
+  if (bank->subject_live_nodes != 0)
+    fatal_error("compact_rewrite: live subject nodes at bank destruction");
+  while (block != NULL) {
+    struct cr_subject_block *next = block->next;
+    safe_free(block);
+    block = next;
+  }
+  bank->subject_blocks = NULL;
+  bank->subject_free_nodes = NULL;
+  bank->subject_block_count = 0;
+}
+
+static Flatterm subject_from_term(Compact_rewrite_bank bank, Term term)
+{
+  Flatterm result = subject_get_node(bank);
+  Flatterm tail = result;
+  int i;
+  result->private_symbol = term->private_symbol;
+  ARITY(result) = ARITY(term);
+  result->size = 1;
+  for (i = 0; i < ARITY(term); i++) {
+    Flatterm child = subject_from_term(bank, ARG(term, i));
+    result->size += child->size;
+    tail->next = child;
+    child->prev = tail;
+    tail = child->end;
+  }
+  result->end = tail;
+  return result;
+}
+
+static Flatterm subject_copy(Compact_rewrite_bank bank, Flatterm source)
+{
+  Flatterm result = subject_get_node(bank);
+  Flatterm tail = result;
+  Flatterm child = source->next;
+  int i;
+  result->private_symbol = source->private_symbol;
+  ARITY(result) = ARITY(source);
+  result->size = 1;
+  for (i = 0; i < ARITY(source); i++) {
+    Flatterm copy = subject_copy(bank, child);
+    result->size += copy->size;
+    tail->next = copy;
+    copy->prev = tail;
+    tail = copy->end;
+    child = child->end->next;
+  }
+  result->end = tail;
+  return result;
 }
 
 static void ensure_nodes(Compact_rewrite_bank bank)
@@ -952,6 +1072,7 @@ static void compact_rewrite_compact_internal(Compact_rewrite_bank bank,
   unsigned long long old_bytes, old_peak, old_peak_rules;
   unsigned long long attempts, rewrites, retired, compactions, reclaimed;
   unsigned long long subject_atoms, subject_initial_nodes;
+  unsigned long long subject_target_nodes;
   unsigned long long variable_sibling_checks, rigid_sibling_checks;
   unsigned long long deep_lookups, deep_hits, deep_misses;
   unsigned long long deep_replacements, deep_growth_denials;
@@ -967,6 +1088,7 @@ static void compact_rewrite_compact_internal(Compact_rewrite_bank bank,
   rewrites = bank->rewrites;
   subject_atoms = bank->subject_atoms;
   subject_initial_nodes = bank->subject_initial_nodes;
+  subject_target_nodes = bank->subject_target_nodes;
   retired = bank->retired_rules;
   compactions = bank->compactions;
   reclaimed = bank->bytes_reclaimed;
@@ -999,6 +1121,7 @@ static void compact_rewrite_compact_internal(Compact_rewrite_bank bank,
   safe_free(old.occurrence_tails);
   safe_free(old.occurrence_last_rules);
   compact_id_map_free(old.id_map);
+  subject_free_blocks(&old);
   safe_free(old.child_cache);
   safe_free(old.deep_child_cache);
   safe_free(old.deep_child_cache_parents);
@@ -1021,6 +1144,7 @@ static void compact_rewrite_compact_internal(Compact_rewrite_bank bank,
   bank->rewrites = rewrites;
   bank->subject_atoms = subject_atoms;
   bank->subject_initial_nodes = subject_initial_nodes;
+  bank->subject_target_nodes = subject_target_nodes;
   bank->variable_sibling_checks = variable_sibling_checks;
   bank->rigid_sibling_checks = rigid_sibling_checks;
   bank->deep_child_cache_lookups = deep_lookups;
@@ -1343,6 +1467,7 @@ void compact_rewrite_restore_counters(Compact_rewrite_bank bank,
                                       unsigned long long rewrites,
                                       unsigned long long subject_atoms,
                                       unsigned long long subject_initial_nodes,
+                                      unsigned long long subject_target_nodes,
                                       unsigned long long compactions,
                                       unsigned long long bytes_reclaimed)
 {
@@ -1355,6 +1480,7 @@ void compact_rewrite_restore_counters(Compact_rewrite_bank bank,
   bank->rewrites = rewrites;
   bank->subject_atoms = subject_atoms;
   bank->subject_initial_nodes = subject_initial_nodes;
+  bank->subject_target_nodes = subject_target_nodes;
   bank->compactions = compactions;
   bank->bytes_reclaimed = bytes_reclaimed;
 }
@@ -1378,7 +1504,8 @@ static void clear_rewrite_binding(uint64_t *bound, unsigned variable)
 /* Build a transient flatterm directly from the compact RHS.  A substituted
    binding is already in normal form because matching is bottom-up; mark the
    copied root exactly as LADR's fapply_demod does. */
-static Flatterm build_flat_contractum(const int32_t *tokens,
+static Flatterm build_flat_contractum(Compact_rewrite_bank bank,
+                                      const int32_t *tokens,
                                       uint32_t *position, uint32_t end,
                                       Flatterm *bindings,
                                       const uint64_t *bound)
@@ -1394,19 +1521,19 @@ static Flatterm build_flat_contractum(const int32_t *tokens,
     if (variable >= MAX_VARS ||
         !rewrite_binding_is_set(bound, (unsigned) variable))
       fatal_error("compact_rewrite: unbound RHS variable");
-    result = copy_flatterm(bindings[variable]);
+    result = subject_copy(bank, bindings[variable]);
     result->reduced_flag = TRUE;
     return result;
   }
   arity = sn_to_arity(code);
-  result = get_flatterm();
+  result = subject_get_node(bank);
   result->private_symbol = -code;
   ARITY(result) = arity;
   result->size = 1;
   tail = result;
   for (i = 0; i < arity; i++) {
-    Flatterm child = build_flat_contractum(tokens, position, end, bindings,
-                                           bound);
+    Flatterm child = build_flat_contractum(bank, tokens, position, end,
+                                           bindings, bound);
     result->size += child->size;
     tail->next = child;
     child->prev = tail;
@@ -1441,8 +1568,8 @@ static BOOL try_leaf(Compact_rewrite_bank bank, uint32_t node,
     }
     tokens = hot_slice_tokens(bank, contractum_slice);
     end = hot_slice_length(contractum_slice);
-    contractum = build_flat_contractum(tokens, &position, end, bindings,
-                                       bound);
+    contractum = build_flat_contractum(bank, tokens, &position, end,
+                                       bindings, bound);
     if (position != end)
       fatal_error("compact_rewrite: incomplete RHS consumption");
     if (rule_type(rule) == ORIENTED ||
@@ -1453,7 +1580,7 @@ static BOOL try_leaf(Compact_rewrite_bank bank, uint32_t node,
       result->direction = p->direction;
       return TRUE;
     }
-    zap_flatterm(contractum);
+    subject_zap(bank, contractum);
   }
   return FALSE;
 }
@@ -1675,8 +1802,10 @@ static Flatterm normalize_flat_term(Compact_rewrite_bank bank, Flatterm term,
   }
   if (*step_limit == 0 || *current_size > size_limit)
     return term;
-  if (count_stats)
+  if (count_stats) {
     bank->attempts++;
+    bank->subject_target_nodes += (unsigned long long) term->size;
+  }
   (*sequence)++;
   match = find_rewrite(bank, term, lex_order_vars);
   if (!match.found) {
@@ -1689,7 +1818,7 @@ static Flatterm normalize_flat_term(Compact_rewrite_bank bank, Flatterm term,
     bank->rewrites++;
   *steps = i3list_prepend(*steps, match.proof_id, *sequence,
                           match.direction);
-  zap_flatterm(term);
+  subject_zap(bank, term);
   *sequence = sequence_save;
   return normalize_flat_term(bank, match.contractum, step_limit, size_limit,
                              current_size, sequence, steps, lex_order_vars,
@@ -1715,7 +1844,7 @@ void compact_rewrite_clause(Compact_rewrite_bank bank, Topform clause,
     if (step_limit == 0 || increase_limit == -1)
       continue;
     original = literal->atom;
-    flat = term_to_flatterm(original);
+    flat = subject_from_term(bank, original);
     if (count_stats) {
       bank->subject_atoms++;
       bank->subject_initial_nodes += (unsigned long long) flat->size;
@@ -1731,7 +1860,7 @@ void compact_rewrite_clause(Compact_rewrite_bank bank, Topform clause,
       literal->atom = flatterm_to_term(normalized);
       zap_term(original);
     }
-    zap_flatterm(normalized);
+    subject_zap(bank, normalized);
     if (current_size > size_limit)
       increase_limit = -1;
   }
@@ -1763,6 +1892,7 @@ void compact_rewrite_get_stats(Compact_rewrite_bank bank,
   stats->rewrites = bank->rewrites;
   stats->subject_atoms = bank->subject_atoms;
   stats->subject_initial_nodes = bank->subject_initial_nodes;
+  stats->subject_target_nodes = bank->subject_target_nodes;
   stats->node_items = bank->node_count;
   stats->posting_items = bank->posting_count;
   stats->node_bytes = bank->node_capacity * sizeof(*bank->nodes);
@@ -1819,6 +1949,7 @@ void compact_rewrite_free(Compact_rewrite_bank bank)
   if (bank->owns_term_pool)
     compact_term_pool_free(bank->term_pool);
   compact_id_map_free(bank->id_map);
+  subject_free_blocks(bank);
   safe_free(bank->child_cache);
   safe_free(bank->deep_child_cache);
   safe_free(bank->deep_child_cache_parents);
