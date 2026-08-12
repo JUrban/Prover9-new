@@ -1173,6 +1173,108 @@ int main(void)
   }
 
   {
+    enum { EAGER_POSITION_FAMILY = 128, EAGER_POSITION_TARGET = 73 };
+    Compact_back_demod_index eager, restored;
+    struct compact_back_demod_stats eager_stats;
+    Topform clauses[EAGER_POSITION_FAMILY], rule, later, multi;
+    unsigned long long *current_ids, *restored_ids;
+    size_t current_count, restored_count;
+    char text[160], state_dir[128], state_path[192];
+    int j;
+    compact_back_demod_set_position_options(1, 4, 1, 0, 50, TRUE, TRUE);
+    compact_back_demod_set_eager_position_depth(2);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_ADAPTIVE);
+    eager = compact_back_demod_init();
+    multi = indexed_clause("q(a,a) | r(f(c),a).");
+    CHECK(compact_back_demod_add(eager, multi),
+          "eager traversal accepts a repeated multi-literal clause span");
+    for (j = 0; j < EAGER_POSITION_FAMILY; j++) {
+      (void) snprintf(text, sizeof(text),
+                      "w(eager_root(q%d,eager_branch(m%d))).", j, j);
+      clauses[j] = indexed_clause(text);
+      CHECK(compact_back_demod_add(eager, clauses[j]),
+            "add global eager-position family clause");
+    }
+    rule = indexed_clause(
+      "eager_root(x,eager_branch(m73)) = eager_done.");
+    ids = compact_back_demod_candidate_ids(eager, rule, ORIENTED, &count);
+    CHECK(count == 1 && ids[0] == clauses[EAGER_POSITION_TARGET]->id,
+          "first eager-position query uses its complete sparse path");
+    safe_free(ids);
+    compact_back_demod_get_stats(eager, &eager_stats);
+    CHECK(eager_stats.position_eager_depth == 2 &&
+          eager_stats.position_eager_features > 0 &&
+          eager_stats.position_admissions == 0 &&
+          eager_stats.position_queries == 1 &&
+          eager_stats.position_bitmap_bytes == 0,
+          "eager sparse paths need no demand census or record bitmap");
+    later = indexed_clause(
+      "w(eager_root(later,eager_branch(m73))).");
+    CHECK(compact_back_demod_add(eager, later),
+          "append later eager-position match");
+    ids = compact_back_demod_candidate_ids(eager, rule, ORIENTED, &count);
+    CHECK(count == 2 && ids[0] == later->id &&
+          ids[1] == clauses[EAGER_POSITION_TARGET]->id,
+          "eager sparse path remains complete after incremental insertion");
+    safe_free(ids);
+    CHECK(compact_back_demod_remove(
+            eager, clauses[EAGER_POSITION_TARGET]->id),
+          "retire eager-position match");
+    compact_back_demod_compact_all_stale(eager);
+    ids = compact_back_demod_candidate_ids(eager, rule, ORIENTED, &count);
+    CHECK(count == 1 && ids[0] == later->id,
+          "eager sparse path rebuild preserves the sole live answer");
+    safe_free(ids);
+    compact_back_demod_get_stats(eager, &eager_stats);
+    CHECK(eager_stats.position_eager_features > 0 &&
+          eager_stats.position_demotions == 0 &&
+          eager_stats.position_bitmap_bytes == 0,
+          "eager sparse definitions rebuild without historical backfill");
+    (void) snprintf(state_dir, sizeof(state_dir),
+                    "/tmp/p9-eager-back-state-%ld", (long) getpid());
+    (void) snprintf(state_path, sizeof(state_path),
+                    "%s/compact_back_adaptive.txt", state_dir);
+    CHECK(mkdir(state_dir, 0700) == 0,
+          "create eager-position checkpoint directory");
+    CHECK(compact_back_demod_write_adaptive_state(eager, state_dir),
+          "write eager-position checkpoint state");
+    restored = compact_back_demod_init();
+    CHECK(compact_back_demod_add(restored, multi),
+          "rebuild eager checkpoint multi-literal clause");
+    for (j = 0; j < EAGER_POSITION_FAMILY; j++)
+      if (j != EAGER_POSITION_TARGET)
+        CHECK(compact_back_demod_add(restored, clauses[j]),
+              "rebuild eager checkpoint family clause");
+    CHECK(compact_back_demod_add(restored, later),
+          "rebuild later eager checkpoint clause");
+    CHECK(compact_back_demod_read_adaptive_state(restored, state_dir),
+          "restore eager-position checkpoint state");
+    current_ids = compact_back_demod_candidate_ids(
+      eager, rule, ORIENTED, &current_count);
+    restored_ids = compact_back_demod_candidate_ids(
+      restored, rule, ORIENTED, &restored_count);
+    CHECK(current_count == restored_count &&
+          memcmp(current_ids, restored_ids,
+                 current_count * sizeof(*current_ids)) == 0,
+          "eager checkpoint preserves candidates and decreasing order");
+    safe_free(current_ids);
+    safe_free(restored_ids);
+    compact_back_demod_free(restored);
+    CHECK(remove(state_path) == 0 && rmdir(state_dir) == 0,
+          "remove eager-position checkpoint artifacts");
+    compact_back_demod_free(eager);
+    delete_clause(rule);
+    delete_clause(later);
+    delete_clause(multi);
+    for (j = 0; j < EAGER_POSITION_FAMILY; j++)
+      delete_clause(clauses[j]);
+    compact_back_demod_set_eager_position_depth(0);
+    compact_back_demod_set_position_options(
+      4096, 4, 8, 65536, 20, TRUE, FALSE);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
+  }
+
+  {
     enum { POSITION_FAMILY = 128, POSITION_TARGET = 73 };
     Compact_back_demod_index position;
     struct compact_back_demod_stats position_stats;

@@ -107,6 +107,11 @@ void configure_compact_back_demod_position(unsigned admit_work,
     admission_enabled, sparse_positions);
 }
 
+void configure_compact_back_demod_eager_position_depth(unsigned depth)
+{
+  compact_back_demod_set_eager_position_depth(depth);
+}
+
 static BOOL compact_back_demod_mode(void)
 {
   return Compact_back_demod_audit || Compact_back_demod_authoritative;
@@ -692,7 +697,8 @@ void fprint_compact_back_demod(FILE *fp)
           "position_credit_balance=%llu, position_credit_earned=%llu, "
           "position_credit_spent=%llu, position_credit_reservations=%llu, "
           "position_admission_freezes=%llu, position_complete=%s, "
-          "position_store=%s, "
+          "position_store=%s, position_eager_depth=%u, "
+          "position_eager_features=%llu, "
           "position_budget=%llu, position_effective_budget=%llu, "
           "position_budget_pct=%u, "
           "position_estimated=%llu, position_probation_bytes=%llu, "
@@ -774,6 +780,8 @@ void fprint_compact_back_demod(FILE *fp)
           stats.position_admission_freezes,
           stats.position_complete ? "yes" : "no",
           stats.position_sparse ? "sparse" : "bitmap",
+          stats.position_eager_depth,
+          stats.position_eager_features,
           stats.position_budget_bytes,
           stats.position_effective_budget_bytes,
           stats.position_budget_pct,

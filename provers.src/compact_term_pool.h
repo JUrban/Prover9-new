@@ -103,6 +103,14 @@ Compact_term_slice compact_term_pool_intern_slice(Compact_term_pool pool,
                                                   Literals literals,
                                                   Term target);
 
+/* Return the complete prefix-token serialization of every atom in a clause,
+   serializing it on first use.  Unlike a target subslice, this is always a
+   well-formed forest and can therefore be traversed without reconstructing
+   literal boundaries. */
+Compact_term_slice compact_term_pool_intern_clause(Compact_term_pool pool,
+                                                   unsigned long long proof_id,
+                                                   Literals literals);
+
 /* Append an already validated prefix-token sequence.  This is used when an
    owning compact index rebuilds into a fresh private pool. */
 uint32_t compact_term_pool_append(Compact_term_pool pool,

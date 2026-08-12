@@ -2144,6 +2144,8 @@ Prover_options init_prover_options(void)
     init_parm("compact_back_position_budget_pct", 20, 0, 1000);
   p->compact_back_position_build_factor =
     init_parm("compact_back_position_build_factor", 32, 1, INT_MAX);
+  p->compact_back_eager_position_depth =
+    init_parm("compact_back_eager_position_depth", 0, 0, 32);
   p->fpa_depth =        init_parm("fpa_depth",            10,      1,    100);
   p->candidate_warn_limit = init_parm("candidate_warn_limit", -1,   -1,INT_MAX);
   p->candidate_hard_limit = init_parm("candidate_hard_limit", -1,   -1,INT_MAX);
@@ -10996,6 +10998,8 @@ static void configure_search_indexes(void)
     flag(Opt->compact_back_position_admission) ||
       str_ident(stringparm1(Opt->compact_back_demod_strategy), "adaptive"),
     flag(Opt->compact_back_sparse_positions));
+  configure_compact_back_demod_eager_position_depth(
+    (unsigned) parm(Opt->compact_back_eager_position_depth));
   configure_compact_unit_term_pool(Compact_terms);
   configure_compact_unit_index(
     flag(Opt->compact_unit_subsumption_audit),

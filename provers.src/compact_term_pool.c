@@ -1256,6 +1256,26 @@ Compact_term_slice compact_term_pool_intern_slice(Compact_term_pool pool,
   return slice;
 }
 
+Compact_term_slice compact_term_pool_intern_clause(Compact_term_pool pool,
+                                                   unsigned long long proof_id,
+                                                   Literals literals)
+{
+  Compact_term_slice clause;
+  if (pool == NULL || proof_id == 0 || literals == NULL ||
+      pool->logical_base > COMPACT_TERM_SLICE_OFFSET_MAX)
+    fatal_error("compact_term_pool_intern_clause: invalid request");
+  pool->lookups++;
+  if (!directory_get(pool, proof_id, &clause))
+    serialize_clause(pool, proof_id, literals);
+  else {
+    pool->hits++;
+    pool->reused_tokens += compact_term_slice_length(clause);
+  }
+  if (!directory_get(pool, proof_id, &clause))
+    fatal_error("compact_term_pool_intern_clause: missing serialization");
+  return clause;
+}
+
 uint32_t compact_term_pool_intern(Compact_term_pool pool,
                                   unsigned long long proof_id,
                                   Literals literals, Term target,

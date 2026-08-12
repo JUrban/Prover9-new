@@ -260,7 +260,7 @@ static void back_demod_variable_prefix_probe(size_t population,
 {
   Compact_back_demod_index mask, hot, position;
   struct compact_back_demod_stats mask_before, hot_before;
-  struct compact_back_demod_stats position_before, position_progress;
+  struct compact_back_demod_stats position_before;
   struct compact_back_demod_stats hot_progress, mask_final, hot_final;
   struct compact_back_demod_stats position_final;
   Topform *clauses = safe_malloc(population * sizeof(*clauses));
@@ -284,6 +284,7 @@ static void back_demod_variable_prefix_probe(size_t population,
   compact_back_demod_set_tree_build_factor(8);
   hot = compact_back_demod_init();
   compact_back_demod_set_position_options(4096, 4, 32, 0, 50, TRUE, TRUE);
+  compact_back_demod_set_eager_position_depth(16);
   compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_ADAPTIVE);
   position = compact_back_demod_init();
   for (i = 0; i < population; i++) {
@@ -320,11 +321,8 @@ static void back_demod_variable_prefix_probe(size_t population,
   safe_free(hot_ids);
   safe_free(position_ids);
   compact_back_demod_get_stats(hot, &hot_progress);
-  compact_back_demod_get_stats(position, &position_progress);
-  while (((hot_progress.tree_root_admissions == 0 &&
-           hot_progress.tree_root_rejections == 0) ||
-          (position_progress.position_admissions == 0 &&
-           position_progress.position_rejections == 0)) &&
+  while ((hot_progress.tree_root_admissions == 0 &&
+          hot_progress.tree_root_rejections == 0) &&
          admission_queries < 128) {
     mask_ids = compact_back_demod_candidate_ids(mask, demod, ORIENTED,
                                                  &mask_count);
@@ -342,7 +340,6 @@ static void back_demod_variable_prefix_probe(size_t population,
     safe_free(position_ids);
     admission_queries++;
     compact_back_demod_get_stats(hot, &hot_progress);
-    compact_back_demod_get_stats(position, &position_progress);
   }
   compact_back_demod_get_stats(mask, &mask_before);
   compact_back_demod_get_stats(hot, &hot_before);
@@ -400,7 +397,7 @@ static void back_demod_variable_prefix_probe(size_t population,
   hot_gate = hot_final.tree_root_admissions > 0 &&
          hot_combined <= ULLONG_MAX / 2 && hot_combined * 2 < mask_work ?
     "pass" : "fail";
-  adaptive_gate = position_final.position_admissions > 0 &&
+  adaptive_gate = position_final.position_eager_features > 0 &&
     position_final.position_sparse &&
     position_final.position_bitmap_bytes == 0 &&
     position_final.position_demotions == 0 &&
@@ -424,6 +421,7 @@ static void back_demod_variable_prefix_probe(size_t population,
          "\"adaptive_combined_work_per_query\":%.3f,"
          "\"mask_bytes\":%llu,\"hot_bytes\":%llu,"
          "\"adaptive_bytes\":%llu,\"position_admissions\":%llu,"
+         "\"position_eager_depth\":%u,\"position_eager_features\":%llu,"
          "\"position_demotions\":%llu,\"position_bitmap_bytes\":%llu,"
          "\"position_effective_budget\":%llu,"
          "\"hot_gate\":\"%s\",\"adaptive_gate\":\"%s\"}\n",
@@ -441,6 +439,8 @@ static void back_demod_variable_prefix_probe(size_t population,
          (double) adaptive_combined / queries,
          mask_final.total_bytes, hot_final.total_bytes,
          position_final.total_bytes, position_final.position_admissions,
+         position_final.position_eager_depth,
+         position_final.position_eager_features,
          position_final.position_demotions,
          position_final.position_bitmap_bytes,
          position_final.position_effective_budget_bytes,
@@ -454,6 +454,7 @@ static void back_demod_variable_prefix_probe(size_t population,
     delete_clause(clauses[i]);
   safe_free(clauses);
   compact_back_demod_set_tree_budget_pct(0);
+  compact_back_demod_set_eager_position_depth(0);
   compact_back_demod_set_position_options(
     4096, 4, 32, 16384, 20, TRUE, FALSE);
 }

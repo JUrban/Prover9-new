@@ -262,6 +262,7 @@ struct prover_options {
     compact_back_position_budget_kb, // independent exact-position RAM cap
     compact_back_position_budget_pct, // relative live/base-index allowance
     compact_back_position_build_factor, // lookup work per census/backfill unit
+    compact_back_eager_position_depth, // global sparse exact-path depth
     fpa_depth,     // FPA index depth (higher = more selective, more memory)
     candidate_warn_limit,  // warn when candidates exceed this
     candidate_hard_limit,  // skip inference when candidates exceed this

@@ -102,6 +102,8 @@ struct compact_back_demod_stats {
   unsigned long long position_probation_bytes;
   unsigned long long position_bitmap_bytes;
   unsigned long long position_budget_exhaustions;
+  unsigned long long position_eager_features;
+  unsigned position_eager_depth;
   unsigned position_budget_pct;
   unsigned position_admit_work;
   unsigned position_min_gain;
@@ -209,6 +211,10 @@ void compact_back_demod_set_position_options(unsigned admit_work,
                                              unsigned budget_pct,
                                              BOOL admission_enabled,
                                              BOOL sparse_positions);
+
+/* Build exact sparse (root,path,symbol) postings incrementally for every
+   rigid path through this depth.  Zero preserves demand-built positions. */
+void compact_back_demod_set_eager_position_depth(unsigned depth);
 
 BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause);
 

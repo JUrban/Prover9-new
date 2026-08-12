@@ -56,6 +56,8 @@ void configure_compact_back_demod_position(unsigned admit_work,
                                            BOOL admission_enabled,
                                            BOOL sparse_positions);
 
+void configure_compact_back_demod_eager_position_depth(unsigned depth);
+
 unsigned long long compact_back_demod_active_count(void);
 
 unsigned long long compact_back_demod_physical_count(void);

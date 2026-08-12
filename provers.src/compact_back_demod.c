@@ -41,6 +41,7 @@ static unsigned Back_demod_position_min_gain = 4;
 static unsigned Back_demod_position_build_factor = 32;
 static BOOL Back_demod_position_admission = FALSE;
 static BOOL Back_demod_sparse_positions = FALSE;
+static unsigned Back_demod_eager_position_depth = 0;
 static unsigned Back_demod_position_budget_pct = 20;
 static unsigned long long Back_demod_position_budget_bytes =
   UINT64_C(16) * 1024 * 1024;
@@ -252,6 +253,8 @@ struct compact_back_demod_index {
   size_t position_query_capacity;
   struct cbd_position_append_match *position_append_matches;
   size_t position_append_match_capacity;
+  uint32_t *position_token_ends;
+  size_t position_token_end_capacity;
   struct cbd_position_probation *position_probation;
   size_t position_probation_capacity;
   struct cbd_route_profile *route_profiles;
@@ -371,6 +374,7 @@ struct compact_back_demod_index {
   unsigned long long position_credit_reservations;
   unsigned long long position_admission_freezes;
   unsigned long long position_budget_exhaustions;
+  unsigned long long position_eager_features;
   unsigned position_admit_work;
   unsigned position_min_gain;
   unsigned position_build_factor;
@@ -383,6 +387,7 @@ struct compact_back_demod_index {
   BOOL position_admission_enabled;
   BOOL position_admission_frozen;
   BOOL position_sparse;
+  unsigned position_eager_depth;
   unsigned long long inactive_groups_examined;
   unsigned long long duplicate_groups_examined;
   unsigned long long posting_bytes_decoded;
@@ -576,7 +581,9 @@ static unsigned long long index_bytes(Compact_back_demod_index index)
     index->query_capacity * sizeof(*index->query) +
     index->position_query_capacity * sizeof(*index->position_query) +
     index->position_append_match_capacity *
-      sizeof(*index->position_append_matches);
+      sizeof(*index->position_append_matches) +
+    index->position_token_end_capacity *
+      sizeof(*index->position_token_ends);
 }
 
 static unsigned long long tree_budget_limit(Compact_back_demod_index index)
@@ -2173,6 +2180,11 @@ static Compact_back_demod_index compact_back_demod_init_with_pool_strategy(
   index->position_complete = TRUE;
   index->position_admission_enabled = Back_demod_position_admission;
   index->position_sparse = Back_demod_sparse_positions;
+  index->position_eager_depth = Back_demod_eager_position_depth;
+  if (index->position_eager_depth != 0 &&
+      (!index->position_sparse || index->position_budget_bytes != 0))
+    fatal_error("compact_back_demod: eager positions require sparse storage "
+                "and a zero absolute budget");
   if (strategy == COMPACT_BACK_DEMOD_ADAPTIVE) {
     index->route_profile_capacity = CBD_ROUTE_PROFILE_CAPACITY;
     index->route_profiles = safe_calloc(
@@ -2300,6 +2312,13 @@ void compact_back_demod_set_position_options(unsigned admit_work,
   Back_demod_sparse_positions = sparse_positions;
 }
 
+void compact_back_demod_set_eager_position_depth(unsigned depth)
+{
+  if (depth > 32)
+    fatal_error("compact_back_demod: eager position depth exceeds 32");
+  Back_demod_eager_position_depth = depth;
+}
+
 BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
 {
   uint32_t record_index;
@@ -2325,6 +2344,13 @@ BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
   symbols.occurrence_values = symbols.occurrence_fixed;
   symbols.occurrence_capacity = sizeof(symbols.occurrence_fixed) /
     sizeof(symbols.occurrence_fixed[0]);
+  if (index->position_eager_depth != 0) {
+    Compact_term_slice clause_tokens = compact_term_pool_intern_clause(
+      index->term_pool, clause->id, clause->literals);
+    record_base = compact_term_slice_offset(clause_tokens);
+    token_end = record_base + compact_term_slice_length(clause_tokens);
+    have_tokens = TRUE;
+  }
   for (literal = clause->literals; literal != NULL; literal = literal->next) {
     Term atom = literal->atom;
     int arg;
@@ -3877,12 +3903,136 @@ static int increasing_position_append_match(const void *left,
     a->root_offset > b->root_offset ? 1 : 0;
 }
 
+static void ensure_position_token_ends(Compact_back_demod_index index,
+                                       size_t needed)
+{
+  while (needed > index->position_token_end_capacity) {
+    index->position_token_end_capacity = grow_record_capacity(
+      index->position_token_end_capacity,
+      sizeof(*index->position_token_ends),
+      "compact_back_demod: position token-end scratch overflow");
+    index->position_token_ends = safe_realloc(
+      index->position_token_ends,
+      index->position_token_end_capacity *
+        sizeof(*index->position_token_ends));
+  }
+}
+
+static uint32_t fill_position_token_ends_rec(
+  Compact_back_demod_index index, const int32_t *tokens,
+  uint32_t token_end, uint32_t position)
+{
+  uint32_t next;
+  int i, arity;
+  if (position >= token_end)
+    fatal_error("compact_back_demod: corrupt eager-position subject");
+  arity = tokens[position] < 0 ? 0 : sn_to_arity(tokens[position]);
+  next = position + 1;
+  for (i = 0; i < arity; i++)
+    next = fill_position_token_ends_rec(index, tokens, token_end, next);
+  index->position_token_ends[position] = next;
+  return next;
+}
+
+static uint32_t collect_eager_position_matches_rec(
+  Compact_back_demod_index index, const int32_t *tokens,
+  uint32_t token_end, uint32_t position, uint32_t root_symbol,
+  uint32_t root_offset, uint64_t path, unsigned depth, size_t *count)
+{
+  uint32_t child;
+  int i, arity;
+  if (position >= token_end)
+    fatal_error("compact_back_demod: corrupt eager-position traversal");
+  if (index->position_append_token_visits != ULLONG_MAX)
+    index->position_append_token_visits++;
+  arity = tokens[position] < 0 ? 0 : sn_to_arity(tokens[position]);
+  child = position + 1;
+  for (i = 0; i < arity; i++) {
+    uint64_t child_path = position_child_path(path, (unsigned) i);
+    unsigned child_depth = depth + 1;
+    int32_t child_code;
+    if (child >= token_end || index->position_token_ends[child] > token_end)
+      fatal_error("compact_back_demod: corrupt eager-position child");
+    child_code = tokens[child];
+    if (child_code >= 0 && child_depth <= index->position_eager_depth) {
+      uint32_t bucket = lookup_position_bucket(
+        index, root_symbol, child_path, (uint32_t) child_code);
+      if (index->position_append_feature_lookups != ULLONG_MAX)
+        index->position_append_feature_lookups++;
+      if (bucket == CBD_NONE) {
+        bucket = add_position_bucket(
+          index, root_symbol, child_path, (uint32_t) child_code);
+        if (index->position_eager_features != ULLONG_MAX)
+          index->position_eager_features++;
+        if (!index->position_rebuilding &&
+            index->position_generation != ULLONG_MAX)
+          index->position_generation++;
+      }
+      append_position_match(index, count, bucket, root_offset);
+    }
+    if (child_depth < index->position_eager_depth && child_code >= 0)
+      (void) collect_eager_position_matches_rec(
+        index, tokens, token_end, child, root_symbol, root_offset,
+        child_path, child_depth, count);
+    child = index->position_token_ends[child];
+  }
+  return child;
+}
+
+static size_t collect_eager_position_matches(
+  Compact_back_demod_index index, struct cbd_record *record)
+{
+  const int32_t *tokens;
+  uint32_t i, position, end = compact_term_slice_length(record->tokens);
+  size_t count = 0, in, out;
+  if (index->position_append_records != ULLONG_MAX)
+    index->position_append_records++;
+  if (end == 0)
+    return 0;
+  ensure_position_token_ends(index, end);
+  tokens = compact_term_pool_slice_tokens(index->term_pool, record->tokens);
+  position = 0;
+  while (position < end)
+    position = fill_position_token_ends_rec(
+      index, tokens, end, position);
+  for (i = 0; i < end; i++)
+    if (tokens[i] >= 0) {
+      if (index->position_append_root_scans != ULLONG_MAX)
+        index->position_append_root_scans++;
+      (void) collect_eager_position_matches_rec(
+        index, tokens, end, i, (uint32_t) tokens[i], i, 0, 0, &count);
+    }
+  if (count < 2) {
+    if (count != 0 && index->position_append_matches_count != ULLONG_MAX)
+      index->position_append_matches_count++;
+    return count;
+  }
+  qsort(index->position_append_matches, count,
+        sizeof(*index->position_append_matches),
+        increasing_position_append_match);
+  out = 1;
+  for (in = 1; in < count; in++)
+    if (index->position_append_matches[in].bucket !=
+          index->position_append_matches[out - 1].bucket ||
+        index->position_append_matches[in].root_offset !=
+          index->position_append_matches[out - 1].root_offset)
+      index->position_append_matches[out++] =
+        index->position_append_matches[in];
+  if (ULLONG_MAX - index->position_append_matches_count < out)
+    index->position_append_matches_count = ULLONG_MAX;
+  else
+    index->position_append_matches_count += out;
+  return out;
+}
+
 static size_t collect_position_append_matches(
   Compact_back_demod_index index, struct cbd_record *record)
 {
   const int32_t *tokens;
   uint32_t i, end = compact_term_slice_length(record->tokens);
   size_t count = 0, in, out;
+  if (index->position_eager_depth != 0)
+    return collect_eager_position_matches(index, record);
   if (index->position_append_records != ULLONG_MAX)
     index->position_append_records++;
   if (end == 0)
@@ -3927,7 +4077,9 @@ static void append_admitted_position_features(
   size_t i, matches, added_blocks = 0;
   unsigned long long bitmap_growth = 0;
   if (!strategy_uses_position(index->strategy) ||
-      !index->position_complete || index->position_bucket_count <= 1)
+      !index->position_complete ||
+      (index->position_eager_depth == 0 &&
+       index->position_bucket_count <= 1))
     return;
   matches = collect_position_append_matches(index, record);
   for (i = 0; i < matches;) {
@@ -4024,7 +4176,7 @@ static void maybe_admit_position_feature(Compact_back_demod_index index,
   unsigned char matched;
   if (!strategy_uses_position(index->strategy) ||
       !index->position_complete || !index->position_admission_enabled ||
-      query_work == 0)
+      index->position_eager_depth != 0 || query_work == 0)
     return;
 
   /* Query work enters one global construction ledger exactly once.  Feature
@@ -5341,12 +5493,17 @@ static void copy_position_definitions(Compact_back_demod_index destination,
     source->position_admission_frozen;
   if (!source->position_complete)
     return;
-  for (i = 1; i < source->position_bucket_count; i++) {
-    struct cbd_position_bucket *bucket = &source->position_buckets[i];
-    if (bucket->active)
-      (void) add_position_bucket(destination, bucket->root_symbol,
-                                 bucket->path, bucket->symbol);
-  }
+  /* Eager shallow definitions are a pure function of the live records and
+     are rebuilt incrementally with them.  Copying their keys first is not
+     needed for completeness and would make checkpoint/rebuild work depend
+     on the historical feature population. */
+  if (source->position_eager_depth == 0)
+    for (i = 1; i < source->position_bucket_count; i++) {
+      struct cbd_position_bucket *bucket = &source->position_buckets[i];
+      if (bucket->active)
+        (void) add_position_bucket(destination, bucket->root_symbol,
+                                   bucket->path, bucket->symbol);
+    }
   if (source->position_probation_capacity != 0) {
     destination->position_probation = safe_malloc(
       source->position_probation_capacity *
@@ -5364,7 +5521,7 @@ static void finish_position_rebuild(Compact_back_demod_index index)
   if (!strategy_uses_position(index->strategy))
     return;
   index->position_rebuilding = FALSE;
-  if (index->position_complete &&
+  if (index->position_eager_depth == 0 && index->position_complete &&
       !position_budget_allows(index, position_estimated_bytes(index))) {
     index->position_complete = FALSE;
     index->position_budget_exhaustions++;
@@ -5560,6 +5717,7 @@ static void compact_back_demod_compact_internal(
   safe_free(old.position_blocks);
   safe_free(old.position_query);
   safe_free(old.position_append_matches);
+  safe_free(old.position_token_ends);
   safe_free(old.position_probation);
   safe_free(old.route_profiles);
   safe_free(old.route_frequency);
@@ -5758,6 +5916,7 @@ void compact_back_demod_compact_materialized(
   safe_free(old.position_blocks);
   safe_free(old.position_query);
   safe_free(old.position_append_matches);
+  safe_free(old.position_token_ends);
   safe_free(old.position_probation);
   safe_free(old.route_profiles);
   safe_free(old.route_frequency);
@@ -5953,9 +6112,10 @@ BOOL compact_back_demod_write_adaptive_state(
         state->admitted || state->rejected)
       roots++;
   }
-  for (i = 1; i < index->position_bucket_count; i++)
-    if (index->position_buckets[i].active)
-      positions++;
+  if (index->position_eager_depth == 0)
+    for (i = 1; i < index->position_bucket_count; i++)
+      if (index->position_buckets[i].active)
+        positions++;
   for (i = 0; i < index->position_probation_capacity; i++)
     if (index->position_probation[i].occupied)
       probation++;
@@ -5984,12 +6144,13 @@ BOOL compact_back_demod_write_adaptive_state(
               (unsigned) state->admitted, (unsigned) state->rejected);
   }
   fprintf(fp, "POSITIONS %lu\n", (unsigned long) positions);
-  for (i = 1; i < index->position_bucket_count; i++) {
-    struct cbd_position_bucket *bucket = &index->position_buckets[i];
-    if (bucket->active)
-      fprintf(fp, "P %u %016llx %u\n", bucket->root_symbol,
-              (unsigned long long) bucket->path, bucket->symbol);
-  }
+  if (index->position_eager_depth == 0)
+    for (i = 1; i < index->position_bucket_count; i++) {
+      struct cbd_position_bucket *bucket = &index->position_buckets[i];
+      if (bucket->active)
+        fprintf(fp, "P %u %016llx %u\n", bucket->root_symbol,
+                (unsigned long long) bucket->path, bucket->symbol);
+    }
   fprintf(fp, "PROBATION %lu %lu\n",
           (unsigned long) index->position_probation_capacity,
           (unsigned long) probation);
@@ -6127,11 +6288,14 @@ BOOL compact_back_demod_read_adaptive_state(
       fclose(fp);
       return FALSE;
     }
-    bucket = add_position_bucket(index, root, (uint64_t) path_value, symbol);
-    for (record = 1; record < index->record_count; record++)
-      if (index->records[record].active)
-        (void) append_record_position_feature(
-          index, bucket, (uint32_t) record);
+    if (index->position_eager_depth == 0) {
+      bucket = add_position_bucket(
+        index, root, (uint64_t) path_value, symbol);
+      for (record = 1; record < index->record_count; record++)
+        if (index->records[record].active)
+          (void) append_record_position_feature(
+            index, bucket, (uint32_t) record);
+    }
   }
   index->position_rebuilding = FALSE;
   if (fscanf(fp, " %31s %lu %lu", label, &probation_capacity,
@@ -6387,6 +6551,8 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
     sizeof(*index->position_probation);
   stats->position_bitmap_bytes = index->position_bitmap_bytes;
   stats->position_budget_exhaustions = index->position_budget_exhaustions;
+  stats->position_eager_features = index->position_eager_features;
+  stats->position_eager_depth = index->position_eager_depth;
   stats->position_budget_pct = index->position_budget_pct;
   stats->position_admit_work = index->position_admit_work;
   stats->position_min_gain = index->position_min_gain;
@@ -6508,7 +6674,9 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
     index->query_capacity * sizeof(*index->query) +
     index->position_query_capacity * sizeof(*index->position_query) +
     index->position_append_match_capacity *
-      sizeof(*index->position_append_matches);
+      sizeof(*index->position_append_matches) +
+    index->position_token_end_capacity *
+      sizeof(*index->position_token_ends);
   stats->total_bytes = index_bytes(index);
   stats->peak_bytes = index->peak_bytes;
 }
@@ -6535,6 +6703,7 @@ void compact_back_demod_free(Compact_back_demod_index index)
   safe_free(index->position_blocks);
   safe_free(index->position_query);
   safe_free(index->position_append_matches);
+  safe_free(index->position_token_ends);
   safe_free(index->position_probation);
   safe_free(index->route_profiles);
   safe_free(index->route_frequency);
