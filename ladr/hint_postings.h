@@ -16,6 +16,8 @@ struct hint_postings_stats {
   unsigned long long dense_keys;
   unsigned long long dense_bit_bytes;
   unsigned long long dense_summary_bytes;
+  unsigned long long dense_budget_bytes;
+  unsigned long long dense_budget_denials;
 };
 
 struct hint_dense_view {
@@ -38,6 +40,11 @@ const unsigned *hint_postings_get(Hint_postings index,
 
 unsigned long long hint_postings_generation(Hint_postings index,
                                              unsigned long long key);
+
+/* Bound the combined dense bitset and summary allocation.  Zero disables
+   dense views; sparse postings remain complete. */
+void hint_postings_set_dense_budget(Hint_postings index,
+                                    unsigned long long bytes);
 
 /* Return an exact, stable-ID bitset for KEY.  If CREATE is false, this is a
    read-only probe and fails unless a view already exists at BIT_CAPACITY.

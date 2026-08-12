@@ -130,6 +130,7 @@ static unsigned Preview_key_scratch_capacity = 0;
 #define FAST_MATCH_CACHE_CANDIDATES 8U
 #define FAST_DENSE_MIN_POSTING 512U
 #define FAST_DENSE_MAX_KEYS 64U
+#define FAST_DENSE_BUDGET_BYTES (16ULL * 1024ULL * 1024ULL)
 
 struct fast_match_cache_entry {
   unsigned long long seed_key;
@@ -702,6 +703,10 @@ static unsigned long long better_feature_key(unsigned kind, unsigned path,
          (unsigned) symbol;
 }
 
+static BOOL fast_dense_collect_candidates(
+  const unsigned long long *keys, unsigned key_count,
+  enum packed_hint_operation op, BOOL exclude_anyconst);
+
 /* A second, independent conservative signature complements the original
    packed path mask.  Every exact shallow match feature contributes one bit;
    collisions admit extra candidates only.  This lets ordinary matching scan
@@ -1000,6 +1005,8 @@ static void better_rebuild_postings(void)
   unsigned long long equivalence_live = 0;
   unsigned long long anyconst_live = 0;
   unsigned id;
+  hint_postings_set_dense_budget(
+    postings, Fast_packed_index ? FAST_DENSE_BUDGET_BYTES : 0);
   Better_anyconst_reference_count = 0;
   for (id = 1; id < Packed_hint_capacity; id++) {
     Topform h = Packed_hint_by_id[id];
@@ -1261,7 +1268,10 @@ static void better_collect_back_pattern_candidates(
   if (Better_key_scratch_count == 0)
     better_scratch_add(better_feature_key(
       BETTER_FEATURE_BACK, 0, SYMNUM(pattern)));
-  better_intersect_scratch_candidates(op, TRUE, TRUE);
+  if (!Fast_packed_index ||
+      !fast_dense_collect_candidates(
+        Better_key_scratch, Better_key_scratch_count, op, TRUE))
+    better_intersect_scratch_candidates(op, TRUE, TRUE);
 }
 
 /* pointer to procedure for demodulating hints (when back demod hints) */
@@ -1486,17 +1496,19 @@ static BOOL fast_dense_collect_candidates(
       seed = i;
     }
   }
-  for (i = 0; i < key_count; i++) {
-    if (!hint_postings_dense_view(Better_postings, keys[i],
-                                  Packed_hint_capacity, create,
-                                  views + i)) {
-      return FALSE;
-    }
-  }
   if (minimum < FAST_DENSE_MIN_POSTING) {
     unsigned count, j;
     const unsigned *ids = hint_postings_get(
       Better_postings, keys[seed], &count);
+    /* The sparse seed is already an ID vector.  Build dense membership only
+       for the other features, so narrow one-off keys do not consume the
+       bounded cache. */
+    for (i = 0; i < key_count; i++)
+      if (i != seed &&
+          !hint_postings_dense_view(Better_postings, keys[i],
+                                    Packed_hint_capacity, create,
+                                    views + i))
+        return FALSE;
     if (!Hint_preview_active) {
       Fast_sparse_used++;
       Fast_sparse_seed_ids += count;
@@ -1531,6 +1543,11 @@ static BOOL fast_dense_collect_candidates(
     }
     return TRUE;
   }
+  for (i = 0; i < key_count; i++)
+    if (!hint_postings_dense_view(Better_postings, keys[i],
+                                  Packed_hint_capacity, create,
+                                  views + i))
+      return FALSE;
   if (!Hint_preview_active) {
     Fast_dense_used++;
     Fast_dense_seed_ids_avoided += minimum;
@@ -1684,6 +1701,8 @@ void init_hints(Uniftype utype,
     fast_cache_init(fast_cache_kb);
   if (Better_packed_index) {
     Better_postings = hint_postings_init();
+    hint_postings_set_dense_budget(
+      Better_postings, Fast_packed_index ? FAST_DENSE_BUDGET_BYTES : 0);
     Better_rebuild_clock = clock_init("packed_hint_rebuild");
   }
   /* Keep an empty Lindex in packed mode so the established lifecycle and
@@ -2984,7 +3003,8 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             "anyconst_references=%u, anyconst_live=%llu, "
             "table_bytes=%llu, reference_bytes=%llu, fingerprint_bytes=%llu, "
             "dense_keys=%llu, dense_bit_bytes=%llu, "
-            "dense_summary_bytes=%llu, "
+            "dense_summary_bytes=%llu, dense_budget_bytes=%llu, "
+            "dense_budget_denials=%llu, "
             "rebuilds=%llu, "
             "rebuilt_references=%llu, rebuild_materializations=%llu.\n",
             s.keys, s.references, Better_feature_live_count,
@@ -2998,6 +3018,7 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             (unsigned long long) Packed_hint_capacity *
               sizeof(unsigned long long),
             s.dense_keys, s.dense_bit_bytes, s.dense_summary_bytes,
+            s.dense_budget_bytes, s.dense_budget_denials,
             Better_posting_rebuilds, Better_posting_rebuild_refs,
             Better_posting_rebuild_materializations);
     fprintf(fp,

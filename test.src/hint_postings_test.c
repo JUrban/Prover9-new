@@ -77,6 +77,28 @@ int main(void)
           "dense byte statistics");
 
   hint_postings_destroy(index);
+
+  /* A dense cache that cannot grow must disappear rather than omit a later
+     ID.  The sparse posting is always the complete fallback. */
+  index = hint_postings_init();
+  hint_postings_set_dense_budget(index, 40);
+  hint_postings_add(index, 17, 3);
+  require(hint_postings_dense_view(index, 17, 256, TRUE, &dense),
+          "bounded dense view fits exact budget");
+  hint_postings_add(index, 17, 300);
+  require(!hint_postings_dense_view(index, 17, 301, FALSE, &dense),
+          "failed dense growth discards incomplete view");
+  refs = hint_postings_get(index, 17, &count);
+  require(count == 2 && contains(refs, count, 3) &&
+          contains(refs, count, 300),
+          "dense denial preserves complete sparse posting");
+  hint_postings_get_stats(index, &stats);
+  require(stats.dense_keys == 0 && stats.dense_bit_bytes == 0 &&
+          stats.dense_summary_bytes == 0 &&
+          stats.dense_budget_bytes == 40 &&
+          stats.dense_budget_denials == 1,
+          "dense budget and denial statistics");
+  hint_postings_destroy(index);
   printf("hint_postings_test: PASS\n");
   return 0;
 }

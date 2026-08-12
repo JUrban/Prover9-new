@@ -26,6 +26,9 @@ struct hint_postings {
   unsigned long long references;
   unsigned long long reference_capacity;
   unsigned long long maximum_posting;
+  unsigned long long dense_bytes;
+  unsigned long long dense_budget_bytes;
+  unsigned long long dense_budget_denials;
 };
 
 static unsigned long long posting_hash(unsigned long long x)
@@ -70,6 +73,7 @@ Hint_postings hint_postings_init(void)
 {
   struct hint_postings *index = safe_calloc(1, sizeof(struct hint_postings));
   index->capacity = 256;
+  index->dense_budget_bytes = ~0ULL;
   index->table = safe_calloc(index->capacity, sizeof(struct hint_posting));
   return index;
 }
@@ -91,11 +95,22 @@ void hint_postings_destroy(Hint_postings index)
   safe_free(index);
 }
 
-static void posting_dense_reserve(struct hint_posting *posting,
+static BOOL posting_dense_reserve(struct hint_postings *index,
+                                  struct hint_posting *posting,
                                   unsigned bit_capacity)
 {
-  unsigned words = (bit_capacity + 63) / 64;
-  unsigned summary_words = (words + 63) / 64;
+  unsigned words = bit_capacity / 64 + (bit_capacity % 64 != 0);
+  unsigned summary_words = words / 64 + (words % 64 != 0);
+  unsigned long long added =
+    (unsigned long long) (words - posting->dense_words) *
+      sizeof(unsigned long long) +
+    (unsigned long long) (summary_words - posting->dense_summary_words) *
+      sizeof(unsigned long long);
+  if (index->dense_bytes > index->dense_budget_bytes ||
+      added > index->dense_budget_bytes - index->dense_bytes) {
+    index->dense_budget_denials++;
+    return FALSE;
+  }
   if (words > posting->dense_words) {
     unsigned old_words = posting->dense_words;
     posting->dense_bits = safe_realloc(
@@ -114,15 +129,41 @@ static void posting_dense_reserve(struct hint_posting *posting,
              sizeof(unsigned long long));
     posting->dense_summary_words = summary_words;
   }
+  index->dense_bytes += added;
+  return TRUE;
 }
 
-static void posting_dense_add(struct hint_posting *posting, unsigned id)
+static void posting_dense_discard(struct hint_postings *index,
+                                  struct hint_posting *posting)
+{
+  unsigned long long bytes =
+    (unsigned long long) posting->dense_words *
+      sizeof(unsigned long long) +
+    (unsigned long long) posting->dense_summary_words *
+      sizeof(unsigned long long);
+  if (bytes > index->dense_bytes)
+    fatal_error("hint_postings: dense byte underflow");
+  if (posting->dense_bits != NULL)
+    safe_free(posting->dense_bits);
+  if (posting->dense_summary != NULL)
+    safe_free(posting->dense_summary);
+  posting->dense_bits = NULL;
+  posting->dense_summary = NULL;
+  posting->dense_words = 0;
+  posting->dense_summary_words = 0;
+  index->dense_bytes -= bytes;
+}
+
+static BOOL posting_dense_add(struct hint_postings *index,
+                              struct hint_posting *posting, unsigned id)
 {
   unsigned word = id / 64;
-  if (word >= posting->dense_words)
-    posting_dense_reserve(posting, id + 1);
+  if (word >= posting->dense_words &&
+      !posting_dense_reserve(index, posting, id + 1))
+    return FALSE;
   posting->dense_bits[word] |= 1ULL << (id % 64);
   posting->dense_summary[word / 64] |= 1ULL << (word % 64);
+  return TRUE;
 }
 
 void hint_postings_add(Hint_postings index, unsigned long long key,
@@ -155,8 +196,9 @@ void hint_postings_add(Hint_postings index, unsigned long long key,
   posting->generation++;
   if (posting->generation == 0)
     posting->generation = 1;
-  if (posting->dense_bits != NULL)
-    posting_dense_add(posting, id);
+  if (posting->dense_bits != NULL &&
+      !posting_dense_add(index, posting, id))
+    posting_dense_discard(index, posting);
   index->references++;
   if (posting->count > index->maximum_posting)
     index->maximum_posting = posting->count;
@@ -192,6 +234,14 @@ unsigned long long hint_postings_generation(Hint_postings index,
   return posting->occupied ? posting->generation : 0;
 }
 
+void hint_postings_set_dense_budget(Hint_postings index,
+                                    unsigned long long bytes)
+{
+  if (index == NULL || index->dense_bytes != 0)
+    fatal_error("hint_postings_set_dense_budget: invalid state");
+  index->dense_budget_bytes = bytes;
+}
+
 BOOL hint_postings_dense_view(Hint_postings index,
                               unsigned long long key,
                               unsigned bit_capacity,
@@ -211,14 +261,20 @@ BOOL hint_postings_dense_view(Hint_postings index,
   if (posting->dense_bits == NULL) {
     if (!create)
       return FALSE;
-    posting_dense_reserve(posting, bit_capacity);
+    if (!posting_dense_reserve(index, posting, bit_capacity))
+      return FALSE;
     for (i = 0; i < posting->count; i++)
-      posting_dense_add(posting, posting->references[i]);
+      if (!posting_dense_add(index, posting, posting->references[i])) {
+        posting_dense_discard(index, posting);
+        return FALSE;
+      }
   }
-  else if (posting->dense_words < (bit_capacity + 63) / 64) {
+  else if (posting->dense_words <
+           bit_capacity / 64 + (bit_capacity % 64 != 0)) {
     if (!create)
       return FALSE;
-    posting_dense_reserve(posting, bit_capacity);
+    if (!posting_dense_reserve(index, posting, bit_capacity))
+      return FALSE;
   }
   view->bits = posting->dense_bits;
   view->summary = posting->dense_summary;
@@ -244,6 +300,8 @@ void hint_postings_get_stats(Hint_postings index,
   stats->reference_bytes = index->reference_capacity *
                            sizeof(unsigned);
   stats->maximum_posting = index->maximum_posting;
+  stats->dense_budget_bytes = index->dense_budget_bytes;
+  stats->dense_budget_denials = index->dense_budget_denials;
   for (i = 0; i < index->capacity; i++) {
     struct hint_posting *posting = index->table + i;
     if (posting->dense_bits != NULL) {
