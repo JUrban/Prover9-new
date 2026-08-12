@@ -287,6 +287,23 @@ unless it contains at least 32 timing samples; counted work slopes remain
 available regardless.  This prevents a short sampled interval from producing
 a false CPU promotion or rejection.
 
+A post-change simultaneous 1,000-given pair on the current wide-slice binary
+also retained the exact 1,268,285-generated/33,909-kept trajectory:
+
+| Strategy | User CPU (s) | System CPU (s) | Back groups | Tree nodes | Back lookup estimate (s) | Peak RSS (KiB) |
+|:---|---:|---:|---:|---:|---:|---:|
+| `mask8` | 103.34 | 15.79 | 10,871,045 | 0 | 3.672 | 90,280 |
+| adaptive | 104.02 | 14.81 | 1,338,073 | 12,598,143 | 2.463 | 90,408 |
+
+Adaptive removes 87.7% of posting-group work and lowers sampled lookup time,
+but tree traversal, construction/maintenance, and the rest of the prover leave
+whole-process user CPU 0.7% higher in this simultaneous sample.  This is
+consistent with the earlier noisy short-prefix crossovers: it validates the
+stronger index's bounded overhead and exactness, but neither promotes nor
+rejects it for the mature population.  The relevant decision remains whether
+adaptive CPU crosses below mask8 and then plateaus as the latter approaches
+the 20.76-billion-group complete-run failure.
+
 The dramatic *given-clause* rate at the end has a second cause which should
 not be attributed to the index.  Between the 3,300- and 3,600-second reports,
 only 68 additional clauses became given, but they generated 10,662,438 clauses
