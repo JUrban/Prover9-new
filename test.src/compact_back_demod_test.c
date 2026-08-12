@@ -76,6 +76,18 @@ int main(void)
   size_t count;
 
   init_standard_ladr();
+  {
+    struct compact_query_timer timer = {0};
+    unsigned i;
+    for (i = 0; i < 4096; i++) {
+      compact_query_timer_start(&timer);
+      compact_query_timer_stop(&timer);
+    }
+    CHECK(timer.eligible == 4096 && timer.samples > 0 &&
+          timer.samples < timer.eligible / 4 && !timer.active &&
+          timer.estimated_seconds >= 0.0,
+          "compact query timing samples instead of timing every lookup");
+  }
   index = compact_back_demod_init();
   first = indexed_clause("p(f(a),g(b)).");
   second = indexed_clause("q(h(f(c))).");
@@ -142,6 +154,10 @@ int main(void)
         stats.query_profile.candidate_max == 2 &&
         stats.query_profile.bytes_decoded > 0,
         "back-demod profile records candidates, exact work, and bytes");
+  CHECK(stats.lookup_timing_eligible == stats.queries &&
+        stats.lookup_timing_samples <= stats.lookup_timing_eligible &&
+        stats.timing_sample_rate == COMPACT_TIMING_SAMPLE_RATE,
+        "back-demod timing reports bounded deterministic sampling");
   CHECK(stats.path_filter_checks > 0 && stats.path_filter_rejects > 0,
         "path filter accounts for a safe fixed-symbol rejection");
   CHECK(stats.posting_groups == 14 && stats.symbol_occurrences == 15,

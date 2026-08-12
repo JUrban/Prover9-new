@@ -105,6 +105,9 @@ struct compact_back_demod_stats {
   unsigned long long query_output_fingerprint;
   struct compact_query_profile query_profile;
   double lookup_seconds;
+  unsigned long long lookup_timing_eligible;
+  unsigned long long lookup_timing_samples;
+  unsigned timing_sample_rate;
   double maintenance_seconds;
   unsigned long long materialized_file_snapshots;
   unsigned long long materialized_snapshot_ids;

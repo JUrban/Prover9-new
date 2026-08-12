@@ -58,6 +58,10 @@ int main(void)
         "lifecycle counters are exact");
   CHECK(stats.forward_queries == 2 && stats.back_queries == 1,
         "query counters are exact");
+  CHECK(stats.forward_timing_eligible == stats.forward_queries &&
+        stats.back_timing_eligible == stats.back_queries &&
+        stats.timing_sample_rate == COMPACT_TIMING_SAMPLE_RATE,
+        "feature-index timing samples without losing query populations");
   CHECK(stats.forward_profile.queries == 2 &&
         stats.forward_profile.exact_tests == 6 &&
         stats.forward_profile.materializations == 5 &&
@@ -72,6 +76,9 @@ int main(void)
   CHECK(stats.active == 4 && stats.physical == 4 &&
         stats.retired == 1 && stats.compactions == 1,
         "forced compaction removes the retired physical record");
+  CHECK(stats.forward_timing_eligible == 2 &&
+        stats.back_timing_eligible == 1,
+        "feature compaction preserves sampled-timing populations");
   CHECK(stats.snapshot_records == 4 && stats.snapshot_bytes > 0 &&
         stats.maintenance_scratch_peak > 0,
         "compaction snapshot and scratch accounting are present");

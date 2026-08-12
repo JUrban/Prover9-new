@@ -248,6 +248,45 @@ demodulation clock is independently large at 3,230.41 seconds.  That and the
 late inference bursts explain why eliminating mask scans alone cannot restore
 all old-P9 throughput, but they do not weaken the measured mask-index failure.
 
+### High-frequency timing overhead found by the complete run
+
+`out4` also reports 1,147.68 system-CPU seconds, versus 18.03 for old P9.
+This exposed a measurement defect in the compact implementation.  The legacy
+`Clock` implementation calls `getrusage()` at both the start and end of an
+operation.  The compact unit, back-demodulation, and nonunit indexes had placed
+those clocks around every query and, in some caller paths, every exact test and
+archive materialization.
+
+The final `out4` counters imply at least 49,312,038 avoidable `getrusage()`
+calls from query, exact-test, and materialization timers alone.  That lower
+bound excludes nonunit structural-summary timing, which adds millions more.
+This does not prove that all 1,147.68 system seconds came from timing: the file
+ancestor store also performed 9,121,532 reads and 2,853,768 writes.  It does
+prove that diagnostic measurement was doing work proportional to the number
+of high-frequency operations and therefore was itself unsafe for long runs.
+
+All high-frequency compact timers now use a deterministic 1/256 sample, with
+the first operation always sampled.  Logical query, candidate, work, exact,
+success, and materialization counters remain exact.  Reports label sampled
+timings and include eligible/sample populations for every operation class.
+At the `out4` populations this reduces timer-boundary system calls by about
+99.6%, to roughly one sampled pair per 256 operations; it does not change the
+search or index-selection decisions.
+
+A same-host 300-given `chat_test.in` check retained the exact trajectory and
+index counters.  Pre-sampling versus fully sampled totals were 20.64 versus
+20.89 user seconds, 2.48 versus 2.29 system seconds, 23.13 versus 23.20 wall
+seconds, and 90,280 versus 90,408 KiB peak RSS.  That prefix is measurement
+noise rather than a claimed speedup; the benefit is asymptotic avoidance of
+tens of millions of timer syscalls.  A mature current-binary run is still
+required to measure the actual end-to-end saving.
+
+The long-run reporter accepts historical exact timings and current sampled
+timings.  For sampled output it excludes an interval from CPU-slope evidence
+unless it contains at least 32 timing samples; counted work slopes remain
+available regardless.  This prevents a short sampled interval from producing
+a false CPU promotion or rejection.
+
 The dramatic *given-clause* rate at the end has a second cause which should
 not be attributed to the index.  Between the 3,300- and 3,600-second reports,
 only 68 additional clauses became given, but they generated 10,662,438 clauses

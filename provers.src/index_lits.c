@@ -40,9 +40,9 @@ static Compact_feature_index Compact_nonunits;
 static unsigned long long Compact_nonunit_audit_failures;
 static unsigned long long Compact_nonunit_forward_exact_tests;
 static unsigned long long Compact_nonunit_back_exact_tests;
-static Clock Compact_nonunit_exact_clock;
-static Clock Compact_nonunit_materialize_clock;
-static Clock Compact_nonunit_summary_clock;
+static struct compact_query_timer Compact_nonunit_exact_timer;
+static struct compact_query_timer Compact_nonunit_materialize_timer;
+static struct compact_query_timer Compact_nonunit_summary_timer;
 static Compact_clause_resolver Compact_clause_resolve;
 static Compact_clause_releaser Compact_clause_release;
 static void *Compact_clause_context;
@@ -64,10 +64,10 @@ static Topform resolve_compact_index_clause_profile(unsigned long long id,
     *materialized = FALSE;
   if (clause == NULL && Compact_clause_resolve != NULL) {
     if (materialized != NULL)
-      clock_start(Compact_nonunit_materialize_clock);
+      compact_query_timer_start(&Compact_nonunit_materialize_timer);
     clause = Compact_clause_resolve(id, Compact_clause_context);
     if (materialized != NULL) {
-      clock_stop(Compact_nonunit_materialize_clock);
+      compact_query_timer_stop(&Compact_nonunit_materialize_timer);
       *materialized = TRUE;
     }
   }
@@ -225,12 +225,27 @@ void fprint_compact_nonunit_index(FILE *fp)
           "Compact_index_timing: component=nonunit, "
           "summary_seconds=%.3f, forward_lookup_seconds=%.3f, "
           "back_lookup_seconds=%.3f, "
+          "timing=sampled, timing_rate=1/%u, "
+          "forward_eligible=%llu, forward_samples=%llu, "
+          "back_eligible=%llu, back_samples=%llu, "
+          "summary_eligible=%llu, summary_samples=%llu, "
+          "exact_eligible=%llu, exact_samples=%llu, "
+          "materialize_eligible=%llu, materialize_samples=%llu, "
           "exact_seconds=%.3f, materialize_seconds=%.3f, "
           "maintenance_seconds=%.3f.\n",
-          clock_seconds(Compact_nonunit_summary_clock),
+          Compact_nonunit_summary_timer.estimated_seconds,
           stats.forward_lookup_seconds, stats.back_lookup_seconds,
-          clock_seconds(Compact_nonunit_exact_clock),
-          clock_seconds(Compact_nonunit_materialize_clock),
+          stats.timing_sample_rate,
+          stats.forward_timing_eligible, stats.forward_timing_samples,
+          stats.back_timing_eligible, stats.back_timing_samples,
+          Compact_nonunit_summary_timer.eligible,
+          Compact_nonunit_summary_timer.samples,
+          Compact_nonunit_exact_timer.eligible,
+          Compact_nonunit_exact_timer.samples,
+          Compact_nonunit_materialize_timer.eligible,
+          Compact_nonunit_materialize_timer.samples,
+          Compact_nonunit_exact_timer.estimated_seconds,
+          Compact_nonunit_materialize_timer.estimated_seconds,
           stats.maintenance_seconds);
 }
 
@@ -308,8 +323,17 @@ void fprint_compact_unit_index(FILE *fp)
   compact_profile_fprint(fp, "unit", "unification",
                          &stats.unifier_profile, stats.unifier_seconds);
   fprintf(fp,
-          "Compact_index_timing: component=unit, sort_seconds=%.3f, "
+          "Compact_index_timing: component=unit, timing=sampled, "
+          "timing_rate=1/%u, generalization_eligible=%llu, "
+          "generalization_samples=%llu, instance_eligible=%llu, "
+          "instance_samples=%llu, unification_eligible=%llu, "
+          "unification_samples=%llu, sort_seconds=%.3f, "
           "maintenance_seconds=%.3f.\n",
+          stats.timing_sample_rate,
+          stats.generalization_timing_eligible,
+          stats.generalization_timing_samples,
+          stats.instance_timing_eligible, stats.instance_timing_samples,
+          stats.unifier_timing_eligible, stats.unifier_timing_samples,
           stats.sort_seconds, stats.maintenance_seconds);
 }
 
@@ -562,10 +586,12 @@ void init_literals_index(int depth)
     compact_feature_index_init(feature_length(),
                                Compact_nonunit_path_filter) : NULL;
   if (compact_nonunit_index_mode()) {
-    Compact_nonunit_exact_clock = clock_init("compact_nonunit_exact");
-    Compact_nonunit_materialize_clock =
-      clock_init("compact_nonunit_materialize");
-    Compact_nonunit_summary_clock = clock_init("compact_nonunit_summary");
+    memset(&Compact_nonunit_exact_timer, 0,
+           sizeof(Compact_nonunit_exact_timer));
+    memset(&Compact_nonunit_materialize_timer, 0,
+           sizeof(Compact_nonunit_materialize_timer));
+    memset(&Compact_nonunit_summary_timer, 0,
+           sizeof(Compact_nonunit_summary_timer));
   }
 }  /* init_lits_index */
 
@@ -596,11 +622,12 @@ void destroy_literals_index(void)
   compact_unit_index_free(Compact_units); Compact_units = NULL;
   Compact_unit_terms = NULL;
   compact_feature_index_free(Compact_nonunits); Compact_nonunits = NULL;
-  free_clock(Compact_nonunit_exact_clock); Compact_nonunit_exact_clock = NULL;
-  free_clock(Compact_nonunit_materialize_clock);
-  Compact_nonunit_materialize_clock = NULL;
-  free_clock(Compact_nonunit_summary_clock);
-  Compact_nonunit_summary_clock = NULL;
+  memset(&Compact_nonunit_exact_timer, 0,
+         sizeof(Compact_nonunit_exact_timer));
+  memset(&Compact_nonunit_materialize_timer, 0,
+         sizeof(Compact_nonunit_materialize_timer));
+  memset(&Compact_nonunit_summary_timer, 0,
+         sizeof(Compact_nonunit_summary_timer));
 }  /* lits_destroy_index */
 
 /*************
@@ -642,9 +669,9 @@ void index_literals(Topform c, Indexop op, Clock clock, BOOL no_fapl)
       struct compact_feature_structural_summary structural;
       memset(&structural, 0, sizeof(structural));
       if (Compact_nonunit_path_filter && op == INSERT) {
-        clock_start(Compact_nonunit_summary_clock);
+        compact_query_timer_start(&Compact_nonunit_summary_timer);
         structural = compact_feature_clause_summary(c);
-        clock_stop(Compact_nonunit_summary_clock);
+        compact_query_timer_stop(&Compact_nonunit_summary_timer);
       }
       BOOL ok = op == INSERT ?
         compact_feature_index_add(
@@ -826,9 +853,9 @@ static Topform compact_nonunit_forward_subsumption(Topform query)
   Topform result = NULL;
   memset(&structural, 0, sizeof(structural));
   if (Compact_nonunit_path_filter) {
-    clock_start(Compact_nonunit_summary_clock);
+    compact_query_timer_start(&Compact_nonunit_summary_timer);
     structural = compact_feature_clause_summary(query);
-    clock_stop(Compact_nonunit_summary_clock);
+    compact_query_timer_stop(&Compact_nonunit_summary_timer);
   }
   ids = compact_feature_forward_candidates(
     Compact_nonunits, vector, structural, &count);
@@ -842,13 +869,13 @@ static Topform compact_nonunit_forward_subsumption(Topform query)
       fatal_error("compact_nonunit_forward_subsumption: candidate is not resident");
     Compact_nonunit_forward_exact_tests++;
     exact++;
-    clock_start(Compact_nonunit_exact_clock);
+    compact_query_timer_start(&Compact_nonunit_exact_timer);
     if (feature_subsumes_raw(candidate, query)) {
-      clock_stop(Compact_nonunit_exact_clock);
+      compact_query_timer_stop(&Compact_nonunit_exact_timer);
       result = candidate;
     }
     else {
-      clock_stop(Compact_nonunit_exact_clock);
+      compact_query_timer_stop(&Compact_nonunit_exact_timer);
       release_compact_index_clause(candidate);
     }
   }
@@ -867,9 +894,9 @@ static Plist compact_nonunit_back_subsumption(Topform query)
   Plist result = NULL;
   memset(&structural, 0, sizeof(structural));
   if (Compact_nonunit_path_filter) {
-    clock_start(Compact_nonunit_summary_clock);
+    compact_query_timer_start(&Compact_nonunit_summary_timer);
     structural = compact_feature_clause_summary(query);
-    clock_stop(Compact_nonunit_summary_clock);
+    compact_query_timer_stop(&Compact_nonunit_summary_timer);
   }
   ids = compact_feature_back_candidates(
     Compact_nonunits, vector, structural, &count);
@@ -884,14 +911,14 @@ static Plist compact_nonunit_back_subsumption(Topform query)
     if (candidate != query) {
       Compact_nonunit_back_exact_tests++;
       exact++;
-      clock_start(Compact_nonunit_exact_clock);
+      compact_query_timer_start(&Compact_nonunit_exact_timer);
       if (feature_subsumes_raw(query, candidate)) {
-        clock_stop(Compact_nonunit_exact_clock);
+        compact_query_timer_stop(&Compact_nonunit_exact_timer);
         successes++;
         result = plist_prepend(result, candidate);
       }
       else {
-        clock_stop(Compact_nonunit_exact_clock);
+        compact_query_timer_stop(&Compact_nonunit_exact_timer);
         release_compact_index_clause(candidate);
       }
     }

@@ -179,6 +179,15 @@ breakdown, and swap peak are retained.  The report prefers that peak over GNU
 time RSS.  Unsupported or non-delegated hosts exit 77 instead of silently
 claiming that process RSS includes file cache.
 
+The complete large-chat audit found that high-frequency compact query, exact,
+and materialization clocks were themselves a long-run CPU scalability defect:
+each operation paid two `getrusage()` calls.  These timings are now sampled
+deterministically at 1/256 while all logical counters remain exact.  Reports
+carry the timing rate and eligible/sample populations, and interval CPU slopes
+require at least 32 samples when timing is sampled.  This removes measurement
+cost proportional to every compact lookup without weakening the counter-based
+longevity gates.  Mature current-binary CPU validation remains open.
+
 ## 5. Phase D: passive control plane for tens of millions of live clauses
 
 The 64-byte dense record and its selector heaps are deliberately much smaller

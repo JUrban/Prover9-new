@@ -163,6 +163,12 @@ int main(void)
         stats.instance_profile.queries == stats.instance_queries &&
         stats.unifier_profile.queries == stats.unifier_queries,
         "operation profiles account for every unit query");
+  CHECK(stats.generalization_timing_eligible ==
+          stats.generalization_queries &&
+        stats.instance_timing_eligible == stats.instance_queries &&
+        stats.unifier_timing_eligible == stats.unifier_queries &&
+        stats.timing_sample_rate == COMPACT_TIMING_SAMPLE_RATE,
+        "unit timing samples each operation class without losing counts");
   CHECK(stats.instance_profile.exact_tests ==
           stats.instance_exact_tests &&
         stats.unifier_profile.exact_tests == stats.unifier_exact_tests &&
@@ -182,6 +188,10 @@ int main(void)
           stats.instance_profile.queries == 1 &&
           stats.unifier_profile.queries == 2,
           "forced compaction preserves unit query distributions");
+    CHECK(stats.generalization_timing_eligible == 5 &&
+          stats.instance_timing_eligible == 1 &&
+          stats.unifier_timing_eligible == 2,
+          "forced compaction preserves unit timing populations");
   }
 
   compact_unit_index_free(index);

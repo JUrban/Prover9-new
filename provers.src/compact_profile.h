@@ -3,10 +3,60 @@
 
 #include <limits.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 
 #define COMPACT_PROFILE_BUCKETS 8
 #define COMPACT_PROFILE_LOG_BUCKETS 65
+#define COMPACT_TIMING_SAMPLE_RATE 256ULL
+
+/* High-frequency compact queries must not use the legacy Clock on every
+   operation: Clock calls getrusage() at both boundaries, which can turn tens
+   of millions of cheap lookups into tens of millions of system calls.  Keep
+   the logical profile exact, but estimate user CPU from a deterministic
+   1/rate sample.  The first duration is measured with unit weight; later
+   samples contribute RATE times their observed duration.  The cumulative
+   estimate therefore remains monotone and interval deltas remain meaningful
+   for long-run reports. */
+struct compact_query_timer {
+  unsigned long long eligible;
+  unsigned long long samples;
+  double estimated_seconds;
+  double started;
+  int active;
+};
+
+static inline int compact_timing_sample(unsigned long long query)
+{
+  unsigned long long x = query + UINT64_C(0x9e3779b97f4a7c15);
+  x = (x ^ (x >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+  x = (x ^ (x >> 27)) * UINT64_C(0x94d049bb133111eb);
+  x ^= x >> 31;
+  return query == 1 || (x & (COMPACT_TIMING_SAMPLE_RATE - 1)) == 0;
+}
+
+static inline void compact_query_timer_start(struct compact_query_timer *timer)
+{
+  timer->eligible++;
+  timer->active = clocks_enabled() &&
+    compact_timing_sample(timer->eligible);
+  if (timer->active) {
+    timer->samples++;
+    timer->started = user_seconds();
+  }
+}
+
+static inline void compact_query_timer_stop(struct compact_query_timer *timer)
+{
+  if (timer->active) {
+    double elapsed = user_seconds() - timer->started;
+    if (elapsed >= 0.0)
+      timer->estimated_seconds +=
+        elapsed * (timer->eligible == 1 ? 1.0 :
+                   (double) COMPACT_TIMING_SAMPLE_RATE);
+    timer->active = 0;
+  }
+}
 
 /* Constant-space query distributions shared by the compact indexes.  The
    eight public buckets make reports comparable with packed hints.  The

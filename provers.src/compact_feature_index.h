@@ -39,6 +39,11 @@ struct compact_feature_index_stats {
   struct compact_query_profile back_profile;
   double forward_lookup_seconds;
   double back_lookup_seconds;
+  unsigned long long forward_timing_eligible;
+  unsigned long long forward_timing_samples;
+  unsigned long long back_timing_eligible;
+  unsigned long long back_timing_samples;
+  unsigned timing_sample_rate;
   double maintenance_seconds;
   unsigned long long node_bytes;
   unsigned long long label_bytes;

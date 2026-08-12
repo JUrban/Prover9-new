@@ -112,9 +112,9 @@ struct compact_unit_index {
   struct compact_query_profile generalization_profile;
   struct compact_query_profile instance_profile;
   struct compact_query_profile unifier_profile;
-  Clock generalization_clock;
-  Clock instance_clock;
-  Clock unifier_clock;
+  struct compact_query_timer generalization_timer;
+  struct compact_query_timer instance_timer;
+  struct compact_query_timer unifier_timer;
   Clock sort_clock;
   Clock maintenance_clock;
   unsigned long long peak_bytes;
@@ -598,9 +598,6 @@ static Compact_unit_index compact_unit_index_init_with_pool_strategy(
   index->term_pool = pool;
   index->strategy = strategy;
   index->id_map = compact_id_map_init(1);
-  index->generalization_clock = clock_init("compact_unit_generalization");
-  index->instance_clock = clock_init("compact_unit_instance");
-  index->unifier_clock = clock_init("compact_unit_unifier");
   index->sort_clock = clock_init("compact_unit_sort");
   index->maintenance_clock = clock_init("compact_unit_maintenance");
   (void) new_node(index, 0);  /* reserved null node */
@@ -830,14 +827,11 @@ static void compact_unit_index_compact_internal(Compact_unit_index index,
   replacement->record_count = 1;
   for (i = 1; i < packed; i++)
     copy_live_record(replacement, &old.records[i]);
-  free_clock(replacement->generalization_clock);
-  free_clock(replacement->instance_clock);
-  free_clock(replacement->unifier_clock);
   free_clock(replacement->sort_clock);
   free_clock(replacement->maintenance_clock);
-  replacement->generalization_clock = old.generalization_clock;
-  replacement->instance_clock = old.instance_clock;
-  replacement->unifier_clock = old.unifier_clock;
+  replacement->generalization_timer = old.generalization_timer;
+  replacement->instance_timer = old.instance_timer;
+  replacement->unifier_timer = old.unifier_timer;
   replacement->sort_clock = old.sort_clock;
   replacement->maintenance_clock = old.maintenance_clock;
   *index = *replacement;
@@ -1046,7 +1040,7 @@ unsigned long long compact_unit_generalization_first(
   if (index == NULL || target == NULL)
     return 0;
   memset(&work, 0, sizeof(work));
-  clock_start(index->generalization_clock);
+  compact_query_timer_start(&index->generalization_timer);
   index->generalization_queries++;
   memset(bindings, 0, sizeof(bindings));
   flatten_query(index, target, &count);
@@ -1062,7 +1056,7 @@ unsigned long long compact_unit_generalization_first(
                              work.postings,
                              result == 0 ? 0 : 1, 0);
   update_peak(index);
-  clock_stop(index->generalization_clock);
+  compact_query_timer_stop(&index->generalization_timer);
   return result;
 }
 
@@ -1267,7 +1261,7 @@ unsigned long long *compact_unit_instance_ids(
   *count = 0;
   if (index == NULL || pattern == NULL)
     return NULL;
-  clock_start(index->instance_clock);
+  compact_query_timer_start(&index->instance_timer);
   index->instance_queries++;
   tests_before = index->instance_exact_tests;
   if (index->strategy == COMPACT_UNIT_CODE_TREE) {
@@ -1330,7 +1324,7 @@ unsigned long long *compact_unit_instance_ids(
     &index->instance_profile,
     index->instance_exact_tests - tests_before, found, 0);
   update_peak(index);
-  clock_stop(index->instance_clock);
+  compact_query_timer_stop(&index->instance_timer);
   if (found == 0)
     return NULL;
   {
@@ -1733,14 +1727,14 @@ unsigned long long *compact_unit_unifier_ids(
   *count = 0;
   if (index == NULL || query == NULL || VARIABLE(query))
     return NULL;
-  clock_start(index->unifier_clock);
+  compact_query_timer_start(&index->unifier_timer);
   index->unifier_queries++;
   tests_before = index->unifier_exact_tests;
   query_root = SYMNUM(query);
   if ((size_t) query_root >= index->unifier_symbol_capacity) {
     compact_profile_note(&index->unifier_profile, 0, 0, 0, 0, 0, 0, 0);
     compact_profile_note_exact(&index->unifier_profile, 0, 0, 0);
-    clock_stop(index->unifier_clock);
+    compact_query_timer_stop(&index->unifier_timer);
     return NULL;
   }
   memset(&choice, 0, sizeof(choice));
@@ -1810,7 +1804,7 @@ unsigned long long *compact_unit_unifier_ids(
     &index->unifier_profile,
     index->unifier_exact_tests - tests_before, found, 0);
   update_peak(index);
-  clock_stop(index->unifier_clock);
+  compact_query_timer_stop(&index->unifier_timer);
   if (found == 0) {
     return NULL;
   }
@@ -1862,9 +1856,19 @@ void compact_unit_index_get_stats(Compact_unit_index index,
   stats->generalization_profile = index->generalization_profile;
   stats->instance_profile = index->instance_profile;
   stats->unifier_profile = index->unifier_profile;
-  stats->generalization_seconds = clock_seconds(index->generalization_clock);
-  stats->instance_seconds = clock_seconds(index->instance_clock);
-  stats->unifier_seconds = clock_seconds(index->unifier_clock);
+  stats->generalization_seconds =
+    index->generalization_timer.estimated_seconds;
+  stats->instance_seconds = index->instance_timer.estimated_seconds;
+  stats->unifier_seconds = index->unifier_timer.estimated_seconds;
+  stats->generalization_timing_eligible =
+    index->generalization_timer.eligible;
+  stats->generalization_timing_samples =
+    index->generalization_timer.samples;
+  stats->instance_timing_eligible = index->instance_timer.eligible;
+  stats->instance_timing_samples = index->instance_timer.samples;
+  stats->unifier_timing_eligible = index->unifier_timer.eligible;
+  stats->unifier_timing_samples = index->unifier_timer.samples;
+  stats->timing_sample_rate = COMPACT_TIMING_SAMPLE_RATE;
   stats->sort_seconds = clock_seconds(index->sort_clock);
   stats->maintenance_seconds = clock_seconds(index->maintenance_clock);
   stats->node_items = index->node_count;
@@ -1910,9 +1914,6 @@ void compact_unit_index_free(Compact_unit_index index)
   safe_free(index->result_ids);
   safe_free(index->path_stack);
   safe_free(index->selected_variable_keys);
-  free_clock(index->generalization_clock);
-  free_clock(index->instance_clock);
-  free_clock(index->unifier_clock);
   free_clock(index->sort_clock);
   free_clock(index->maintenance_clock);
   safe_free(index);

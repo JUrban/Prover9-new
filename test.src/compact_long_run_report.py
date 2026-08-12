@@ -48,12 +48,14 @@ STEADY_WARMUP_INTERVALS = 1
 STEADY_WINDOW_INTERVALS = 3
 MIN_STEADY_INTERVALS = (
     STEADY_WARMUP_INTERVALS + 2 * STEADY_WINDOW_INTERVALS)
+MIN_SAMPLED_LOOKUP_TIMINGS_PER_INTERVAL = 32
 
 CUMULATIVE_KEYS = (
     "given", "generated", "kept", "user_cpu", "system_cpu",
     "back_queries", "back_groups_examined", "back_tree_nodes_examined",
     "back_tree_sibling_checks", "back_tree_child_lookups",
     "back_candidates", "back_timing_lookup_seconds",
+    "back_timing_lookup_samples",
     "back_timing_exact_seconds", "back_timing_materialize_seconds",
     "back_timing_maintenance_seconds", "demod_attempts", "demod_rewrites",
     "back_profile_exact_tests", "back_profile_exact_successes",
@@ -324,6 +326,16 @@ def derive_intervals(samples):
             row["back_lookup_cpu_pct"] *= 100.0
         row["back_lookup_seconds_per_query"] = safe_ratio(
             row.get("delta_back_timing_lookup_seconds"), delta_queries)
+        sampled_lookup = sample.get("back_timing_lookup_timing") == "sampled"
+        row["back_lookup_timing_samples"] = row.get(
+            "delta_back_timing_lookup_samples")
+        row["back_lookup_timing_sufficient"] = (
+            not sampled_lookup or
+            number(row, "back_lookup_timing_samples", 0) >=
+            MIN_SAMPLED_LOOKUP_TIMINGS_PER_INTERVAL)
+        if not row["back_lookup_timing_sufficient"]:
+            row["back_lookup_cpu_pct"] = None
+            row["back_lookup_seconds_per_query"] = None
         row["back_lookup_us_per_query"] = (
             row["back_lookup_seconds_per_query"] * 1000000.0
             if row["back_lookup_seconds_per_query"] is not None else None)
@@ -336,6 +348,8 @@ def derive_intervals(samples):
             isinstance(delta_exact_successes, (int, float)) else None)
         row["back_lookup_seconds_per_answer_unit"] = safe_ratio(
             row.get("delta_back_timing_lookup_seconds"), answer_units)
+        if not row["back_lookup_timing_sufficient"]:
+            row["back_lookup_seconds_per_answer_unit"] = None
         row["back_lookup_us_per_answer_unit"] = (
             row["back_lookup_seconds_per_answer_unit"] * 1000000.0
             if row["back_lookup_seconds_per_answer_unit"] is not None
@@ -432,6 +446,16 @@ def run_summary(label, rows):
         signals.append(
             "steady back-lookup slope needs at least {} complete periodic "
             "intervals".format(MIN_STEADY_INTERVALS))
+    insufficient_timing_intervals = sum(
+        1 for row in rows
+        if row.get("back_timing_lookup_timing") == "sampled" and
+        not row.get("back_lookup_timing_sufficient"))
+    if insufficient_timing_intervals:
+        signals.append(
+            "{} sampled back-lookup interval(s) have fewer than {} timing "
+            "samples and are excluded from CPU slopes".format(
+                insufficient_timing_intervals,
+                MIN_SAMPLED_LOOKUP_TIMINGS_PER_INTERVAL))
     if number(last, "back_failures", 0) != 0:
         signals.append("compact backward-demodulation reports failures")
     if number(last, "passive_gc_validation_failures", 0) != 0:
@@ -561,6 +585,9 @@ def run_summary(label, rows):
         "cgroup_file_current_bytes": last.get("cgroup_file_current_bytes"),
         "cgroup_swap_peak_bytes": last.get("cgroup_swap_peak_bytes"),
         "statistics_format_buffers": formatting_buffers or None,
+        "last_back_lookup_timing": last.get("back_timing_lookup_timing"),
+        "last_back_lookup_rate": last.get("back_timing_lookup_rate"),
+        "last_back_lookup_samples": last.get("back_timing_lookup_samples"),
         "last_passive_records": last.get("passive_records"),
         "last_passive_directory_bytes": last.get("passive_directory_logical"),
         "last_selector_run_bytes": last.get("selector_run_logical"),
@@ -850,6 +877,8 @@ TSV_COLUMNS = (
     "back_siblings_per_query", "back_children_per_query",
     "back_combined_per_query", "back_lookup_cpu_pct", "back_child_hit_pct",
     "back_lookup_seconds_per_query", "back_lookup_us_per_query",
+    "back_timing_lookup_timing", "back_timing_lookup_rate",
+    "delta_back_timing_lookup_samples", "back_lookup_timing_sufficient",
     "delta_back_profile_exact_successes", "back_exact_successes_per_query",
     "back_lookup_seconds_per_answer_unit", "back_lookup_us_per_answer_unit",
     "back_tree_child_parents", "back_tree_child_bytes", "back_bytes",

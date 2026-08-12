@@ -44,6 +44,13 @@ struct compact_unit_index_stats {
   double generalization_seconds;
   double instance_seconds;
   double unifier_seconds;
+  unsigned long long generalization_timing_eligible;
+  unsigned long long generalization_timing_samples;
+  unsigned long long instance_timing_eligible;
+  unsigned long long instance_timing_samples;
+  unsigned long long unifier_timing_eligible;
+  unsigned long long unifier_timing_samples;
+  unsigned timing_sample_rate;
   double sort_seconds;
   double maintenance_seconds;
   unsigned long long node_items;

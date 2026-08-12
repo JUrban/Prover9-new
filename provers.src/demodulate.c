@@ -31,8 +31,8 @@ static Compact_term_pool Compact_back_demod_terms;
 static BOOL Compact_back_demod_audit;
 static BOOL Compact_back_demod_authoritative;
 static unsigned long long Compact_back_demod_failures;
-static Clock Compact_back_demod_exact_clock;
-static Clock Compact_back_demod_materialize_clock;
+static struct compact_query_timer Compact_back_demod_exact_timer;
+static struct compact_query_timer Compact_back_demod_materialize_timer;
 static Compact_back_demod_resolver Compact_back_demod_resolve;
 static Compact_back_demod_releaser Compact_back_demod_release;
 static Compact_back_demod_batch_adviser Compact_back_demod_advise;
@@ -206,9 +206,10 @@ void init_back_demod_index(Mindextype mtype, Uniftype utype, int fpa_depth)
     (Compact_back_demod_terms == NULL ? compact_back_demod_init() :
      compact_back_demod_init_with_pool(Compact_back_demod_terms)) : NULL;
   if (compact_back_demod_mode()) {
-    Compact_back_demod_exact_clock = clock_init("compact_back_demod_exact");
-    Compact_back_demod_materialize_clock =
-      clock_init("compact_back_demod_materialize");
+    memset(&Compact_back_demod_exact_timer, 0,
+           sizeof(Compact_back_demod_exact_timer));
+    memset(&Compact_back_demod_materialize_timer, 0,
+           sizeof(Compact_back_demod_materialize_timer));
   }
 }  /* init_back_demod_index */
 
@@ -453,10 +454,10 @@ void destroy_back_demod_index(void)
   compact_back_demod_free(Compact_back_demod_idx);
   Compact_back_demod_idx = NULL;
   Compact_back_demod_terms = NULL;
-  free_clock(Compact_back_demod_exact_clock);
-  Compact_back_demod_exact_clock = NULL;
-  free_clock(Compact_back_demod_materialize_clock);
-  Compact_back_demod_materialize_clock = NULL;
+  memset(&Compact_back_demod_exact_timer, 0,
+         sizeof(Compact_back_demod_exact_timer));
+  memset(&Compact_back_demod_materialize_timer, 0,
+         sizeof(Compact_back_demod_materialize_timer));
 }  /* destroy_back_demod_index */
 
 /*************
@@ -542,18 +543,18 @@ static Plist compact_back_demodulatable(Topform demod, int type,
   for (i = 0; i < count; i++) {
     Topform candidate = find_clause_by_id(ids[i]);
     if (candidate == NULL && Compact_back_demod_resolve != NULL) {
-      clock_start(Compact_back_demod_materialize_clock);
+      compact_query_timer_start(&Compact_back_demod_materialize_timer);
       candidate = Compact_back_demod_resolve(
         ids[i], Compact_back_demod_context);
-      clock_stop(Compact_back_demod_materialize_clock);
+      compact_query_timer_stop(&Compact_back_demod_materialize_timer);
       materializations++;
     }
     if (candidate == NULL)
       fatal_error("compact_back_demodulatable: candidate is not resident");
-    clock_start(Compact_back_demod_exact_clock);
+    compact_query_timer_start(&Compact_back_demod_exact_timer);
     if (rewritable_clause_type(demod, candidate, type, lex_order_vars)) {
       Plist cell = get_plist();
-      clock_stop(Compact_back_demod_exact_clock);
+      compact_query_timer_stop(&Compact_back_demod_exact_timer);
       successes++;
       cell->v = candidate;
       cell->next = NULL;
@@ -564,7 +565,7 @@ static Plist compact_back_demodulatable(Topform demod, int type,
       tail = cell;
     }
     else {
-      clock_stop(Compact_back_demod_exact_clock);
+      compact_query_timer_stop(&Compact_back_demod_exact_timer);
       if (Compact_back_demod_release != NULL)
         Compact_back_demod_release(candidate, Compact_back_demod_context);
     }
@@ -749,10 +750,21 @@ void fprint_compact_back_demod(FILE *fp)
                          &stats.query_profile, stats.lookup_seconds);
   fprintf(fp,
           "Compact_index_timing: component=back_demod, lookup_seconds=%.3f, "
+          "lookup_timing=sampled, lookup_rate=1/%u, "
+          "lookup_eligible=%llu, lookup_samples=%llu, "
+          "exact_timing=sampled, exact_eligible=%llu, exact_samples=%llu, "
+          "materialize_timing=sampled, materialize_eligible=%llu, "
+          "materialize_samples=%llu, "
           "exact_seconds=%.3f, materialize_seconds=%.3f, "
           "maintenance_seconds=%.3f.\n",
-          stats.lookup_seconds, clock_seconds(Compact_back_demod_exact_clock),
-          clock_seconds(Compact_back_demod_materialize_clock),
+          stats.lookup_seconds, stats.timing_sample_rate,
+          stats.lookup_timing_eligible, stats.lookup_timing_samples,
+          Compact_back_demod_exact_timer.eligible,
+          Compact_back_demod_exact_timer.samples,
+          Compact_back_demod_materialize_timer.eligible,
+          Compact_back_demod_materialize_timer.samples,
+          Compact_back_demod_exact_timer.estimated_seconds,
+          Compact_back_demod_materialize_timer.estimated_seconds,
           stats.maintenance_seconds);
   fprintf(fp,
           "Compact_worst_query: component=back_demod, proof_id=%llu, "

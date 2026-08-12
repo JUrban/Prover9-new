@@ -107,6 +107,27 @@ class ReportTest(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_sparse_sampled_lookup_intervals_are_not_cpu_evidence(self):
+        sampled = SAMPLE.replace(
+            "lookup_seconds=2.0, exact_seconds=0.1",
+            "lookup_seconds=2.0, lookup_timing=sampled, "
+            "lookup_rate=1/256, lookup_samples=40, exact_seconds=0.1")
+        sampled = sampled.replace(
+            "lookup_seconds=3.0, exact_seconds=0.2",
+            "lookup_seconds=3.0, lookup_timing=sampled, "
+            "lookup_rate=1/256, lookup_samples=60, exact_seconds=0.2")
+        rows = REPORT.derive_intervals(REPORT.parse_stream(
+            sampled.splitlines(True), "sampled"))
+        self.assertTrue(rows[0]["back_lookup_timing_sufficient"])
+        self.assertFalse(rows[1]["back_lookup_timing_sufficient"])
+        self.assertEqual(rows[1]["delta_back_timing_lookup_samples"], 20)
+        self.assertIsNone(rows[1]["back_lookup_us_per_query"])
+        summary = REPORT.run_summary("sampled", rows)
+        self.assertEqual(summary["back_lookup_normalized_cpu_samples"], 1)
+        self.assertTrue(any(
+            "fewer than 32 timing samples" in signal
+            for signal in summary["signals"]))
+
     def test_legacy_output_without_compact_statistics(self):
         text = """Given=2. Generated=10. Kept=4. proofs=0.\nUser_CPU=1.0, System_CPU=0.0, Wall_clock=1.\n"""
         rows = REPORT.derive_intervals(REPORT.parse_stream(text.splitlines(True)))

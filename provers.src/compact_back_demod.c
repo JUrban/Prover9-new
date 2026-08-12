@@ -303,7 +303,7 @@ struct compact_back_demod_index {
   unsigned long long query_input_fingerprint;
   unsigned long long query_output_fingerprint;
   struct compact_query_profile query_profile;
-  Clock lookup_clock;
+  struct compact_query_timer lookup_timer;
   Clock maintenance_clock;
   unsigned long long materialized_file_snapshots;
   unsigned long long materialized_snapshot_ids;
@@ -1892,7 +1892,6 @@ static Compact_back_demod_index compact_back_demod_init_with_pool_strategy(
   index->position_complete = TRUE;
   index->position_admission_enabled = Back_demod_position_admission;
   index->id_map = compact_id_map_init(1);
-  index->lookup_clock = clock_init("compact_back_demod_lookup");
   index->maintenance_clock = clock_init("compact_back_demod_maintenance");
   if (new_posting_block(index, FALSE) != CBD_NONE)
     fatal_error("compact_back_demod: invalid posting block sentinel");
@@ -3830,7 +3829,7 @@ unsigned long long *compact_back_demod_candidate_ids(
   *count = 0;
   if (index == NULL || demod == NULL || demod->literals == NULL)
     return NULL;
-  clock_start(index->lookup_clock);
+  compact_query_timer_start(&index->lookup_timer);
   index->query_work = 0;
   index->query_live = 0;
   index->query_dead = 0;
@@ -3877,7 +3876,7 @@ unsigned long long *compact_back_demod_candidate_ids(
     index->worst_query_candidates = *count;
   }
   update_peak(index);
-  clock_stop(index->lookup_clock);
+  compact_query_timer_stop(&index->lookup_timer);
   return answer;
 }
 
@@ -4186,9 +4185,8 @@ static void compact_back_demod_compact_internal(
   safe_free(record_map);
   update_peak(replacement);
   old = *index;
-  free_clock(replacement->lookup_clock);
   free_clock(replacement->maintenance_clock);
-  replacement->lookup_clock = old.lookup_clock;
+  replacement->lookup_timer = old.lookup_timer;
   replacement->maintenance_clock = old.maintenance_clock;
   *index = *replacement;
   safe_free(replacement);
@@ -4426,9 +4424,8 @@ void compact_back_demod_compact_materialized(
   if (id_file != NULL)
     fclose(id_file);
   safe_free(ids);
-  free_clock(replacement->lookup_clock);
   free_clock(replacement->maintenance_clock);
-  replacement->lookup_clock = old.lookup_clock;
+  replacement->lookup_timer = old.lookup_timer;
   replacement->maintenance_clock = old.maintenance_clock;
   *index = *replacement;
   safe_free(replacement);
@@ -4671,7 +4668,10 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->query_input_fingerprint = index->query_input_fingerprint;
   stats->query_output_fingerprint = index->query_output_fingerprint;
   stats->query_profile = index->query_profile;
-  stats->lookup_seconds = clock_seconds(index->lookup_clock);
+  stats->lookup_seconds = index->lookup_timer.estimated_seconds;
+  stats->lookup_timing_eligible = index->lookup_timer.eligible;
+  stats->lookup_timing_samples = index->lookup_timer.samples;
+  stats->timing_sample_rate = COMPACT_TIMING_SAMPLE_RATE;
   stats->maintenance_seconds = clock_seconds(index->maintenance_clock);
   stats->materialized_file_snapshots = index->materialized_file_snapshots;
   stats->materialized_snapshot_ids = index->materialized_snapshot_ids;
@@ -4742,7 +4742,6 @@ void compact_back_demod_free(Compact_back_demod_index index)
   compact_id_map_free(index->id_map);
   safe_free(index->results);
   safe_free(index->query);
-  free_clock(index->lookup_clock);
   free_clock(index->maintenance_clock);
   safe_free(index);
 }

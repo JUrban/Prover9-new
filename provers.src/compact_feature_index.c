@@ -94,8 +94,8 @@ struct compact_feature_index {
   unsigned long long query_dead;
   unsigned long long query_structural_rejects;
   unsigned long long query_variable_rejects;
-  Clock forward_lookup_clock;
-  Clock back_lookup_clock;
+  struct compact_query_timer forward_lookup_timer;
+  struct compact_query_timer back_lookup_timer;
   Clock maintenance_clock;
   unsigned long long peak_bytes;
 };
@@ -589,8 +589,6 @@ Compact_feature_index compact_feature_index_init(int feature_length,
   index = safe_calloc(1, sizeof(*index));
   index->feature_length = feature_length;
   index->structural_filter = structural_filter;
-  index->forward_lookup_clock = clock_init("compact_nonunit_forward_lookup");
-  index->back_lookup_clock = clock_init("compact_nonunit_back_lookup");
   index->maintenance_clock = clock_init("compact_nonunit_maintenance");
   (void) new_node(index, 0, 0);  /* reserved null node */
   index->root = new_node(index, 0, 0);
@@ -870,11 +868,9 @@ static void compact_feature_index_compact_internal(
   if (fclose(snapshot) != 0)
     fatal_error("compact_feature_index: cannot close rebuild snapshot");
 
-  free_clock(replacement->forward_lookup_clock);
-  free_clock(replacement->back_lookup_clock);
   free_clock(replacement->maintenance_clock);
-  replacement->forward_lookup_clock = old.forward_lookup_clock;
-  replacement->back_lookup_clock = old.back_lookup_clock;
+  replacement->forward_lookup_timer = old.forward_lookup_timer;
+  replacement->back_lookup_timer = old.back_lookup_timer;
   replacement->maintenance_clock = old.maintenance_clock;
   *index = *replacement;
   safe_free(replacement);
@@ -1245,8 +1241,8 @@ static unsigned long long *candidates(Compact_feature_index index,
   *count = 0;
   if (index == NULL || query == NULL)
     return NULL;
-  clock_start(forward ? index->forward_lookup_clock :
-              index->back_lookup_clock);
+  compact_query_timer_start(forward ? &index->forward_lookup_timer :
+                            &index->back_lookup_timer);
   index->query_nodes = 0;
   index->query_postings = 0;
   index->query_live = 0;
@@ -1290,8 +1286,8 @@ static unsigned long long *candidates(Compact_feature_index index,
                          0, 0, 0);
   }
   update_peak(index);
-  clock_stop(forward ? index->forward_lookup_clock :
-             index->back_lookup_clock);
+  compact_query_timer_stop(forward ? &index->forward_lookup_timer :
+                           &index->back_lookup_timer);
   return answer;
 }
 
@@ -1355,8 +1351,14 @@ void compact_feature_index_get_stats(Compact_feature_index index,
   stats->maintenance_scratch_peak = index->maintenance_scratch_peak;
   stats->forward_profile = index->forward_profile;
   stats->back_profile = index->back_profile;
-  stats->forward_lookup_seconds = clock_seconds(index->forward_lookup_clock);
-  stats->back_lookup_seconds = clock_seconds(index->back_lookup_clock);
+  stats->forward_lookup_seconds =
+    index->forward_lookup_timer.estimated_seconds;
+  stats->back_lookup_seconds = index->back_lookup_timer.estimated_seconds;
+  stats->forward_timing_eligible = index->forward_lookup_timer.eligible;
+  stats->forward_timing_samples = index->forward_lookup_timer.samples;
+  stats->back_timing_eligible = index->back_lookup_timer.eligible;
+  stats->back_timing_samples = index->back_lookup_timer.samples;
+  stats->timing_sample_rate = COMPACT_TIMING_SAMPLE_RATE;
   stats->maintenance_seconds = clock_seconds(index->maintenance_clock);
   stats->node_bytes = index->node_capacity * sizeof(*index->nodes);
   stats->label_bytes = index->label_capacity * sizeof(*index->labels);
@@ -1380,8 +1382,6 @@ void compact_feature_index_free(Compact_feature_index index)
   if (index == NULL)
     return;
   free_index_arrays(index);
-  free_clock(index->forward_lookup_clock);
-  free_clock(index->back_lookup_clock);
   free_clock(index->maintenance_clock);
   safe_free(index);
 }
