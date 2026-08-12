@@ -65,6 +65,7 @@ struct cbd_path_bucket {
   uint32_t last_record;
   uint32_t last_occurrence;
   uint32_t symbol;
+  uint32_t posting_count;
   cbd_path_mask mask;
 };
 
@@ -1557,6 +1558,9 @@ static void append_symbol_record(Compact_back_demod_index index,
     fatal_error("compact_back_demod: nonmonotone posting occurrence");
   if (occurrence_length == 0)
     fatal_error("compact_back_demod: empty posting occurrence list");
+  if (bucket->posting_count == UINT32_MAX)
+    fatal_error("compact_back_demod: path-bucket population exceeds 32 bits");
+  bucket->posting_count++;
   if (strategy_uses_hot_tree(index->strategy)) {
     struct cbd_tree_root_state *state;
     if ((size_t) symbol >= index->tree_root_capacity)
@@ -3884,15 +3888,25 @@ static BOOL route_materially_better(unsigned long long alternative,
   return alternative < current && alternative <= threshold;
 }
 
-static unsigned long long route_root_population(
+static unsigned long long route_mask_population(
   Compact_back_demod_index index, Term pattern)
 {
   unsigned symbol;
+  uint32_t bucket;
+  cbd_path_mask required;
+  unsigned long long population = 0;
   if (VARIABLE(pattern))
     return index->record_count - 1;
   symbol = (unsigned) SYMNUM(pattern);
-  return (size_t) symbol < index->tree_root_capacity ?
-    index->tree_roots[symbol].physical_groups : 0;
+  if ((size_t) symbol >= index->symbol_capacity)
+    return 0;
+  required = term_path_mask(index, pattern);
+  for (bucket = index->symbol_buckets[symbol]; bucket != CBD_NONE;
+       bucket = index->path_buckets[bucket].next)
+    if ((index->path_buckets[bucket].mask & required) == required)
+      population = saturating_add(
+        population, index->path_buckets[bucket].posting_count);
+  return population;
 }
 
 static unsigned long long route_position_population(
@@ -4199,7 +4213,7 @@ static void collect_pattern(Compact_back_demod_index index, Term pattern,
     }
     available[CBD_ROUTE_TREE] = use_tree_for_pattern(index, pattern);
     available[CBD_ROUTE_POSITION] = position_bucket != CBD_NONE;
-    population[CBD_ROUTE_MASK] = route_root_population(index, pattern);
+    population[CBD_ROUTE_MASK] = route_mask_population(index, pattern);
     population[CBD_ROUTE_TREE] = population[CBD_ROUTE_MASK];
     population[CBD_ROUTE_POSITION] = route_position_population(
       index, position_bucket, selected_positions, position_feature_count);
@@ -5051,6 +5065,272 @@ void compact_back_demod_rebase_term_pool(
         map, index->tree_nodes[i].tokens);
   index->term_pool = pool;
   update_peak(index);
+}
+
+static BOOL adaptive_state_path(char *path, size_t size,
+                                const char *directory)
+{
+  int written;
+  if (directory == NULL)
+    return FALSE;
+  written = snprintf(path, size, "%s/compact_back_adaptive.txt", directory);
+  return written >= 0 && (size_t) written < size;
+}
+
+BOOL compact_back_demod_write_adaptive_state(
+  Compact_back_demod_index index, const char *directory)
+{
+  char path[1024];
+  FILE *fp;
+  size_t i, roots = 0, positions = 0, probation = 0, routes = 0;
+  BOOL ok;
+  if (index == NULL || index->strategy != COMPACT_BACK_DEMOD_ADAPTIVE)
+    return TRUE;
+  if (!adaptive_state_path(path, sizeof(path), directory))
+    return FALSE;
+  fp = fopen(path, "w");
+  if (fp == NULL)
+    return FALSE;
+  for (i = 0; i < index->tree_root_capacity; i++) {
+    struct cbd_tree_root_state *state = &index->tree_roots[i];
+    if (state->fallback_work != 0 || state->next_check_work != 0 ||
+        state->admitted || state->rejected)
+      roots++;
+  }
+  for (i = 1; i < index->position_bucket_count; i++)
+    if (index->position_buckets[i].active)
+      positions++;
+  for (i = 0; i < index->position_probation_capacity; i++)
+    if (index->position_probation[i].occupied)
+      probation++;
+  for (i = 0; i < index->route_profile_capacity; i++)
+    if (index->route_profiles[i].occupied)
+      routes++;
+  fprintf(fp, "P9_COMPACT_BACK_ADAPTIVE 1\n");
+  fprintf(fp, "GENERATION %llu %llu\n",
+          index->position_generation, index->position_budget_high_water);
+  fprintf(fp, "ROOTS %lu\n", (unsigned long) roots);
+  for (i = 0; i < index->tree_root_capacity; i++) {
+    struct cbd_tree_root_state *state = &index->tree_roots[i];
+    if (state->fallback_work != 0 || state->next_check_work != 0 ||
+        state->admitted || state->rejected)
+      fprintf(fp, "R %lu %llu %llu %u %u\n", (unsigned long) i,
+              state->fallback_work, state->next_check_work,
+              (unsigned) state->admitted, (unsigned) state->rejected);
+  }
+  fprintf(fp, "POSITIONS %lu\n", (unsigned long) positions);
+  for (i = 1; i < index->position_bucket_count; i++) {
+    struct cbd_position_bucket *bucket = &index->position_buckets[i];
+    if (bucket->active)
+      fprintf(fp, "P %u %016llx %u\n", bucket->root_symbol,
+              (unsigned long long) bucket->path, bucket->symbol);
+  }
+  fprintf(fp, "PROBATION %lu %lu\n",
+          (unsigned long) index->position_probation_capacity,
+          (unsigned long) probation);
+  for (i = 0; i < index->position_probation_capacity; i++) {
+    struct cbd_position_probation *entry =
+      &index->position_probation[i];
+    if (entry->occupied)
+      fprintf(fp, "B %lu %016llx %llu %u %u %u\n",
+              (unsigned long) i, (unsigned long long) entry->path,
+              entry->work, entry->root_symbol, entry->symbol, entry->hits);
+  }
+  fprintf(fp, "ROUTES %lu %lu\n",
+          (unsigned long) index->route_profile_capacity,
+          (unsigned long) routes);
+  for (i = 0; i < index->route_profile_capacity; i++) {
+    struct cbd_route_profile *entry = &index->route_profiles[i];
+    if (entry->occupied)
+      fprintf(fp,
+              "Q %lu %016llx %u %llu %llu "
+              "%llu %llu %llu %llu %llu %llu "
+              "%llu %llu %llu %u %u %u\n",
+              (unsigned long) i, (unsigned long long) entry->key,
+              (unsigned) entry->preferred, entry->queries,
+              entry->position_generation,
+              entry->cost[CBD_ROUTE_MASK], entry->cost[CBD_ROUTE_TREE],
+              entry->cost[CBD_ROUTE_POSITION],
+              entry->population[CBD_ROUTE_MASK],
+              entry->population[CBD_ROUTE_TREE],
+              entry->population[CBD_ROUTE_POSITION],
+              entry->last_sample[CBD_ROUTE_MASK],
+              entry->last_sample[CBD_ROUTE_TREE],
+              entry->last_sample[CBD_ROUTE_POSITION],
+              entry->samples[CBD_ROUTE_MASK],
+              entry->samples[CBD_ROUTE_TREE],
+              entry->samples[CBD_ROUTE_POSITION]);
+  }
+  fprintf(fp, "END\n");
+  ok = fflush(fp) == 0 && !ferror(fp);
+  if (fclose(fp) != 0)
+    ok = FALSE;
+  return ok;
+}
+
+BOOL compact_back_demod_read_adaptive_state(
+  Compact_back_demod_index index, const char *directory)
+{
+  char path[1024], label[32];
+  FILE *fp;
+  unsigned version;
+  unsigned long roots, positions, probation_capacity, probation_count;
+  unsigned long route_capacity, route_count, at, i;
+  unsigned long long generation, budget_high_water;
+  if (index == NULL || index->strategy != COMPACT_BACK_DEMOD_ADAPTIVE)
+    return TRUE;
+  if (!adaptive_state_path(path, sizeof(path), directory))
+    return FALSE;
+  fp = fopen(path, "r");
+  if (fp == NULL)
+    return TRUE;  /* An older checkpoint starts with safe cold calibration. */
+  if (fscanf(fp, " %31s %u", label, &version) != 2 ||
+      strcmp(label, "P9_COMPACT_BACK_ADAPTIVE") != 0 || version != 1 ||
+      fscanf(fp, " %31s %llu %llu", label, &generation,
+             &budget_high_water) != 3 || strcmp(label, "GENERATION") != 0 ||
+      fscanf(fp, " %31s %lu", label, &roots) != 2 ||
+      strcmp(label, "ROOTS") != 0) {
+    fclose(fp);
+    return FALSE;
+  }
+  for (i = 0; i < roots; i++) {
+    unsigned long symbol;
+    unsigned admitted, rejected;
+    unsigned long long fallback, next_check, physical;
+    if (fscanf(fp, " %31s %lu %llu %llu %u %u", label, &symbol,
+               &fallback, &next_check, &admitted, &rejected) != 6 ||
+        strcmp(label, "R") != 0 || symbol > UINT_MAX ||
+        admitted > 1 || rejected > 1) {
+      fclose(fp);
+      return FALSE;
+    }
+    ensure_symbols(index, (unsigned) symbol);
+    physical = index->tree_roots[symbol].physical_groups;
+    index->tree_roots[symbol].fallback_work = fallback;
+    index->tree_roots[symbol].next_check_work = next_check;
+    index->tree_roots[symbol].admitted = (unsigned char) admitted;
+    index->tree_roots[symbol].rejected = (unsigned char) rejected;
+    index->tree_roots[symbol].physical_groups = physical;
+    if (admitted)
+      (void) process_root_postings(index, (unsigned) symbol, TRUE);
+  }
+  if (fscanf(fp, " %31s %lu", label, &positions) != 2 ||
+      strcmp(label, "POSITIONS") != 0) {
+    fclose(fp);
+    return FALSE;
+  }
+  index->position_budget_high_water = budget_high_water;
+  index->position_rebuilding = TRUE;
+  for (i = 0; i < positions; i++) {
+    unsigned root, symbol;
+    unsigned long long path_value;
+    uint32_t bucket;
+    size_t record;
+    if (fscanf(fp, " %31s %u %llx %u", label, &root,
+               &path_value, &symbol) != 4 || strcmp(label, "P") != 0) {
+      fclose(fp);
+      return FALSE;
+    }
+    bucket = add_position_bucket(index, root, (uint64_t) path_value, symbol);
+    for (record = 1; record < index->record_count; record++)
+      if (index->records[record].active)
+        (void) append_record_position_feature(
+          index, bucket, (uint32_t) record);
+  }
+  index->position_rebuilding = FALSE;
+  if (fscanf(fp, " %31s %lu %lu", label, &probation_capacity,
+             &probation_count) != 3 || strcmp(label, "PROBATION") != 0 ||
+      probation_capacity > 1048576 ||
+      (probation_capacity != 0 &&
+       (probation_capacity & (probation_capacity - 1)) != 0) ||
+      probation_count > probation_capacity) {
+    fclose(fp);
+    return FALSE;
+  }
+  safe_free(index->position_probation);
+  index->position_probation = probation_capacity == 0 ? NULL :
+    safe_calloc(probation_capacity, sizeof(*index->position_probation));
+  index->position_probation_capacity = probation_capacity;
+  for (i = 0; i < probation_count; i++) {
+    unsigned root, symbol, hits;
+    unsigned long long path_value, work;
+    struct cbd_position_probation *entry;
+    if (fscanf(fp, " %31s %lu %llx %llu %u %u %u", label, &at,
+               &path_value, &work, &root, &symbol, &hits) != 7 ||
+        strcmp(label, "B") != 0 || at >= probation_capacity ||
+        index->position_probation[at].occupied) {
+      fclose(fp);
+      return FALSE;
+    }
+    entry = &index->position_probation[at];
+    entry->occupied = TRUE;
+    entry->path = (uint64_t) path_value;
+    entry->work = work;
+    entry->root_symbol = root;
+    entry->symbol = symbol;
+    entry->hits = hits;
+  }
+  if (fscanf(fp, " %31s %lu %lu", label, &route_capacity,
+             &route_count) != 3 || strcmp(label, "ROUTES") != 0 ||
+      route_capacity != index->route_profile_capacity ||
+      route_count > route_capacity) {
+    fclose(fp);
+    return FALSE;
+  }
+  memset(index->route_profiles, 0,
+         index->route_profile_capacity * sizeof(*index->route_profiles));
+  index->route_profile_occupied = 0;
+  for (i = 0; i < route_count; i++) {
+    unsigned preferred, sample_mask, sample_tree, sample_position;
+    unsigned long long key, queries, position_generation;
+    unsigned long long cost_mask, cost_tree, cost_position;
+    unsigned long long population_mask, population_tree, population_position;
+    unsigned long long last_mask, last_tree, last_position;
+    struct cbd_route_profile *entry;
+    if (fscanf(fp,
+               " %31s %lu %llx %u %llu %llu "
+               "%llu %llu %llu %llu %llu %llu "
+               "%llu %llu %llu %u %u %u",
+               label, &at, &key, &preferred, &queries,
+               &position_generation,
+               &cost_mask, &cost_tree, &cost_position,
+               &population_mask, &population_tree, &population_position,
+               &last_mask, &last_tree, &last_position,
+               &sample_mask, &sample_tree, &sample_position) != 18 ||
+        strcmp(label, "Q") != 0 || at >= route_capacity ||
+        preferred >= CBD_ROUTE_COUNT || index->route_profiles[at].occupied) {
+      fclose(fp);
+      return FALSE;
+    }
+    entry = &index->route_profiles[at];
+    entry->occupied = TRUE;
+    entry->key = (uint64_t) key;
+    entry->preferred = (unsigned char) preferred;
+    entry->queries = queries;
+    entry->position_generation = position_generation;
+    entry->cost[CBD_ROUTE_MASK] = cost_mask;
+    entry->cost[CBD_ROUTE_TREE] = cost_tree;
+    entry->cost[CBD_ROUTE_POSITION] = cost_position;
+    entry->population[CBD_ROUTE_MASK] = population_mask;
+    entry->population[CBD_ROUTE_TREE] = population_tree;
+    entry->population[CBD_ROUTE_POSITION] = population_position;
+    entry->last_sample[CBD_ROUTE_MASK] = last_mask;
+    entry->last_sample[CBD_ROUTE_TREE] = last_tree;
+    entry->last_sample[CBD_ROUTE_POSITION] = last_position;
+    entry->samples[CBD_ROUTE_MASK] = sample_mask;
+    entry->samples[CBD_ROUTE_TREE] = sample_tree;
+    entry->samples[CBD_ROUTE_POSITION] = sample_position;
+    index->route_profile_occupied++;
+  }
+  if (fscanf(fp, " %31s", label) != 1 || strcmp(label, "END") != 0) {
+    fclose(fp);
+    return FALSE;
+  }
+  if (fclose(fp) != 0)
+    return FALSE;
+  index->position_generation = generation;
+  update_peak(index);
+  return TRUE;
 }
 
 void compact_back_demod_get_stats(Compact_back_demod_index index,

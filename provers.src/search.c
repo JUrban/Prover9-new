@@ -14014,6 +14014,8 @@ void write_checkpoint(void)
         }
       }
     }
+    if (!write_compact_back_demod_adaptive_state(tmpdir))
+      fatal_error("write_checkpoint: cannot write compact back adaptive state");
 
     /* 3d. Write justifications for proof reconstruction on resume */
     write_justifications(tmpdir);
@@ -15715,6 +15717,8 @@ void load_checkpoint_into_loop(void)
         }
       }
     }
+    if (!restore_compact_back_demod_adaptive_state(Resume_dir))
+      fatal_error("resume: invalid compact back adaptive state");
     safe_free(is_usable);
     safe_free(all_clauses);
 

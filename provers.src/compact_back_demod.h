@@ -222,6 +222,14 @@ void compact_back_demod_note_exact_query(
   Compact_back_demod_index index, size_t tests, size_t successes,
   size_t materializations);
 
+/* Save/restore only bounded adaptive performance state.  Clause-derived
+   postings remain part of the normal checkpoint rebuild recipe. */
+BOOL compact_back_demod_write_adaptive_state(
+  Compact_back_demod_index index, const char *directory);
+
+BOOL compact_back_demod_read_adaptive_state(
+  Compact_back_demod_index index, const char *directory);
+
 void compact_back_demod_get_stats(Compact_back_demod_index index,
                                   struct compact_back_demod_stats *stats);
 

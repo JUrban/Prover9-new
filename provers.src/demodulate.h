@@ -68,6 +68,10 @@ void compact_back_demod_retain_term_clauses(Compact_term_rebase_map map);
 void compact_back_demod_rebase_shared_term_pool(
   Compact_term_pool pool, Compact_term_rebase_map map);
 
+BOOL write_compact_back_demod_adaptive_state(const char *directory);
+
+BOOL restore_compact_back_demod_adaptive_state(const char *directory);
+
 typedef Topform (*Compact_back_demod_resolver)(unsigned long long id,
                                                void *context);
 typedef void (*Compact_back_demod_releaser)(Topform clause, void *context);

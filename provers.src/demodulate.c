@@ -173,6 +173,20 @@ void compact_back_demod_rebase_shared_term_pool(
   Compact_back_demod_terms = pool;
 }
 
+BOOL write_compact_back_demod_adaptive_state(const char *directory)
+{
+  return Compact_back_demod_idx == NULL ||
+    compact_back_demod_write_adaptive_state(
+      Compact_back_demod_idx, directory);
+}
+
+BOOL restore_compact_back_demod_adaptive_state(const char *directory)
+{
+  return Compact_back_demod_idx == NULL ||
+    compact_back_demod_read_adaptive_state(
+      Compact_back_demod_idx, directory);
+}
+
 /*************
  *
  *   init_demodulator_index()

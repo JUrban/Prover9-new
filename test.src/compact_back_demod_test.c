@@ -1,6 +1,8 @@
 #include "../provers.src/compact_back_demod.h"
 
 #include <stdint.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 static int Failures;
 
@@ -546,12 +548,16 @@ int main(void)
   {
     enum { ROUTE_FAMILY = 128, ROUTE_TARGET = 73 };
     Compact_back_demod_index adaptive;
+    Compact_back_demod_index restored;
     struct compact_back_demod_stats selective_stats, broad_stats,
       renamed_stats, growth_stats, stable_growth_stats, compacted_stats;
     Topform clauses[ROUTE_FAMILY], growth[ROUTE_FAMILY];
     Topform selective, broad, renamed;
     char text[128];
     unsigned long long tree_before_broad;
+    unsigned long long *current_ids, *restored_ids;
+    size_t current_count, restored_count;
+    char state_dir[128], state_path[180];
     int j;
     compact_back_demod_set_tree_budget_kb(65536);
     compact_back_demod_set_tree_admit_work(1);
@@ -663,6 +669,46 @@ int main(void)
           compacted_stats.route_tree_choices ==
             stable_growth_stats.route_tree_choices,
           "compaction preserves bounded route calibration without retraining");
+
+    (void) snprintf(state_dir, sizeof(state_dir),
+                    "/tmp/p9-compact-back-state-%ld", (long) getpid());
+    (void) snprintf(state_path, sizeof(state_path),
+                    "%s/compact_back_adaptive.txt", state_dir);
+    CHECK(mkdir(state_dir, 0700) == 0,
+          "create adaptive-state test directory");
+    CHECK(compact_back_demod_write_adaptive_state(adaptive, state_dir),
+          "write bounded adaptive checkpoint sidecar");
+    restored = compact_back_demod_init();
+    for (j = ROUTE_FAMILY / 4; j < ROUTE_FAMILY; j++)
+      CHECK(compact_back_demod_add(restored, clauses[j]),
+            "rebuild live checkpoint route clause");
+    for (j = 0; j < ROUTE_FAMILY; j++)
+      CHECK(compact_back_demod_add(restored, growth[j]),
+            "rebuild live checkpoint growth clause");
+    CHECK(compact_back_demod_read_adaptive_state(restored, state_dir),
+          "restore bounded adaptive checkpoint sidecar");
+    current_ids = compact_back_demod_candidate_ids(
+      adaptive, broad, ORIENTED, &current_count);
+    restored_ids = compact_back_demod_candidate_ids(
+      restored, broad, ORIENTED, &restored_count);
+    CHECK(current_count == restored_count &&
+          memcmp(current_ids, restored_ids,
+                 current_count * sizeof(*current_ids)) == 0,
+          "checkpoint restore preserves adaptive candidates and order");
+    safe_free(current_ids);
+    safe_free(restored_ids);
+    compact_back_demod_get_stats(restored, &growth_stats);
+    CHECK(growth_stats.route_profile_occupied ==
+            compacted_stats.route_profile_occupied &&
+          growth_stats.route_profile_bytes ==
+            compacted_stats.route_profile_bytes &&
+          growth_stats.route_mask_choices == 1 &&
+          growth_stats.route_tree_choices == 0 &&
+          growth_stats.tree_nodes > 0,
+          "checkpoint restore resumes the calibrated route without retraining");
+    compact_back_demod_free(restored);
+    CHECK(remove(state_path) == 0 && rmdir(state_dir) == 0,
+          "remove adaptive-state test artifacts");
 
     compact_back_demod_free(adaptive);
     delete_clause(selective);
