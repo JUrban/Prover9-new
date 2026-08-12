@@ -563,7 +563,7 @@ int main(void)
     compact_back_demod_set_tree_budget_kb(65536);
     compact_back_demod_set_tree_admit_work(1);
     compact_back_demod_set_tree_build_factor(1);
-    compact_back_demod_set_position_options(1, 4, 1, 65536, 20, TRUE);
+    compact_back_demod_set_position_options(4096, 4, 8, 65536, 20, FALSE);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_ADAPTIVE);
     adaptive = compact_back_demod_init();
     for (j = 0; j < ROUTE_FAMILY; j++) {
@@ -585,16 +585,12 @@ int main(void)
     }
     compact_back_demod_get_stats(adaptive, &selective_stats);
     CHECK(selective_stats.tree_root_admissions == 1 &&
-          selective_stats.position_admissions >= 1 &&
-          selective_stats.route_position_choices >= 1 &&
-          selective_stats.route_position_probes >= 1 &&
           selective_stats.route_tree_choices >= 1 &&
-          selective_stats.route_tree_probes >= 1 &&
           selective_stats.route_tree_observed_cost <
             selective_stats.route_mask_observed_cost &&
           selective_stats.route_profile_capacity == 4096 &&
           selective_stats.route_profile_bytes <= 512 * 1024,
-          "selective shape calibrates all complete bounded routes");
+          "selective shape promotes a bounded tree route");
 
     broad = indexed_clause("route(x,y) = a.");
     tree_before_broad = selective_stats.route_tree_choices;

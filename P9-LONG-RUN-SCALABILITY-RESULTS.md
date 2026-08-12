@@ -1015,11 +1015,11 @@ bounded performance cache rather than an index authority:
   costs one bounded pass over that root's structural buckets rather than a
   clause scan.  At the completed-chat scale this is thousands of small bucket
   counters, not millions of passive clauses.
-- An admitted position joins the same calibrated mask/tree competition only
-  when its exact current posting/bitmap estimate is at least four times better
-  than the current mask population.  Marginal positions remain indexed but do
-  not force a bad route, and an eligible position cannot hide a still-cheaper
-  trained tree.
+- An admitted position bypasses mask/tree only when its exact current
+  posting/bitmap estimate is at least four times better than the current mask
+  population, the same gain required for admission.  This is recomputed on
+  every query, so a position which grows too broad automatically returns to
+  the calibrated mask/tree path.
 - Mask, tree, and position remain complete candidate generators.  Results are
   exact-tested, deduplicated, and sorted into the established decreasing-ID
   order, so eviction or a different preference can change performance but not
@@ -1060,6 +1060,17 @@ same-work timing spread and the 2.6% candidate/control difference mean the
 bounded result is inside the planned 5% regression gate, not evidence of a CPU
 win.  Peak process RSS is unchanged at this scale; the final route table is
 416 KiB (the recorded development run used the preceding 480 KiB layout).
+
+Two subsequent attempts to make an eligible position compete more aggressively
+with a trained tree failed the same paired gate.  A three-route profile
+completed the exact 1,000-given trajectory but took 124.44 user seconds versus
+a fresh 113.44-second mask control (1.097 times).  It made only 129 position
+choices rather than the accepted policy's 386, while groups rose from 6.30 to
+6.91 million.  A lower-overhead tree-lower-bound guard still cut position
+choices from 49 to 10 at 300 givens and raised combined mask/tree work.  Both
+implementations were removed.  These results are evidence that position
+queries also fund further complementary-position discovery; delaying them has
+an indirect construction cost which a local route estimate missed.
 
 The completed `bob/chat_test.new.out4` now supplies the mature mask endpoint.
 It proves after 11,369 givens with 1,529,207 active back-demod records,

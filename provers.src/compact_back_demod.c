@@ -4207,14 +4207,14 @@ static void collect_pattern(Compact_back_demod_index index, Term pattern,
     population[CBD_ROUTE_TREE] = population[CBD_ROUTE_MASK];
     population[CBD_ROUTE_POSITION] = route_position_population(
       index, position_bucket, selected_positions, position_feature_count);
-    available[CBD_ROUTE_POSITION] = position_bucket != CBD_NONE &&
-      population[CBD_ROUTE_MASK] >= 4 &&
-      population[CBD_ROUTE_POSITION] <= population[CBD_ROUTE_MASK] / 4;
 
-    /* A cold root has no tree alternative or route profile yet.  An admitted
-       position still has to clear the same fourfold current-population gate
-       used at construction; otherwise retain the complete mask baseline. */
-    if (available[CBD_ROUTE_POSITION] && !available[CBD_ROUTE_TREE]) {
+    /* An admitted position has exact current posting metadata.  Use it only
+       for the same fourfold gain required at construction; marginal features
+       remain available but cannot displace a safer mask/tree route. */
+    if (position_bucket != CBD_NONE &&
+        population[CBD_ROUTE_MASK] >= 4 &&
+        population[CBD_ROUTE_POSITION] <=
+          population[CBD_ROUTE_MASK] / 4) {
       work_before = route_work_snapshot(index);
       if (selected_positions > 1 && use_dense_position_intersection(
             index, position_bucket, position_feature_count))
@@ -4269,21 +4269,7 @@ static void collect_pattern(Compact_back_demod_index index, Term pattern,
     route = choose_adaptive_route(
       index, profile, available, population, &probe);
     work_before = route_work_snapshot(index);
-    if (route == CBD_ROUTE_POSITION) {
-      if (selected_positions > 1 && use_dense_position_intersection(
-            index, position_bucket, position_feature_count))
-        collect_position_bitmap_intersection(
-          index, position_bucket, position_feature_count, pattern,
-          exclude_id, count);
-      else if (selected_positions > 1)
-        collect_position_intersection(
-          index, position_bucket, position_feature_count, pattern,
-          exclude_id, count);
-      else
-        collect_position_bucket(index, position_bucket, pattern,
-                                exclude_id, count);
-    }
-    else if (route == CBD_ROUTE_TREE)
+    if (route == CBD_ROUTE_TREE)
       collect_tree(index, pattern, exclude_id, count);
     else
       collect_symbol(index, pattern, exclude_id, count);

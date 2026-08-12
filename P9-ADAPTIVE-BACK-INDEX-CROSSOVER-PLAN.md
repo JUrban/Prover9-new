@@ -91,13 +91,13 @@ existing tree-admission evidence.  After admission, each new structural/scale
 class obtains a mask baseline and at most one initial tree probe.
 
 Admitted rigid-position postings are alternatives, not unconditional winners.
-The current policy makes a position available to the same profile only when
-its exact current work estimate is at least four times smaller than the
+The current policy deliberately bypasses the mask/tree profile only when a
+position's exact current work estimate is at least four times smaller than the
 compatible mask population, the same minimum gain required for position
-construction.  Mask, tree, and position then calibrate and compete by observed
-logical work.  A marginal position remains indexed but cannot displace
-mask/tree routing.  Expensive complete routes still contribute evidence for
-admitting a missing selective position.
+construction.  This gate is reevaluated on every query as postings grow.  A
+marginal position remains indexed but cannot displace mask/tree routing.
+Expensive complete routes still contribute evidence for admitting a missing
+selective position.
 
 Compaction copies the bounded route table and counters.  Its samples use
 logical decoded work rather than addresses or allocation capacities, so no
@@ -199,3 +199,13 @@ back lookup.  It saved 73.8% peak RSS against old P9 but used 1.87 times its
 user CPU.  No adaptive run yet reaches its 1.53-million-active back index.
 Consequently the branch is ready for a bounded/mature host comparison, not for
 promotion as the default strategy.
+
+Two post-implementation position generalizations were measured and rejected.
+Putting position into every structural profile reduced position choices from
+386 to 129 at 1,000 givens and took 124.44 user seconds against a fresh 113.44
+mask control (1.097 times, outside the 1.05 gate).  A cheaper tree-lower-bound
+guard still reduced position discovery from 49 to 10 choices at 300 givens
+and increased counted tree/mask work.  The branch therefore retains the
+per-query fourfold position gate which produced the accepted bounded result;
+the failed variants remain reviewable in history rather than being presented
+as improvements.
