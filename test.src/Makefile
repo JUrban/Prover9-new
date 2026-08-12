@@ -178,6 +178,10 @@ comma-num-test: comma_num_test
 
 compact-long-run-report-test: comma-num-test
 	python3 compact_long_run_report_test.py
+	sh -n cgroup_job_memory.sh
+	@probe=$$(mktemp /tmp/prover9-cgroup-probe.XXXXXX); \
+	status=0; ./cgroup_job_memory.sh $$probe /bin/true >/dev/null 2>&1 || status=$$?; \
+	/bin/rm -f $$probe; test $$status -eq 0 -o $$status -eq 77
 
 ancestor-store-scale: ancestor_store_scale_test
 	./ancestor_store_scale_test

@@ -166,6 +166,12 @@ archive supplied by `CHAT_REFERENCE_OUTPUT`/
 `P9_MATRIX_REFERENCE_OUTPUT`.  CPU, RAM, and slope thresholds are explicit
 reporter options and matrix environment variables, so a compact-versus-compact
 CPU crossover does not incorrectly inherit the 80% old-P9 RAM target.
+`cgroup_job_memory.sh` supplies the missing total-job measurement: when the
+matrix is run with `*_CGROUP_ACCOUNTING=1` inside a delegated cgroup-v2 scope,
+each prover gets a fresh child and its `memory.peak`, end-of-job anonymous/file
+breakdown, and swap peak are retained.  The report prefers that peak over GNU
+time RSS.  Unsupported or non-delegated hosts exit 77 instead of silently
+claiming that process RSS includes file cache.
 
 ## 5. Phase D: passive control plane for tens of millions of live clauses
 

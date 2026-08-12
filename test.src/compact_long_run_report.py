@@ -204,6 +204,19 @@ def inferred_time_sidecar(path):
     return None
 
 
+def inferred_cgroup_sidecar(path):
+    if path == "-":
+        return None
+    base = path[:-3] if path.endswith(".gz") else path
+    if base.endswith(".out"):
+        base = base[:-4]
+    candidates = (base + ".cgroup", path + ".cgroup")
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
 def parse_gnu_time(path):
     result = {"external_time_file": path}
     with open(path, "r", encoding="utf-8", errors="replace") as stream:
@@ -218,11 +231,25 @@ def parse_gnu_time(path):
     return result
 
 
+def parse_cgroup_report(path):
+    result = {"cgroup_report_file": path}
+    with open(path, "r", encoding="utf-8", errors="replace") as stream:
+        for line in stream:
+            if "=" not in line:
+                continue
+            key, value = line.rstrip("\n").split("=", 1)
+            result["cgroup_" + key] = scalar(value)
+    return result
+
+
 def parse_run(path):
     samples = parse_file(path)
     sidecar = inferred_time_sidecar(path)
     if samples and sidecar is not None:
         samples[-1].update(parse_gnu_time(sidecar))
+    sidecar = inferred_cgroup_sidecar(path)
+    if samples and sidecar is not None:
+        samples[-1].update(parse_cgroup_report(sidecar))
     return samples
 
 
@@ -357,8 +384,13 @@ def run_summary(label, rows):
         signals.append("back-demod counted work/query grew by more than 25%")
     if len(given_rates) >= 2 and given_rates[0] > 0 and given_rates[-1] < given_rates[0] * 0.75:
         signals.append("given/user-CPU rate fell by more than 25%")
-    peak_rss_kb = number(last, "external_peak_rss_kb", None)
-    peak_rss_source = "GNU time sidecar" if peak_rss_kb is not None else None
+    peak_rss_kb = safe_ratio(
+        number(last, "cgroup_memory_peak_bytes", None), 1024)
+    peak_rss_source = "cgroup v2 total-job peak" if peak_rss_kb is not None else None
+    if peak_rss_kb is None:
+        peak_rss_kb = number(last, "external_peak_rss_kb", None)
+        if peak_rss_kb is not None:
+            peak_rss_source = "GNU time sidecar"
     if peak_rss_kb is None:
         peak_rss_kb = number(last, "allocator_rss_peak_kb", None)
         if peak_rss_kb is not None:
@@ -397,6 +429,11 @@ def run_summary(label, rows):
         "peak_rss_mib": safe_ratio(peak_rss_kb, 1024),
         "peak_rss_source": peak_rss_source,
         "reported_megabytes": last.get("reported_megabytes"),
+        "cgroup_memory_peak_bytes": last.get("cgroup_memory_peak_bytes"),
+        "cgroup_memory_current_bytes": last.get("cgroup_memory_current_bytes"),
+        "cgroup_anon_current_bytes": last.get("cgroup_anon_current_bytes"),
+        "cgroup_file_current_bytes": last.get("cgroup_file_current_bytes"),
+        "cgroup_swap_peak_bytes": last.get("cgroup_swap_peak_bytes"),
         "statistics_format_buffers": formatting_buffers or None,
         "last_passive_records": last.get("passive_records"),
         "last_passive_directory_bytes": last.get("passive_directory_logical"),
@@ -532,7 +569,7 @@ def markdown_summary(summary):
               fmt(summary.get("last_generated")), fmt(summary.get("last_kept")),
               fmt(summary.get("last_pss_mib"), 1),
               fmt(summary.get("last_back_mib"), 1)))
-    print("Peak RSS={} MiB ({}).".format(
+    print("Peak memory={} MiB ({}).".format(
         fmt(summary.get("peak_rss_mib"), 1),
         fmt(summary.get("peak_rss_source"))))
     print("First-to-last interval ratios: counted back work/query={}, "
@@ -598,6 +635,9 @@ TSV_COLUMNS = (
     "selector_io_mib_per_cpu", "statistics_format_comma_num_buffers",
     "allocator_rss_current_kb", "allocator_rss_peak_kb",
     "external_peak_rss_kb", "external_user_cpu",
+    "cgroup_memory_peak_bytes", "cgroup_memory_current_bytes",
+    "cgroup_anon_current_bytes", "cgroup_file_current_bytes",
+    "cgroup_shmem_current_bytes", "cgroup_swap_peak_bytes",
     "clock_infer", "clock_preprocess",
     "clock_demod", "clock_back_demod",
 )

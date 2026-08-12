@@ -157,6 +157,22 @@ User_CPU=2.0, System_CPU=0.0, Wall_clock=2.
             self.assertEqual(summary["peak_rss_kb"], 54321)
             self.assertEqual(summary["peak_rss_source"], "GNU time sidecar")
 
+            cgroup_path = os.path.join(directory, "candidate.cgroup")
+            with open(cgroup_path, "w") as stream:
+                stream.write("format=1\n")
+                stream.write("memory_peak_bytes=104857600\n")
+                stream.write("memory_current_bytes=52428800\n")
+                stream.write("anon_current_bytes=10485760\n")
+                stream.write("file_current_bytes=41943040\n")
+                stream.write("swap_peak_bytes=0\n")
+                stream.write("command_status=0\n")
+            rows = REPORT.derive_intervals(REPORT.parse_run(output_path))
+            summary = REPORT.run_summary("candidate", rows)
+            self.assertEqual(summary["peak_rss_mib"], 100.0)
+            self.assertEqual(summary["peak_rss_source"],
+                             "cgroup v2 total-job peak")
+            self.assertEqual(summary["cgroup_file_current_bytes"], 41943040)
+
     def test_matched_threshold_audit(self):
         reference = {
             "label": "old", "last_given": 100, "last_generated": 1000,

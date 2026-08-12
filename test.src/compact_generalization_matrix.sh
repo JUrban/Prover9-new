@@ -29,6 +29,7 @@ reference_output=${P9_MATRIX_REFERENCE_OUTPUT:-}
 compare_max_cpu_ratio=${P9_MATRIX_COMPARE_MAX_CPU_RATIO:-1.25}
 compare_min_ram_saving_pct=${P9_MATRIX_COMPARE_MIN_RAM_SAVING_PCT:-80}
 compare_max_back_slope_ratio=${P9_MATRIX_COMPARE_MAX_BACK_SLOPE_RATIO:-1.25}
+cgroup_accounting=${P9_MATRIX_CGROUP_ACCOUNTING:-0}
 
 if test -z "$output_dir"; then
   echo "usage: $0 OUTPUT_DIR" >&2
@@ -50,6 +51,18 @@ esac
 
 "$repo_dir/test.src/validate_compact_generalization_manifest.sh" "$manifest"
 mkdir -p "$output_dir/inputs" "$output_dir/tmp"
+case "$cgroup_accounting" in
+  0) ;;
+  1)
+    if ! "$repo_dir/test.src/cgroup_job_memory.sh" \
+         "$output_dir/tmp/cgroup-probe.cgroup" /bin/true; then
+      echo "P9_MATRIX_CGROUP_ACCOUNTING requested but unavailable" >&2
+      exit 77
+    fi
+    rm -f "$output_dir/tmp/cgroup-probe.cgroup"
+    ;;
+  *) echo "P9_MATRIX_CGROUP_ACCOUNTING must be 0 or 1" >&2; exit 2 ;;
+esac
 
 case " $variants " in
   *" old_p9 "*)
@@ -342,14 +355,28 @@ run_one()
   esac
   sha256sum "$input" "$prover" > "$output_dir/$run_id.sha256"
   status=0
-  if TMPDIR="$output_dir/tmp" P9_COMPACT_HEAP=1 \
-       /usr/bin/time -v -o "$output_dir/$run_id.time" \
-       timeout --signal=TERM --kill-after=10 "$wall_seconds" \
-       taskset -c "$cpu" "$prover" < "$input" \
-       > "$output_dir/$run_id.out" 2> "$output_dir/$run_id.err"; then
-    status=0
+  if test "$cgroup_accounting" = 1; then
+    if TMPDIR="$output_dir/tmp" P9_COMPACT_HEAP=1 \
+         "$repo_dir/test.src/cgroup_job_memory.sh" \
+         "$output_dir/$run_id.cgroup" \
+         /usr/bin/time -v -o "$output_dir/$run_id.time" \
+         timeout --signal=TERM --kill-after=10 "$wall_seconds" \
+         taskset -c "$cpu" "$prover" < "$input" \
+         > "$output_dir/$run_id.out" 2> "$output_dir/$run_id.err"; then
+      status=0
+    else
+      status=$?
+    fi
   else
-    status=$?
+    if TMPDIR="$output_dir/tmp" P9_COMPACT_HEAP=1 \
+         /usr/bin/time -v -o "$output_dir/$run_id.time" \
+         timeout --signal=TERM --kill-after=10 "$wall_seconds" \
+         taskset -c "$cpu" "$prover" < "$input" \
+         > "$output_dir/$run_id.out" 2> "$output_dir/$run_id.err"; then
+      status=0
+    else
+      status=$?
+    fi
   fi
   printf '%s\n' "$status" > "$output_dir/$run_id.status"
   if grep -q 'THEOREM PROVED' "$output_dir/$run_id.out"; then
@@ -390,6 +417,7 @@ done
   echo "compare_max_cpu_ratio=$compare_max_cpu_ratio"
   echo "compare_min_ram_saving_pct=$compare_min_ram_saving_pct"
   echo "compare_max_back_slope_ratio=$compare_max_back_slope_ratio"
+  echo "cgroup_accounting=$cgroup_accounting"
   uname -a
 } > "$output_dir/run.conf"
 
@@ -400,7 +428,7 @@ for case_id in $case_ids; do
 done
 
 summary=$output_dir/summary.tsv
-printf 'case\tvariant\tstatus\tproved\tgiven\tuser_cpu\twall\tmax_rss_kb\n' > "$summary"
+printf 'case\tvariant\tstatus\tproved\tgiven\tuser_cpu\twall\tmax_rss_kb\tcgroup_peak_kb\tcgroup_file_end_kb\n' > "$summary"
 for case_id in $case_ids; do
   for variant in $variants; do
     run_id=$case_id.$variant
@@ -412,9 +440,18 @@ for case_id in $case_ids; do
     user_cpu=$(sed -n 's/^[[:space:]]*User time (seconds):[[:space:]]*//p' "$time_file")
     wall=$(sed -n 's/^[[:space:]]*Elapsed (wall clock) time (h:mm:ss or m:ss):[[:space:]]*//p' "$time_file")
     max_rss=$(sed -n 's/^[[:space:]]*Maximum resident set size (kbytes):[[:space:]]*//p' "$time_file")
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    cgroup_file="$output_dir/$run_id.cgroup"
+    if test -f "$cgroup_file"; then
+      cgroup_peak=$(awk -F= '$1 == "memory_peak_bytes" {printf "%.0f", $2 / 1024}' "$cgroup_file")
+      cgroup_file_end=$(awk -F= '$1 == "file_current_bytes" {printf "%.0f", $2 / 1024}' "$cgroup_file")
+    else
+      cgroup_peak=NA
+      cgroup_file_end=NA
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$case_id" "$variant" "$status" "$proved" "${given:-NA}" \
-      "${user_cpu:-NA}" "${wall:-NA}" "${max_rss:-NA}" >> "$summary"
+      "${user_cpu:-NA}" "${wall:-NA}" "${max_rss:-NA}" \
+      "${cgroup_peak:-NA}" "${cgroup_file_end:-NA}" >> "$summary"
   done
 done
 

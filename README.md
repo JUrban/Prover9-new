@@ -121,8 +121,11 @@ periodic evidence, and back-index slope.  Matrix runs discover their adjacent
 GNU `time` sidecars automatically and include this audit when more than one
 case is selected.  Set `CHAT_REFERENCE_OUTPUT` to reuse an archived baseline
 without rerunning its prover; comparison thresholds have corresponding
-`CHAT_COMPARE_*` variables.  See `P9-LONG-RUN-SCALABILITY-RESULTS.md` for exact
-mature-run commands, measurement caveats, and acceptance criteria.
+`CHAT_COMPARE_*` variables.  `CHAT_CGROUP_ACCOUNTING=1` measures whole-job
+cgroup-v2 peak memory, including charged file cache, and refuses with exit 77
+when the current scope is not delegated.  See
+`P9-LONG-RUN-SCALABILITY-RESULTS.md` for exact mature-run commands,
+measurement caveats, and acceptance criteria.
 
 ---
 

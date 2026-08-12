@@ -59,6 +59,7 @@ threshold because both sides are compact implementations:
 CHAT_CASES=new_otter_compact_file_runs \
 CHAT_REFERENCE_OUTPUT=/project/bob/chat_test.new.out41 \
 CHAT_COMPARE_MIN_RAM_SAVING_PCT=0 \
+CHAT_CGROUP_ACCOUNTING=1 \
 CHAT_REPORT_SECONDS=300 CHAT_CPU=0 \
 ./test.src/chat_test_matrix.sh /project/bob/chat_test.in \
     chat-current-8800 8799 43200 22000 43800
@@ -78,6 +79,7 @@ default 80% threshold:
 ```sh
 CHAT_CASES=new_otter_compact_file_runs \
 CHAT_REFERENCE_OUTPUT=/project/bob/chat_test.new.out1.gz \
+CHAT_CGROUP_ACCOUNTING=1 \
 CHAT_REPORT_SECONDS=300 CHAT_CPU=0 \
 ./test.src/chat_test_matrix.sh /project/bob/chat_test.in \
     chat-current-full -1 43200 22000 43800
@@ -85,8 +87,25 @@ CHAT_REPORT_SECONDS=300 CHAT_CPU=0 \
 
 Both commands create `long-run-slopes.tsv`, `long-run-summary.md`, the exact
 generated input, binary/input/reference hashes, GNU-time data, and the raw
-output.  They should run on the larger host, not the constrained development
-machine.
+output.  With cgroup accounting they also create `CASE.cgroup`; the summary
+adds total cgroup peak and end-of-job file-cache columns, and the comparison
+uses total-job peak in preference to process RSS.  The runner requires a
+writable delegated cgroup-v2 scope.  If the controller is unavailable it exits
+77 before starting Prover9; arrange delegation rather than deleting the flag
+when making the final 80% claim.  The constrained development container has no
+`/sys/fs/cgroup` mount, so only this refusal path and synthetic report parsing
+were validated locally.  The theorem runs themselves belong on the larger
+host.
+
+The standalone wrapper has the form:
+
+```sh
+./test.src/cgroup_job_memory.sh run.cgroup COMMAND ARG...
+```
+
+Its peak includes anonymous memory and filesystem cache charged to the fresh
+job cgroup.  The end-of-job `file_current_bytes` is a breakdown, not a second
+quantity to add to `memory_peak_bytes`.
 
 During implementation, the reporting audit found that `comma_num()` retained
 only 16 rotating results while one statistics `fprintf` used 24.  Later calls

@@ -22,6 +22,7 @@ reference_output=${CHAT_REFERENCE_OUTPUT:-}
 compare_max_cpu_ratio=${CHAT_COMPARE_MAX_CPU_RATIO:-1.25}
 compare_min_ram_saving_pct=${CHAT_COMPARE_MIN_RAM_SAVING_PCT:-80}
 compare_max_back_slope_ratio=${CHAT_COMPARE_MAX_BACK_SLOPE_RATIO:-1.25}
+cgroup_accounting=${CHAT_CGROUP_ACCOUNTING:-0}
 
 if test ! -f "$input"; then
   echo "input not found: $input" >&2
@@ -47,6 +48,18 @@ if test -n "$reference_output" && test ! -f "$reference_output"; then
 fi
 
 mkdir -p "$output_dir/tmp"
+case "$cgroup_accounting" in
+  0) ;;
+  1)
+    if ! "$repo_dir/test.src/cgroup_job_memory.sh" \
+         "$output_dir/tmp/cgroup-probe.cgroup" /bin/true; then
+      echo "CHAT_CGROUP_ACCOUNTING requested but unavailable" >&2
+      exit 77
+    fi
+    rm -f "$output_dir/tmp/cgroup-probe.cgroup"
+    ;;
+  *) echo "CHAT_CGROUP_ACCOUNTING must be 0 or 1" >&2; exit 2 ;;
+esac
 {
   sha256sum "$input" "$new_prover"
   if test "$need_old_prover" = yes; then
@@ -72,6 +85,7 @@ mkdir -p "$output_dir/tmp"
   echo "compare_max_cpu_ratio=$compare_max_cpu_ratio"
   echo "compare_min_ram_saving_pct=$compare_min_ram_saving_pct"
   echo "compare_max_back_slope_ratio=$compare_max_back_slope_ratio"
+  echo "cgroup_accounting=$cgroup_accounting"
   echo "new_prover=$new_prover"
   echo "old_prover=$old_prover"
 } > "$output_dir/limits.txt"
@@ -289,13 +303,26 @@ run_case()
     *) return ;;
   esac
   status=0
-  if TMPDIR="$output_dir/tmp" /usr/bin/time -v -o "$output_dir/$name.time" \
-       timeout --signal=TERM --kill-after=10 "$wall_seconds" \
-       taskset -c "$cpu" "$prover" < "$output_dir/$name.in" \
-       > "$output_dir/$name.out" 2> "$output_dir/$name.err"; then
-    status=0
+  if test "$cgroup_accounting" = 1; then
+    if TMPDIR="$output_dir/tmp" "$repo_dir/test.src/cgroup_job_memory.sh" \
+         "$output_dir/$name.cgroup" \
+         /usr/bin/time -v -o "$output_dir/$name.time" \
+         timeout --signal=TERM --kill-after=10 "$wall_seconds" \
+         taskset -c "$cpu" "$prover" < "$output_dir/$name.in" \
+         > "$output_dir/$name.out" 2> "$output_dir/$name.err"; then
+      status=0
+    else
+      status=$?
+    fi
   else
-    status=$?
+    if TMPDIR="$output_dir/tmp" /usr/bin/time -v -o "$output_dir/$name.time" \
+         timeout --signal=TERM --kill-after=10 "$wall_seconds" \
+         taskset -c "$cpu" "$prover" < "$output_dir/$name.in" \
+         > "$output_dir/$name.out" 2> "$output_dir/$name.err"; then
+      status=0
+    else
+      status=$?
+    fi
   fi
   echo "$status" > "$output_dir/$name.status"
 }
@@ -312,7 +339,7 @@ do
 done
 
 summary="$output_dir/summary.tsv"
-printf 'case\tstatus\tproved\tgiven\tuser_cpu\twall\tmax_rss_kb\n' > "$summary"
+printf 'case\tstatus\tproved\tgiven\tuser_cpu\twall\tmax_rss_kb\tcgroup_peak_kb\tcgroup_file_end_kb\n' > "$summary"
 for name in $selected_cases
 do
   out="$output_dir/$name.out"
@@ -323,9 +350,18 @@ do
   user_cpu=$(sed -n 's/^[[:space:]]*User time (seconds):[[:space:]]*//p' "$time_file")
   wall=$(sed -n 's/^[[:space:]]*Elapsed (wall clock) time (h:mm:ss or m:ss):[[:space:]]*//p' "$time_file")
   max_rss=$(sed -n 's/^[[:space:]]*Maximum resident set size (kbytes):[[:space:]]*//p' "$time_file")
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  cgroup_file="$output_dir/$name.cgroup"
+  if test -f "$cgroup_file"; then
+    cgroup_peak=$(awk -F= '$1 == "memory_peak_bytes" {printf "%.0f", $2 / 1024}' "$cgroup_file")
+    cgroup_file_end=$(awk -F= '$1 == "file_current_bytes" {printf "%.0f", $2 / 1024}' "$cgroup_file")
+  else
+    cgroup_peak=NA
+    cgroup_file_end=NA
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$name" "$status" "$proved" "${given:-NA}" "${user_cpu:-NA}" \
-    "${wall:-NA}" "${max_rss:-NA}" >> "$summary"
+    "${wall:-NA}" "${max_rss:-NA}" "${cgroup_peak:-NA}" \
+    "${cgroup_file_end:-NA}" >> "$summary"
 done
 
 set --
