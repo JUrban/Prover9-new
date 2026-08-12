@@ -29,6 +29,7 @@ The changes are split into reviewable commits:
 | `559af0a` | global position-construction ledger, one-candidate census, population cooldown, admission freeze, independent options |
 | `0ad8d9b` | 10,000 cold/5,000 hot route churn test, position retry test, symbol-independent hard-budget semantics |
 | `000f7a6` | removal of cold adaptive double scans and premature position-feature traversal |
+| `e33f3b9` | frequency-sketch aging and a multi-window cold-churn test for mature runs |
 
 Candidate completeness and decreasing-ID order remain authoritative in the
 mask/tree/position paths.  Scheduling, wall time, and cache residency never
@@ -38,6 +39,9 @@ affect the selected route or the returned ID set.
 
 - A two-row, saturating count-min sketch sees a structural/scale class before
   the 4,096-entry profile table does.
+- Both 64K rows are halved every 262,144 routed lookups, so sparse lifetime
+  traffic cannot eventually saturate the sketch.  The sweep is one 16-bit
+  counter visit per two routed lookups amortized.
 - Fewer than 32 observations means an immediate complete mask lookup: no
   profile allocation and no tree probe.
 - A full table admits an incoming class only when its deterministic
@@ -172,6 +176,9 @@ work was removed rather than hidden by threshold tuning.
 `compact_back_demod_test` now checks:
 
 - 10,000 singleton route classes allocate zero profiles and issue zero probes;
+- cold classes totaling 40 observations across two decay windows still
+  allocate no profile, while one genuinely hot class remains admitted with a
+  single probe;
 - heating 5,000 classes against the 4,096-slot table keeps memory fixed,
   admission deterministic, and probes below one per 32 routed lookups;
 - one global reservation buys one candidate census, even for multi-feature

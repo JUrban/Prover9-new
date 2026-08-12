@@ -1,6 +1,7 @@
 # Mature backward-index CPU recovery plan
 
-Status: active implementation on branch `mature-back-index-cpu`.
+Status: implemented and locally validated on branch
+`mature-back-index-cpu`; the external mature-run gates remain open.
 
 This plan supersedes the short-prefix reasoning behind the first adaptive
 router.  The new authoritative baseline is the matched search state in the
@@ -41,7 +42,9 @@ the former extrapolation.
    same work cannot be credited independently to every rigid feature in the
    query.
 4. Cold or one-off query classes use the complete mask path without allocating
-   a route profile and without probing the tree.
+   a route profile and without probing the tree.  Frequency evidence ages, so
+   a class cannot become hot merely by accumulating sparse hits over a
+   week- or month-long run.
 5. Failed position features cannot be reconsidered at every query.  A normal
    selectivity rejection waits until the active population has doubled; a
    budget-demoted feature is not rebuilt in the same index generation.
@@ -65,6 +68,12 @@ must be observed at least 32 times at its current structural/population-scale
 key before it can receive a profile.  Until then it uses mask.  Two independent
 counter rows make collision overestimation possible but bounded; a collision
 can cause an unnecessary profile attempt, never a missing candidate.
+
+The fixed sketch cannot use lifetime counters: eventually even singleton
+traffic would saturate both rows.  Both 64K rows are therefore halved every
+four sketch capacities (262,144 routed lookups).  This is a 256-KiB bounded
+working set, an amortized one 16-bit counter visit per two routed lookups, and
+makes the threshold measure recent repeated demand rather than run age.
 
 Full-table replacement is admission-controlled.  An incoming class replaces
 only a profile whose frequency/recency score is lower, with deterministic
@@ -130,7 +139,9 @@ Focused tests must establish:
 
 1. Ten thousand cold route classes do not allocate profiles or cause tree
    probes.  A subsequently repeated class crosses the 32-hit boundary, gets
-   one baseline and one probe, and retains exact candidate order.
+   one baseline and one probe, and retains exact candidate order.  A separate
+   multi-window case accumulates more than 32 lifetime hits per cold class but
+   keeps each below the decayed recent-demand threshold.
 2. More hot classes than the profile capacity cause deterministic admission
    rejection/aging, not near-one replacement per query.  A retained hot class
    does not retrain when cold traffic returns.
