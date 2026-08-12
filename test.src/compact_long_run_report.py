@@ -46,6 +46,7 @@ PREFIXES = (
     ("Compact_rewrite_shape:", "rewrite_shape"),
     ("Compact_rewrite_root_cache:", "rewrite_root_cache"),
     ("Compact_rewrite_deep_cache:", "rewrite_deep_cache"),
+    ("Compact_rewrite_subjects:", "rewrite_subject"),
 )
 
 STATISTICS_FORMAT_MARKER = "Statistics_format:"
@@ -100,6 +101,8 @@ CUMULATIVE_KEYS = (
     "rewrite_deep_cache_growth_denials",
     "rewrite_deep_cache_variable_sibling_checks",
     "rewrite_deep_cache_rigid_sibling_checks",
+    "rewrite_subject_atoms", "rewrite_subject_initial_nodes",
+    "rewrite_subject_target_nodes", "rewrite_subject_attempts",
     "clock_infer", "clock_preprocess", "clock_demod", "clock_hints",
     "clock_subsume", "clock_back_demod", "ancestor_file_reads_bytes",
     "ancestor_file_writes_bytes", "selector_reads_bytes",
@@ -417,6 +420,18 @@ def derive_intervals(samples):
         row["rewrite_rigid_sibling_checks_per_demod_attempt"] = safe_ratio(
             row.get("delta_rewrite_deep_cache_rigid_sibling_checks"),
             row.get("delta_demod_attempts"))
+        row["rewrite_initial_nodes_per_atom"] = safe_ratio(
+            row.get("delta_rewrite_subject_initial_nodes"),
+            row.get("delta_rewrite_subject_atoms"))
+        row["rewrite_attempts_per_atom"] = safe_ratio(
+            row.get("delta_rewrite_subject_attempts"),
+            row.get("delta_rewrite_subject_atoms"))
+        row["rewrite_target_nodes_per_attempt"] = safe_ratio(
+            row.get("delta_rewrite_subject_target_nodes"),
+            row.get("delta_rewrite_subject_attempts"))
+        row["rewrite_query_preparation_reduction"] = safe_ratio(
+            row.get("delta_rewrite_subject_target_nodes"),
+            row.get("delta_rewrite_subject_initial_nodes"))
         child_hits = number(sample, "back_tree_child_hits", None)
         child_lookups = number(sample, "back_tree_child_lookups", None)
         row["back_child_hit_pct"] = safe_ratio(child_hits, child_lookups)
@@ -701,6 +716,9 @@ def run_summary(label, rows):
             "selector_run_checks_per_given"),
         "last_ancestor_file_read_bytes": last.get("ancestor_file_reads_bytes"),
         "last_ancestor_file_write_bytes": last.get("ancestor_file_writes_bytes"),
+        "last_rewrite_query_preparation_reduction": safe_ratio(
+            last.get("rewrite_subject_target_nodes"),
+            last.get("rewrite_subject_initial_nodes")),
         "signals": signals,
     }
 
@@ -882,6 +900,19 @@ def markdown(label, rows, summary, total_samples=None):
                 fmt(row.get("delta_back_route_reversions")),
                 fmt(row.get("delta_back_route_hysteresis_holds"))))
         print()
+    if any(number(row, "rewrite_subject_atoms", 0) > 0 for row in rows):
+        print("| CPU s | Rewrite atoms | Initial nodes/atom | Attempts/atom | "
+              "Target nodes/attempt | Legacy/new prep nodes |")
+        print("|---:|---:|---:|---:|---:|---:|")
+        for row in rows:
+            print("| {} | {} | {} | {} | {} | {} |".format(
+                fmt(row.get("user_cpu")),
+                fmt(row.get("delta_rewrite_subject_atoms")),
+                fmt(row.get("rewrite_initial_nodes_per_atom"), 1),
+                fmt(row.get("rewrite_attempts_per_atom"), 1),
+                fmt(row.get("rewrite_target_nodes_per_attempt"), 1),
+                fmt(row.get("rewrite_query_preparation_reduction"), 1)))
+        print()
     markdown_summary(summary)
 
 
@@ -895,6 +926,11 @@ def markdown_summary(summary):
     print("Peak memory={} MiB ({}).".format(
         fmt(summary.get("peak_rss_mib"), 1),
         fmt(summary.get("peak_rss_source"))))
+    if summary.get("last_rewrite_query_preparation_reduction") is not None:
+        print("Cumulative compact rewrite query-preparation node ratio: "
+              "legacy/new={}x.".format(fmt(
+                  summary.get("last_rewrite_query_preparation_reduction"),
+                  1)))
     if number(summary, "last_back_route_profile_capacity", 0) > 0:
         print("Final adaptive route table={}/{} entries ({} bytes); last "
               "interval route mix: mask={}%, tree={}%, position={}%.".format(
@@ -1066,6 +1102,11 @@ TSV_COLUMNS = (
     "cgroup_shmem_current_bytes", "cgroup_swap_peak_bytes",
     "clock_infer", "clock_preprocess",
     "clock_demod", "clock_back_demod",
+    "delta_rewrite_subject_atoms", "delta_rewrite_subject_initial_nodes",
+    "delta_rewrite_subject_target_nodes", "delta_rewrite_subject_attempts",
+    "rewrite_initial_nodes_per_atom", "rewrite_attempts_per_atom",
+    "rewrite_target_nodes_per_attempt",
+    "rewrite_query_preparation_reduction",
 )
 
 

@@ -22,6 +22,7 @@ Given=100. Generated=1000. Kept=200. proofs=0.
 Usable=10. Sos=20. Demods=3. Limbo=0, Disabled=4. Hints=5. Active_Hints=2.
 Compact_back_demod: mode=authoritative, strategy=adaptive, failures=0, active=50, queries=20, candidates=4, groups_examined=200, tree_nodes_examined=100, tree_sibling_checks=50, tree_child_lookups=10, tree_child_hits=8, tree_child_parents=2, tree_child_bytes=1024, bytes=4096.
 Compact_back_route: capacity=4096, occupied=3, bytes=425984, collisions=1, replacements=0, mask_choices=10, tree_choices=8, position_choices=2, mask_probes=0, tree_probes=3, position_probes=0, switches=2, reversions=0, hysteresis_holds=1, mask_observed_cost=100, tree_observed_cost=40, position_observed_cost=4, mask_estimated_cost=110, tree_estimated_cost=45, position_estimated_cost=4, mask_candidates=3, tree_candidates=1, position_candidates=0.
+Compact_rewrite_subjects: atoms=10, initial_nodes=100, target_nodes=500, attempts=40.
 Compact_index_timing: component=back_demod, lookup_seconds=2.0, exact_seconds=0.1, materialize_seconds=0.2, maintenance_seconds=0.3.
 Compact_query_profile: component=back_demod, op=candidate_lookup, queries=20, candidates=4, exact_tests=4, exact_successes=3.
 Dense_passive: backing=ancestor-file, directory=file, records=20, directory_logical=1280.
@@ -38,6 +39,7 @@ clock back_demod     :   2.20 seconds.
 Given=140. Generated=1800. Kept=300. proofs=0.
 Compact_back_demod: mode=authoritative, strategy=adaptive, failures=0, active=90, queries=30, candidates=6, groups_examined=350, tree_nodes_examined=180, tree_sibling_checks=70, tree_child_lookups=20, tree_child_hits=17, tree_child_parents=3, tree_child_bytes=2048, bytes=8192.
 Compact_back_route: capacity=4096, occupied=4, bytes=425984, collisions=2, replacements=0, mask_choices=14, tree_choices=13, position_choices=3, mask_probes=0, tree_probes=4, position_probes=0, switches=3, reversions=1, hysteresis_holds=2, mask_observed_cost=140, tree_observed_cost=65, position_observed_cost=6, mask_estimated_cost=150, tree_estimated_cost=70, position_estimated_cost=6, mask_candidates=4, tree_candidates=2, position_candidates=0.
+Compact_rewrite_subjects: atoms=20, initial_nodes=240, target_nodes=1340, attempts=100.
 Compact_index_timing: component=back_demod, lookup_seconds=3.0, exact_seconds=0.2, materialize_seconds=0.3, maintenance_seconds=0.4.
 Compact_query_profile: component=back_demod, op=candidate_lookup, queries=30, candidates=6, exact_tests=6, exact_successes=4.
 Process_residency_kb: pss=12288, anonymous=9216, swap=1024.
@@ -79,6 +81,10 @@ class ReportTest(unittest.TestCase):
         self.assertAlmostEqual(rows[1]["back_child_hit_pct"], 85.0)
         self.assertAlmostEqual(rows[1]["clock_preprocess_cpu_pct"], 90.0)
         self.assertAlmostEqual(rows[1]["clock_demod_cpu_pct"], 40.0)
+        self.assertAlmostEqual(rows[1]["rewrite_initial_nodes_per_atom"], 14.0)
+        self.assertAlmostEqual(rows[1]["rewrite_attempts_per_atom"], 6.0)
+        self.assertAlmostEqual(rows[1]["rewrite_target_nodes_per_attempt"], 14.0)
+        self.assertAlmostEqual(rows[1]["rewrite_query_preparation_reduction"], 6.0)
         self.assertEqual(rows[0]["ancestor_file_reads_bytes"], 1000)
         self.assertEqual(rows[0]["selector_writes_bytes"], 96)
         self.assertEqual(rows[0]["selector_read_evictions_bytes"], 48)
