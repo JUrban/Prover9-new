@@ -302,5 +302,15 @@ do
     "${wall:-NA}" "${max_rss:-NA}" >> "$summary"
 done
 
+set --
+for name in $selected_cases
+do
+  set -- "$@" "$output_dir/$name.out"
+done
+python3 "$repo_dir/test.src/compact_long_run_report.py" --format tsv "$@" \
+  > "$output_dir/long-run-slopes.tsv"
+python3 "$repo_dir/test.src/compact_long_run_report.py" --summary-only "$@" \
+  > "$output_dir/long-run-summary.md"
+
 echo "chat_test matrix written to $output_dir"
 cat "$summary"

@@ -106,6 +106,18 @@ disabled-heavy comparisons across `off`, body-only compression, `memory`, and
 `mmap`; `... all` also runs the two capped AIM cases when the supplied AIM
 corpus is available.
 
+## Long-run scalability reports
+
+Periodic output is more useful than a final average when a search slows down
+after millions of clauses.  Run
+`test.src/compact_long_run_report.py RUN.out.gz` to summarize interval
+given-clause throughput, generated work, clock shares, compact-index work,
+PSS/swap, and file I/O directly from an existing plain or gzip output.  Use
+`--format tsv` or `--format json` for every sample, `--tail 0` for a complete
+Markdown table, and `--summary-only` for several runs.  No theorem search is
+started by the reporter.  See `P9-LONG-RUN-SCALABILITY-RESULTS.md` for the
+measurement caveats and acceptance criteria.
+
 ---
 
 ## Availability & Positioning

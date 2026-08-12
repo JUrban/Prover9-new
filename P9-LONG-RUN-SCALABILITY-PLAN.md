@@ -145,6 +145,19 @@ Gate:
   population; and
 - no configured 30-day projection reaches an internal representation limit.
 
+Implementation status: `compact_long_run_report.py` now reads existing plain
+or gzip outputs and derives interval CPU, query-work, memory, and file-I/O
+slopes from periodic reports.  The bounded chat and generalization runners
+write both a machine-readable `long-run-slopes.tsv` and a concise
+`long-run-summary.md`; an expensive old baseline therefore need not be rerun.
+The reporter is diagnostic rather than an acceptance oracle: candidate and
+reference runs must still have matched logical trajectories, and distribution
+changes in generated clauses must be separated from index cost.  New reports
+carry a statistics-format capacity marker.  Older long `comma_num`-formatted
+lines can contain overwritten arguments and are explicitly warned about;
+direct `%llu` compact-index lines and the short process-residency line are not
+affected by that historical formatter defect.
+
 ## 5. Phase D: passive control plane for tens of millions of live clauses
 
 The 64-byte dense record and its selector heaps are deliberately much smaller

@@ -4,6 +4,54 @@ This file records the evidence used to accept or reject long-run compact-index
 changes.  Short-prefix wins are not promoted unless their CPU and RAM slopes
 remain acceptable as the live population grows.
 
+## Reusing archived outputs for slope analysis
+
+`test.src/compact_long_run_report.py` accepts any mixture of plain and
+gzip-compressed Prover9 outputs.  It calculates interval deltas between
+periodic `Given=` blocks, because final cumulative averages hide late-run
+collapse.  The default Markdown view shows only the last 20 intervals while
+its first-to-last summary still uses the complete run:
+
+```sh
+./test.src/compact_long_run_report.py old.out.gz candidate.out.gz
+./test.src/compact_long_run_report.py --tail 0 candidate.out.gz
+./test.src/compact_long_run_report.py --format tsv *.out.gz > slopes.tsv
+./test.src/compact_long_run_report.py --format json candidate.out > slopes.json
+./test.src/compact_long_run_report.py --summary-only *.out.gz
+```
+
+The report separates given/CPU and generated/given from inference,
+preprocessing, demodulation, and backward-demodulation clock shares.  It also
+separates posting groups, tree nodes, sibling checks, and child-cache lookups;
+their sum is deliberately called *counted work*, not equivalent CPU
+instructions.  PSS, anonymous residency, swap, index bytes, passive-directory
+bytes, and ancestor/selector I/O remain separate fields.  TSV and JSON retain
+all samples and are the appropriate inputs for independent analysis.
+
+The bounded matrix runners create `long-run-slopes.tsv` and
+`long-run-summary.md` automatically.  For a manual long run, retain
+`set(clocks).`, `assign(stats,all).`, and a periodic `assign(report,N).`; a
+single final statistics block can report totals but cannot establish a slope.
+The warning thresholds are triage aids, not pass/fail decisions: an integrated
+query distribution can legitimately change, so promotion still requires the
+same logical trajectory and a matched reference run.
+
+During implementation, the reporting audit found that `comma_num()` retained
+only 16 rotating results while one statistics `fprintf` used 24.  Later calls
+could overwrite earlier values before printing; a recent example reported
+`offset_lookups` as the exact `handle_bytes` value.  New output begins every
+statistics block with `Statistics_format: comma_num_buffers=32.` and a focused
+24-result regression protects the current maximum.  The reporter warns when
+this marker is absent.  In old archives, long comma-formatted lines such as
+`Ancestor_store` must not be trusted field-for-field.  Direct `%llu` compact
+index reports and the short `Process_residency_kb` report are unaffected.
+
+Applied to `chat_test.new.out41`, the interval view sharpens the existing
+diagnosis: counted back work/query rises from about 1,182 in the first interval
+to about 10,101 in the last, an 8.55-fold increase.  The last interval also
+generates about 156,801 clauses/given.  These are two simultaneous problems;
+the adaptive index work targets the former and cannot remove the latter.
+
 ## `chat_test.new.out41`: mask8 backward-demodulation collapse
 
 Source: user-supplied `bob/chat_test.new.out41`, inspected 2026-08-12.  The run

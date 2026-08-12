@@ -389,7 +389,6 @@ done
 
 summary=$output_dir/summary.tsv
 printf 'case\tvariant\tstatus\tproved\tgiven\tuser_cpu\twall\tmax_rss_kb\n' > "$summary"
-outputs=
 for case_id in $case_ids; do
   for variant in $variants; do
     run_id=$case_id.$variant
@@ -404,18 +403,26 @@ for case_id in $case_ids; do
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$case_id" "$variant" "$status" "$proved" "${given:-NA}" \
       "${user_cpu:-NA}" "${wall:-NA}" "${max_rss:-NA}" >> "$summary"
-    outputs="$outputs $out"
+  done
+done
+
+set --
+for case_id in $case_ids; do
+  for variant in $variants; do
+    set -- "$@" "$output_dir/$case_id.$variant.out"
   done
 done
 
 # The parser reads only committed machine-readable statistics and can be run
 # again on compressed long-run outputs without rerunning Prover9.
-# shellcheck disable=SC2086
-"$repo_dir/test.src/parse_compact_profiles.sh" --tsv $outputs \
+"$repo_dir/test.src/parse_compact_profiles.sh" --tsv "$@" \
   > "$output_dir/profiles.tsv"
-# shellcheck disable=SC2086
-"$repo_dir/test.src/parse_compact_profiles.sh" --json $outputs \
+"$repo_dir/test.src/parse_compact_profiles.sh" --json "$@" \
   > "$output_dir/profiles.json"
+python3 "$repo_dir/test.src/compact_long_run_report.py" --format tsv "$@" \
+  > "$output_dir/long-run-slopes.tsv"
+python3 "$repo_dir/test.src/compact_long_run_report.py" --summary-only "$@" \
+  > "$output_dir/long-run-summary.md"
 
 echo "compact generalization matrix written to $output_dir"
 awk '{ print }' "$summary"
