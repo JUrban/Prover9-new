@@ -131,6 +131,8 @@ void compact_term_pool_set_logical_base(Compact_term_pool pool,
 
 const int32_t *compact_term_pool_tokens(Compact_term_pool pool);
 
+unsigned long long compact_term_pool_logical_base(Compact_term_pool pool);
+
 size_t compact_term_pool_token_count(Compact_term_pool pool);
 
 void compact_term_pool_get_stats(Compact_term_pool pool,

@@ -397,6 +397,8 @@ struct prover_stats {
     compact_rewrite_posting_items,
     compact_rewrite_node_bytes,
     compact_rewrite_posting_bytes,
+    compact_rewrite_child_cache_bytes,
+    compact_rewrite_child_cache_capacity,
     compact_rewrite_occurrence_bytes,
     compact_rewrite_occurrence_stream_used,
     compact_rewrite_occurrence_stream_bytes,

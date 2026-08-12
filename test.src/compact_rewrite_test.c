@@ -114,6 +114,7 @@ int main(void)
   CHECK(stats.attempts > 0 && stats.rewrites > 0,
         "compact rewrite accounting");
   CHECK(stats.node_bytes > 0 && stats.posting_bytes > 0 &&
+        stats.child_cache_bytes > 0 && stats.child_cache_capacity > 0 &&
         stats.occurrence_bytes > 0 &&
         stats.rule_bytes > 0 && stats.term_bytes > 0 &&
         stats.hash_bytes > 0 && stats.total_bytes > 0,
@@ -172,6 +173,24 @@ int main(void)
   CHECK(!compact_rewrite_contains(bank, 102), "removed rule is absent");
   index_demodulator(rules[1], types[1], DELETE, Index_clock);
   compare_case(bank, "p(g(a,a)).");
+
+  {
+    Topform wide_rules[9];
+    char text[64];
+    for (i = 0; i < 9; i++) {
+      (void) snprintf(text, sizeof(text), "q%d(x) = x.", i);
+      wide_rules[i] = make_rule(text, 500 + (unsigned long long) i,
+                                ORIENTED, bank);
+    }
+    compare_case(bank, "p(q8(a)).");
+    compact_rewrite_get_stats(bank, &stats);
+    CHECK(stats.child_cache_capacity > 0 && stats.child_cache_bytes > 0,
+          "root child cache is allocated by rigid rewrite rules");
+    for (i = 0; i < 9; i++) {
+      index_demodulator(wide_rules[i], ORIENTED, DELETE, Index_clock);
+      delete_clause(wide_rules[i]);
+    }
+  }
 
   for (i = 0; i < 6; i++) {
     if (i != 1)

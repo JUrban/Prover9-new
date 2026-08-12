@@ -9,6 +9,7 @@ static unsigned Compaction_stale_pct = 25;
 
 #define CR_NONE 0U
 #define CR_OCCURRENCE_BLOCK_PAYLOAD 248
+#define CR_BINDING_WORDS ((MAX_VARS + 63U) / 64U)
 #define CR_RULE_PROOF_ID_MASK UINT64_C(0x0fffffffffffffff)
 #define CR_RULE_TYPE_SHIFT 60
 #define CR_RULE_TYPE_MASK UINT64_C(0x7000000000000000)
@@ -50,6 +51,7 @@ struct compact_rewrite_bank {
   struct cr_node *nodes;
   size_t node_count;
   size_t node_capacity;
+  int32_t *node_first_codes;
   struct cr_posting *postings;
   size_t posting_count;
   size_t posting_capacity;
@@ -70,6 +72,10 @@ struct compact_rewrite_bank {
   Compact_id_map id_map;
   struct cr_query_term *query;
   size_t query_capacity;
+  const int32_t *query_token_base;
+  unsigned long long query_logical_base;
+  uint32_t *child_cache;
+  size_t child_cache_capacity;
   unsigned long long active_rules;
   unsigned long long peak_rules;
   unsigned long long retired_rules;
@@ -191,6 +197,7 @@ static unsigned long long bank_bytes(Compact_rewrite_bank bank)
   compact_term_pool_get_stats(bank->term_pool, &terms);
   return sizeof(*bank) +
     bank->node_capacity * sizeof(*bank->nodes) +
+    bank->node_capacity * sizeof(*bank->node_first_codes) +
     bank->posting_capacity * sizeof(*bank->postings) +
     bank->occurrence_block_capacity * sizeof(*bank->occurrence_blocks) +
     bank->occurrence_symbol_capacity *
@@ -199,7 +206,8 @@ static unsigned long long bank_bytes(Compact_rewrite_bank bank)
     bank->rule_capacity * sizeof(*bank->rules) +
     (bank->owns_term_pool ? terms.total_bytes : 0) +
     compact_id_map_bytes(bank->id_map) +
-    bank->query_capacity * sizeof(*bank->query);
+    bank->query_capacity * sizeof(*bank->query) +
+    bank->child_cache_capacity * sizeof(*bank->child_cache);
 }
 
 static void update_peak(Compact_rewrite_bank bank)
@@ -214,11 +222,18 @@ static void update_peak(Compact_rewrite_bank bank)
 static void ensure_nodes(Compact_rewrite_bank bank)
 {
   if (bank->node_count == bank->node_capacity) {
+    size_t old_capacity = bank->node_capacity;
     bank->node_capacity = grow_node_capacity(
       bank->node_capacity, sizeof(*bank->nodes),
       "compact_rewrite: node overflow");
     bank->nodes = safe_realloc(bank->nodes,
                                 bank->node_capacity * sizeof(*bank->nodes));
+    bank->node_first_codes = safe_realloc(
+      bank->node_first_codes,
+      bank->node_capacity * sizeof(*bank->node_first_codes));
+    memset(bank->node_first_codes + old_capacity, 0,
+           (bank->node_capacity - old_capacity) *
+             sizeof(*bank->node_first_codes));
   }
 }
 
@@ -328,15 +343,76 @@ static uint32_t new_node(Compact_rewrite_bank bank,
   node = (uint32_t) bank->node_count++;
   memset(&bank->nodes[node], 0, sizeof(bank->nodes[node]));
   bank->nodes[node].tokens = tokens;
+  if (compact_term_slice_length(tokens) != 0)
+    bank->node_first_codes[node] =
+      compact_term_pool_slice_tokens(bank->term_pool, tokens)[0];
   return node;
 }
 
 static int32_t first_code(Compact_rewrite_bank bank, uint32_t node)
 {
-  struct cr_node *n = &bank->nodes[node];
-  if (compact_term_slice_length(n->tokens) == 0)
+  if (compact_term_slice_length(bank->nodes[node].tokens) == 0)
     fatal_error("compact_rewrite: empty nonroot radix edge");
-  return compact_term_pool_slice_tokens(bank->term_pool, n->tokens)[0];
+  return bank->node_first_codes[node];
+}
+
+static const int32_t *hot_slice_tokens(Compact_rewrite_bank bank,
+                                       Compact_term_slice slice)
+{
+  unsigned long long offset =
+    slice & COMPACT_TERM_SLICE_OFFSET_MAX;
+  unsigned long long local;
+  if (offset < bank->query_logical_base)
+    fatal_error("compact_rewrite: hot slice precedes logical base");
+  local = offset - bank->query_logical_base;
+  if (local > SIZE_MAX)
+    fatal_error("compact_rewrite: hot slice exceeds address space");
+  return bank->query_token_base + (size_t) local;
+}
+
+static uint32_t hot_slice_length(Compact_term_slice slice)
+{
+  return (uint32_t) (slice >> COMPACT_TERM_SLICE_OFFSET_BITS);
+}
+
+static void ensure_child_cache(Compact_rewrite_bank bank, int32_t code)
+{
+  size_t old = bank->child_cache_capacity;
+  size_t capacity = old == 0 ? 64 : old;
+  while ((size_t) code >= capacity) {
+    if (capacity > SIZE_MAX / 2)
+      fatal_error("compact_rewrite: root child cache overflow");
+    capacity *= 2;
+  }
+  if (capacity != old) {
+    bank->child_cache = safe_realloc(
+      bank->child_cache, capacity * sizeof(*bank->child_cache));
+    memset(bank->child_cache + old, 0,
+           (capacity - old) * sizeof(*bank->child_cache));
+    bank->child_cache_capacity = capacity;
+  }
+}
+
+static void child_cache_put(Compact_rewrite_bank bank, uint32_t parent,
+                            int32_t code, uint32_t child)
+{
+  if (parent != 0 || code < 0 || child == CR_NONE)
+    return;
+  ensure_child_cache(bank, code);
+  bank->child_cache[code] = child;
+}
+
+static BOOL child_cache_get(Compact_rewrite_bank bank, uint32_t parent,
+                            int32_t code, uint32_t *child)
+{
+  uint32_t cached;
+  cached = parent == 0 && code >= 0 &&
+    (size_t) code < bank->child_cache_capacity ? bank->child_cache[code] : 0;
+  if (cached != CR_NONE && first_code(bank, cached) == code) {
+    *child = cached;
+    return TRUE;
+  }
+  return FALSE;
 }
 
 /* Insert an immutable prefix-token slice as a radix path.  Siblings remain
@@ -377,6 +453,7 @@ static uint32_t insert_token_path(Compact_rewrite_bank bank, uint32_t root,
           bank->nodes[previous].next_sibling;
         bank->nodes[previous].next_sibling = added;
       }
+      child_cache_put(bank, parent, wanted, added);
       return added;
     }
     else {
@@ -389,6 +466,7 @@ static uint32_t insert_token_path(Compact_rewrite_bank bank, uint32_t root,
              old_tokens[common] == tokens[position + common])
         common++;
       if (common == old_length) {
+        child_cache_put(bank, parent, wanted, current);
         position += common;
         parent = current;
       }
@@ -410,8 +488,12 @@ static uint32_t insert_token_path(Compact_rewrite_bank bank, uint32_t root,
         else
           bank->nodes[previous].next_sibling = split;
         bank->nodes[current].tokens = old_suffix;
+        bank->node_first_codes[current] =
+          compact_term_pool_slice_tokens(bank->term_pool, old_suffix)[0];
         bank->nodes[current].next_sibling = CR_NONE;
         bank->nodes[split].first_child = current;
+        child_cache_put(bank, parent, wanted, split);
+        child_cache_put(bank, split, first_code(bank, current), current);
         position += common;
         if (position == length)
           return split;
@@ -429,6 +511,7 @@ static uint32_t insert_token_path(Compact_rewrite_bank bank, uint32_t root,
         }
         else
           bank->nodes[current].next_sibling = added;
+        child_cache_put(bank, split, first_code(bank, added), added);
         return added;
       }
     }
@@ -699,6 +782,7 @@ static void compact_rewrite_compact_internal(Compact_rewrite_bank bank,
 
   old = *bank;
   safe_free(old.nodes);
+  safe_free(old.node_first_codes);
   safe_free(old.postings);
   safe_free(old.occurrence_blocks);
   safe_free(old.occurrence_heads);
@@ -706,6 +790,7 @@ static void compact_rewrite_compact_internal(Compact_rewrite_bank bank,
   safe_free(old.occurrence_last_rules);
   compact_id_map_free(old.id_map);
   safe_free(old.query);
+  safe_free(old.child_cache);
   old.rules = safe_realloc(old.rules, packed * sizeof(*old.rules));
   old.rule_capacity = packed;
   old.rule_count = packed;
@@ -1099,8 +1184,25 @@ static int nonvariable_term_count(Term term)
   return count;
 }
 
+static BOOL rewrite_binding_is_set(const uint64_t *bound, unsigned variable)
+{
+  return (bound[variable / 64U] &
+          (UINT64_C(1) << (variable % 64U))) != 0;
+}
+
+static void set_rewrite_binding(uint64_t *bound, unsigned variable)
+{
+  bound[variable / 64U] |= UINT64_C(1) << (variable % 64U);
+}
+
+static void clear_rewrite_binding(uint64_t *bound, unsigned variable)
+{
+  bound[variable / 64U] &= ~(UINT64_C(1) << (variable % 64U));
+}
+
 static Term build_contractum(const int32_t *tokens, uint32_t *position,
                              uint32_t end, Term *bindings,
+                             const uint64_t *bound,
                              int reduced_flag)
 {
   int32_t code;
@@ -1111,7 +1213,8 @@ static Term build_contractum(const int32_t *tokens, uint32_t *position,
   code = tokens[(*position)++];
   if (code < 0) {
     int variable = -code - 1;
-    if (variable >= MAX_VARS || bindings[variable] == NULL)
+    if (variable >= MAX_VARS ||
+        !rewrite_binding_is_set(bound, (unsigned) variable))
       fatal_error("compact_rewrite: unbound RHS variable");
     return copy_reduced_binding(bindings[variable], reduced_flag);
   }
@@ -1119,12 +1222,13 @@ static Term build_contractum(const int32_t *tokens, uint32_t *position,
   result = get_rigid_term_dangerously(code, arity);
   for (i = 0; i < arity; i++)
     ARG(result, i) = build_contractum(tokens, position, end, bindings,
-                                     reduced_flag);
+                                     bound, reduced_flag);
   return result;
 }
 
 static BOOL try_leaf(Compact_rewrite_bank bank, uint32_t node, Term target,
-                     Term *bindings, BOOL lex_order_vars,
+                     Term *bindings, const uint64_t *bound,
+                     BOOL lex_order_vars,
                      int reduced_flag,
                      struct cr_match_result *result)
 {
@@ -1145,10 +1249,9 @@ static BOOL try_leaf(Compact_rewrite_bank bank, uint32_t node, Term target,
     else {
       contractum_slice = rule->left;
     }
-    tokens = compact_term_pool_slice_tokens(bank->term_pool,
-                                            contractum_slice);
-    end = compact_term_slice_length(contractum_slice);
-    contractum = build_contractum(tokens, &position, end, bindings,
+    tokens = hot_slice_tokens(bank, contractum_slice);
+    end = hot_slice_length(contractum_slice);
+    contractum = build_contractum(tokens, &position, end, bindings, bound,
                                   reduced_flag);
     if (position != end)
       fatal_error("compact_rewrite: incomplete RHS consumption");
@@ -1168,13 +1271,13 @@ static BOOL try_leaf(Compact_rewrite_bank bank, uint32_t node, Term target,
 static BOOL match_rewrite_edge(
   Compact_rewrite_bank bank, uint32_t node,
   struct cr_query_term *query, uint32_t position, uint32_t end,
-  Term *bindings, unsigned *binding_trail, unsigned *trail_count,
+  Term *bindings, uint64_t *bound, unsigned *binding_trail,
+  unsigned *trail_count,
   uint32_t *next_position)
 {
   struct cr_node *edge = &bank->nodes[node];
-  const int32_t *tokens = compact_term_pool_slice_tokens(
-    bank->term_pool, edge->tokens);
-  uint32_t length = compact_term_slice_length(edge->tokens);
+  const int32_t *tokens = hot_slice_tokens(bank, edge->tokens);
+  uint32_t length = hot_slice_length(edge->tokens);
   uint32_t i;
   for (i = 0; i < length; i++) {
     int32_t code = tokens[i];
@@ -1186,8 +1289,9 @@ static BOOL match_rewrite_edge(
       unsigned variable = (unsigned) (-code - 1);
       if (variable >= MAX_VARS)
         fatal_error("compact_rewrite: variable exceeds MAX_VARS");
-      if (bindings[variable] == NULL) {
+      if (!rewrite_binding_is_set(bound, variable)) {
         bindings[variable] = query_term;
+        set_rewrite_binding(bound, variable);
         binding_trail[(*trail_count)++] = variable;
       }
       else if (!term_ident(bindings[variable], query_term))
@@ -1204,57 +1308,94 @@ static BOOL match_rewrite_edge(
   return TRUE;
 }
 
-static void undo_rewrite_bindings(Term *bindings,
+static void undo_rewrite_bindings(uint64_t *bound,
                                   const unsigned *binding_trail,
                                   unsigned *trail_count,
                                   unsigned trail_mark)
 {
   while (*trail_count != trail_mark)
-    bindings[binding_trail[--(*trail_count)]] = NULL;
+    clear_rewrite_binding(bound, binding_trail[--(*trail_count)]);
 }
+
+static BOOL retrieve_child(Compact_rewrite_bank bank, uint32_t child,
+                           struct cr_query_term *query, uint32_t position,
+                           uint32_t end, Term *bindings, uint64_t *bound,
+                           unsigned *binding_trail, unsigned *trail_count,
+                           Term target, BOOL lex_order_vars,
+                           int reduced_flag,
+                           struct cr_match_result *result);
 
 static BOOL retrieve_rec(Compact_rewrite_bank bank, uint32_t node,
                          struct cr_query_term *query, uint32_t position,
-                         uint32_t end, Term *bindings,
+                         uint32_t end, Term *bindings, uint64_t *bound,
                          unsigned *binding_trail, unsigned *trail_count,
                          Term target,
                          BOOL lex_order_vars,
                          int reduced_flag,
                          struct cr_match_result *result)
 {
-  uint32_t child;
+  uint32_t child, rigid_start;
   Term query_term;
   int32_t query_code;
   if (position == end)
-    return try_leaf(bank, node, target, bindings, lex_order_vars,
+    return try_leaf(bank, node, target, bindings, bound, lex_order_vars,
                     reduced_flag, result);
   query_term = query[position].term;
   query_code = VARIABLE(query_term) ? INT32_MIN : SYMNUM(query_term);
-  for (child = bank->nodes[node].first_child; child != CR_NONE;
+  /* Variable-led alternatives retain their exact predecessor order and must
+     be tried before a rigid edge. */
+  for (child = bank->nodes[node].first_child; child != CR_NONE &&
+       first_code(bank, child) < 0;
        child = bank->nodes[child].next_sibling) {
-    int32_t edge_code = first_code(bank, child);
-    unsigned trail_mark = *trail_count;
-    uint32_t next_position = position;
-    BOOL found = FALSE;
-    /* Siblings are ordered with variables first and rigid symbols in symbol
-       order.  A variable edge can match any subject subterm; among rigid
-       edges only the subject's root symbol can match. */
-    if (edge_code >= 0) {
-      if (query_code == INT32_MIN || edge_code > query_code)
-        break;
-      if (edge_code < query_code)
-        continue;
-    }
-    if (match_rewrite_edge(bank, child, query, position, end, bindings,
-                           binding_trail, trail_count, &next_position))
-      found = retrieve_rec(bank, child, query, next_position, end,
-                           bindings, binding_trail, trail_count, target,
-                           lex_order_vars, reduced_flag, result);
-    undo_rewrite_bindings(bindings, binding_trail, trail_count, trail_mark);
-    if (found)
+    if (retrieve_child(bank, child, query, position, end, bindings, bound,
+                       binding_trail, trail_count, target, lex_order_vars,
+                       reduced_flag, result))
       return TRUE;
   }
+  if (query_code == INT32_MIN)
+    return FALSE;
+
+  rigid_start = child;
+  if (node == 0 && child_cache_get(bank, node, query_code, &child))
+    return retrieve_child(bank, child, query, position, end, bindings, bound,
+                          binding_trail, trail_count, target, lex_order_vars,
+                          reduced_flag, result);
+
+  /* A cache miss is semantically uninteresting: search the same ordered
+     sibling chain as the original implementation and refresh the slot. */
+  for (child = rigid_start; child != CR_NONE;
+       child = bank->nodes[child].next_sibling) {
+    int32_t edge_code = first_code(bank, child);
+    if (edge_code > query_code)
+      break;
+    if (edge_code < query_code)
+      continue;
+    child_cache_put(bank, node, query_code, child);
+    return retrieve_child(bank, child, query, position, end, bindings, bound,
+                          binding_trail, trail_count, target, lex_order_vars,
+                          reduced_flag, result);
+  }
   return FALSE;
+}
+
+static BOOL retrieve_child(Compact_rewrite_bank bank, uint32_t child,
+                           struct cr_query_term *query, uint32_t position,
+                           uint32_t end, Term *bindings, uint64_t *bound,
+                           unsigned *binding_trail, unsigned *trail_count,
+                           Term target, BOOL lex_order_vars,
+                           int reduced_flag,
+                           struct cr_match_result *result)
+{
+  unsigned trail_mark = *trail_count;
+  uint32_t next_position = position;
+  BOOL found = FALSE;
+  if (match_rewrite_edge(bank, child, query, position, end, bindings, bound,
+                         binding_trail, trail_count, &next_position))
+    found = retrieve_rec(bank, child, query, next_position, end, bindings,
+                         bound, binding_trail, trail_count, target,
+                         lex_order_vars, reduced_flag, result);
+  undo_rewrite_bindings(bound, binding_trail, trail_count, trail_mark);
+  return found;
 }
 
 static struct cr_match_result find_rewrite(Compact_rewrite_bank bank,
@@ -1265,13 +1406,17 @@ static struct cr_match_result find_rewrite(Compact_rewrite_bank bank,
   struct cr_match_result result;
   size_t count = 0;
   Term bindings[MAX_VARS];
+  uint64_t bound[CR_BINDING_WORDS];
   unsigned binding_trail[MAX_VARS];
   unsigned trail_count = 0;
   memset(&result, 0, sizeof(result));
-  memset(bindings, 0, sizeof(bindings));
+  memset(bound, 0, sizeof(bound));
+  bank->query_token_base = compact_term_pool_tokens(bank->term_pool);
+  bank->query_logical_base =
+    compact_term_pool_logical_base(bank->term_pool);
   flatten_query_rec(bank, target, &count);
   if (count > 0)
-    retrieve_rec(bank, 0, bank->query, 0, (uint32_t) count, bindings,
+    retrieve_rec(bank, 0, bank->query, 0, (uint32_t) count, bindings, bound,
                  binding_trail, &trail_count, target, lex_order_vars,
                  reduced_flag, &result);
   return result;
@@ -1373,7 +1518,12 @@ void compact_rewrite_get_stats(Compact_rewrite_bank bank,
   stats->node_items = bank->node_count;
   stats->posting_items = bank->posting_count;
   stats->node_bytes = bank->node_capacity * sizeof(*bank->nodes);
+  stats->node_bytes +=
+    bank->node_capacity * sizeof(*bank->node_first_codes);
   stats->posting_bytes = bank->posting_capacity * sizeof(*bank->postings);
+  stats->child_cache_bytes =
+    bank->child_cache_capacity * sizeof(*bank->child_cache);
+  stats->child_cache_capacity = bank->child_cache_capacity;
   stats->occurrence_bytes =
     bank->occurrence_block_capacity * sizeof(*bank->occurrence_blocks) +
     bank->occurrence_symbol_capacity *
@@ -1394,6 +1544,7 @@ void compact_rewrite_free(Compact_rewrite_bank bank)
   if (bank == NULL)
     return;
   safe_free(bank->nodes);
+  safe_free(bank->node_first_codes);
   safe_free(bank->postings);
   safe_free(bank->occurrence_blocks);
   safe_free(bank->occurrence_heads);
@@ -1404,5 +1555,6 @@ void compact_rewrite_free(Compact_rewrite_bank bank)
     compact_term_pool_free(bank->term_pool);
   compact_id_map_free(bank->id_map);
   safe_free(bank->query);
+  safe_free(bank->child_cache);
   safe_free(bank);
 }

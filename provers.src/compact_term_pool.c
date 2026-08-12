@@ -1309,6 +1309,12 @@ const int32_t *compact_term_pool_tokens(Compact_term_pool pool)
   return pool == NULL ? NULL : pool->tokens;
 }
 
+/* PUBLIC */
+unsigned long long compact_term_pool_logical_base(Compact_term_pool pool)
+{
+  return pool == NULL ? 0 : pool->logical_base;
+}
+
 size_t compact_term_pool_token_count(Compact_term_pool pool)
 {
   return pool == NULL ? 0 : pool->token_count;

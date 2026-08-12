@@ -3117,6 +3117,10 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             s.compact_rewrite_node_items,
             s.compact_rewrite_posting_items);
     fprintf(fp,
+            "Compact_rewrite_root_cache: capacity=%llu, bytes=%llu.\n",
+            s.compact_rewrite_child_cache_capacity,
+            s.compact_rewrite_child_cache_bytes);
+    fprintf(fp,
             "Compact_rewrite_occurrence_stream: used=%s, bytes=%s.\n",
             comma_num(s.compact_rewrite_occurrence_stream_used),
             comma_num(s.compact_rewrite_occurrence_stream_bytes));
@@ -5917,6 +5921,8 @@ static void update_rewrite_only_stats(void)
   Stats.compact_rewrite_posting_items = compact.posting_items;
   Stats.compact_rewrite_node_bytes = compact.node_bytes;
   Stats.compact_rewrite_posting_bytes = compact.posting_bytes;
+  Stats.compact_rewrite_child_cache_bytes = compact.child_cache_bytes;
+  Stats.compact_rewrite_child_cache_capacity = compact.child_cache_capacity;
   Stats.compact_rewrite_occurrence_bytes = compact.occurrence_bytes;
   Stats.compact_rewrite_occurrence_stream_used =
     compact.occurrence_stream_used;
