@@ -91,12 +91,13 @@ existing tree-admission evidence.  After admission, each new structural/scale
 class obtains a mask baseline and at most one initial tree probe.
 
 Admitted rigid-position postings are alternatives, not unconditional winners.
-The current policy deliberately bypasses the profile only when its exact
-current work estimate is at least four times smaller than the compatible mask
-population, the same minimum gain required for position construction.  A
-marginal position remains indexed but cannot displace mask/tree routing.
-Expensive complete routes still contribute evidence for admitting a missing
-selective position.
+The current policy makes a position available to the same profile only when
+its exact current work estimate is at least four times smaller than the
+compatible mask population, the same minimum gain required for position
+construction.  Mask, tree, and position then calibrate and compete by observed
+logical work.  A marginal position remains indexed but cannot displace
+mask/tree routing.  Expensive complete routes still contribute evidence for
+admitting a missing selective position.
 
 Compaction copies the bounded route table and counters.  Its samples use
 logical decoded work rather than addresses or allocation capacities, so no

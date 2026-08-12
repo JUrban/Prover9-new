@@ -1015,10 +1015,11 @@ bounded performance cache rather than an index authority:
   costs one bounded pass over that root's structural buckets rather than a
   clause scan.  At the completed-chat scale this is thousands of small bucket
   counters, not millions of passive clauses.
-- An admitted position route bypasses mask/tree only when its exact current
-  posting/bitmap estimate is at least four times better than the current mask
-  population.  Marginal positions remain available but do not force a bad
-  route.
+- An admitted position joins the same calibrated mask/tree competition only
+  when its exact current posting/bitmap estimate is at least four times better
+  than the current mask population.  Marginal positions remain indexed but do
+  not force a bad route, and an eligible position cannot hide a still-cheaper
+  trained tree.
 - Mask, tree, and position remain complete candidate generators.  Results are
   exact-tested, deduplicated, and sorted into the established decreasing-ID
   order, so eviction or a different preference can change performance but not
