@@ -561,6 +561,43 @@ int main(void)
   }
 
   {
+    enum { REALLOC_FAMILY = 1024 };
+    Compact_back_demod_index reallocating;
+    struct compact_back_demod_stats realloc_stats;
+    Topform clauses[REALLOC_FAMILY], rule;
+    int j;
+    compact_back_demod_set_tree_budget_kb(65536);
+    compact_back_demod_set_tree_admit_work(1);
+    compact_back_demod_set_tree_build_factor(1);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_HOT_ROOT_TREE);
+    reallocating = compact_back_demod_init();
+    for (j = 0; j < REALLOC_FAMILY; j++) {
+      clauses[j] = indexed_clause("w(realloc_root(a)).");
+      CHECK(compact_back_demod_add(reallocating, clauses[j]),
+            "add duplicate root-backfill posting");
+    }
+    rule = indexed_clause("realloc_root(a) = a.");
+    ids = compact_back_demod_candidate_ids(
+      reallocating, rule, ORIENTED, &count);
+    CHECK(count == REALLOC_FAMILY &&
+          ids[0] == clauses[REALLOC_FAMILY - 1]->id &&
+          ids[REALLOC_FAMILY - 1] == clauses[0]->id,
+          "root backfill survives shared posting-array reallocation");
+    safe_free(ids);
+    compact_back_demod_get_stats(reallocating, &realloc_stats);
+    CHECK(realloc_stats.tree_root_admissions == 1 &&
+          realloc_stats.tree_posting_groups == REALLOC_FAMILY,
+          "reallocated root backfill retains every tree posting");
+    compact_back_demod_free(reallocating);
+    delete_clause(rule);
+    for (j = 0; j < REALLOC_FAMILY; j++)
+      delete_clause(clauses[j]);
+    compact_back_demod_set_tree_admit_work(4096);
+    compact_back_demod_set_tree_build_factor(8);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
+  }
+
+  {
     enum { PROBE_FAMILY = 128, PROBE_QUERIES = 40 };
     Compact_back_demod_index bounded_probe;
     struct compact_back_demod_stats probe_stats;

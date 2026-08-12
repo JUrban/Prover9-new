@@ -3082,23 +3082,25 @@ static unsigned long long process_root_postings(
        bucket_index != CBD_NONE;
        bucket_index = index->path_buckets[bucket_index].next) {
     struct cbd_path_bucket *bucket = &index->path_buckets[bucket_index];
-    uint32_t block;
+    uint32_t block = bucket->posting_head;
     uint32_t record_index = bucket->inline_record;
     uint32_t occurrence_offset = bucket->inline_occurrence;
     occurrences += backfill_root_group(
       index, record_index, occurrence_offset, bucket->inline_length, build);
-    for (block = bucket->posting_head; block != CBD_NONE;
-         block = index->posting_blocks[block].next) {
-      const struct cbd_posting_block *current =
-        &index->posting_blocks[block];
+    while (block != CBD_NONE) {
+      const struct cbd_posting_block *current;
       uint16_t position = 0;
       uint16_t entries = 0;
-      while (position < current->used) {
-        uint32_t delta = decode_posting_value(current, &position);
-        uint32_t occurrence_delta =
-          decode_posting_value(current, &position);
-        uint32_t occurrence_length =
-          decode_posting_value(current, &position);
+      if (block >= index->posting_block_count)
+        fatal_error("compact_back_demod: corrupt root backfill block index");
+      for (;;) {
+        uint32_t delta, occurrence_delta, occurrence_length;
+        current = &index->posting_blocks[block];
+        if (position >= current->used)
+          break;
+        delta = decode_posting_value(current, &position);
+        occurrence_delta = decode_posting_value(current, &position);
+        occurrence_length = decode_posting_value(current, &position);
         if (delta > UINT32_MAX - record_index ||
             occurrence_delta > UINT32_MAX - occurrence_offset)
           fatal_error("compact_back_demod: root backfill posting overflow");
@@ -3108,8 +3110,10 @@ static unsigned long long process_root_postings(
           index, record_index, occurrence_offset, occurrence_length, build);
         entries++;
       }
+      current = &index->posting_blocks[block];
       if (position != current->used || entries != current->count)
         fatal_error("compact_back_demod: corrupt root backfill block");
+      block = current->next;
     }
   }
   return occurrences;
