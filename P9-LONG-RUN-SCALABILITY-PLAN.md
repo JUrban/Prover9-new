@@ -198,6 +198,18 @@ tree fanout to fund a later position admission.  CPU gates count both posting
 groups and tree nodes.  Position-budget exhaustion must eventually be isolated
 without globally abandoning other useful admitted positions.
 
+Implementation status: cost-aware root and position admission, per-feature
+budget isolation, complementary-position intersections, and dense structural
+bitmaps are implemented.  Lossy signatures and probation now use stable
+name/arity symbol hashes, so irrelevant option constants cannot perturb index
+collisions or scheduling.  Rigid tree queries prune nonmatching sibling
+subtrees, while explicit sibling-check counters keep the CPU gate honest.  A
+fresh 1,000-given `chat_test.in` sample is 6.0% faster than the stable `mask8`
+control with the same search trajectory.  This closes the bounded-prefix
+correctness and crossover gate only.  Ordered sibling scans, filled budgets,
+deletion-heavy rebuilds, and the 684,719-active-record `out41` scale still need
+mature-run evidence before promotion.
+
 ### E2. Unit and rewrite indexes
 
 Run fixed-live and adversarial scaling gates against code-tree, position, and

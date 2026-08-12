@@ -631,6 +631,7 @@ void fprint_compact_back_demod(FILE *fp)
           "candidates=%llu, exact_tests=%llu, posting_groups=%llu, "
           "path_buckets=%llu, tree_nodes=%llu, tree_terminals=%llu, "
           "tree_queries=%llu, tree_nodes_examined=%llu, "
+          "tree_sibling_checks=%llu, "
           "tree_posting_groups=%llu, tree_min_tokens=%u, "
           "tree_complete=%s, tree_budget=%llu, tree_estimated=%llu, "
           "tree_budget_exhaustions=%llu, "
@@ -664,7 +665,8 @@ void fprint_compact_back_demod(FILE *fp)
           "position_build_factor=%u, position_admission=%s, "
           "symbol_occurrences=%llu, groups_examined=%llu, "
           "occurrences_examined=%llu, path_checks=%llu, "
-          "path_rejects=%llu, file_snapshots=%llu, snapshot_ids=%llu, "
+          "path_rejects=%llu, query_input=%016llx, "
+          "query_output=%016llx, file_snapshots=%llu, snapshot_ids=%llu, "
           "posting_stream_used=%llu, "
           "posting_stream=%llu, occurrence_stream_used=%llu, "
           "occurrence_stream=%llu, postings=%llu, records=%llu, roots=%llu, "
@@ -683,6 +685,7 @@ void fprint_compact_back_demod(FILE *fp)
           stats.exact_tests, stats.posting_groups, stats.path_buckets,
           stats.tree_nodes, stats.tree_terminals, stats.tree_queries,
           stats.tree_nodes_examined,
+          stats.tree_sibling_checks,
           stats.tree_posting_groups, stats.tree_min_tokens,
           stats.tree_complete ? "yes" : "no",
           stats.tree_budget_bytes, stats.tree_estimated_bytes,
@@ -722,6 +725,8 @@ void fprint_compact_back_demod(FILE *fp)
           stats.symbol_occurrences,
           stats.posting_groups_examined, stats.occurrences_examined,
           stats.path_filter_checks, stats.path_filter_rejects,
+          stats.query_input_fingerprint,
+          stats.query_output_fingerprint,
           stats.materialized_file_snapshots,
           stats.materialized_snapshot_ids,
           stats.posting_stream_used, stats.posting_stream_bytes,

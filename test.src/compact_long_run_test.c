@@ -114,6 +114,7 @@ static void back_demod_longevity(size_t population, size_t queries)
   size_t mask_count, hot_count, i, q, warmup_queries = 0;
   unsigned long long mask_steady_work, hot_steady_work;
   unsigned long long hot_steady_nodes, hot_combined_work;
+  unsigned long long hot_steady_siblings;
   double mask_work_per_query, hot_work_per_query, hot_nodes_per_query;
   const char *gate;
 
@@ -189,8 +190,14 @@ static void back_demod_longevity(size_t population, size_t queries)
                     hot_before.query_profile.work;
   hot_steady_nodes = hot_final.tree_nodes_examined -
                      hot_before.tree_nodes_examined;
-  hot_combined_work = hot_steady_work > ULLONG_MAX - hot_steady_nodes ?
-    ULLONG_MAX : hot_steady_work + hot_steady_nodes;
+  hot_steady_siblings = hot_final.tree_sibling_checks -
+                        hot_before.tree_sibling_checks;
+  hot_combined_work = hot_steady_work >
+      ULLONG_MAX - hot_steady_nodes ? ULLONG_MAX :
+    hot_steady_work + hot_steady_nodes;
+  hot_combined_work = hot_combined_work >
+      ULLONG_MAX - hot_steady_siblings ? ULLONG_MAX :
+    hot_combined_work + hot_steady_siblings;
   mask_work_per_query = (double) mask_steady_work / queries;
   hot_work_per_query = (double) hot_steady_work / queries;
   hot_nodes_per_query = (double) hot_steady_nodes / queries;
@@ -208,6 +215,7 @@ static void back_demod_longevity(size_t population, size_t queries)
          "\"mask_work_per_query\":%.3f,"
          "\"hot_work_per_query\":%.3f,"
          "\"hot_nodes_per_query\":%.3f,"
+         "\"hot_sibling_checks_per_query\":%.3f,"
          "\"hot_combined_work_per_query\":%.3f,"
          "\"mask_bytes\":%llu,\"hot_bytes\":%llu,"
          "\"hot_admissions\":%llu,\"hot_rejections\":%llu,"
@@ -219,6 +227,7 @@ static void back_demod_longevity(size_t population, size_t queries)
          (unsigned long long) hot_count,
          (unsigned long long) warmup_queries + 1, mask_work_per_query,
          hot_work_per_query, hot_nodes_per_query,
+         (double) hot_steady_siblings / queries,
          (double) hot_combined_work / queries,
          mask_final.total_bytes, hot_final.total_bytes,
          hot_final.tree_root_admissions, hot_final.tree_root_rejections,
@@ -251,7 +260,9 @@ static void back_demod_variable_prefix_probe(size_t population,
   char subject[1200], marker[512], text[1300];
   unsigned long long *mask_ids, *hot_ids, *position_ids;
   unsigned long long mask_work, hot_groups, hot_nodes, hot_combined;
+  unsigned long long hot_siblings;
   unsigned long long adaptive_groups, adaptive_nodes, adaptive_combined;
+  unsigned long long adaptive_siblings;
   size_t mask_count, hot_count, position_count, i, q;
   size_t admission_queries = 1;
   const char *hot_gate, *adaptive_gate;
@@ -352,14 +363,22 @@ static void back_demod_variable_prefix_probe(size_t population,
                hot_before.query_profile.work;
   hot_nodes = hot_final.tree_nodes_examined -
               hot_before.tree_nodes_examined;
+  hot_siblings = hot_final.tree_sibling_checks -
+                 hot_before.tree_sibling_checks;
   hot_combined = hot_groups > ULLONG_MAX - hot_nodes ?
     ULLONG_MAX : hot_groups + hot_nodes;
+  hot_combined = hot_combined > ULLONG_MAX - hot_siblings ?
+    ULLONG_MAX : hot_combined + hot_siblings;
   adaptive_groups = position_final.query_profile.work -
                     position_before.query_profile.work;
   adaptive_nodes = position_final.tree_nodes_examined -
                    position_before.tree_nodes_examined;
+  adaptive_siblings = position_final.tree_sibling_checks -
+                      position_before.tree_sibling_checks;
   adaptive_combined = adaptive_groups > ULLONG_MAX - adaptive_nodes ?
     ULLONG_MAX : adaptive_groups + adaptive_nodes;
+  adaptive_combined = adaptive_combined > ULLONG_MAX - adaptive_siblings ?
+    ULLONG_MAX : adaptive_combined + adaptive_siblings;
   hot_gate = hot_final.tree_root_admissions > 0 &&
          hot_combined <= ULLONG_MAX / 2 && hot_combined * 2 < mask_work ?
     "pass" : "fail";
@@ -374,9 +393,11 @@ static void back_demod_variable_prefix_probe(size_t population,
          "\"mask_work_per_query\":%.3f,"
          "\"hot_groups_per_query\":%.3f,"
          "\"hot_nodes_per_query\":%.3f,"
+         "\"hot_sibling_checks_per_query\":%.3f,"
          "\"hot_combined_work_per_query\":%.3f,"
          "\"adaptive_groups_per_query\":%.3f,"
          "\"adaptive_nodes_per_query\":%.3f,"
+         "\"adaptive_sibling_checks_per_query\":%.3f,"
          "\"adaptive_combined_work_per_query\":%.3f,"
          "\"mask_bytes\":%llu,\"hot_bytes\":%llu,"
          "\"adaptive_bytes\":%llu,\"position_admissions\":%llu,"
@@ -385,9 +406,11 @@ static void back_demod_variable_prefix_probe(size_t population,
          (unsigned long long) hot_count,
          (unsigned long long) admission_queries,
          (double) mask_work / queries, (double) hot_groups / queries,
-         (double) hot_nodes / queries, (double) hot_combined / queries,
+         (double) hot_nodes / queries, (double) hot_siblings / queries,
+         (double) hot_combined / queries,
          (double) adaptive_groups / queries,
          (double) adaptive_nodes / queries,
+         (double) adaptive_siblings / queries,
          (double) adaptive_combined / queries,
          mask_final.total_bytes, hot_final.total_bytes,
          position_final.total_bytes, position_final.position_admissions,

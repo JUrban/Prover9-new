@@ -165,13 +165,15 @@ cannot see the suffix, while a prefix discrimination tree must enumerate every
 first-argument branch before checking it.  This caught a ground-query
 overgeneralization in the first hot-root result.
 
-| Population | mask8 groups/query | hot groups/query | hot tree nodes/query | hot combined | adaptive combined | Adaptive position admissions |
-|---:|---:|---:|---:|---:|---:|---:|
-| 1,000 | 1,000 | 1 | 1,999 | 2,000 | 1 | 1 |
-| 10,000 | 10,000 | 1 | 19,999 | 20,000 | 1 | 1 |
+| Population | mask8 groups/query | hot groups/query | hot tree nodes/query | hot sibling checks/query | hot combined | adaptive combined | Adaptive position admissions |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1,000 | 1,000 | 1 | 1,999 | 1,998 | 3,998 | 1 | 1 |
+| 10,000 | 10,000 | 1 | 19,999 | 19,998 | 39,998 | 1 | 1 |
 
 Hot-root trees alone therefore fail this generality gate even though their
-posting count looks perfect.  The new `adaptive` strategy maintains both
+posting count looks perfect.  These corrected combined figures include the
+sibling-edge comparisons which the first version of the longevity test did
+not report.  The new `adaptive` strategy maintains both
 cost-aware mechanisms: it uses an admitted position posting first, otherwise
 an admitted root tree, otherwise the complete `mask8` fallback.  A fanning-out
 tree query supplies deterministic work evidence for position probation.  The
@@ -329,6 +331,57 @@ less than 0.3 MiB and is dominated by the shared prover state.
 These are single bounded samples, not a statistically strong speed claim.
 They validate correctness, accounting, and plan selection.  The long-run
 crossover and work-slope gate remain open.
+
+### Stable semantic hashing and rigid-child pruning
+
+An exact-trace differential exposed a general reproducibility defect in the
+preceding integrated samples.  Prover9 interns option constants in the same
+global symbol table as theorem symbols.  Changing only
+`passive_selector_store` from `heap` to `file` therefore shifted later raw
+symbol numbers.  The proof trajectory and exact candidate stream stayed the
+same, but compact path-signature collisions, position-probation collisions,
+and adaptive admissions changed.  Consequently the preceding same-host table
+is useful historical evidence but is superseded for current CPU comparison.
+
+Compact backward demodulation now caches a deterministic hash of each
+symbol's name and arity.  Lossy path signatures, bucket placement, and
+adaptive probation use that semantic hash; exact root arrays and equality
+checks continue to use the raw symbol number.  Cumulative semantic query-input
+and output/work fingerprints are reported in `Compact_back_demod`.  Setting
+`P9_COMPACT_BACK_TRACE=1` additionally writes one `CBD_QUERY` event to standard
+error per lookup.  A regression changes the irrelevant selector-store option
+and requires identical normalized work, admission, and fingerprint reports.
+In a forced-file 300-given differential, all 4,292 query events and the entire
+compact backward-demodulation statistics line matched exactly; both runs
+generated 120,793 clauses and kept 5,737.
+
+A fresh stable-hash 1,000-given pair first showed that replacing broad posting
+scans with tree traversal was only a tie:
+
+| Strategy | User CPU (s) | Back groups | Tree nodes | Back bytes | Peak RSS (KiB) |
+|:---|---:|---:|---:|---:|---:|
+| `mask8` | 85.87 | 10,871,045 | 0 | 3,073,016 | 90,536 |
+| adaptive before child pruning | 86.79 | 3,317,482 | 15,190,004 | 7,124,972 | 90,408 |
+
+The tree collector was recursively entering every sibling even when the next
+query token was rigid and sibling edge prefixes were ordered and distinct.
+It now scans to the matching edge and descends only that subtree.  Sibling
+comparisons are separately reported and are included in the synthetic
+combined-work gate rather than hidden.  The resulting adaptive run preserved
+the exact 1,268,285-generated, 33,909-kept trajectory and took 80.72 user
+seconds, 6.0% below the fresh `mask8` sample.  It examined 1,338,073 posting
+groups, 12,598,143 tree nodes, and 17,808,810 sibling edges; 15 position
+features were admitted.  Back-index storage was 6,984,708 bytes and peak RSS
+was 90,540 KiB, essentially unchanged.
+
+Focused exactness, checkpoint/compaction, ASan/UBSan, and semantic-hash
+stability tests pass.  This is still only a 1,000-given CPU result.  The large
+sibling count shows the next potential long-run risk: an ordered linked
+sibling scan is still linear in node fan-out even though it avoids expensive
+recursive subtree visits.  A bounded child-dispatch structure should be added
+only if mature-prefix counters show that sibling checks become material; the
+8,800-given `out41` replacement and multi-million-passive IO gates remain
+open.
 
 ## Selective structural retrieval for nonunit back subsumption
 

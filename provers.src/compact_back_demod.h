@@ -34,6 +34,7 @@ struct compact_back_demod_stats {
   unsigned long long tree_terminals;
   unsigned long long tree_queries;
   unsigned long long tree_nodes_examined;
+  unsigned long long tree_sibling_checks;
   unsigned long long tree_posting_groups;
   unsigned long long tree_budget_bytes;
   unsigned long long tree_estimated_bytes;
@@ -93,6 +94,8 @@ struct compact_back_demod_stats {
   unsigned long long worst_query_groups;
   unsigned long long worst_query_occurrences;
   unsigned long long worst_query_candidates;
+  unsigned long long query_input_fingerprint;
+  unsigned long long query_output_fingerprint;
   struct compact_query_profile query_profile;
   double lookup_seconds;
   double maintenance_seconds;

@@ -158,6 +158,7 @@ struct compact_back_demod_index {
   size_t posting_count;
   size_t posting_stream_used;
   uint32_t *symbol_buckets;
+  uint64_t *symbol_hashes;
   size_t symbol_capacity;
   struct cbd_path_bucket *path_buckets;
   size_t path_bucket_count;
@@ -217,6 +218,7 @@ struct compact_back_demod_index {
   unsigned long long path_filter_rejects;
   unsigned long long tree_queries;
   unsigned long long tree_nodes_examined;
+  unsigned long long tree_sibling_checks;
   unsigned long long tree_posting_count;
   unsigned long long tree_posting_blocks;
   unsigned long long tree_posting_stream_used;
@@ -274,6 +276,8 @@ struct compact_back_demod_index {
   unsigned long long worst_query_groups;
   unsigned long long worst_query_occurrences;
   unsigned long long worst_query_candidates;
+  unsigned long long query_input_fingerprint;
+  unsigned long long query_output_fingerprint;
   struct compact_query_profile query_profile;
   Clock lookup_clock;
   Clock maintenance_clock;
@@ -414,6 +418,7 @@ static unsigned long long index_bytes(Compact_back_demod_index index)
   return sizeof(*index) +
     index->posting_block_capacity * sizeof(*index->posting_blocks) +
     index->symbol_capacity * sizeof(*index->symbol_buckets) +
+    index->symbol_capacity * sizeof(*index->symbol_hashes) +
     index->path_bucket_capacity * sizeof(*index->path_buckets) +
     index->path_bucket_hash_capacity * sizeof(*index->path_bucket_hash) +
     index->tree_node_capacity * sizeof(*index->tree_nodes) +
@@ -469,6 +474,12 @@ static void ensure_symbols(Compact_back_demod_index index, unsigned symbol)
   memset(index->symbol_buckets + old_capacity, 0,
          (index->symbol_capacity - old_capacity) *
            sizeof(*index->symbol_buckets));
+  index->symbol_hashes = safe_realloc(
+    index->symbol_hashes,
+    index->symbol_capacity * sizeof(*index->symbol_hashes));
+  memset(index->symbol_hashes + old_capacity, 0,
+         (index->symbol_capacity - old_capacity) *
+           sizeof(*index->symbol_hashes));
   if (strategy_uses_hot_tree(index->strategy)) {
     size_t old_roots = index->tree_root_capacity;
     index->tree_root_capacity = index->symbol_capacity;
@@ -489,6 +500,31 @@ static void ensure_symbols(Compact_back_demod_index index, unsigned symbol)
            (index->position_root_capacity - old_roots) *
              sizeof(*index->position_root_buckets));
   }
+}
+
+/* Symbol numbers include constants introduced while parsing option terms.
+   They are exact array keys, but must not determine lossy signature bits or
+   adaptive-probation collisions: adding an unrelated option value would then
+   change index work for the same theorem. */
+static uint64_t stable_symbol_hash(Compact_back_demod_index index,
+                                   uint32_t symbol)
+{
+  const unsigned char *name;
+  uint64_t value = UINT64_C(1469598103934665603);
+  ensure_symbols(index, symbol);
+  if (index->symbol_hashes[symbol] != 0)
+    return index->symbol_hashes[symbol];
+  name = (const unsigned char *) sn_to_str((int) symbol);
+  while (*name != '\0') {
+    value ^= *name++;
+    value *= UINT64_C(1099511628211);
+  }
+  value ^= (unsigned) sn_to_arity((int) symbol);
+  value = hash_id(value);
+  if (value == 0)
+    value = 1;
+  index->symbol_hashes[symbol] = value;
+  return value;
 }
 
 static void ensure_occurrence_bytes(Compact_back_demod_index index,
@@ -561,15 +597,16 @@ static uint32_t new_posting_block(Compact_back_demod_index index,
   return block;
 }
 
-static uint64_t path_bucket_key(uint32_t symbol, cbd_path_mask mask)
+static uint64_t path_bucket_key(Compact_back_demod_index index,
+                                uint32_t symbol, cbd_path_mask mask)
 {
-  return hash_id(((uint64_t) symbol << 32) ^ hash_id(mask));
+  return hash_id(stable_symbol_hash(index, symbol) ^ hash_id(mask));
 }
 
 static size_t path_bucket_hash_slot(Compact_back_demod_index index,
                                     uint32_t symbol, cbd_path_mask mask)
 {
-  size_t at = (size_t) hash_id(path_bucket_key(symbol, mask)) &
+  size_t at = (size_t) hash_id(path_bucket_key(index, symbol, mask)) &
     (index->path_bucket_hash_capacity - 1);
   for (;;) {
     uint32_t bucket = index->path_bucket_hash[at];
@@ -643,19 +680,22 @@ static uint32_t find_or_add_path_bucket(Compact_back_demod_index index,
   return bucket;
 }
 
-static uint64_t position_feature_key(uint32_t root_symbol, uint64_t path,
+static uint64_t position_feature_key(Compact_back_demod_index index,
+                                     uint32_t root_symbol, uint64_t path,
                                      uint32_t symbol)
 {
   return hash_id(path ^
-    ((uint64_t) root_symbol * UINT64_C(0x9e3779b97f4a7c15)) ^
-    ((uint64_t) symbol * UINT64_C(0x85ebca77c2b2ae63)));
+    (stable_symbol_hash(index, root_symbol) *
+      UINT64_C(0x9e3779b97f4a7c15)) ^
+    (stable_symbol_hash(index, symbol) * UINT64_C(0x85ebca77c2b2ae63)));
 }
 
 static size_t position_hash_slot(Compact_back_demod_index index,
                                  uint32_t root_symbol, uint64_t path,
                                  uint32_t symbol)
 {
-  size_t at = (size_t) position_feature_key(root_symbol, path, symbol) &
+  size_t at = (size_t) position_feature_key(
+    index, root_symbol, path, symbol) &
     (index->position_bucket_hash_capacity - 1);
   for (;;) {
     uint32_t bucket = index->position_bucket_hash[at];
@@ -984,7 +1024,8 @@ static unsigned long long note_position_probation(
   Compact_back_demod_index index, uint32_t root_symbol, uint64_t path,
   uint32_t symbol, unsigned long long work, unsigned *hits)
 {
-  uint64_t key = position_feature_key(root_symbol, path, symbol);
+  uint64_t key = position_feature_key(
+    index, root_symbol, path, symbol);
   size_t mask, first, second;
   struct cbd_position_probation *entry, *alternative;
   ensure_position_probation(index);
@@ -1036,7 +1077,7 @@ static void clear_position_probation(Compact_back_demod_index index,
   size_t mask, first, second;
   if (index->position_probation_capacity == 0)
     return;
-  key = position_feature_key(root_symbol, path, symbol);
+  key = position_feature_key(index, root_symbol, path, symbol);
   mask = index->position_probation_capacity - 1;
   first = (size_t) key & mask;
   second = (size_t) hash_id(key ^ UINT64_C(0xd6e8feb86659fd93)) & mask;
@@ -1370,15 +1411,17 @@ static uint64_t signature_child_path(uint64_t path, unsigned child)
 static cbd_path_mask path_feature_bits(Compact_back_demod_index index,
                                        uint64_t path, uint32_t symbol)
 {
+  uint64_t stable = stable_symbol_hash(index, symbol);
   if (strategy_uses_mask8(index->strategy)) {
     uint32_t mixed = (uint32_t) path * UINT32_C(0x9e3779b1) ^
-                     symbol * UINT32_C(0x85ebca6b);
+                     (uint32_t) stable * UINT32_C(0x85ebca6b) ^
+                     (uint32_t) (stable >> 32);
     mixed ^= mixed >> 16;
     return UINT64_C(1) << (mixed % 8U);
   }
   else {
     uint64_t mixed = hash_id(
-      path ^ ((uint64_t) symbol * UINT64_C(0x85ebca77c2b2ae63)));
+      path ^ (stable * UINT64_C(0x85ebca77c2b2ae63)));
     unsigned first = (unsigned) (mixed & 31U);
     unsigned second = (unsigned) ((mixed >> 32) & 31U);
     if (second == first)
@@ -2656,10 +2699,34 @@ static void collect_tree_candidates(Compact_back_demod_index index,
     return;
   }
 
-  for (child = tree_first_child(index, node); child != CBD_NONE;
-       child = index->tree_nodes[child].next_sibling)
-    collect_tree_candidates(index, child, query_position, query_end,
-                            pending, exclude_id, count);
+  child = tree_first_child(index, node);
+  if (pending == 0 && query_position < query_end &&
+      !VARIABLE(index->query[query_position].term)) {
+    int32_t wanted = SYMNUM(index->query[query_position].term);
+    /* Sibling edges are ordered by their first token and radix insertion
+       gives them distinct first tokens.  A rigid query token can therefore
+       enter only the equal-code edge; earlier and later siblings would fail
+       at the first comparison inside collect_tree_candidates. */
+    while (child != CBD_NONE) {
+      int32_t actual = tree_first_code(index, child);
+      index->tree_sibling_checks++;
+      if (tree_code_compare(actual, wanted) < 0)
+        child = index->tree_nodes[child].next_sibling;
+      else {
+        if (actual == wanted)
+          collect_tree_candidates(index, child, query_position, query_end,
+                                  pending, exclude_id, count);
+        break;
+      }
+    }
+  }
+  else
+    for (; child != CBD_NONE;
+         child = index->tree_nodes[child].next_sibling) {
+      index->tree_sibling_checks++;
+      collect_tree_candidates(index, child, query_position, query_end,
+                              pending, exclude_id, count);
+    }
 }
 
 static void collect_tree(Compact_back_demod_index index, Term pattern,
@@ -3313,6 +3380,66 @@ static int decreasing_id(const void *left, const void *right)
   return a < b ? 1 : a > b ? -1 : 0;
 }
 
+static uint64_t query_term_fingerprint(Compact_back_demod_index index,
+                                       Term term)
+{
+  uint64_t value;
+  int i;
+  if (VARIABLE(term))
+    return hash_id(UINT64_C(0x6a09e667f3bcc909) ^
+                   (unsigned) VARNUM(term));
+  value = hash_id(UINT64_C(0xbb67ae8584caa73b) ^
+                  stable_symbol_hash(index, (uint32_t) SYMNUM(term)) ^
+                  ((uint64_t) ARITY(term) << 32));
+  for (i = 0; i < ARITY(term); i++)
+    value = hash_id(value ^ query_term_fingerprint(index, ARG(term, i)) ^
+                    (UINT64_C(0x9e3779b97f4a7c15) *
+                     ((uint64_t) i + 1)));
+  return value;
+}
+
+static BOOL query_event_trace_enabled(void)
+{
+  static int enabled = -1;
+  if (enabled < 0) {
+    const char *value = getenv("P9_COMPACT_BACK_TRACE");
+    enabled = value != NULL && value[0] != '\0' && strcmp(value, "0") != 0;
+  }
+  return enabled != 0;
+}
+
+static uint64_t note_query_input_fingerprint(Compact_back_demod_index index,
+                                             Topform demod, int type,
+                                             Term alpha, Term beta)
+{
+  uint64_t value = hash_id(demod->id ^ ((uint64_t) (unsigned) type << 56));
+  if (type == ORIENTED || type == LEX_DEP_LR || type == LEX_DEP_BOTH)
+    value = hash_id(value ^ query_term_fingerprint(index, alpha));
+  if (type == LEX_DEP_RL || type == LEX_DEP_BOTH)
+    value = hash_id(value ^ query_term_fingerprint(index, beta) ^
+                    UINT64_C(0x3c6ef372fe94f82b));
+  index->query_input_fingerprint = hash_id(
+    index->query_input_fingerprint ^ value ^
+    (index->queries + UINT64_C(0xa54ff53a5f1d36f1)));
+  return value;
+}
+
+static uint64_t note_query_output_fingerprint(Compact_back_demod_index index,
+                                              size_t count)
+{
+  size_t i;
+  uint64_t value = hash_id(index->query_work ^
+    ((uint64_t) count << 32) ^ index->query_bytes_decoded);
+  for (i = 0; i < count; i++)
+    value = hash_id(value ^ index->results[i] ^
+                    (UINT64_C(0x510e527fade682d1) *
+                     ((uint64_t) i + 1)));
+  index->query_output_fingerprint = hash_id(
+    index->query_output_fingerprint ^ value ^
+    (index->queries + UINT64_C(0x1f83d9abfb41bd6b)));
+  return value;
+}
+
 static size_t pattern_min_tokens(Term term)
 {
   size_t count = 1;
@@ -3392,6 +3519,7 @@ unsigned long long *compact_back_demod_candidate_ids(
   Compact_back_demod_index index, Topform demod, int type, size_t *count)
 {
   Term atom, alpha, beta;
+  uint64_t input_fingerprint, output_fingerprint;
   unsigned long long *answer;
   unsigned long long occurrences_before;
   *count = 0;
@@ -3409,6 +3537,8 @@ unsigned long long *compact_back_demod_candidate_ids(
   atom = demod->literals->atom;
   alpha = ARG(atom, 0);
   beta = ARG(atom, 1);
+  input_fingerprint = note_query_input_fingerprint(
+    index, demod, type, alpha, beta);
   begin_query(index);
   if (type == ORIENTED || type == LEX_DEP_LR || type == LEX_DEP_BOTH)
     collect_pattern(index, alpha, demod->id, count);
@@ -3416,6 +3546,17 @@ unsigned long long *compact_back_demod_candidate_ids(
     collect_pattern(index, beta, demod->id, count);
   if (*count > 1)
     qsort(index->results, *count, sizeof(*index->results), decreasing_id);
+  output_fingerprint = note_query_output_fingerprint(index, *count);
+  if (query_event_trace_enabled())
+    fprintf(stderr,
+            "CBD_QUERY sequence=%llu demod=%llu type=%d input=%016llx "
+            "active=%llu physical=%llu work=%llu candidates=%llu "
+            "output=%016llx.\n",
+            index->queries + 1, demod->id, type,
+            (unsigned long long) input_fingerprint, index->active,
+            (unsigned long long) (index->record_count - 1),
+            index->query_work, (unsigned long long) *count,
+            (unsigned long long) output_fingerprint);
   answer = *count == 0 ? NULL : safe_malloc(*count * sizeof(*answer));
   if (*count != 0)
     memcpy(answer, index->results, *count * sizeof(*answer));
@@ -3730,6 +3871,7 @@ static void compact_back_demod_compact_internal(
   safe_free(replacement);
   safe_free(old.posting_blocks);
   safe_free(old.symbol_buckets);
+  safe_free(old.symbol_hashes);
   safe_free(old.path_buckets);
   safe_free(old.path_bucket_hash);
   safe_free(old.tree_nodes);
@@ -3759,6 +3901,7 @@ static void compact_back_demod_compact_internal(
   index->path_filter_rejects = path_rejects;
   index->tree_queries = old.tree_queries;
   index->tree_nodes_examined = old.tree_nodes_examined;
+  index->tree_sibling_checks = old.tree_sibling_checks;
   index->tree_budget_exhaustions += old.tree_budget_exhaustions;
   index->tree_root_admissions = old.tree_root_admissions;
   index->tree_root_rejections = old.tree_root_rejections;
@@ -3798,6 +3941,8 @@ static void compact_back_demod_compact_internal(
   index->worst_query_groups = old.worst_query_groups;
   index->worst_query_occurrences = old.worst_query_occurrences;
   index->worst_query_candidates = old.worst_query_candidates;
+  index->query_input_fingerprint = old.query_input_fingerprint;
+  index->query_output_fingerprint = old.query_output_fingerprint;
   index->query_profile = old.query_profile;
   if (old_peak > index->peak_bytes)
     index->peak_bytes = old_peak;
@@ -3896,6 +4041,7 @@ void compact_back_demod_compact_materialized(
   old = *index;
   safe_free(old.posting_blocks);
   safe_free(old.symbol_buckets);
+  safe_free(old.symbol_hashes);
   safe_free(old.path_buckets);
   safe_free(old.path_bucket_hash);
   safe_free(old.tree_nodes);
@@ -3965,6 +4111,7 @@ void compact_back_demod_compact_materialized(
   index->path_filter_rejects = path_rejects;
   index->tree_queries = old.tree_queries;
   index->tree_nodes_examined = old.tree_nodes_examined;
+  index->tree_sibling_checks = old.tree_sibling_checks;
   index->tree_budget_exhaustions += old.tree_budget_exhaustions;
   index->tree_root_admissions = old.tree_root_admissions;
   index->tree_root_rejections = old.tree_root_rejections;
@@ -4004,6 +4151,8 @@ void compact_back_demod_compact_materialized(
   index->worst_query_groups = old.worst_query_groups;
   index->worst_query_occurrences = old.worst_query_occurrences;
   index->worst_query_candidates = old.worst_query_candidates;
+  index->query_input_fingerprint = old.query_input_fingerprint;
+  index->query_output_fingerprint = old.query_output_fingerprint;
   index->query_profile = old.query_profile;
   index->materialized_file_snapshots =
     file_snapshots + (file_snapshot ? 1 : 0);
@@ -4097,6 +4246,7 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
     index->tree_posting_list_count - 1;
   stats->tree_queries = index->tree_queries;
   stats->tree_nodes_examined = index->tree_nodes_examined;
+  stats->tree_sibling_checks = index->tree_sibling_checks;
   stats->tree_posting_groups = index->tree_posting_count;
   stats->tree_budget_bytes = index->tree_budget_bytes;
   stats->tree_estimated_bytes = tree_estimated_bytes(index);
@@ -4169,6 +4319,8 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->worst_query_groups = index->worst_query_groups;
   stats->worst_query_occurrences = index->worst_query_occurrences;
   stats->worst_query_candidates = index->worst_query_candidates;
+  stats->query_input_fingerprint = index->query_input_fingerprint;
+  stats->query_output_fingerprint = index->query_output_fingerprint;
   stats->query_profile = index->query_profile;
   stats->lookup_seconds = clock_seconds(index->lookup_clock);
   stats->maintenance_seconds = clock_seconds(index->maintenance_clock);
@@ -4187,6 +4339,7 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->record_bytes = index->record_capacity * sizeof(*index->records);
   stats->root_bytes =
     index->symbol_capacity * sizeof(*index->symbol_buckets) +
+    index->symbol_capacity * sizeof(*index->symbol_hashes) +
     index->path_bucket_capacity * sizeof(*index->path_buckets) +
     index->path_bucket_hash_capacity * sizeof(*index->path_bucket_hash) +
     index->tree_node_capacity * sizeof(*index->tree_nodes) +
@@ -4214,6 +4367,7 @@ void compact_back_demod_free(Compact_back_demod_index index)
     return;
   safe_free(index->posting_blocks);
   safe_free(index->symbol_buckets);
+  safe_free(index->symbol_hashes);
   safe_free(index->path_buckets);
   safe_free(index->path_bucket_hash);
   safe_free(index->tree_nodes);
