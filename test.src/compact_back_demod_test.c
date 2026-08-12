@@ -446,7 +446,7 @@ int main(void)
         text, sizeof(text), "u(f(shallow_a%d,shallow_b%d)).", j, j);
       clauses[j] = indexed_clause(text);
       CHECK(compact_back_demod_add(mask32_index, clauses[j]),
-            "add shallow family clause to mask32 Patricia index");
+            "add shallow family clause to mask32 bit-plane index");
     }
     (void) snprintf(
       text, sizeof(text), "f(shallow_a%d,shallow_b%d) = shallow_a%d.",
@@ -456,15 +456,16 @@ int main(void)
       mask32_index, rule, ORIENTED, &mask32_count);
     CHECK(mask32_count == 1 &&
           mask32_ids[0] == clauses[SHALLOW_TARGET]->id,
-          "mask32 Patricia retrieval preserves the exact shallow answer");
+          "mask32 bit-plane retrieval preserves the exact shallow answer");
     compact_back_demod_note_exact_query(
       mask32_index, mask32_count, mask32_count, 0);
     compact_back_demod_get_stats(mask32_index, &before);
-    CHECK(before.mask_trie_nodes <= before.path_buckets * 2 &&
-          before.mask_trie_queries == 1 &&
-          before.mask_trie_nodes_examined < before.path_buckets &&
-          before.mask_trie_prunes > 0,
-          "mask32 Patricia storage is linear and prunes bucket enumeration");
+    CHECK(before.mask_directory_blocks < before.path_buckets &&
+          before.mask_directory_queries == 1 &&
+          before.mask_directory_blocks_examined < before.path_buckets &&
+          before.mask_directory_word_checks > 0 &&
+          before.mask_directory_buckets_selected == 1,
+          "mask32 bit-plane directory is linear and filters by words");
     CHECK(compact_back_demod_remove(
             mask32_index, clauses[SHALLOW_TARGET]->id),
           "remove shallow mask32 answer");
@@ -473,11 +474,11 @@ int main(void)
     mask32_ids = compact_back_demod_candidate_ids(
       mask32_index, rule, ORIENTED, &mask32_count);
     CHECK(mask32_count == 0 && mask32_ids == NULL,
-          "mask32 Patricia retrieval survives forced compaction");
+          "mask32 bit-plane retrieval survives forced compaction");
     compact_back_demod_get_stats(mask32_index, &after);
-    CHECK(after.mask_trie_nodes <= after.path_buckets * 2 &&
-          after.mask_trie_queries == 2,
-          "compaction rebuilds the bounded mask32 Patricia directory");
+    CHECK(after.mask_directory_blocks <= after.path_buckets &&
+          after.mask_directory_queries == 2,
+          "compaction rebuilds the bounded mask32 bit-plane directory");
     compact_back_demod_free(mask32_index);
     delete_clause(rule);
     for (j = 0; j < SHALLOW_FAMILY; j++)

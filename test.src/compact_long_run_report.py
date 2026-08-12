@@ -63,6 +63,9 @@ CUMULATIVE_KEYS = (
     "back_queries", "back_groups_examined", "back_tree_nodes_examined",
     "back_mask_trie_queries", "back_mask_trie_nodes_examined",
     "back_mask_trie_prunes",
+    "back_mask_directory_queries", "back_mask_directory_blocks_examined",
+    "back_mask_directory_word_checks",
+    "back_mask_directory_buckets_selected",
     "back_tree_sibling_checks", "back_tree_child_lookups",
     "back_tree_insert_sibling_checks", "back_tree_insert_cache_lookups",
     "back_tree_insert_cache_hits", "back_tree_insert_cache_misses",
@@ -355,10 +358,18 @@ def derive_intervals(samples):
         delta_queries = row.get("delta_back_queries")
         delta_groups = row.get("delta_back_groups_examined")
         delta_mask_nodes = row.get("delta_back_mask_trie_nodes_examined")
+        delta_mask_blocks = row.get(
+            "delta_back_mask_directory_blocks_examined")
+        delta_mask_words = row.get("delta_back_mask_directory_word_checks")
+        mask_components = (delta_mask_nodes, delta_mask_blocks,
+                           delta_mask_words)
+        delta_mask_work = (
+            sum(value for value in mask_components if value is not None)
+            if any(value is not None for value in mask_components) else None)
         delta_nodes = row.get("delta_back_tree_nodes_examined")
         delta_siblings = row.get("delta_back_tree_sibling_checks")
         delta_children = row.get("delta_back_tree_child_lookups")
-        components = (delta_groups, delta_mask_nodes, delta_nodes,
+        components = (delta_groups, delta_mask_work, delta_nodes,
                       delta_siblings,
                       delta_children)
         combined = (sum(value for value in components if value is not None)
@@ -370,7 +381,7 @@ def derive_intervals(samples):
         row["kept_per_given"] = safe_ratio(row.get("delta_kept"), delta_given)
         row["back_groups_per_query"] = safe_ratio(delta_groups, delta_queries)
         row["back_mask_nodes_per_query"] = safe_ratio(
-            delta_mask_nodes, delta_queries)
+            delta_mask_work, delta_queries)
         row["back_nodes_per_query"] = safe_ratio(delta_nodes, delta_queries)
         row["back_siblings_per_query"] = safe_ratio(
             delta_siblings, delta_queries)
@@ -1076,6 +1087,10 @@ TSV_COLUMNS = (
     "delta_back_queries", "back_groups_per_query",
     "back_mask_trie_nodes", "delta_back_mask_trie_queries",
     "back_mask_nodes_per_query", "delta_back_mask_trie_prunes",
+    "back_mask_directory_blocks", "delta_back_mask_directory_queries",
+    "delta_back_mask_directory_blocks_examined",
+    "delta_back_mask_directory_word_checks",
+    "delta_back_mask_directory_buckets_selected",
     "back_nodes_per_query",
     "back_siblings_per_query", "back_children_per_query",
     "back_combined_per_query", "back_lookup_cpu_pct", "back_child_hit_pct",
