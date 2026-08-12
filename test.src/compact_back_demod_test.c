@@ -652,16 +652,16 @@ int main(void)
     for (j = 0; j < INTERSECTION_FAMILY; j++) {
       (void) snprintf(text, sizeof(text),
                       "w(f(a,z(h(j(a%d)),h(j(b%d))))).",
-                      j % 4, (j / 4) % 4);
+                      j % 32, (j / 32) % 32);
       clauses[j] = indexed_clause(text);
       CHECK(compact_back_demod_add(intersected, clauses[j]),
             "add correlated position-intersection family");
     }
     rule = indexed_clause("f(a,z(h(j(a0)),h(j(b0)))) = a.");
-    for (round = 0; round < 7; round++) {
+    for (round = 0; round < 35; round++) {
       ids = compact_back_demod_candidate_ids(
         intersected, rule, ORIENTED, &count);
-      CHECK(count == INTERSECTION_FAMILY / 16,
+      CHECK(count == 1,
             "position intersection preserves every exact candidate");
       safe_free(ids);
     }
@@ -669,12 +669,10 @@ int main(void)
     CHECK(before_compact.position_admissions == 2 &&
           before_compact.position_features == 2 &&
           before_compact.position_intersection_queries == 1 &&
-          before_compact.position_intersection_scans ==
-            INTERSECTION_FAMILY / 4 &&
-          before_compact.position_intersection_bit_checks ==
-            INTERSECTION_FAMILY / 4 &&
-          before_compact.position_intersection_records ==
-            INTERSECTION_FAMILY / 16 &&
+          before_compact.position_dense_intersection_queries == 0 &&
+          before_compact.position_intersection_scans == 4 &&
+          before_compact.position_intersection_bit_checks == 4 &&
+          before_compact.position_intersection_records == 1 &&
           before_compact.position_bitmap_bytes > 0,
           "two broad features use a bounded bitmap intersection");
     later = indexed_clause("w(f(a,z(h(j(a0)),h(j(b0))))).");
@@ -682,7 +680,7 @@ int main(void)
           "add later clause to both intersected position features");
     ids = compact_back_demod_candidate_ids(
       intersected, rule, ORIENTED, &count);
-    CHECK(count == INTERSECTION_FAMILY / 16 + 1 && ids[0] == later->id,
+    CHECK(count == 2 && ids[0] == later->id,
           "intersection membership stays complete after insertion");
     safe_free(ids);
     CHECK(compact_back_demod_remove(intersected, later->id),
@@ -690,7 +688,7 @@ int main(void)
     compact_back_demod_compact_all_stale(intersected);
     ids = compact_back_demod_candidate_ids(
       intersected, rule, ORIENTED, &count);
-    CHECK(count == INTERSECTION_FAMILY / 16,
+    CHECK(count == 1,
           "position intersection remains complete after compaction");
     safe_free(ids);
     compact_back_demod_get_stats(intersected, &after_compact);
@@ -704,6 +702,50 @@ int main(void)
     delete_clause(rule);
     delete_clause(later);
     for (j = 0; j < INTERSECTION_FAMILY; j++)
+      delete_clause(clauses[j]);
+    compact_back_demod_set_position_options(
+      4096, 4, 8, 65536, 20, TRUE);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
+  }
+
+  {
+    enum { DENSE_INTERSECTION_FAMILY = 512 };
+    Compact_back_demod_index dense_intersection;
+    struct compact_back_demod_stats dense_stats;
+    Topform clauses[DENSE_INTERSECTION_FAMILY], rule;
+    char text[160];
+    int j, round;
+    compact_back_demod_set_position_options(1, 4, 1, 65536, 20, TRUE);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_POSITION);
+    dense_intersection = compact_back_demod_init();
+    for (j = 0; j < DENSE_INTERSECTION_FAMILY; j++) {
+      (void) snprintf(text, sizeof(text),
+                      "w(d(a,z(h(j(da%d)),h(j(db%d))))).",
+                      j % 4, (j / 4) % 4);
+      clauses[j] = indexed_clause(text);
+      CHECK(compact_back_demod_add(dense_intersection, clauses[j]),
+            "add dense position-intersection family");
+    }
+    rule = indexed_clause("d(a,z(h(j(da0)),h(j(db0)))) = a.");
+    for (round = 0; round < 8; round++) {
+      ids = compact_back_demod_candidate_ids(
+        dense_intersection, rule, ORIENTED, &count);
+      CHECK(count == DENSE_INTERSECTION_FAMILY / 16,
+            "dense bitmap intersection preserves exact candidates");
+      safe_free(ids);
+    }
+    compact_back_demod_get_stats(dense_intersection, &dense_stats);
+    CHECK(dense_stats.position_admissions == 2 &&
+          dense_stats.position_features == 2 &&
+          dense_stats.position_dense_intersection_queries == 2 &&
+          dense_stats.position_intersection_scans == 0 &&
+          dense_stats.position_bitmap_word_checks == 34 &&
+          dense_stats.position_intersection_records ==
+            2 * (DENSE_INTERSECTION_FAMILY / 16),
+          "broad features select dense word-wise bitmap intersection");
+    compact_back_demod_free(dense_intersection);
+    delete_clause(rule);
+    for (j = 0; j < DENSE_INTERSECTION_FAMILY; j++)
       delete_clause(clauses[j]);
     compact_back_demod_set_position_options(
       4096, 4, 8, 65536, 20, TRUE);

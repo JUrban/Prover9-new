@@ -288,12 +288,23 @@ only 8 occurrence matches.  Candidate IDs and order remain identical through
 later insertion, deletion, and forced compaction.  New counters expose
 intersection queries, scans, probes, survivors, and allocated bitmap bytes.
 
-This mechanism does **not** make the compressed scan itself smaller than the
-smallest singleton posting.  It removes expensive occurrence matching for
-nonmembers and is therefore one bounded layer, not a claim that the 5.7
-billion-group `out41` slope is solved.  Dense word-wise intersections or a
-stronger conjunctive retrieval structure remain candidates if admitted
-singleton postings themselves grow too broad.
+The first implementation did **not** make the compressed scan itself smaller
+than the smallest singleton posting.  A second cost-gated path now handles
+broad admitted features: it ANDs their dense membership maps word by word and
+scans full tokens only for set-bit survivors.  The planner compares the
+logical bitmap-word count (not overallocated capacity) with the smallest
+posting count and retains compressed scanning for sparse features.  Zero
+words short-circuit later bitmap reads.  Query work and statistics charge
+every bitmap word actually read, so this path cannot manufacture a posting
+count win by hiding its alternative work.
+
+Focused tests cover both choices.  A sparse family continues to decode its
+four-record posting.  In a 512-record dense family, the two singleton postings
+contain 128 records each; a dense query reads only 17 bitmap words and retains
+the same 32 exact candidates.  This is still not a claim that the 5.7
+billion-group `out41` slope is solved: the decisive evidence must come from a
+much longer adaptive run where postings and bitmaps have reached their mature
+cardinalities.
 
 ### Same-host 1,000-given check after intersection support
 
@@ -301,16 +312,20 @@ Fresh sequential runs used the current optimized executable, identical input,
 and a 1,000-given cap.  Both reproduced 1,268,285 generated and 33,909 kept
 clauses.
 
-| Strategy | User CPU (s) | Back groups | Tree nodes | Intersections | Bitmap probes | Intersection survivors | Peak RSS (KiB) |
+| Strategy/build | User CPU (s) | Back groups | Tree nodes | Dense intersections | Sparse scans | Bitmap word reads | Peak RSS (KiB) |
 |:---|---:|---:|---:|---:|---:|---:|---:|
 | `mask8` | 88.54 | 9,323,859 | 0 | 0 | 0 | 0 | 90,408 |
-| adaptive | 85.45 | 2,835,834 | 15,249,493 | 722 | 306,685 | 86,479 | 90,268 |
+| adaptive, record probes | 85.45 | 2,835,834 | 15,249,493 | 0 | 306,685 | 0 | 90,268 |
+| adaptive, cost-gated dense | 83.66 | 2,768,376 | 15,249,493 | 69 | 239,227 | 51,806 | 90,548 |
 
-Adaptive mode is 3.5% faster in this same-host pair and retains the exact
-search trajectory.  The intersection filter avoids 220,206 full occurrence
-checks in the queries which use it, but the aggregate comparison cannot
-attribute the whole adaptive difference to this new layer because hot trees
-and singleton positions are also active.  In particular, the back-group count
-is the same as the earlier adaptive prefix: the current posting-plus-bitmap
-algorithm still decodes the smallest posting.  The result is a correctness and
-bounded-overhead validation, not a long-run crossover result.
+The current adaptive mode is 5.5% faster than the same-host `mask8` run and
+retains the exact search trajectory.  Against the immediately preceding
+record-probe build, dense planning replaces 67,458 compressed scans with
+51,806 contiguous bitmap-word reads and lowers this one user-CPU sample by
+2.1%.  The 69 dense queries are a small fraction of the workload, as intended;
+most intersections remain on their cheaper sparse plan.  Peak RSS changes by
+less than 0.3 MiB and is dominated by the shared prover state.
+
+These are single bounded samples, not a statistically strong speed claim.
+They validate correctness, accounting, and plan selection.  The long-run
+crossover and work-slope gate remain open.

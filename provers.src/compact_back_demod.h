@@ -56,8 +56,10 @@ struct compact_back_demod_stats {
   unsigned long long position_postings;
   unsigned long long position_queries;
   unsigned long long position_intersection_queries;
+  unsigned long long position_dense_intersection_queries;
   unsigned long long position_intersection_scans;
   unsigned long long position_intersection_bit_checks;
+  unsigned long long position_bitmap_word_checks;
   unsigned long long position_intersection_records;
   unsigned long long position_records_examined;
   unsigned long long position_admissions;
