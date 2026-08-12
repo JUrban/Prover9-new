@@ -50,8 +50,13 @@ static void compare_case(Compact_rewrite_bank bank, char *text)
 
   demodulate_clause(legacy, -1, -1, FALSE, FALSE);
   compact_rewrite_clause(bank, compact, -1, -1, FALSE, TRUE);
-  CHECK(clause_ident(legacy->literals, compact->literals),
-        "compact normal form equals legacy normal form");
+  if (!clause_ident(legacy->literals, compact->literals)) {
+    fprintf(stderr, "rewrite mismatch for %s\nlegacy: ", text);
+    fprint_clause(stderr, legacy);
+    fprintf(stderr, "compact: ");
+    fprint_clause(stderr, compact);
+    CHECK(FALSE, "compact normal form equals legacy normal form");
+  }
   CHECK(encode_justification(legacy->justification,
                              &legacy_just, &legacy_size),
         "encode legacy justification");
