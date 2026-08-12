@@ -140,16 +140,18 @@ parameters should not be relaxed for the first mature comparison.
 ## Bounded `chat_test.in` evidence
 
 All measurements used input SHA-256
-`9781ee07691bc62e01f67534208620ca0be3f026f55248a227e9161f1ed17e6c`
-and release binary SHA-256
+`9781ee07691bc62e01f67534208620ca0be3f026f55248a227e9161f1ed17e6c`.
+The 1,000-given and bounded 180-second pairs used release binary SHA-256
 `f8a49de3f1d05596209c9b7016742cfb95c499433f209da373b41300963fca6e`.
+After the final frequency-aging hardening, the 300-given pair was repeated
+with release binary SHA-256
+`3a830e1cf4ecfa8a5f43f6b3bde6284c2eef5d1997faa4e2bc33f14b2bc2161d`.
 Mask8 and adaptive cases ran with the same generated input on dedicated CPUs.
 
 | Gate | mask8 | adaptive | Result |
 |:---|---:|---:|:---|
-| 300 given, user CPU | 18.81 s | 18.69 s | adaptive -0.6% |
+| final 300 given, user CPU | 18.62 s | 19.07 s | adaptive +2.4% |
 | 300 given, generated / kept | 120,793 / 5,737 | 120,793 / 5,737 | identical |
-| 300 given, sampled lookup | 0.127 s | 0.125 s | parity |
 | 1,000 given, user CPU | 104.30 s | 104.83 s | adaptive +0.51% |
 | 1,000 given, generated / kept | 1,268,285 / 33,909 | 1,268,285 / 33,909 | identical |
 | 1,000 given, sampled lookup | 3.598 s | 3.488 s | adaptive -3.1% |
@@ -168,8 +170,14 @@ The first pre-fix 300-given pair is retained in `chat-mature-cpu-300`: it took
 23.92 versus 18.73 user seconds because adaptive redundantly scanned mask
 buckets and updated 19,744 position probations despite admitting no route.
 The corrected pair is in `chat-mature-cpu-300b`; position probation updates
-fell to 45.  This failed result is important evidence for why the cold-path
-work was removed rather than hidden by threshold tuning.
+fell to 45.  The final post-aging pair is in
+`chat-mature-cpu-final-300-mask` and
+`chat-mature-cpu-final-300-adaptive`; it retained identical search counters,
+admitted and probed zero route classes, and stayed within the 5% CPU gate.
+Its sampled lookup clock had only 24 samples per case, so total user CPU is
+the meaningful short-run comparison.  The original failed result is important
+evidence for why the cold-path work was removed rather than hidden by threshold
+tuning.
 
 ## Focused and adversarial coverage
 
