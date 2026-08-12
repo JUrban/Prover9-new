@@ -3,6 +3,9 @@
 Status: the first retained-linear implementation landed in `950b230` and the
 global shallow sparse-path stage landed in `1f1643d`, derived from the
 complete large CHAT run and the `out61`, `out71`, and `out81` measurements.
+The completed `out7`/`out8` reports reject the capped adaptive scheduler, and
+the stable wide-mask control plus its bounded superset directory landed in
+`a803cfc` and `b256b35`.
 Short prefixes remain useful for correctness and profiling, but they are not
 performance acceptance evidence for this work.  A new full CHAT run is still
 required before the CPU gate can be claimed.
@@ -109,12 +112,41 @@ the generated input SHA-256 was
 
 Reverting to raw symbol IDs is not a general fix: unrelated option constants
 then change symbol numbers and hence the lossy signature collision pattern.
-The next baseline repair should retain stable name/arity hashing but use the
-already-stored 32-bit shallow mask rather than only eight bits.  This does not
-enlarge `cbd_path_bucket` or a record; it should reduce collision-driven
-bucket scans without coupling behavior to parser order.  It must be introduced
-as a separately named strategy and pass paired shuffled-symbol, short-prefix,
-and mature-slope gates before replacing mask8.
+The implemented `mask32` control retains stable name/arity hashing but uses
+all 32 already-stored shallow-mask bits rather than only eight.  It does not
+enlarge `cbd_path_bucket` or a record and remains independent of parser symbol
+numbering.  It is deliberately a separately named strategy, so existing
+`mask8` and `adaptive` behavior has not silently changed.
+
+A direct 1,500-given comparison confirmed the expected selectivity but also
+exposed the cost of enumerating every distinct wide-mask bucket.  Both widths
+had the identical 1,501-given / 2,947,136-generated / 66,933-kept trajectory
+and returned 23,401 exact candidates.  `mask32` reduced posting groups from
+45,348,316 to 5,235,700 and sampled lookup CPU from 16.213 to 4.220 seconds,
+but increased mask-bucket checks from 10,738,847 to 133,566,591.  Its total
+user CPU was 138.90 rather than 154.81 seconds.  The wide signature therefore
+removes most false postings, but a linked list over its much larger set of
+distinct masks is not a mature representation.
+
+Commit `b256b35` replaces that enumeration with a per-root Patricia superset
+trie.  Each distinct stored mask owns one leaf and at most one internal node;
+an internal node stores the union of all masks below it.  A query follows only
+the present branch for each required bit and rejects a complete subtree when
+its union lacks a required bit.  Space is `O(distinct root/mask buckets)`, not
+`O(2^32)`, clauses times queries, or elapsed run time.  Compatible leaves
+still feed the existing exact compact matcher, preserving completeness under
+hash collisions.
+
+At 1,500 givens the trie preserved the same trajectory, query fingerprint,
+5,235,700 posting groups, and 23,401 candidates.  It reduced leaf mask tests
+from 133,566,591 to 1,508,549 and sampled lookup CPU from 4.220 to 3.160
+seconds.  It visited 14,130,478 trie nodes and pruned 4,548,735 subtrees.  The
+back index grew from 5,742,779 to 6,826,387 bytes, about 1.08 MiB.  Total user
+CPU in the unpaired trie run was 145.23 seconds, so that run proves the
+structural and lookup improvement, not an end-to-end win.  The next candidate
+must combine this complete shallow fallback with the retained depth-four
+exact positions and the occurrence-linear rigid-edge route; `mask32` alone
+is a diagnostic control, not yet the full-run recommendation.
 
 `out61` also contains a separate configuration regression.  It did not set
 `compact_unit_strategy=code_tree` or `compact_nonunit_path_filter`.  At its
