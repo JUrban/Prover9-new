@@ -9,6 +9,86 @@ regression.  The external 7,365-given run and proof endpoint remain open;
 these bounded runs are not a claim that a week-long run has already been
 reproduced.
 
+## August 2026 completed-run verdict and current rerun
+
+The now-complete `chat_test.new.out7` and `chat_test.new.out8` runs have the
+same compact proof endpoint: 11,369 given, 253,302,129 generated, 2,207,014
+kept, and one proof.  `out7`'s capped adaptive index needs 11,282.22 user
+seconds and 977.45 MiB final PSS; simultaneous `out8` mask8 needs 10,459.17
+seconds and 917.44 MiB.  The old capped adaptive implementation is therefore
+rejected: it is 7.9% slower and retains about 60 MiB more PSS even though it
+examines fewer fallback posting groups.  Every admitted tree and position
+feature has demoted by the proof, leaving mask8 to serve the final interval.
+
+Those files predate the retained depth-four sparse positions, atom-linear
+rewrite traversal, stable32 fallback, and bit-plane mask directory.  The
+current explicit `adaptive32` mode preserves legacy `adaptive` for
+reproducibility while combining those replacements.  In the matched
+1,500-given CHAT pair it preserves the exact 1,501 / 2,947,136 / 66,933
+trajectory and 23,401 candidates, reduces backward posting groups by 75.4%,
+occurrence checks by 75.6%, and sampled lookup CPU by 43.2% relative to
+legacy adaptive.  The subsequent bit-plane directory preserves that result
+while reducing sampled lookup from 3.983 to 2.494 seconds and allocated
+back-index bytes from 17,308,050 to 16,439,490.  Its late directory work is
+about one third of the Patricia version, but counted work/query still grows;
+only the external mature run can decide the CPU gate.
+
+For the next full CHAT comparison, start from the successful `out8` input and
+replace its compact-index block with:
+
+```prolog
+assign(search_loop,otter).
+assign(passive_store,dense).
+assign(passive_directory,file).
+assign(passive_selector_store,file).
+assign(passive_selector_buffer,65536).
+assign(hint_index,packed_fast).
+assign(inference_frontier,clauses).
+assign(ancestor_store,file).
+assign(sos_limit,-1).
+
+set(process_initial_sos).
+set(back_demod).
+set(back_demod_hints).
+clear(unit_deletion).
+clear(ancestor_subsume).
+clear(eval_rewrite).
+
+set(compact_otter_demodulation).
+set(compact_otter_unit_index).
+set(compact_otter_back_demod_index).
+set(compact_otter_nonunit_index).
+assign(compact_unit_strategy,code_tree).
+set(compact_nonunit_path_filter).
+
+assign(compact_back_demod_strategy,adaptive32).
+set(compact_back_sparse_positions).
+assign(compact_back_position_budget_kb,0).
+assign(compact_back_position_budget_pct,50).
+assign(compact_back_position_build_factor,32).
+assign(compact_back_eager_position_depth,4).
+assign(compact_back_tree_budget_kb,65536).
+assign(compact_back_tree_budget_pct,200).
+assign(compact_rewrite_deep_cache_kb,0).
+clear(compact_back_edge_filter).
+
+assign(compact_passive_cache,0).
+assign(compact_index_stale_pct,25).
+assign(compact_term_reclaim_kb,8192).
+```
+
+The rigid-edge route is intentionally off for this CHAT authority run.  At
+1,500 givens it is chosen for only 9 of 56,373 back queries while maintaining
+613,042 postings; it remains available for arbitrary-depth workloads where
+telemetry establishes a payoff.  The 200% tree allowance is a CPU-oriented
+validation ceiling, not a prediction that it will be consumed.  Report
+`Compact_back_demod`, `Compact_back_route`, `Compact_back_edge`, process PSS,
+GNU-time peak RSS, and filesystem/cgroup memory separately.
+
+The release binary used for the final local bit-plane checks has SHA-256
+`c0ba6689964436a719170d43cd0112077c07771a1b083bcb81c0347e8df5e3c6`;
+the corresponding implementation commit is `3dd3afb`.
+
 The later `chat_test.new.out61` is not a valid measurement of the final
 recommended block: it omitted both `compact_unit_strategy=code_tree` and
 `compact_nonunit_path_filter`.  Its root-scan unit index had performed
