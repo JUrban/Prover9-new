@@ -388,8 +388,10 @@ Example: 1234567890 becomes "1,234,567,890"
 If comma formatting is disabled, returns plain number string.
 */
 
-/* Statistics lines can format more than eight values in one fprintf. */
-#define COMMA_NUM_BUFFERS 16
+/* Keep every result live across the largest statistics fprintf.  The search
+ * report currently formats up to 24 values in one call; 32 leaves explicit
+ * headroom without making each caller own formatting scratch. */
+#define COMMA_NUM_BUFFERS 32
 #define COMMA_NUM_SIZE 32  /* enough for 64-bit with commas */
 
 /* PUBLIC */
