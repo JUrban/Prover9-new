@@ -746,6 +746,30 @@ void fprint_compact_back_demod(FILE *fp)
           stats.posting_bytes, stats.record_bytes, stats.root_bytes,
           stats.token_bytes, stats.hash_bytes, stats.scratch_bytes,
           stats.total_bytes, stats.peak_bytes);
+  fprintf(fp,
+          "Compact_back_route: capacity=%llu, occupied=%llu, bytes=%llu, "
+          "collisions=%llu, replacements=%llu, mask_choices=%llu, "
+          "tree_choices=%llu, position_choices=%llu, mask_probes=%llu, "
+          "tree_probes=%llu, position_probes=%llu, switches=%llu, "
+          "reversions=%llu, hysteresis_holds=%llu, "
+          "mask_observed_cost=%llu, tree_observed_cost=%llu, "
+          "position_observed_cost=%llu, mask_estimated_cost=%llu, "
+          "tree_estimated_cost=%llu, position_estimated_cost=%llu, "
+          "mask_candidates=%llu, tree_candidates=%llu, "
+          "position_candidates=%llu.\n",
+          stats.route_profile_capacity, stats.route_profile_occupied,
+          stats.route_profile_bytes, stats.route_profile_collisions,
+          stats.route_profile_replacements, stats.route_mask_choices,
+          stats.route_tree_choices, stats.route_position_choices,
+          stats.route_mask_probes, stats.route_tree_probes,
+          stats.route_position_probes, stats.route_switches,
+          stats.route_reversions, stats.route_hysteresis_holds,
+          stats.route_mask_observed_cost, stats.route_tree_observed_cost,
+          stats.route_position_observed_cost,
+          stats.route_mask_estimated_cost, stats.route_tree_estimated_cost,
+          stats.route_position_estimated_cost,
+          stats.route_mask_candidates, stats.route_tree_candidates,
+          stats.route_position_candidates);
   compact_profile_fprint(fp, "back_demod", "candidate_lookup",
                          &stats.query_profile, stats.lookup_seconds);
   fprintf(fp,
