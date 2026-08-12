@@ -51,6 +51,7 @@ CUMULATIVE_KEYS = (
     "back_candidates", "back_timing_lookup_seconds",
     "back_timing_exact_seconds", "back_timing_materialize_seconds",
     "back_timing_maintenance_seconds", "demod_attempts", "demod_rewrites",
+    "back_profile_exact_tests", "back_profile_exact_successes",
     "clock_infer", "clock_preprocess", "clock_demod", "clock_hints",
     "clock_subsume", "clock_back_demod", "ancestor_file_reads_bytes",
     "ancestor_file_writes_bytes", "selector_reads_bytes",
@@ -319,6 +320,19 @@ def derive_intervals(samples):
         row["back_lookup_us_per_query"] = (
             row["back_lookup_seconds_per_query"] * 1000000.0
             if row["back_lookup_seconds_per_query"] is not None else None)
+        delta_exact_successes = row.get("delta_back_profile_exact_successes")
+        row["back_exact_successes_per_query"] = safe_ratio(
+            delta_exact_successes, delta_queries)
+        answer_units = (
+            delta_queries + delta_exact_successes
+            if isinstance(delta_queries, (int, float)) and
+            isinstance(delta_exact_successes, (int, float)) else None)
+        row["back_lookup_seconds_per_answer_unit"] = safe_ratio(
+            row.get("delta_back_timing_lookup_seconds"), answer_units)
+        row["back_lookup_us_per_answer_unit"] = (
+            row["back_lookup_seconds_per_answer_unit"] * 1000000.0
+            if row["back_lookup_seconds_per_answer_unit"] is not None
+            else None)
         child_hits = number(sample, "back_tree_child_hits", None)
         child_lookups = number(sample, "back_tree_child_lookups", None)
         row["back_child_hit_pct"] = safe_ratio(child_hits, child_lookups)
@@ -367,6 +381,8 @@ def run_summary(label, rows):
     combined = finite([row.get("back_combined_per_query") for row in rows])
     back_cpu_costs = finite(
         [row.get("back_lookup_seconds_per_query") for row in rows])
+    normalized_back_cpu_costs = finite(
+        [row.get("back_lookup_seconds_per_answer_unit") for row in rows])
     given_rates = finite([row.get("given_per_cpu") for row in rows])
     signals = []
     if len(rows) < 2:
@@ -392,6 +408,13 @@ def run_summary(label, rows):
     if (len(back_cpu_costs) >= 2 and back_cpu_costs[0] > 0 and
             back_cpu_costs[-1] > back_cpu_costs[0] * 1.25):
         signals.append("back-demod lookup CPU/query grew by more than 25%")
+    if (len(normalized_back_cpu_costs) >= 2 and
+            normalized_back_cpu_costs[0] > 0 and
+            normalized_back_cpu_costs[-1] >
+            normalized_back_cpu_costs[0] * 1.25):
+        signals.append(
+            "back-demod lookup CPU/(query + exact answer) grew by more "
+            "than 25%")
     if len(given_rates) >= 2 and given_rates[0] > 0 and given_rates[-1] < given_rates[0] * 0.75:
         signals.append("given/user-CPU rate fell by more than 25%")
     peak_rss_kb = safe_ratio(
@@ -432,6 +455,16 @@ def run_summary(label, rows):
         "back_lookup_cpu_slope_ratio": (
             safe_ratio(back_cpu_costs[-1], back_cpu_costs[0])
             if back_cpu_costs else None),
+        "first_back_lookup_seconds_per_answer_unit": (
+            normalized_back_cpu_costs[0]
+            if normalized_back_cpu_costs else None),
+        "last_back_lookup_seconds_per_answer_unit": (
+            normalized_back_cpu_costs[-1]
+            if normalized_back_cpu_costs else None),
+        "back_lookup_normalized_cpu_slope_ratio": (
+            safe_ratio(normalized_back_cpu_costs[-1],
+                       normalized_back_cpu_costs[0])
+            if normalized_back_cpu_costs else None),
         "first_given_per_cpu": given_rates[0] if given_rates else None,
         "last_given_per_cpu": given_rates[-1] if given_rates else None,
         "given_rate_ratio": (safe_ratio(given_rates[-1], given_rates[0])
@@ -492,7 +525,7 @@ def compare_summaries(reference, candidate, max_cpu_ratio=1.25,
     ram_gate = (ram_savings_pct >= min_ram_saving_pct
                 if ram_savings_pct is not None else None)
     interval_gate = True if candidate.get("samples", 0) >= 2 else None
-    slope_ratio = (candidate.get("back_lookup_cpu_slope_ratio")
+    slope_ratio = (candidate.get("back_lookup_normalized_cpu_slope_ratio")
                    if candidate.get("samples", 0) >= 2 else None)
     slope_gate = (slope_ratio <= max_back_slope_ratio
                   if slope_ratio is not None else None)
@@ -522,7 +555,7 @@ def compare_summaries(reference, candidate, max_cpu_ratio=1.25,
         "ram_gate": threshold_state(ram_gate),
         "candidate_periodic_samples": candidate.get("samples"),
         "interval_gate": threshold_state(interval_gate),
-        "candidate_back_cpu_slope_ratio": slope_ratio,
+        "candidate_back_normalized_cpu_slope_ratio": slope_ratio,
         "slope_gate": threshold_state(slope_gate),
     }
 
@@ -562,10 +595,11 @@ def markdown(label, rows, summary, total_samples=None):
     print()
     print("| CPU s | Back active | Groups/query | Nodes/query | "
           "Siblings/query | Child/query | Combined/query | Lookup us/query | "
-          "Back CPU % | Child hit % | Back MiB |")
-    print("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+          "Exact answers/query | Lookup us/(query+answer) | Back CPU % | "
+          "Child hit % | Back MiB |")
+    print("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for row in rows:
-        print("| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |".format(
+        print("| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |".format(
             fmt(row.get("user_cpu")), fmt(row.get("back_active")),
             fmt(row.get("back_groups_per_query"), 1),
             fmt(row.get("back_nodes_per_query"), 1),
@@ -573,6 +607,8 @@ def markdown(label, rows, summary, total_samples=None):
             fmt(row.get("back_children_per_query"), 1),
             fmt(row.get("back_combined_per_query"), 1),
             fmt(row.get("back_lookup_us_per_query"), 1),
+            fmt(row.get("back_exact_successes_per_query"), 3),
+            fmt(row.get("back_lookup_us_per_answer_unit"), 1),
             fmt(row.get("back_lookup_cpu_pct"), 1),
             fmt(row.get("back_child_hit_pct"), 1),
             fmt(row.get("back_mib"), 1)))
@@ -591,9 +627,11 @@ def markdown_summary(summary):
         fmt(summary.get("peak_rss_mib"), 1),
         fmt(summary.get("peak_rss_source"))))
     print("First-to-last interval ratios: counted back work/query={}, "
-          "back lookup CPU/query={}, given/CPU={}.".format(
+          "back lookup CPU/query={}, answer-normalized back CPU={}, "
+          "given/CPU={}.".format(
               fmt(summary.get("combined_slope_ratio"), 2),
               fmt(summary.get("back_lookup_cpu_slope_ratio"), 2),
+              fmt(summary.get("back_lookup_normalized_cpu_slope_ratio"), 2),
               fmt(summary.get("given_rate_ratio"), 2)))
     if summary["signals"]:
         print("Signals:")
@@ -614,14 +652,14 @@ def markdown_comparisons(comparisons):
     if comparisons:
         first = comparisons[0]
         print("Thresholds: CPU ratio <= {}, RAM saving >= {}%, measured "
-              "back-lookup CPU/query slope <= {}.".format(
+              "back-lookup CPU/(query + exact answer) slope <= {}.".format(
                   fmt(first["max_cpu_ratio"], 2),
                   fmt(first["min_ram_saving_pct"], 1),
                   fmt(first["max_back_slope_ratio"], 2)))
     print()
     print("| Candidate | Trajectory | CPU ratio | CPU | Reference peak MiB | "
           "Candidate peak MiB | RAM saved % | RAM | Samples | Periodic | "
-          "Back CPU slope | Slope | Result |")
+          "Normalized back CPU slope | Slope | Result |")
     print("|:---|:---:|---:|:---:|---:|---:|---:|:---:|---:|:---:|---:|:---:|:---:|")
     for comparison in comparisons:
         print("| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |".format(
@@ -632,7 +670,7 @@ def markdown_comparisons(comparisons):
             fmt(comparison["ram_savings_pct"], 1), comparison["ram_gate"],
             fmt(comparison["candidate_periodic_samples"]),
             comparison["interval_gate"],
-            fmt(comparison["candidate_back_cpu_slope_ratio"], 2),
+            fmt(comparison["candidate_back_normalized_cpu_slope_ratio"], 2),
             comparison["slope_gate"], comparison["result"]))
     print()
 
@@ -645,6 +683,8 @@ TSV_COLUMNS = (
     "back_siblings_per_query", "back_children_per_query",
     "back_combined_per_query", "back_lookup_cpu_pct", "back_child_hit_pct",
     "back_lookup_seconds_per_query", "back_lookup_us_per_query",
+    "delta_back_profile_exact_successes", "back_exact_successes_per_query",
+    "back_lookup_seconds_per_answer_unit", "back_lookup_us_per_answer_unit",
     "back_tree_child_parents", "back_tree_child_bytes", "back_bytes",
     "residency_pss", "residency_anonymous", "residency_swap",
     "passive_records", "passive_directory_logical", "selector_buffer_bytes",
@@ -696,7 +736,8 @@ def main(argv=None):
         help="comparison peak-RSS saving threshold (default 80)")
     parser.add_argument(
         "--max-back-slope-ratio", type=float, default=1.25,
-        help="comparison back-lookup CPU/query slope threshold (default 1.25)")
+        help=("comparison back-lookup CPU/(query + exact answer) slope "
+              "threshold (default 1.25)"))
     args = parser.parse_args(argv)
     if args.tail < 0:
         parser.error("--tail must be nonnegative")

@@ -117,8 +117,8 @@ PSS/swap, and file I/O directly from an existing plain or gzip output.  Use
 Markdown table, and `--summary-only` for several runs.  No theorem search is
 started by the reporter.  Put the reference first and add
 `--compare-to-first` to audit exact final counters, CPU ratio, peak-RSS saving,
-periodic evidence, and measured back-lookup CPU/query slope.  Matrix runs
-discover their adjacent
+periodic evidence, and measured back-lookup CPU normalized by query count plus
+exact successful answers.  Matrix runs discover their adjacent
 GNU `time` sidecars automatically and include this audit when more than one
 case is selected.  Set `CHAT_REFERENCE_OUTPUT` to reuse an archived baseline
 without rerunning its prover; comparison thresholds have corresponding

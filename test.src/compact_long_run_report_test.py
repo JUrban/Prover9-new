@@ -22,6 +22,7 @@ Given=100. Generated=1000. Kept=200. proofs=0.
 Usable=10. Sos=20. Demods=3. Limbo=0, Disabled=4. Hints=5. Active_Hints=2.
 Compact_back_demod: mode=authoritative, strategy=adaptive, failures=0, active=50, queries=20, candidates=4, groups_examined=200, tree_nodes_examined=100, tree_sibling_checks=50, tree_child_lookups=10, tree_child_hits=8, tree_child_parents=2, tree_child_bytes=1024, bytes=4096.
 Compact_index_timing: component=back_demod, lookup_seconds=2.0, exact_seconds=0.1, materialize_seconds=0.2, maintenance_seconds=0.3.
+Compact_query_profile: component=back_demod, op=candidate_lookup, queries=20, candidates=4, exact_tests=4, exact_successes=3.
 Dense_passive: backing=ancestor-file, directory=file, records=20, directory_logical=1280.
 Dense_passive_selector: store=file, buffer_bytes=240, run_logical=480, reads=3 (72 bytes), writes=4 (96 bytes).
 Dense_passive_gc: validation_failures=0.
@@ -36,6 +37,7 @@ clock back_demod     :   2.20 seconds.
 Given=140. Generated=1800. Kept=300. proofs=0.
 Compact_back_demod: mode=authoritative, strategy=adaptive, failures=0, active=90, queries=30, candidates=6, groups_examined=350, tree_nodes_examined=180, tree_sibling_checks=70, tree_child_lookups=20, tree_child_hits=17, tree_child_parents=3, tree_child_bytes=2048, bytes=8192.
 Compact_index_timing: component=back_demod, lookup_seconds=3.0, exact_seconds=0.2, materialize_seconds=0.3, maintenance_seconds=0.4.
+Compact_query_profile: component=back_demod, op=candidate_lookup, queries=30, candidates=6, exact_tests=6, exact_successes=4.
 Process_residency_kb: pss=12288, anonymous=9216, swap=1024.
 Allocator_slabs: current=2, peak=3, RSS_kb: current=12288, peak=13000.
 User_CPU=20.00, System_CPU=2.00, Wall_clock=22.
@@ -62,6 +64,9 @@ class ReportTest(unittest.TestCase):
         self.assertAlmostEqual(rows[1]["back_combined_per_query"], 26.0)
         self.assertAlmostEqual(rows[1]["back_lookup_cpu_pct"], 10.0)
         self.assertAlmostEqual(rows[1]["back_lookup_us_per_query"], 100000.0)
+        self.assertAlmostEqual(rows[1]["back_exact_successes_per_query"], 0.1)
+        self.assertAlmostEqual(
+            rows[1]["back_lookup_us_per_answer_unit"], 1000000.0 / 11)
         self.assertAlmostEqual(rows[1]["back_child_hit_pct"], 85.0)
         self.assertAlmostEqual(rows[1]["clock_preprocess_cpu_pct"], 90.0)
         self.assertAlmostEqual(rows[1]["clock_demod_cpu_pct"], 40.0)
@@ -181,13 +186,15 @@ User_CPU=2.0, System_CPU=0.0, Wall_clock=2.
             "peak_rss_kb": 100000, "peak_rss_mib": 100000 / 1024,
             "samples": 2, "combined_slope_ratio": 1.0,
             "back_lookup_cpu_slope_ratio": 1.0,
+            "back_lookup_normalized_cpu_slope_ratio": 1.0,
         }
         candidate = {
             "label": "new", "last_given": 100, "last_generated": 1000,
             "last_kept": 200, "last_proofs": 0, "last_user_cpu": 120.0,
             "peak_rss_kb": 19000, "peak_rss_mib": 19000 / 1024,
             "samples": 3, "combined_slope_ratio": 4.0,
-            "back_lookup_cpu_slope_ratio": 1.20,
+            "back_lookup_cpu_slope_ratio": 4.0,
+            "back_lookup_normalized_cpu_slope_ratio": 1.20,
         }
         comparison = REPORT.compare_summaries(reference, candidate)
         self.assertEqual(comparison["result"], "eligible")
@@ -196,11 +203,11 @@ User_CPU=2.0, System_CPU=0.0, Wall_clock=2.
         self.assertEqual(comparison["ram_gate"], "pass")
         self.assertEqual(comparison["slope_gate"], "pass")
 
-        candidate["back_lookup_cpu_slope_ratio"] = 1.30
+        candidate["back_lookup_normalized_cpu_slope_ratio"] = 1.30
         cpu_slope_failure = REPORT.compare_summaries(reference, candidate)
         self.assertEqual(cpu_slope_failure["slope_gate"], "fail")
         self.assertEqual(cpu_slope_failure["result"], "reject")
-        candidate["back_lookup_cpu_slope_ratio"] = 1.20
+        candidate["back_lookup_normalized_cpu_slope_ratio"] = 1.20
 
         candidate["peak_rss_kb"] = 100000
         candidate["peak_rss_mib"] = 100000 / 1024
@@ -228,7 +235,8 @@ User_CPU=2.0, System_CPU=0.0, Wall_clock=2.
             "candidate_peak_rss_mib": 10.0, "ram_savings_pct": 90.0,
             "ram_gate": "pass", "candidate_periodic_samples": 3,
             "interval_gate": "pass",
-            "candidate_back_cpu_slope_ratio": 1.1, "slope_gate": "pass",
+            "candidate_back_normalized_cpu_slope_ratio": 1.1,
+            "slope_gate": "pass",
             "max_cpu_ratio": 1.25, "min_ram_saving_pct": 80.0,
             "max_back_slope_ratio": 1.25,
             "result": "eligible",
