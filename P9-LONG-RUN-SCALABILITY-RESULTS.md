@@ -363,3 +363,12 @@ may have no rigid fact at all, so selecting one required query bit is not
 complete.  Its existing path remains measured separately; adding a bounded
 complement/forbidden-fact plan requires its own cost gate rather than reusing
 the back-subsumption rule.
+
+A 300-given integrated `chat_test.in` smoke run retained the established
+trajectory (120,793 generated and 5,737 kept).  The 635-active nonunit index
+used the structural path for 252 back queries; 250 had an empty required-fact
+map, and the remaining work totaled 337 bitmap-word reads and two records.
+The complete compact nonunit index used 231,232 bytes, including 12,288 bytes
+of structural maps.  This validates the empty-result path and reporting in the
+real prover, while the synthetic identical-leaf family remains the relevant
+scale gate.
