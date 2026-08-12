@@ -288,16 +288,19 @@ another long parameter sweep:
    so collisions or feature coarsening can add candidates but never omit a
    redex.
 
-The planned representation is a global rigid-edge index.  For every direct
-edge whose parent and child are rigid, store the key
+The planned representation is a global rigid-edge index.  For every rigid
+symbol store one record-level root marker, and for every direct edge whose
+parent and child are rigid store the key
 `(parent symbol, child number, child symbol)` and append the record ID once;
 duplicates within one record are removed.  A rigid pattern contributes all
 such edges at arbitrary depth.  Retrieval starts with the least-populated
-edge posting and may intersect other postings before scanning the surviving
-records for an exact occurrence of the complete pattern.  Total posting
-entries are at most the number of rigid parent-child occurrences, so this is
-occurrence-linear rather than `features * records` or `nodes * indexed
-depth`.
+edge/root posting and may intersect other postings before scanning the
+surviving records for an exact occurrence of the complete pattern.  Total
+posting entries are bounded by rigid nodes plus rigid parent-child
+occurrences, so this is occurrence-linear rather than `features * records`
+or `nodes * indexed depth`.  Including the pattern-root marker prevents an
+otherwise relevant edge elsewhere in a large clause from admitting an
+unrelated root family.
 
 This filter is complete for every pattern that contains a non-root rigid
 node: such a node necessarily has a rigid parent because pattern traversal

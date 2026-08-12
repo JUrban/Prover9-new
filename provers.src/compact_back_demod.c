@@ -16,6 +16,7 @@
 #define CBD_POSITION_BLOCK_PAYLOAD 24
 #define CBD_EDGE_BLOCK_PAYLOAD 24
 #define CBD_EDGE_INTERSECTION_LIMIT 4
+#define CBD_EDGE_ROOT_MARKER UINT32_MAX
 #define CBD_TREE_CHILD_CACHE_MAX_BYTES (UINT64_C(8) * 1024 * 1024)
 #define CBD_TREE_CHILD_CACHE_MIN_SCAN 8
 #define CBD_ROUTE_PROFILE_CAPACITY 4096
@@ -171,10 +172,10 @@ struct cbd_position_block {
   unsigned char data[CBD_POSITION_BLOCK_PAYLOAD];
 };
 
-/* Every posting names a record containing at least one occurrence of this
-   direct rigid edge.  Edges are deduplicated within a record, making the
-   complete index no larger than the rigid parent-child occurrence
-   population.  Exact whole-pattern matching remains authoritative. */
+/* Every posting names a record containing either a direct rigid edge or a
+   rigid root-symbol marker.  Features are deduplicated within a record, so
+   their complete population is bounded by rigid nodes plus rigid edges.
+   Exact whole-pattern matching remains authoritative. */
 struct cbd_edge_bucket {
   uint32_t parent_symbol;
   uint32_t child_symbol;
@@ -2590,6 +2591,20 @@ static uint32_t collect_record_edges_rec(Compact_back_demod_index index,
   child = position + 1;
   if (index->edge_append_token_visits != ULLONG_MAX)
     index->edge_append_token_visits++;
+  if (parent >= 0) {
+    uint32_t root_bucket;
+    if (index->edge_append_feature_lookups != ULLONG_MAX)
+      index->edge_append_feature_lookups++;
+    root_bucket = lookup_edge_bucket(
+      index, (uint32_t) parent, CBD_EDGE_ROOT_MARKER,
+      (uint32_t) parent);
+    if (root_bucket == CBD_NONE)
+      root_bucket = add_edge_bucket(
+        index, (uint32_t) parent, CBD_EDGE_ROOT_MARKER,
+        (uint32_t) parent);
+    ensure_edge_append(index, *count + 1);
+    index->edge_append_buckets[(*count)++] = root_bucket;
+  }
   for (i = 0; i < arity; i++) {
     int32_t child_symbol;
     uint32_t bucket;
@@ -4094,7 +4109,7 @@ static void ensure_edge_query(Compact_back_demod_index index, size_t needed)
 
 static void collect_pattern_edges_rec(Compact_back_demod_index index,
                                       Term pattern, size_t *count,
-                                      BOOL *missing)
+                                      BOOL *missing, BOOL *have_edge)
 {
   uint32_t parent;
   int i;
@@ -4108,6 +4123,7 @@ static void collect_pattern_edges_rec(Compact_back_demod_index index,
       uint32_t bucket = lookup_edge_bucket(
         index, parent, (uint32_t) i, child_symbol);
       size_t j;
+      *have_edge = TRUE;
       if (bucket == CBD_NONE)
         *missing = TRUE;
       else {
@@ -4123,7 +4139,8 @@ static void collect_pattern_edges_rec(Compact_back_demod_index index,
           (*count)++;
         }
       }
-      collect_pattern_edges_rec(index, child, count, missing);
+      collect_pattern_edges_rec(
+        index, child, count, missing, have_edge);
     }
   }
 }
@@ -4138,16 +4155,29 @@ static enum cbd_edge_query_status prepare_edge_query(
   Compact_back_demod_index index, Term pattern, size_t *selected)
 {
   size_t count = 0, i, out;
-  BOOL missing = FALSE;
+  uint32_t root, root_bucket;
+  BOOL missing = FALSE, have_edge = FALSE;
   *selected = 0;
   if (!index->edge_enabled || VARIABLE(pattern))
     return CBD_EDGE_NO_FEATURE;
-  collect_pattern_edges_rec(index, pattern, &count, &missing);
+  root = (uint32_t) SYMNUM(pattern);
+  root_bucket = lookup_edge_bucket(
+    index, root, CBD_EDGE_ROOT_MARKER, root);
+  if (root_bucket == CBD_NONE)
+    return CBD_EDGE_EMPTY;
+  ensure_edge_query(index, 1);
+  index->edge_query[0].parent_symbol = root;
+  index->edge_query[0].child_index = CBD_EDGE_ROOT_MARKER;
+  index->edge_query[0].child_symbol = root;
+  index->edge_query[0].bucket = root_bucket;
+  count = 1;
+  collect_pattern_edges_rec(
+    index, pattern, &count, &missing, &have_edge);
   index->edge_query_features = saturating_add(
     index->edge_query_features, count);
   if (missing)
     return CBD_EDGE_EMPTY;
-  if (count == 0)
+  if (!have_edge)
     return CBD_EDGE_NO_FEATURE;
 
   /* Put the rarest features first.  Only similarly sized secondary streams
