@@ -398,6 +398,8 @@ struct prover_stats {
     compact_rewrite_bytes_reclaimed,
     compact_rewrite_attempts,
     compact_rewrite_rewrites,
+    compact_rewrite_subject_atoms,
+    compact_rewrite_subject_initial_nodes,
     compact_rewrite_node_items,
     compact_rewrite_posting_items,
     compact_rewrite_node_bytes,

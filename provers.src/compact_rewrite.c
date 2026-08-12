@@ -1341,6 +1341,8 @@ void compact_rewrite_restore_counters(Compact_rewrite_bank bank,
                                       unsigned long long rules_retired,
                                       unsigned long long attempts,
                                       unsigned long long rewrites,
+                                      unsigned long long subject_atoms,
+                                      unsigned long long subject_initial_nodes,
                                       unsigned long long compactions,
                                       unsigned long long bytes_reclaimed)
 {
@@ -1351,6 +1353,8 @@ void compact_rewrite_restore_counters(Compact_rewrite_bank bank,
   bank->retired_rules = rules_retired;
   bank->attempts = attempts;
   bank->rewrites = rewrites;
+  bank->subject_atoms = subject_atoms;
+  bank->subject_initial_nodes = subject_initial_nodes;
   bank->compactions = compactions;
   bank->bytes_reclaimed = bytes_reclaimed;
 }
@@ -1757,6 +1761,8 @@ void compact_rewrite_get_stats(Compact_rewrite_bank bank,
   stats->bytes_reclaimed = bank->bytes_reclaimed;
   stats->attempts = bank->attempts;
   stats->rewrites = bank->rewrites;
+  stats->subject_atoms = bank->subject_atoms;
+  stats->subject_initial_nodes = bank->subject_initial_nodes;
   stats->node_items = bank->node_count;
   stats->posting_items = bank->posting_count;
   stats->node_bytes = bank->node_capacity * sizeof(*bank->nodes);

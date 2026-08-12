@@ -115,6 +115,37 @@ int main(void)
   compare_case(bank, "p(u(a),v(a)).");
   compare_case(bank, "g(f(a),f(a)) = k(f(b),f(b)).");
 
+  {
+    const int depth = 200;
+    char *text = safe_malloc((size_t) (3 * depth + 6));
+    char *at = text;
+    struct compact_rewrite_stats before, after;
+    *at++ = 'p';
+    *at++ = '(';
+    for (i = 0; i < depth; i++) {
+      *at++ = 's';
+      *at++ = '(';
+    }
+    *at++ = 'a';
+    for (i = 0; i < depth; i++)
+      *at++ = ')';
+    *at++ = ')';
+    *at++ = '.';
+    *at = '\0';
+    compact_rewrite_get_stats(bank, &before);
+    compare_case(bank, text);
+    compact_rewrite_get_stats(bank, &after);
+    CHECK(after.subject_atoms == before.subject_atoms + 1,
+          "deep subject is flattened once per atom");
+    CHECK(after.subject_initial_nodes == before.subject_initial_nodes +
+          (unsigned long long) depth + 2,
+          "one-time subject preparation is linear in atom size");
+    CHECK(after.attempts == before.attempts +
+          (unsigned long long) depth + 2,
+          "deep no-match subject still probes every rigid subterm");
+    safe_free(text);
+  }
+
   compact_rewrite_get_stats(bank, &stats);
   CHECK(stats.rules_current == 6, "compact rule count");
   CHECK(stats.attempts > 0 && stats.rewrites > 0,
