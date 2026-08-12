@@ -2725,6 +2725,9 @@ void update_memory_stats(void)
   Stats.ancestor_file_writes = as.file_writes;
   Stats.ancestor_file_write_bytes = as.file_write_bytes;
   Stats.ancestor_offset_lookups = as.offset_lookups;
+  Stats.ancestor_detached_records = as.detached_records;
+  Stats.ancestor_detached_current = as.detached_current;
+  Stats.ancestor_handle_bytes_avoided = as.handle_bytes_avoided;
 
   Stats.disabled_store_bytes = clause_store_allocated_bytes(Glob.disabled);
   Stats.disabled_legacy_clist_bytes =
@@ -3424,7 +3427,9 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
           "mmap_eviction_passes=%s, mmap_eviction_bytes=%s, "
           "mmap_scan_eviction_passes=%s, mmap_scan_eviction_bytes=%s, "
           "io_buffer=%s, file_reads=%s (%s bytes), "
-          "file_writes=%s (%s bytes), offset_lookups=%s.\n",
+          "file_writes=%s (%s bytes), offset_lookups=%s, "
+          "detached_records=%s, detached_current=%s, "
+          "handle_bytes_avoided=%s.\n",
           comma_num(s.ancestor_records), comma_num(s.ancestor_record_bytes),
           comma_num(s.ancestor_backing_bytes), comma_num(s.ancestor_handle_bytes),
           comma_num(s.ancestor_materializations),
@@ -3438,7 +3443,10 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
           comma_num(s.ancestor_file_read_bytes),
           comma_num(s.ancestor_file_writes),
           comma_num(s.ancestor_file_write_bytes),
-          comma_num(s.ancestor_offset_lookups));
+          comma_num(s.ancestor_offset_lookups),
+          comma_num(s.ancestor_detached_records),
+          comma_num(s.ancestor_detached_current),
+          comma_num(s.ancestor_handle_bytes_avoided));
   if (compact_otter_passive_mode())
     fprintf(fp,
             "Compact_passive_cache: budget=%s, metadata_bytes=%s, "
@@ -5427,6 +5435,8 @@ static void print_deferred_terminal_statistics(FILE *fp)
 }
 
 static void compact_passive_cache_free(void);
+static void compact_passive_cache_clear_all(void);
+static void discard_compact_otter_passives(void);
 
 static void release_terminal_compact_indexes(void)
 {
@@ -5438,6 +5448,7 @@ static void release_terminal_compact_indexes(void)
      them before materializing the proof DAG instead of overlapping roughly
      ten MiB of passive metadata with thousands of proof clauses. */
   compact_passive_cache_free();
+  discard_compact_otter_passives();
   reset_selector_indexes();
   cold_passive_store_free(Dense_body_store);
   Dense_body_store = NULL;
@@ -5909,10 +5920,8 @@ static void compact_passive_cache_clear_entry(
 
 static void compact_passive_cache_free(void)
 {
-  size_t i;
+  compact_passive_cache_clear_all();
   if (Compact_passive_cache != NULL) {
-    for (i = 0; i < Compact_passive_cache_slots; i++)
-      compact_passive_cache_clear_entry(&Compact_passive_cache[i]);
     safe_free(Compact_passive_cache);
   }
   Compact_passive_cache = NULL;
@@ -5921,6 +5930,15 @@ static void compact_passive_cache_free(void)
   Compact_passive_cache_budget = 0;
   Compact_passive_cache_bytes = 0;
   Compact_passive_cache_entries = 0;
+}
+
+static void compact_passive_cache_clear_all(void)
+{
+  size_t i;
+  if (Compact_passive_cache == NULL)
+    return;
+  for (i = 0; i < Compact_passive_cache_slots; i++)
+    compact_passive_cache_clear_entry(&Compact_passive_cache[i]);
 }
 
 static void compact_passive_cache_init(unsigned megs)
@@ -5971,7 +5989,8 @@ static void restore_compact_passive_metadata(
 static Topform materialize_compact_otter_passive(
   const struct dense_passive_view *view)
 {
-  Topform c = clause_store_materialize(Glob.disabled, view->store_position);
+  Topform c = clause_store_materialize_offset(Glob.disabled,
+                                               view->store_position);
   if (c == NULL || c->id != view->id || !c->archive_materialized)
     fatal_error("materialize_compact_otter_passive: archive identity mismatch");
   restore_compact_passive_metadata(c, view);
@@ -6113,7 +6132,7 @@ static size_t archive_compact_otter_passive(
   Topform c, unsigned *body_bytes, unsigned *justification_bytes,
   unsigned *logical_body_bytes)
 {
-  size_t position;
+  size_t offset;
   unsigned just_bytes;
   Clause_compress_result result;
   if (c == NULL || c->id == 0 || active_or_indexable_clause(c))
@@ -6132,18 +6151,16 @@ static size_t archive_compact_otter_passive(
     *justification_bytes = just_bytes;
   if (logical_body_bytes != NULL)
     *logical_body_bytes = c->uncompressed_body_bytes;
-  position = clause_store_length(Glob.disabled);
-  clause_store_append(Glob.disabled, c);
-  if (!clause_store_archive_clause(Glob.disabled, c))
+  if (!clause_store_archive_detached(Glob.disabled, c, &offset))
     return SIZE_MAX;
-  return position;
+  return offset;
 }
 
 static Topform activate_compact_otter_passive(
   size_t position, unsigned long long id, unsigned long long hint_id)
 {
   compact_passive_cache_discard(id, NULL);
-  Topform c = clause_store_activate(Glob.disabled, position);
+  Topform c = clause_store_activate_offset(Glob.disabled, position, id);
   if (c == NULL || c->id != id)
     return NULL;
   c->matching_hint = hint_by_id(hint_id);
@@ -6208,7 +6225,22 @@ static void compact_otter_advise_rebuild_batch(
     }
   }
   if (first != SIZE_MAX)
-    clause_store_advise_mmap_range_cold(Glob.disabled, first, last);
+    clause_store_advise_mmap_offsets_cold(Glob.disabled, first, last);
+}
+
+static void discard_compact_otter_passive_visit(
+  const struct dense_passive_view *view, void *context)
+{
+  (void) context;
+  if (!clause_store_discard_detached(Glob.disabled, view->store_position,
+                                     view->id))
+    fatal_error("cannot discard compact passive archive record");
+}
+
+static void discard_compact_otter_passives(void)
+{
+  if (compact_otter_passive_mode() && Glob.disabled != NULL)
+    dense_passive_foreach(discard_compact_otter_passive_visit, NULL);
 }
 
 static
@@ -6394,7 +6426,7 @@ void disable_clause(Topform c)
     if (!dense_passive_view_id(id, &view))
       fatal_error("disable_clause: cold passive metadata is missing");
     compact_passive_cache_discard(id, c);
-    c = clause_store_activate(Glob.disabled, view.store_position);
+    c = clause_store_activate_offset(Glob.disabled, view.store_position, id);
     if (c == NULL || c->id != id)
       fatal_error("disable_clause: cannot activate cold passive");
     c->matching_hint = hint_by_id(view.hint_id);
@@ -6556,6 +6588,7 @@ void free_search_memory(void)
   Glob.desc_to_be_disabled = NULL;
 
   compact_passive_cache_free();
+  discard_compact_otter_passives();
   clause_store_delete_clauses(Glob.disabled);
   Glob.disabled = NULL;
   reset_selector_indexes();
@@ -15074,6 +15107,8 @@ void load_checkpoint_into_loop(void)
   /* 0a. Drop the old disabled/archive store before clearing its tagged ID
      entries.  This matters for the in-process save+reload harness; a fresh
      resume process reaches the same empty state. */
+  compact_passive_cache_clear_all();
+  discard_compact_otter_passives();
   clause_store_delete_clauses(Glob.disabled);
   Glob.disabled = new_disabled_store();
   cold_passive_store_free(Dense_body_store);

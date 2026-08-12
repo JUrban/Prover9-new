@@ -1,6 +1,7 @@
 /* Phase 4 record-format, corruption, proof materialization, and mmap tests. */
 
 #include "../ladr/ladr.h"
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -508,6 +509,69 @@ static void archive_direct_offset_aging_test(Clause_store_archive_mode mode)
         "direct-offset aging teardown removes the current archived ID");
 }
 
+static void detached_archive_scaling_test(Clause_store_archive_mode mode)
+{
+  enum { RECORDS = 4096 };
+  Clause_store store = clause_store_init("detached-archive-scaling");
+  unsigned long long *ids = safe_malloc(RECORDS * sizeof(*ids));
+  size_t *offsets = safe_malloc(RECORDS * sizeof(*offsets));
+  struct clause_store_stats stats;
+  size_t i;
+
+  CHECK(clause_store_enable_archive(store, mode),
+        "detached archive backing initializes");
+  for (i = 0; i < RECORDS; i++) {
+    Topform c = clause("detached_scale(f(x),g(a)).");
+    c->justification = input_just();
+    assign_clause_id(c);
+    ids[i] = c->id;
+    if (!clause_store_archive_detached(store, c, &offsets[i])) {
+      CHECK(FALSE, "detached record archives without a store handle");
+      break;
+    }
+  }
+  stats = clause_store_get_stats(store);
+  CHECK(i == RECORDS && clause_store_length(store) == 0 &&
+        clause_store_current_length(store) == RECORDS,
+        "external directory owns all current records without handle entries");
+  CHECK(stats.detached_records == RECORDS &&
+        stats.detached_current == RECORDS &&
+        stats.handle_bytes_avoided == RECORDS * sizeof(uintptr_t),
+        "detached archive accounting reports exact avoided handle bytes");
+  CHECK(stats.handle_bytes < stats.handle_bytes_avoided,
+        "store handle memory stays bounded as detached records accumulate");
+  if (i == RECORDS) {
+    Topform sample = clause_store_materialize_offset(store,
+                                                      offsets[RECORDS / 2]);
+    CHECK(sample != NULL && sample->id == ids[RECORDS / 2],
+          "detached offset materializes its exact clause");
+    clause_store_release_materialized(sample);
+  }
+
+  for (i = 0; i < RECORDS; i++) {
+    if ((i & 1) == 0) {
+      Topform c = clause_store_activate_offset(store, offsets[i], ids[i]);
+      CHECK(c != NULL && c->id == ids[i],
+            "detached offset activates its exact public ID");
+      if (c != NULL)
+        delete_clause(c);
+    }
+    else
+      CHECK(clause_store_discard_detached(store, offsets[i], ids[i]),
+            "detached offset discards its exact public ID");
+  }
+  stats = clause_store_get_stats(store);
+  CHECK(clause_store_current_length(store) == 0 &&
+        stats.detached_current == 0,
+        "activation and discard release every detached current record");
+  CHECK(find_clause_by_id(ids[0]) == NULL &&
+        find_clause_by_id(ids[RECORDS - 1]) == NULL,
+        "detached lifecycle leaves no stale endpoint IDs");
+  clause_store_delete_clauses(store);
+  safe_free(offsets);
+  safe_free(ids);
+}
+
 int main(void)
 {
   struct clause_id_table_stats ids;
@@ -520,14 +584,17 @@ int main(void)
   archive_round_trip(CLAUSE_STORE_ARCHIVE_MEMORY);
   archive_preserve_body_test(CLAUSE_STORE_ARCHIVE_MEMORY);
   archive_direct_offset_aging_test(CLAUSE_STORE_ARCHIVE_MEMORY);
+  detached_archive_scaling_test(CLAUSE_STORE_ARCHIVE_MEMORY);
 #ifndef __EMSCRIPTEN__
   tmpdir_failure_test();
   archive_round_trip(CLAUSE_STORE_ARCHIVE_MMAP);
   archive_preserve_body_test(CLAUSE_STORE_ARCHIVE_MMAP);
   archive_direct_offset_aging_test(CLAUSE_STORE_ARCHIVE_MMAP);
+  detached_archive_scaling_test(CLAUSE_STORE_ARCHIVE_MMAP);
   archive_round_trip(CLAUSE_STORE_ARCHIVE_FILE);
   archive_preserve_body_test(CLAUSE_STORE_ARCHIVE_FILE);
   archive_direct_offset_aging_test(CLAUSE_STORE_ARCHIVE_FILE);
+  detached_archive_scaling_test(CLAUSE_STORE_ARCHIVE_FILE);
 #endif
   ids = clause_id_table_get_stats();
   CHECK(ids.entries == 0 && ids.pages == 0,

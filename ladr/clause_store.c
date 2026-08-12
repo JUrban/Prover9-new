@@ -62,6 +62,8 @@ struct clause_store {
   unsigned long long file_writes;
   unsigned long long file_write_bytes;
   unsigned long long offset_lookups;
+  unsigned long long detached_records;
+  size_t detached_current;
 };
 
 /* The ID table stores only a tagged offset, so one archive-enabled store is
@@ -663,6 +665,8 @@ void clause_store_free(Clause_store store)
   size_t i;
   if (store == NULL)
     return;
+  if (store->detached_current != 0)
+    fatal_error("clause_store_free: detached archive records remain owned");
   for (i = 0; i < store->length; i++) {
     uintptr_t ref = store->refs[i];
     if (ref_is_archive(ref)) {
@@ -688,6 +692,8 @@ void clause_store_delete_clauses(Clause_store store)
   size_t i;
   if (store == NULL)
     return;
+  if (store->detached_current != 0)
+    fatal_error("clause_store_delete_clauses: detached archive records remain owned");
   for (i = 0; i < store->length; i++) {
     uintptr_t ref = store->refs[i];
     if (ref_is_archive(ref)) {
@@ -798,6 +804,32 @@ BOOL clause_store_archive_clause_preserve(Clause_store store, Topform c)
     fatal_error("clause_store_archive_clause_preserve: ID replacement failed");
   store->refs[i-1] = offset_ref(offset);
   c->disabled = 0;
+  return TRUE;
+}
+
+/* PUBLIC */
+BOOL clause_store_archive_detached(Clause_store store, Topform c,
+                                   size_t *offset)
+{
+  unsigned long long record_offset;
+  if (store == NULL || c == NULL || offset == NULL ||
+      store->mode == CLAUSE_STORE_ARCHIVE_OFF)
+    return FALSE;
+  if (store->current_records == SIZE_MAX ||
+      store->detached_current == SIZE_MAX ||
+      store->detached_records == ULLONG_MAX)
+    fatal_error("clause_store_archive_detached: record-count overflow");
+  if (!append_record(store, c, &record_offset) || record_offset > SIZE_MAX)
+    return FALSE;
+  if (!archive_clause_id(c, record_offset))
+    fatal_error("clause_store_archive_detached: ID-table replacement failed");
+  store->current_records++;
+  store->detached_current++;
+  store->detached_records++;
+  *offset = (size_t) record_offset;
+  c->disabled = 0;
+  c->id = 0;
+  delete_clause(c);
   return TRUE;
 }
 
@@ -949,8 +981,8 @@ Topform clause_store_get(Clause_store store, size_t position)
   return (Topform) store->refs[position];
 }
 
-static Topform clause_store_materialize_offset(Clause_store store,
-                                               unsigned long long offset)
+static Topform materialize_record_offset(Clause_store store,
+                                         unsigned long long offset)
 {
   struct record_view v;
   Topform c;
@@ -1039,7 +1071,7 @@ Topform clause_store_materialize(Clause_store store, size_t position)
     return NULL;
   ref = store->refs[position];
   return ref_is_archive(ref) ?
-    clause_store_materialize_offset(store, ref_offset(ref)) : (Topform) ref;
+    materialize_record_offset(store, ref_offset(ref)) : (Topform) ref;
 }
 
 /* PUBLIC */
@@ -1068,6 +1100,53 @@ Topform clause_store_activate(Clause_store store, size_t position)
 }
 
 /* PUBLIC */
+Topform clause_store_materialize_offset(Clause_store store, size_t offset)
+{
+  return materialize_record_offset(store, (unsigned long long) offset);
+}
+
+/* PUBLIC */
+Topform clause_store_activate_offset(Clause_store store, size_t offset,
+                                     unsigned long long expected_id)
+{
+  Topform c;
+  if (store == NULL || expected_id == 0 || store->detached_current == 0)
+    return NULL;
+  c = materialize_record_offset(store, (unsigned long long) offset);
+  if (c == NULL)
+    return NULL;
+  if (c->id != expected_id ||
+      !activate_archived_clause_id(c, (unsigned long long) offset)) {
+    clause_store_release_materialized(c);
+    return NULL;
+  }
+  if (store->current_records == 0)
+    fatal_error("clause_store_activate_offset: current-record underflow");
+  store->current_records--;
+  store->detached_current--;
+  c->archive_materialized = 0;
+  c->disabled = 0;
+  return c;
+}
+
+/* PUBLIC */
+BOOL clause_store_discard_detached(Clause_store store, size_t offset,
+                                   unsigned long long expected_id)
+{
+  unsigned long long current_offset;
+  if (store == NULL || expected_id == 0 || store->detached_current == 0 ||
+      !clause_id_archive_offset(expected_id, &current_offset) ||
+      current_offset != (unsigned long long) offset)
+    return FALSE;
+  unassign_archived_clause_id(expected_id, (unsigned long long) offset);
+  if (store->current_records == 0)
+    fatal_error("clause_store_discard_detached: current-record underflow");
+  store->current_records--;
+  store->detached_current--;
+  return TRUE;
+}
+
+/* PUBLIC */
 Topform clause_store_materialize_by_id(unsigned long long id)
 {
   unsigned long long offset;
@@ -1076,7 +1155,7 @@ Topform clause_store_materialize_by_id(unsigned long long id)
     return NULL;
   Active_archive_store->offset_lookups++;
   {
-    Topform c = clause_store_materialize_offset(Active_archive_store, offset);
+    Topform c = materialize_record_offset(Active_archive_store, offset);
     if (c != NULL && c->id != id) {
       Active_archive_store->validation_failures++;
       clause_store_release_materialized(c);
@@ -1221,33 +1300,27 @@ BOOL clause_store_sync(Clause_store store)
   return TRUE;
 }
 
-/* PUBLIC */
-void clause_store_advise_mmap_range_cold(Clause_store store,
-                                         size_t first_position,
-                                         size_t last_position)
+static void advise_mmap_offsets_cold(Clause_store store,
+                                     unsigned long long first_offset,
+                                     unsigned long long last_record_offset)
 {
 #ifndef __EMSCRIPTEN__
-  uintptr_t first_ref, last_ref;
   struct record_view last_view;
   long page_size_long;
   size_t page_size, begin, end, last_offset, sync_start;
   if (store == NULL || store->mode != CLAUSE_STORE_ARCHIVE_MMAP ||
-      store->backing == NULL || first_position > last_position ||
-      last_position >= store->length)
-    return;
-  first_ref = store->refs[first_position];
-  last_ref = store->refs[last_position];
-  if (!ref_is_archive(first_ref) || !ref_is_archive(last_ref))
+      store->backing == NULL || first_offset > last_record_offset ||
+      first_offset > SIZE_MAX || last_record_offset > SIZE_MAX)
     return;
   page_size_long = sysconf(_SC_PAGESIZE);
   if (page_size_long <= 0)
     return;
   page_size = (size_t) page_size_long;
-  last_offset = (size_t) ref_offset(last_ref);
-  if (!record_view(store, ref_offset(last_ref), &last_view) ||
+  last_offset = (size_t) last_record_offset;
+  if (!record_view(store, last_record_offset, &last_view) ||
       last_view.total > SIZE_MAX - last_offset)
     return;
-  begin = (size_t) ref_offset(first_ref) / page_size * page_size;
+  begin = (size_t) first_offset / page_size * page_size;
   end = last_offset + (size_t) last_view.total;
   if (end % page_size != 0) {
     if (end > SIZE_MAX - (page_size - end % page_size))
@@ -1276,9 +1349,35 @@ void clause_store_advise_mmap_range_cold(Clause_store store,
   }
 #else
   (void) store;
-  (void) first_position;
-  (void) last_position;
+  (void) first_offset;
+  (void) last_record_offset;
 #endif
+}
+
+/* PUBLIC */
+void clause_store_advise_mmap_range_cold(Clause_store store,
+                                         size_t first_position,
+                                         size_t last_position)
+{
+  uintptr_t first_ref, last_ref;
+  if (store == NULL || first_position > last_position ||
+      last_position >= store->length)
+    return;
+  first_ref = store->refs[first_position];
+  last_ref = store->refs[last_position];
+  if (!ref_is_archive(first_ref) || !ref_is_archive(last_ref))
+    return;
+  advise_mmap_offsets_cold(store, ref_offset(first_ref),
+                           ref_offset(last_ref));
+}
+
+/* PUBLIC */
+void clause_store_advise_mmap_offsets_cold(Clause_store store,
+                                           size_t first_offset,
+                                           size_t last_offset)
+{
+  advise_mmap_offsets_cold(store, (unsigned long long) first_offset,
+                           (unsigned long long) last_offset);
 }
 
 /* PUBLIC */
@@ -1306,6 +1405,11 @@ struct clause_store_stats clause_store_get_stats(Clause_store store)
     stats.file_writes = store->file_writes;
     stats.file_write_bytes = store->file_write_bytes;
     stats.offset_lookups = store->offset_lookups;
+    stats.detached_records = store->detached_records;
+    stats.detached_current = store->detached_current;
+    stats.handle_bytes_avoided =
+      store->detached_records > ULLONG_MAX / sizeof(uintptr_t) ? ULLONG_MAX :
+      store->detached_records * sizeof(uintptr_t);
   }
   return stats;
 }

@@ -36,6 +36,9 @@ struct clause_store_stats {
   unsigned long long file_writes;
   unsigned long long file_write_bytes;
   unsigned long long offset_lookups;
+  unsigned long long detached_records;
+  unsigned long long detached_current;
+  unsigned long long handle_bytes_avoided;
 };
 
 Clause_store clause_store_init(const char *name);
@@ -58,6 +61,13 @@ BOOL clause_store_archive_clause(Clause_store store, Topform c);
    leave the original materialized body alive but detached from the store and
    ID table.  The caller assumes ownership of that original Topform. */
 BOOL clause_store_archive_clause_preserve(Clause_store store, Topform c);
+
+/* Archive a clause whose immutable record is owned by an external compact
+   directory.  OFFSET is the stable record address; no entry is added to the
+   store's cumulative handle array.  The caller must eventually activate or
+   discard every detached record before destroying the store. */
+BOOL clause_store_archive_detached(Clause_store store, Topform c,
+                                   size_t *offset);
 
 BOOL clause_store_member(Clause_store store, Topform c);
 
@@ -88,6 +98,14 @@ Topform clause_store_materialize(Clause_store store, size_t position);
 
 Topform clause_store_activate(Clause_store store, size_t position);
 
+Topform clause_store_materialize_offset(Clause_store store, size_t offset);
+
+Topform clause_store_activate_offset(Clause_store store, size_t offset,
+                                     unsigned long long expected_id);
+
+BOOL clause_store_discard_detached(Clause_store store, size_t offset,
+                                   unsigned long long expected_id);
+
 Topform clause_store_materialize_by_id(unsigned long long id);
 
 Ilist clause_parents_by_id(unsigned long long id);
@@ -110,6 +128,10 @@ BOOL clause_store_sync(Clause_store store);
 void clause_store_advise_mmap_range_cold(Clause_store store,
                                          size_t first_position,
                                          size_t last_position);
+
+void clause_store_advise_mmap_offsets_cold(Clause_store store,
+                                           size_t first_offset,
+                                           size_t last_offset);
 
 struct clause_store_stats clause_store_get_stats(Clause_store store);
 
