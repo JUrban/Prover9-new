@@ -1,7 +1,9 @@
 # Mature backward-index CPU recovery plan
 
-Status: implemented and locally validated on branch
-`mature-back-index-cpu`; the external mature-run gates remain open.
+Status: active implementation on branch `mature-back-index-cpu`.  The
+external mature-run gates remain open.  A completion audit widened the local
+work below because parity with compact `mask8` is only an intermediate gate,
+not the product CPU goal.
 
 This plan supersedes the short-prefix reasoning behind the first adaptive
 router.  The new authoritative baseline is the matched search state in the
@@ -30,6 +32,15 @@ position budget exhausted 514 times: 624 features had been admitted, 517 had
 already been demoted, and only 107 remained active.  These counters disprove
 the former extrapolation.
 
+The complete-run target is stricter.  The supplied normal-P9
+`chat_test.new.out1.gz` proves after 11,368 givens in 5,110.38 user seconds;
+compact `mask8` in `chat_test.new.out4` follows essentially the same trajectory
+but needs 9,573.63 user seconds and 1,147.68 system seconds.  Its backward
+lookup alone costs 3,607.118 seconds.  Recovering adaptive-versus-mask parity
+therefore does not prove competitiveness: the product gate remains at most
+1.25 times normal-P9 user CPU at the complete proof endpoint, with system CPU
+and file-cache memory reported separately.
+
 ## 1. Non-negotiable invariants
 
 1. Mask, tree, and position retrieval remain complete candidate generators.
@@ -55,6 +66,13 @@ the former extrapolation.
 7. Checkpoint/resume and index compaction preserve the global credit ledger,
    rejection generations, admission freeze, hot-route evidence, and all
    semantic fingerprints.
+8. Steady insertion work cannot be proportional to the number of admitted
+   optimization features.  Construction may be amortized yet still lose a
+   long run if every later clause is independently rescanned for every active
+   feature.
+9. Every structural operation used to choose a route is charged to that
+   route.  In particular, root-level sibling traversal cannot remain hidden
+   from the tree cost merely because it occurs outside the recursive walker.
 
 ## 2. Admission before calibration
 
@@ -201,3 +219,43 @@ provisional and the report will identify exactly which external gate is open.
 Every commit states the semantic invariant preserved and the remaining
 mature-scale uncertainty.  Generated runs and existing untracked user files
 remain outside version control.
+
+## 7. Completion-audit extension: steady-state CPU
+
+The first implementation bounds *admission* scans, but inspection found an
+independent mature-run term in incremental position maintenance.  For each new
+record, `append_admitted_position_features` first checks every active feature
+by traversing the serialized clause, then traverses it again per feature while
+building postings.  With `F` admitted features and `T` clause tokens this is
+`O(F*T)` work per retained demodulator even after admissions freeze.  A fixed
+16-MiB byte cap does not make that CPU term acceptable.
+
+Replace it with one record-oriented traversal.  For each subject occurrence
+whose root owns an active feature, walk that subterm once, probe the existing
+`(root,path,symbol)` hash, collect matching `(bucket,root-offset)` pairs in
+bounded scratch storage, sort/deduplicate them, and append every affected
+posting.  Budget preflight must consume this same match set rather than repeat
+the traversal.  The resulting work is proportional to traversed subject
+structure plus actual matches, independent of the total number of features.
+Expose records, root traversals, token visits, feature-hash probes, and matches
+so a mature run can verify the bound directly.
+
+The adaptive tree audit also found that the top-level sibling loop in
+`collect_tree` is absent from `tree_sibling_checks`.  Count it exactly so the
+initial probe and later EWMA include the real structural cost.  Exercise both
+cache-hit and forced-collision/miss cases; a route may become more conservative
+after honest accounting, but candidate completeness and order must not change.
+
+Additional local gates:
+
+1. Admit at least 32 independent exact-position features, then add unmatched
+   records.  Incremental token/hash work must stay constant per record rather
+   than multiplying by 32, with identical postings for matched records.
+2. Run enough adaptive route queries to cross multiple sketch-aging windows
+   while the active feature set is nonempty; planner bytes and per-query
+   maintenance must remain bounded.
+3. Include root sibling comparisons in route-observed work and verify that a
+   costly tree probe cannot be promoted by an artificially low counter.
+4. Repeat bounded `chat_test.in` parity tests on the final binary, then use the
+   external 7,365-given and complete-proof runs to evaluate both compact-mask
+   parity and the actual 1.25-times-normal-P9 product gate.
