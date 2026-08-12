@@ -5607,31 +5607,45 @@ static void collect_pattern(Compact_back_demod_index index, Term pattern,
   size_t selected_edges;
   size_t selected_positions;
   size_t position_feature_count;
+  uint32_t position_bucket;
   enum cbd_edge_query_status edge_status = prepare_edge_query(
     index, pattern, &selected_edges);
   if (edge_status == CBD_EDGE_EMPTY) {
     index->edge_empty_queries++;
     return;
   }
+  position_bucket = best_position_bucket(
+    index, pattern, &selected_positions, &position_feature_count);
   if (edge_status == CBD_EDGE_AVAILABLE) {
-    unsigned long long edge_population = index->edge_buckets[
-      index->edge_query[0].bucket].posting_count;
-    unsigned long long root_population;
-    if (strategy_uses_hot_tree(index->strategy))
-      root_population = route_root_population(index, pattern);
-    else if (strategy_uses_paths(index->strategy))
-      root_population = route_mask_population(index, pattern);
+    unsigned long long edge_work = 0;
+    unsigned long long fallback_population;
+    size_t i;
+    for (i = 0; i < selected_edges; i++)
+      edge_work = saturating_add(
+        edge_work, index->edge_buckets[
+          index->edge_query[i].bucket].posting_count);
+    if (strategy_uses_paths(index->strategy))
+      fallback_population = route_mask_population(index, pattern);
     else
-      root_population = index->active;
-    if (edge_population <= root_population / 2) {
+      fallback_population = index->active;
+    if (position_bucket != CBD_NONE) {
+      unsigned long long position_population = route_position_population(
+        index, position_bucket, selected_positions,
+        position_feature_count);
+      if (position_population < fallback_population)
+        fallback_population = position_population;
+    }
+    /* Edge postings identify records, then scan each surviving record for
+       the complete pattern.  Demand a fourfold posting-work margin over the
+       best retained route; root population alone badly overstates the cost
+       of a selective shallow position bucket. */
+    if (edge_work <= fallback_population / 4) {
       collect_edge_candidates(
         index, pattern, selected_edges, exclude_id, count);
       return;
     }
     index->edge_bypass_queries++;
   }
-  uint32_t position_bucket = best_position_bucket(
-    index, pattern, &selected_positions, &position_feature_count);
   if (index->strategy == COMPACT_BACK_DEMOD_ADAPTIVE &&
       !VARIABLE(pattern)) {
     struct cbd_route_profile *profile;

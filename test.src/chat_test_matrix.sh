@@ -17,6 +17,7 @@ compact_back_position_build_factor=${CHAT_COMPACT_BACK_POSITION_BUILD_FACTOR:-32
 compact_back_position_budget_kb=${CHAT_COMPACT_BACK_POSITION_BUDGET_KB:-16384}
 compact_back_position_budget_pct=${CHAT_COMPACT_BACK_POSITION_BUDGET_PCT:-50}
 compact_back_eager_position_depth=${CHAT_COMPACT_BACK_EAGER_POSITION_DEPTH:-4}
+compact_back_edge_filter=${CHAT_COMPACT_BACK_EDGE_FILTER:-0}
 compact_back_tree_budget_kb=${CHAT_COMPACT_BACK_TREE_BUDGET_KB:-65536}
 compact_back_tree_budget_pct=${CHAT_COMPACT_BACK_TREE_BUDGET_PCT:-200}
 passive_selector_buffer=${CHAT_PASSIVE_SELECTOR_BUFFER:-65536}
@@ -89,6 +90,7 @@ esac
   echo "compact_back_position_budget_kb=$compact_back_position_budget_kb"
   echo "compact_back_position_budget_pct=$compact_back_position_budget_pct"
   echo "compact_back_eager_position_depth=$compact_back_eager_position_depth"
+  echo "compact_back_edge_filter=$compact_back_edge_filter"
   echo "compact_back_tree_budget_kb=$compact_back_tree_budget_kb"
   echo "compact_back_tree_budget_pct=$compact_back_tree_budget_pct"
   echo "passive_selector_buffer=$passive_selector_buffer"
@@ -120,6 +122,7 @@ awk '
   /^(set|clear)\(collective_[a-z_]+\)\./ { next }
   /^(set|clear)\(compact_otter_[a-z_]+\)\./ { next }
   /^(set|clear)\(compact_back_sparse_positions\)\./ { next }
+  /^(set|clear)\(compact_back_edge_filter\)\./ { next }
   /^(set|clear)\(compact_nonunit_path_filter\)\./ { next }
   /^(set|clear)\(print_(gen|kept|given|initial_clauses)\)\./ { next }
   { print }
@@ -164,6 +167,11 @@ write_case()
         echo "assign(compact_back_eager_position_depth,$compact_back_eager_position_depth)."
         echo "assign(compact_back_tree_budget_kb,$compact_back_tree_budget_kb)."
         echo "assign(compact_back_tree_budget_pct,$compact_back_tree_budget_pct)."
+        if test "$compact_back_edge_filter" = 1; then
+          echo 'set(compact_back_edge_filter).'
+        else
+          echo 'clear(compact_back_edge_filter).'
+        fi
         ;;
       new_otter_compact_*)
         echo "assign(compact_term_reclaim_kb,$compact_term_reclaim_kb)."
