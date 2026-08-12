@@ -120,6 +120,15 @@ static void run(Dense_passive_selector_mode mode, BOOL record_expected)
   }
   if (givens_available() || dense_passive_size() != 0)
     fail("selector not empty after full drain");
+  if (mode == DENSE_SELECTOR_FILE) {
+    struct dense_passive_selector_stats stats =
+      dense_passive_selector_stats();
+    if (stats.file_min_calls !=
+        CLAUSES + stats.stale_entries_discarded)
+      fail("file selector performed a redundant minimum search");
+    if (stats.file_run_checks > stats.file_min_calls * 64ULL)
+      fail("file selector run-head checks exceed the fixed level bound");
+  }
   clist_free(sos);
   zap_given_selectors();
   configure_dense_passive(FALSE, NULL, NULL);

@@ -216,7 +216,12 @@ and non-default.  Sequential blocks consumed by selection or merging are now
 advised out of the kernel cache immediately after `pread`; separate counters
 make complete advice coverage and failures visible.  This closes an identified
 cumulative cgroup-cache path, but actual whole-job cache residency remains part
-of the mature delegated-cgroup gate.
+of the mature delegated-cgroup gate.  Selector choice no longer performs a
+file minimum probe only to have retrieval repeat that same probe: the
+exact logical active count chooses a nonempty selector, and retrieval alone
+prunes stale heads.  Empty file queues are closed without scanning because
+reactivation already reinserts their entries.  Minimum calls and buffer/run
+head checks are reported for mature CPU-slope diagnosis.
 
 ## 6. Phase E: remaining indexes and offset spaces
 

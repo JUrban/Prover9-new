@@ -24,7 +24,7 @@ Compact_back_demod: mode=authoritative, strategy=adaptive, failures=0, active=50
 Compact_index_timing: component=back_demod, lookup_seconds=2.0, exact_seconds=0.1, materialize_seconds=0.2, maintenance_seconds=0.3.
 Compact_query_profile: component=back_demod, op=candidate_lookup, queries=20, candidates=4, exact_tests=4, exact_successes=3.
 Dense_passive: backing=ancestor-file, directory=file, records=20, directory_logical=1280.
-Dense_passive_selector: store=file, buffer_bytes=240, run_logical=480, reads=3 (72 bytes), writes=4 (96 bytes), read_evictions=2 (48 bytes), read_eviction_failures=0.
+Dense_passive_selector: store=file, buffer_bytes=240, run_logical=480, reads=3 (72 bytes), writes=4 (96 bytes), read_evictions=2 (48 bytes), read_eviction_failures=0, min_calls=10, buffer_checks=8, run_checks=20.
 Dense_passive_gc: validation_failures=0.
 Ancestor_store: validation_failures=0, file_reads=10 (1000 bytes), file_writes=5 (500 bytes).
 Process_residency_kb: pss=10240, anonymous=8192, swap=0.
@@ -75,6 +75,8 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(rows[0]["selector_read_evictions_bytes"], 48)
         self.assertAlmostEqual(rows[0]["selector_read_eviction_pct"],
                                100.0 * 48 / 72)
+        self.assertAlmostEqual(rows[0]["selector_min_calls_per_given"], 0.1)
+        self.assertAlmostEqual(rows[0]["selector_run_checks_per_given"], 0.2)
         self.assertAlmostEqual(rows[1]["pss_mib"], 12.0)
         self.assertEqual(rows[1]["statistics_format_comma_num_buffers"], 32)
         self.assertAlmostEqual(rows[0]["ancestor_io_mib_per_cpu"],

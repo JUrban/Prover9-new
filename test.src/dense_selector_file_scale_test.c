@@ -97,7 +97,9 @@ int main(int argc, char **argv)
       after_select.file_read_evictions != after_select.file_reads ||
       after_select.file_read_eviction_bytes !=
         after_select.file_read_bytes ||
-      after_select.file_read_eviction_failures != 0)
+      after_select.file_read_eviction_failures != 0 ||
+      after_select.file_min_calls != 1 ||
+      after_select.file_run_checks != selectors.runs)
     fatal_error("dense_selector_file_scale_test: read cache eviction failure");
 #endif
   printf("{\"records\":%llu,\"directory_logical\":%llu,"
@@ -107,6 +109,7 @@ int main(int argc, char **argv)
          "\"selector_read_evictions\":%llu,"
          "\"selector_read_eviction_bytes\":%llu,"
          "\"selector_read_eviction_failures\":%llu,"
+         "\"selector_min_calls\":%llu,\"selector_run_checks\":%llu,"
          "\"selector_writes\":%llu,\"selector_write_bytes\":%llu,"
          "\"eviction_passes\":%llu,\"eviction_bytes\":%llu,"
          "\"pss_kib\":%llu,\"anonymous_kib\":%llu}\n",
@@ -117,6 +120,7 @@ int main(int argc, char **argv)
          after_select.file_read_evictions,
          after_select.file_read_eviction_bytes,
          after_select.file_read_eviction_failures,
+         after_select.file_min_calls, after_select.file_run_checks,
          selectors.file_writes, selectors.file_write_bytes,
          directory.file_eviction_passes,
          directory.file_eviction_bytes, process.pss_kbytes,

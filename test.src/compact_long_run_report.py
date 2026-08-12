@@ -62,6 +62,7 @@ CUMULATIVE_KEYS = (
     "ancestor_file_writes_bytes", "selector_reads_bytes",
     "selector_writes_bytes", "selector_read_evictions",
     "selector_read_evictions_bytes", "selector_read_eviction_failures",
+    "selector_min_calls", "selector_buffer_checks", "selector_run_checks",
 )
 
 
@@ -374,6 +375,10 @@ def derive_intervals(samples):
             row.get("delta_selector_reads_bytes"))
         if row["selector_read_eviction_pct"] is not None:
             row["selector_read_eviction_pct"] *= 100.0
+        row["selector_min_calls_per_given"] = safe_ratio(
+            row.get("delta_selector_min_calls"), delta_given)
+        row["selector_run_checks_per_given"] = safe_ratio(
+            row.get("delta_selector_run_checks"), delta_given)
         derived.append(row)
         previous = sample
     return derived
@@ -558,6 +563,10 @@ def run_summary(label, rows):
         "last_selector_read_eviction_pct": selector_read_eviction_pct,
         "last_selector_read_eviction_failures": last.get(
             "selector_read_eviction_failures"),
+        "last_selector_min_calls_per_given": last.get(
+            "selector_min_calls_per_given"),
+        "last_selector_run_checks_per_given": last.get(
+            "selector_run_checks_per_given"),
         "last_ancestor_file_read_bytes": last.get("ancestor_file_reads_bytes"),
         "last_ancestor_file_write_bytes": last.get("ancestor_file_writes_bytes"),
         "signals": signals,
@@ -752,10 +761,15 @@ def markdown_summary(summary):
                   "back_lookup_normalized_steady_slope_ratio"), 2)))
     if summary.get("last_selector_store") == "file":
         print("File-selector consumed-read cache advice: coverage={}%, "
-              "failures={}.".format(
+              "failures={}; last interval min calls/given={}, run "
+              "checks/given={}.".format(
                   fmt(summary.get("last_selector_read_eviction_pct"), 1),
                   fmt(summary.get(
-                      "last_selector_read_eviction_failures"))))
+                      "last_selector_read_eviction_failures")),
+                  fmt(summary.get(
+                      "last_selector_min_calls_per_given"), 2),
+                  fmt(summary.get(
+                      "last_selector_run_checks_per_given"), 2)))
     if summary["signals"]:
         print("Signals:")
         for signal in summary["signals"]:
@@ -823,6 +837,9 @@ TSV_COLUMNS = (
     "selector_io_mib_per_cpu", "statistics_format_comma_num_buffers",
     "selector_read_evictions", "selector_read_evictions_bytes",
     "selector_read_eviction_failures", "selector_read_eviction_pct",
+    "delta_selector_min_calls", "selector_min_calls_per_given",
+    "delta_selector_buffer_checks", "delta_selector_run_checks",
+    "selector_run_checks_per_given",
     "allocator_rss_current_kb", "allocator_rss_peak_kb",
     "external_peak_rss_kb", "external_user_cpu",
     "cgroup_memory_peak_bytes", "cgroup_memory_current_bytes",

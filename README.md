@@ -128,7 +128,8 @@ have corresponding
 cgroup-v2 peak memory, including charged file cache, and refuses with exit 77
 when the current scope is not delegated.  File-selector candidates must also
 exercise reads and successfully advise at least 99% of consumed bytes out of
-cache.  See
+cache.  Interval output also reports selector minimum calls and run-head checks
+per given, so file-queue CPU growth is visible.  See
 `P9-LONG-RUN-SCALABILITY-RESULTS.md` for exact mature-run commands,
 measurement caveats, and acceptance criteria.
 

@@ -772,3 +772,25 @@ checkpoint/restart at boundaries zero and two, the release proof smoke, and
 isolated ASan/UBSan 200,000-record tests pass.  Because advice is not a guarantee
 that the kernel reclaimed every page immediately, the final claim still uses
 the delegated-cgroup peak rather than these counters alone.
+
+### Single selector minimum probe per given
+
+The selector cycle formerly called the dense minimum lookup to prune a chosen
+queue and `get_given_clause2()` immediately repeated the same lookup to obtain
+the clause.  `dense_active` is already maintained exactly on every insertion,
+deactivation, reactivation, selection, and compaction, so the first successful
+probe supplied no information.  Selector choice now uses that logical count;
+only retrieval searches file heads and prunes stale entries.  When a file queue
+has no active clauses, its buffer and runs are closed directly.  This is safe
+because file-mode reactivation explicitly reinserts the record (unlike the
+heap mode's retained lazy entry).
+
+New counters expose minimum calls, insertion-buffer checks, and live-run head
+checks.  The 3,000-given heap/file differential asserts the exact invariant
+`min_calls = givens + stale_discarded`, retains byte-identical selection order,
+and bounds run checks by the fixed 64-level table.  In the integrated
+300-given chat prefix, final counters were 301 givens, 324 stale entries, and
+625 minimum calls—exactly one successful lookup per given plus one retry per
+discarded stale entry.  It retained the established 120,793 generated and
+5,737 kept trajectory.  This removes a deterministic approximately twofold
+minimum-search overhead; mature end-to-end CPU remains the acceptance gate.

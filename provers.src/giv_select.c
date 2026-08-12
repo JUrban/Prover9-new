@@ -98,6 +98,9 @@ struct giv_select {
   unsigned long long dense_file_read_evictions;
   unsigned long long dense_file_read_eviction_bytes;
   unsigned long long dense_file_read_eviction_failures;
+  unsigned long long dense_file_min_calls;
+  unsigned long long dense_file_buffer_checks;
+  unsigned long long dense_file_run_checks;
   unsigned long long dense_stale_entries_discarded;
 };  /* struct giv_select */
 
@@ -1094,7 +1097,9 @@ static BOOL dense_selector_file_min(Giv_select gs,
 {
   unsigned level;
   BOOL found = FALSE;
+  gs->dense_file_min_calls++;
   if (gs->dense_buffer_size != 0) {
+    gs->dense_file_buffer_checks++;
     *entry = gs->dense_buffer[0];
     *source = -1;
     found = TRUE;
@@ -1103,6 +1108,7 @@ static BOOL dense_selector_file_min(Giv_select gs,
     struct dense_selector_run *run = &gs->dense_runs[level];
     if (run->fd < 0)
       continue;
+    gs->dense_file_run_checks++;
     if (!run->head_valid) {
       if (!dense_selector_run_next(gs, run, &run->head)) {
         dense_selector_run_close(run);
@@ -1163,6 +1169,9 @@ static void dense_selector_initialize(Giv_select gs)
   gs->dense_file_read_evictions = 0;
   gs->dense_file_read_eviction_bytes = 0;
   gs->dense_file_read_eviction_failures = 0;
+  gs->dense_file_min_calls = 0;
+  gs->dense_file_buffer_checks = 0;
+  gs->dense_file_run_checks = 0;
   gs->dense_stale_entries_discarded = 0;
 }
 
@@ -1208,6 +1217,9 @@ static void dense_selector_add_stats(
   stats->file_read_eviction_bytes += gs->dense_file_read_eviction_bytes;
   stats->file_read_eviction_failures +=
     gs->dense_file_read_eviction_failures;
+  stats->file_min_calls += gs->dense_file_min_calls;
+  stats->file_buffer_checks += gs->dense_file_buffer_checks;
+  stats->file_run_checks += gs->dense_file_run_checks;
   stats->stale_entries_discarded += gs->dense_stale_entries_discarded;
 }
 
@@ -1313,10 +1325,12 @@ static BOOL dense_selector_peek(Giv_select gs, uint32_t *record)
   return FALSE;
 }
 
-static void dense_selector_prune(Giv_select gs)
+static void dense_selector_drop_empty_file_runs(Giv_select gs)
 {
-  uint32_t record;
-  (void) dense_selector_peek(gs, &record);
+  if (Dense_selector_mode == DENSE_SELECTOR_FILE &&
+      gs->dense_active == 0 &&
+      (gs->dense_buffer_size != 0 || dense_selector_run_count(gs) != 0))
+    dense_selector_file_reset(gs);
 }
 
 static void dense_selector_clear_contents(Giv_select gs)
@@ -2064,14 +2078,14 @@ Giv_select next_selector(Select_state s)
     Plist start = s->current;
     Giv_select gs = s->current->v;
     if (Dense_passive)
-      dense_selector_prune(gs);
+      dense_selector_drop_empty_file_runs(gs);
     while (selector_size(gs) == 0 || s->count >= gs->part) {
       s->current = s->current->next;
       if (!s->current)
 	s->current = s->selectors;
       gs = s->current->v;
       if (Dense_passive)
-        dense_selector_prune(gs);
+        dense_selector_drop_empty_file_runs(gs);
       s->count = 0;
       if (s->current == start)
 	break;  /* we're back to the start */

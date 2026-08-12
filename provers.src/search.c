@@ -2668,6 +2668,10 @@ void update_memory_stats(void)
     selectors.file_read_eviction_bytes;
   Stats.dense_passive_selector_file_read_eviction_failures =
     selectors.file_read_eviction_failures;
+  Stats.dense_passive_selector_file_min_calls = selectors.file_min_calls;
+  Stats.dense_passive_selector_file_buffer_checks =
+    selectors.file_buffer_checks;
+  Stats.dense_passive_selector_file_run_checks = selectors.file_run_checks;
   Stats.dense_passive_selector_stale_entries_discarded =
     selectors.stale_entries_discarded;
   Stats.dense_passive_arena_records = ps.records;
@@ -3477,7 +3481,8 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             "flushes=%s, merges=%s, reads=%s (%s bytes), "
             "writes=%s (%s bytes), evictions=%s (%s bytes), "
             "eviction_failures=%s, read_evictions=%s (%s bytes), "
-            "read_eviction_failures=%s, stale_discarded=%s.\n",
+            "read_eviction_failures=%s, min_calls=%s, buffer_checks=%s, "
+            "run_checks=%s, stale_discarded=%s.\n",
             str_ident(stringparm1(Opt->passive_selector_store), "file") ?
               "file" : "heap",
             parm(Opt->passive_selector_buffer),
@@ -3500,6 +3505,9 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             comma_num(s.dense_passive_selector_file_read_evictions),
             comma_num(s.dense_passive_selector_file_read_eviction_bytes),
             comma_num(s.dense_passive_selector_file_read_eviction_failures),
+            comma_num(s.dense_passive_selector_file_min_calls),
+            comma_num(s.dense_passive_selector_file_buffer_checks),
+            comma_num(s.dense_passive_selector_file_run_checks),
             comma_num(s.dense_passive_selector_stale_entries_discarded));
   if (dense_passive_mode())
     fprintf(fp,
