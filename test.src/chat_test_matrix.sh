@@ -18,6 +18,10 @@ new_prover=${CHAT_NEW_PROVER:-"$repo_dir/bin/prover9"}
 old_prover=${CHAT_OLD_PROVER:-/project/Prover9-old-LADR-2026-6A/bin/prover9}
 all_cases='old_otter new_otter_fpa new_otter_packed new_otter_packed_fast new_otter_compact_full new_otter_compact_packed_fast new_otter_compact_file_mask new_otter_compact_file_heap new_otter_compact_file_runs discount_clauses_selected discount_clauses_eager collective_balanced_selected collective_balanced_legacy collective_balanced_eager'
 selected_cases=${CHAT_CASES:-$all_cases}
+reference_output=${CHAT_REFERENCE_OUTPUT:-}
+compare_max_cpu_ratio=${CHAT_COMPARE_MAX_CPU_RATIO:-1.25}
+compare_min_ram_saving_pct=${CHAT_COMPARE_MIN_RAM_SAVING_PCT:-80}
+compare_max_back_slope_ratio=${CHAT_COMPARE_MAX_BACK_SLOPE_RATIO:-1.25}
 
 if test ! -f "$input"; then
   echo "input not found: $input" >&2
@@ -27,13 +31,31 @@ if test ! -x "$new_prover"; then
   echo "new prover not found: $new_prover" >&2
   exit 2
 fi
-if test ! -x "$old_prover"; then
-  echo "old prover not found: $old_prover" >&2
+case " $selected_cases " in
+  *" old_otter "*)
+    if test ! -x "$old_prover"; then
+      echo "old prover not found: $old_prover" >&2
+      exit 2
+    fi
+    need_old_prover=yes
+    ;;
+  *) need_old_prover=no ;;
+esac
+if test -n "$reference_output" && test ! -f "$reference_output"; then
+  echo "reference output not found: $reference_output" >&2
   exit 2
 fi
 
 mkdir -p "$output_dir/tmp"
-sha256sum "$input" "$new_prover" "$old_prover" > "$output_dir/hashes.txt"
+{
+  sha256sum "$input" "$new_prover"
+  if test "$need_old_prover" = yes; then
+    sha256sum "$old_prover"
+  fi
+  if test -n "$reference_output"; then
+    sha256sum "$reference_output"
+  fi
+} > "$output_dir/hashes.txt"
 {
   echo "max_given=$max_given"
   echo "max_seconds=$max_seconds"
@@ -46,6 +68,10 @@ sha256sum "$input" "$new_prover" "$old_prover" > "$output_dir/hashes.txt"
   echo "compact_index_stale_pct=$compact_index_stale_pct"
   echo "passive_selector_buffer=$passive_selector_buffer"
   echo "cases=$selected_cases"
+  echo "reference_output=${reference_output:-none}"
+  echo "compare_max_cpu_ratio=$compare_max_cpu_ratio"
+  echo "compare_min_ram_saving_pct=$compare_min_ram_saving_pct"
+  echo "compare_max_back_slope_ratio=$compare_max_back_slope_ratio"
   echo "new_prover=$new_prover"
   echo "old_prover=$old_prover"
 } > "$output_dir/limits.txt"
@@ -303,6 +329,9 @@ do
 done
 
 set --
+if test -n "$reference_output"; then
+  set -- "$@" "$reference_output"
+fi
 for name in $selected_cases
 do
   set -- "$@" "$output_dir/$name.out"
@@ -311,7 +340,10 @@ python3 "$repo_dir/test.src/compact_long_run_report.py" --format tsv "$@" \
   > "$output_dir/long-run-slopes.tsv"
 if test "$#" -gt 1; then
   python3 "$repo_dir/test.src/compact_long_run_report.py" --summary-only \
-    --compare-to-first "$@" > "$output_dir/long-run-summary.md"
+    --compare-to-first --max-cpu-ratio "$compare_max_cpu_ratio" \
+    --min-ram-saving-pct "$compare_min_ram_saving_pct" \
+    --max-back-slope-ratio "$compare_max_back_slope_ratio" "$@" \
+    > "$output_dir/long-run-summary.md"
 else
   python3 "$repo_dir/test.src/compact_long_run_report.py" --summary-only "$@" \
     > "$output_dir/long-run-summary.md"

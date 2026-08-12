@@ -161,7 +161,11 @@ the exact final trajectory, total user-CPU ratio, peak-RSS saving, presence of
 periodic evidence, and counted back-work slope against the promotion
 thresholds.  A GNU `time` sidecar named like `case.time` is preferred for peak
 RSS; otherwise the allocator's process peak is used.  The matrix runners put
-their first selected case in the reference role automatically.
+their first selected case in the reference role automatically, or prepend an
+archive supplied by `CHAT_REFERENCE_OUTPUT`/
+`P9_MATRIX_REFERENCE_OUTPUT`.  CPU, RAM, and slope thresholds are explicit
+reporter options and matrix environment variables, so a compact-versus-compact
+CPU crossover does not incorrectly inherit the 80% old-P9 RAM target.
 
 ## 5. Phase D: passive control plane for tens of millions of live clauses
 

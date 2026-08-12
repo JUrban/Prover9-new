@@ -415,7 +415,9 @@ def threshold_state(value):
     return "unknown"
 
 
-def compare_summaries(reference, candidate):
+def compare_summaries(reference, candidate, max_cpu_ratio=1.25,
+                      min_ram_saving_pct=80.0,
+                      max_back_slope_ratio=1.25):
     trajectory_fields = ("last_given", "last_generated", "last_kept",
                          "last_proofs")
     trajectory_known = all(
@@ -427,17 +429,19 @@ def compare_summaries(reference, candidate):
 
     cpu_ratio = safe_ratio(candidate.get("last_user_cpu"),
                            reference.get("last_user_cpu"))
-    cpu_gate = cpu_ratio <= 1.25 if cpu_ratio is not None else None
+    cpu_gate = (cpu_ratio <= max_cpu_ratio
+                if cpu_ratio is not None else None)
     rss_ratio = safe_ratio(candidate.get("peak_rss_kb"),
                            reference.get("peak_rss_kb"))
     ram_savings_pct = ((1.0 - rss_ratio) * 100.0
                        if rss_ratio is not None else None)
-    ram_gate = (ram_savings_pct >= 80.0
+    ram_gate = (ram_savings_pct >= min_ram_saving_pct
                 if ram_savings_pct is not None else None)
     interval_gate = True if candidate.get("samples", 0) >= 2 else None
     slope_ratio = (candidate.get("combined_slope_ratio")
                    if candidate.get("samples", 0) >= 2 else None)
-    slope_gate = slope_ratio <= 1.25 if slope_ratio is not None else None
+    slope_gate = (slope_ratio <= max_back_slope_ratio
+                  if slope_ratio is not None else None)
 
     checks = (trajectory_match, cpu_gate, ram_gate, interval_gate, slope_gate)
     if any(value is False for value in checks):
@@ -450,6 +454,9 @@ def compare_summaries(reference, candidate):
         "reference": reference.get("label"),
         "candidate": candidate.get("label"),
         "result": result,
+        "max_cpu_ratio": max_cpu_ratio,
+        "min_ram_saving_pct": min_ram_saving_pct,
+        "max_back_slope_ratio": max_back_slope_ratio,
         "trajectory_match": trajectory_match,
         "trajectory_gate": threshold_state(trajectory_match),
         "cpu_ratio": cpu_ratio,
@@ -548,6 +555,13 @@ def markdown_comparisons(comparisons):
     print("The first output is the reference. `eligible` means the parsed "
           "thresholds pass; it is not a substitute for independent proof "
           "checking or total-job/cgroup accounting.")
+    if comparisons:
+        first = comparisons[0]
+        print("Thresholds: CPU ratio <= {}, RAM saving >= {}%, counted "
+              "back-work slope <= {}.".format(
+                  fmt(first["max_cpu_ratio"], 2),
+                  fmt(first["min_ram_saving_pct"], 1),
+                  fmt(first["max_back_slope_ratio"], 2)))
     print()
     print("| Candidate | Trajectory | CPU ratio | CPU | Reference peak MiB | "
           "Candidate peak MiB | RAM saved % | RAM | Samples | Periodic | "
@@ -615,6 +629,14 @@ def main(argv=None):
     parser.add_argument(
         "--compare-to-first", action="store_true",
         help="audit each later output against the first (Markdown/JSON only)")
+    parser.add_argument("--max-cpu-ratio", type=float, default=1.25,
+                        help="comparison CPU rejection threshold (default 1.25)")
+    parser.add_argument(
+        "--min-ram-saving-pct", type=float, default=80.0,
+        help="comparison peak-RSS saving threshold (default 80)")
+    parser.add_argument(
+        "--max-back-slope-ratio", type=float, default=1.25,
+        help="comparison counted-work slope threshold (default 1.25)")
     args = parser.parse_args(argv)
     if args.tail < 0:
         parser.error("--tail must be nonnegative")
@@ -622,6 +644,10 @@ def main(argv=None):
         parser.error("--compare-to-first requires at least two outputs")
     if args.compare_to_first and args.format == "tsv":
         parser.error("--compare-to-first is available in Markdown or JSON")
+    if args.max_cpu_ratio <= 0 or args.max_back_slope_ratio <= 0:
+        parser.error("CPU and back-slope ratios must be positive")
+    if not 0 <= args.min_ram_saving_pct <= 100:
+        parser.error("--min-ram-saving-pct must be between 0 and 100")
     runs = []
     basenames = ["stdin" if path == "-" else os.path.basename(path)
                  for path in args.outputs]
@@ -630,7 +656,9 @@ def main(argv=None):
                  basenames.count(basename) > 1 else basename)
         rows = derive_intervals(parse_run(path))
         runs.append((label, rows, run_summary(label, rows)))
-    comparisons = ([compare_summaries(runs[0][2], run[2])
+    comparisons = ([compare_summaries(
+                        runs[0][2], run[2], args.max_cpu_ratio,
+                        args.min_ram_saving_pct, args.max_back_slope_ratio)
                     for run in runs[1:]] if args.compare_to_first else [])
     if args.format == "tsv":
         emit_tsv(runs)

@@ -48,6 +48,45 @@ and total-job/cgroup accounting.  For uncompressed matrix output, a neighboring
 GNU `time` file such as `case.time` is discovered automatically and takes
 precedence over Prover9's allocator peak.  Both matrix runners use their first
 selected case as the comparison reference in `long-run-summary.md`.
+`--max-cpu-ratio`, `--min-ram-saving-pct`, and
+`--max-back-slope-ratio` make those thresholds explicit.
+
+An archived reference can be prepended without rerunning it.  For the exact
+8,800-given current-adaptive versus `out41` CPU/slope crossover, use a 0% RAM
+threshold because both sides are compact implementations:
+
+```sh
+CHAT_CASES=new_otter_compact_file_runs \
+CHAT_REFERENCE_OUTPUT=/project/bob/chat_test.new.out41 \
+CHAT_COMPARE_MIN_RAM_SAVING_PCT=0 \
+CHAT_REPORT_SECONDS=300 CHAT_CPU=0 \
+./test.src/chat_test_matrix.sh /project/bob/chat_test.in \
+    chat-current-8800 8799 43200 22000 43800
+```
+
+The off-by-one cap is intentional: this runner's established 1,000 cap reports
+the `Given=1001` state, so 8,799 targets the archived `Given=8800` boundary.
+Choose a valid isolated real CPU instead of zero when appropriate.  The
+candidate uses adaptive back demodulation, file-backed passive directory and
+selectors, file-backed ancestors, packed-fast hints, and compact OTTER indexes.
+The archived reference is hashed and included only in reporting; the old
+executable is no longer required unless `old_otter` is selected as a case.
+
+For the full proof and the actual 80% old-P9 RAM gate, use `out1` and retain the
+default 80% threshold:
+
+```sh
+CHAT_CASES=new_otter_compact_file_runs \
+CHAT_REFERENCE_OUTPUT=/project/bob/chat_test.new.out1.gz \
+CHAT_REPORT_SECONDS=300 CHAT_CPU=0 \
+./test.src/chat_test_matrix.sh /project/bob/chat_test.in \
+    chat-current-full -1 43200 22000 43800
+```
+
+Both commands create `long-run-slopes.tsv`, `long-run-summary.md`, the exact
+generated input, binary/input/reference hashes, GNU-time data, and the raw
+output.  They should run on the larger host, not the constrained development
+machine.
 
 During implementation, the reporting audit found that `comma_num()` retained
 only 16 rotating results while one statistics `fprintf` used 24.  Later calls

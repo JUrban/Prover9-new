@@ -119,8 +119,10 @@ started by the reporter.  Put the reference first and add
 `--compare-to-first` to audit exact final counters, CPU ratio, peak-RSS saving,
 periodic evidence, and back-index slope.  Matrix runs discover their adjacent
 GNU `time` sidecars automatically and include this audit when more than one
-case is selected.  See `P9-LONG-RUN-SCALABILITY-RESULTS.md` for the measurement
-caveats and acceptance criteria.
+case is selected.  Set `CHAT_REFERENCE_OUTPUT` to reuse an archived baseline
+without rerunning its prover; comparison thresholds have corresponding
+`CHAT_COMPARE_*` variables.  See `P9-LONG-RUN-SCALABILITY-RESULTS.md` for exact
+mature-run commands, measurement caveats, and acceptance criteria.
 
 ---
 

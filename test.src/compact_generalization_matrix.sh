@@ -25,6 +25,10 @@ detected_cpu=$(taskset -pc $$ 2>/dev/null | sed 's/^.*: //;s/,.*//;s/-.*//' || t
 cpu=${P9_MATRIX_CPU:-${detected_cpu:-0}}
 allow_holdout=${P9_MATRIX_ALLOW_HOLDOUT:-0}
 output_dir=${1:-}
+reference_output=${P9_MATRIX_REFERENCE_OUTPUT:-}
+compare_max_cpu_ratio=${P9_MATRIX_COMPARE_MAX_CPU_RATIO:-1.25}
+compare_min_ram_saving_pct=${P9_MATRIX_COMPARE_MIN_RAM_SAVING_PCT:-80}
+compare_max_back_slope_ratio=${P9_MATRIX_COMPARE_MAX_BACK_SLOPE_RATIO:-1.25}
 
 if test -z "$output_dir"; then
   echo "usage: $0 OUTPUT_DIR" >&2
@@ -33,6 +37,10 @@ if test -z "$output_dir"; then
 fi
 if test ! -x "$new_prover"; then
   echo "new prover not executable: $new_prover" >&2
+  exit 2
+fi
+if test -n "$reference_output" && test ! -f "$reference_output"; then
+  echo "reference output not found: $reference_output" >&2
   exit 2
 fi
 case "$clocks" in
@@ -378,6 +386,10 @@ done
   echo "back_position_budget_pct=20"
   echo "cpu=$cpu"
   echo "allow_holdout=$allow_holdout"
+  echo "reference_output=${reference_output:-none}"
+  echo "compare_max_cpu_ratio=$compare_max_cpu_ratio"
+  echo "compare_min_ram_saving_pct=$compare_min_ram_saving_pct"
+  echo "compare_max_back_slope_ratio=$compare_max_back_slope_ratio"
   uname -a
 } > "$output_dir/run.conf"
 
@@ -407,6 +419,9 @@ for case_id in $case_ids; do
 done
 
 set --
+if test -n "$reference_output"; then
+  set -- "$@" "$reference_output"
+fi
 for case_id in $case_ids; do
   for variant in $variants; do
     set -- "$@" "$output_dir/$case_id.$variant.out"
@@ -423,7 +438,10 @@ python3 "$repo_dir/test.src/compact_long_run_report.py" --format tsv "$@" \
   > "$output_dir/long-run-slopes.tsv"
 if test "$#" -gt 1; then
   python3 "$repo_dir/test.src/compact_long_run_report.py" --summary-only \
-    --compare-to-first "$@" > "$output_dir/long-run-summary.md"
+    --compare-to-first --max-cpu-ratio "$compare_max_cpu_ratio" \
+    --min-ram-saving-pct "$compare_min_ram_saving_pct" \
+    --max-back-slope-ratio "$compare_max_back_slope_ratio" "$@" \
+    > "$output_dir/long-run-summary.md"
 else
   python3 "$repo_dir/test.src/compact_long_run_report.py" --summary-only "$@" \
     > "$output_dir/long-run-summary.md"

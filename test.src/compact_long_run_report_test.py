@@ -177,6 +177,15 @@ User_CPU=2.0, System_CPU=0.0, Wall_clock=2.
         self.assertEqual(comparison["ram_gate"], "pass")
         self.assertEqual(comparison["slope_gate"], "pass")
 
+        candidate["peak_rss_kb"] = 100000
+        candidate["peak_rss_mib"] = 100000 / 1024
+        custom = REPORT.compare_summaries(
+            reference, candidate, min_ram_saving_pct=0.0)
+        self.assertEqual(custom["ram_gate"], "pass")
+        self.assertEqual(custom["result"], "eligible")
+        candidate["peak_rss_kb"] = 19000
+        candidate["peak_rss_mib"] = 19000 / 1024
+
         candidate["last_user_cpu"] = 130.0
         self.assertEqual(REPORT.compare_summaries(
             reference, candidate)["result"], "reject")
@@ -195,6 +204,8 @@ User_CPU=2.0, System_CPU=0.0, Wall_clock=2.
             "ram_gate": "pass", "candidate_periodic_samples": 3,
             "interval_gate": "pass",
             "candidate_back_slope_ratio": 1.1, "slope_gate": "pass",
+            "max_cpu_ratio": 1.25, "min_ram_saving_pct": 80.0,
+            "max_back_slope_ratio": 1.25,
             "result": "eligible",
         }
         output = io.StringIO()
