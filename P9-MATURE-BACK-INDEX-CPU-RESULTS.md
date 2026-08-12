@@ -33,6 +33,34 @@ back-index bytes from 17,308,050 to 16,439,490.  Its late directory work is
 about one third of the Patricia version, but counted work/query still grows;
 only the external mature run can decide the CPU gate.
 
+The subsequently completed `chat_test.new.out9` supplies that missing mature
+evidence for the retained sparse-path architecture.  It reaches exactly the
+same compact proof endpoint in 6,363.60 user seconds, versus 10,459.17 for
+`out8` and 11,282.22 for `out7`.  Back-demod work is 4.392 billion groups and
+812.886 sampled seconds, reductions of 84.0% and 81.0% from `out8`.
+Positions serve 1,172,987 of 1,941,156 queries, trees serve 143,440, and both
+remain complete and retained through the proof.  This is the first complete
+confirmation that the bounded-prefix maintenance overhead is repaid at
+maturity.
+
+It does not yet close the product gate.  Ordinary P9 uses 5,110.38 user and
+18.03 system seconds; `out9` uses 6,363.60 user and 1,094.60 system seconds.
+Peak RSS is 1,368,864 KiB, approximately 61.5% below the ordinary-P9
+3,519 MiB allocator reference but not the requested 80% reduction.  The
+699,541,264-byte back index is now the largest removable in-process memory
+component.  The final interval still averages 5,266 groups/query, although
+that is only 16.2% of `out8`'s 32,536.
+
+Importantly, `out9` uses the older `adaptive`/leaf-only eager path code.  It
+does not contain authoritative absent-path empties, rooted rigid-ancestor
+words, sparse multi-posting intersection, the stable32 bit-plane fallback, or
+the relaxed census-free eager routing now present in `adaptive32`.  The latest
+bounded 1,500-given depth-zero/depth-four pair has identical semantic answer
+fingerprints and endpoint counters while cutting back work by 75.5%; total
+CPU is still 5.6% worse at that prefix.  `out9` shows why this early overhead
+is not grounds to reject the current candidate, but a new full run remains
+necessary before claiming its exact CPU/RAM result.
+
 For the next full CHAT comparison, start from the successful `out8` input and
 replace its compact-index block with:
 
@@ -645,7 +673,8 @@ tuning.
   one newly funded retry occurs;
 - budget exhaustion freezes admission while an unrelated feature remains
   complete through forced compaction;
-- checkpoint version 3 and compaction retain bounded adaptive state;
+- checkpoint version 4 and compaction retain bounded adaptive state while
+  discarding obsolete leaf-only position calibration;
 - high logical term-pool bases preserve exact candidates for every strategy;
 - 32 simultaneously active position features still require one record walk,
   and a fully demoted root requires none;
@@ -654,6 +683,13 @@ tuning.
   order; and
 - a 1,024-duplicate root backfill can grow the shared posting array during
   traversal without invalidating its iterator.
+- a missing complete eager rooted path returns authoritative empty without a
+  fallback scan, and two sparse rooted-path postings intersect without a
+  per-record bitmap;
+- clauses with the same leaf at different rigid ancestors cannot collide
+  merely because their child-number paths are identical; and
+- mask-only and rooted-position runs expose the same semantic answer
+  fingerprint even when their work fingerprints differ.
 
 The last item is a regression for the supplied `chat_test.new.out6` crash.
 The exact extracted input reproduces SIGSEGV at given 301 in `b6142ea`, at
@@ -686,11 +722,12 @@ external mature run auditable instead of relying on a final aggregate.
 
 ## Remaining external gate
 
-These results establish semantic compatibility, bounded fixed overhead, and
-amortized maintenance.  They do not establish the final mature CPU result.
-Run the exact configuration above through at least the archived 7,365-given
-state and reject it if matched-trajectory user CPU exceeds mask8 by 5%, if
-position maintenance exceeds 5% of user CPU, if route replacements remain
-proportional to queries, or if any admission/demotion cycle continues after
-the first position-budget exhaustion.  The proof-endpoint comparison remains
-the final product gate.
+`out9` establishes the mature crossover for the predecessor retained-path
+implementation.  It does not establish the exact current `adaptive32`,
+rooted-word result.  Run the configuration above to the proof endpoint and
+compare its semantic answer fingerprint and exact trajectory with a current
+depth-zero control.  Reject it if the proof-endpoint total CPU does not
+improve on `out9`, if resident memory grows without a corresponding posting
+count explanation, or if the interval back lookup resumes population-linear
+growth.  The ordinary-P9 total CPU and 80% resident-memory reduction remain
+the final product gates.

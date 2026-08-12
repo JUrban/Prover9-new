@@ -88,6 +88,44 @@ routes 100% of its queries through mask8.  Thus the complete files strengthen
 the fixed-budget-collapse diagnosis: the selective routes disappear at
 maturity while their storage and previous CPU cost remain.
 
+### Completed `out9` retained-path verdict
+
+`chat_test.new.out9` is the first complete run to demonstrate the intended
+mature crossover.  It uses the same compact proof endpoint as `out4`,
+`out7`, and `out8`, but enables sparse eager depth-four positions and
+population-relative tree retention.  It proves in 6,363.60 user seconds,
+1,094.60 system seconds, and 7,465 seconds wall time, with 1,368,864 KiB peak
+RSS and 1,386,059 KiB final PSS.
+
+Relative to the simultaneous `out8` mask control, `out9` reduces user CPU by
+39.2%, back-demod posting work by 84.0% (27.413 billion to 4.392 billion),
+and sampled back lookup by 81.0% (4,278.491 to 812.886 seconds).  The retained
+routes remain active at the proof: 1,172,987 queries use positions, 143,440
+use trees, and 628,323 use the mask fallback.  No eager position or tree is
+demoted.  This directly falsifies the concern that maintaining a linear
+sparse path index can only lose CPU on a mature run: the short-prefix setup
+cost crosses over decisively.
+
+The result is promising rather than final.  Against ordinary P9's 5,110.38
+user seconds, `out9` is still 24.5% slower in user CPU and 45.4% slower when
+system CPU is included.  Its peak resident reduction is approximately 61.5%
+against the 3,519 MiB ordinary-P9 allocator reference, short of the 80% RAM
+target.  Its final back index alone is 699,541,264 bytes.  Interval back
+work/query rises from 451 at the first report to 5,266 in the proof tail; the
+absolute tail is much smaller than `out8`'s 32,536, but it is not
+population-flat.
+
+`out9` predates the rooted-path corrections in `0f39d4a`, `28ae2cc`, and
+`801bded`.  Its path key records only child numbers plus the final symbol, an
+absent eager key is not used as an exact empty answer, and sparse postings are
+not intersected.  The current implementation folds every rigid ancestor
+symbol and child number into the path word, treats a missing complete eager
+path as authoritative empty, intersects up to four narrow sparse streams,
+and lets a census-free eager route compete at equal measured posting work.
+The separate semantic fingerprint in `eea6d05` verifies route-independent
+candidate identity.  Therefore `out9` establishes the mature value of the
+architecture, but it does not measure the current implementation.
+
 The mask-only control also exposes an independent regression.  Relative to
 `out4`, `out8` uses 9.25% more user CPU, examines 32.0% more back-index groups,
 and spends 18.6% more sampled back-index lookup CPU, despite the same proof
@@ -361,6 +399,28 @@ sampled lookup time fell from 21.828 to 6.900 seconds.  This establishes a
 bounded crossover and selects the parameter; it still does not close the
 proof-endpoint gate.
 
+The initial key encoded only child numbers and the final rigid symbol.  That
+was complete as a conservative filter, but unrelated rigid ancestors shared
+one posting and an absent key could not prove emptiness.  Commits `0f39d4a`
+and `28ae2cc` correct both limitations: the key is now the complete rooted
+word of rigid ancestor symbol/arity hashes and child numbers; missing eager
+keys return exact empty; and sparse mode intersects up to four compressed
+posting streams without allocating per-record bitmaps.  Version-4 adaptive
+checkpoints cold-reset obsolete leaf-only position calibration while
+retaining compatible mask/tree evidence.
+
+A same-current-binary 1,500-given pair preserved the complete search endpoint
+and the new semantic answer fingerprint.  Relative to depth zero, rooted
+depth four reduced back work from 5,235,700 to 1,283,017 groups (-75.5%) and
+sampled lookup from 2.911 to 1.688 seconds (-42.0%).  It used 117,168 rather
+than 99,496 KiB peak RSS and 135.36 rather than 128.14 user seconds: eager
+construction still dominates at this early endpoint.  At 2,500 givens, even
+the stricter pre-`801bded` router reduced work from 23,335,168 to 8,010,733
+groups and lookup from 14.270 to 8.342 seconds; total user CPU was 352.41
+versus 338.43 seconds.  The tail lookup cost/query was already 1.65x lower.
+These bounded runs locate the crossover cost; completed `out9` shows that the
+crossover is reached well before the proof endpoint.
+
 ### Forward rewrite subjects are now atom-linear
 
 The retained back indexes do not by themselves bound forward demodulation
@@ -391,7 +451,7 @@ settings and add the following complete strategy block:
 ```prolog
 assign(compact_unit_strategy,code_tree).
 set(compact_nonunit_path_filter).
-assign(compact_back_demod_strategy,adaptive).
+assign(compact_back_demod_strategy,adaptive32).
 set(compact_back_sparse_positions).
 assign(compact_back_position_budget_kb,0).
 assign(compact_back_position_budget_pct,50).
@@ -400,6 +460,7 @@ assign(compact_back_eager_position_depth,4).
 assign(compact_back_tree_budget_kb,65536).
 assign(compact_back_tree_budget_pct,200).
 assign(compact_rewrite_deep_cache_kb,0).
+clear(compact_back_edge_filter).
 ```
 
 The 64 MiB tree value is an initial floor in this configuration, not the old
