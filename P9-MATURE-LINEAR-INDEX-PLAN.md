@@ -264,6 +264,60 @@ final RAM constant.  The sparse position allowance is 50% of the base index
 and contains no record-sized per-feature bitmap.  The rewrite cache remains
 off until an independent paired long interval establishes a benefit.
 
+### Mature residual: bounded depth eventually becomes a scan
+
+The completed 2,100-second prefixes now separate the useful short-run work
+from the remaining mature defect.  At the common endpoint, the adaptive
+depth-four run had processed 7,298 givens and the older mask run 7,363.  The
+adaptive run was slightly faster in the final interval (1.487 versus 1.397
+givens/second) and reduced mean back-index work from about 9,081 to 6,006
+posting groups/query, so the retained indexes are doing useful work.  They
+are not population-stable: all 144 shallow position features had been
+demoted, and thousands of records still reached the exact matcher per
+query.  Raising the fixed depth merely moves that failure and multiplies
+ancestor/path postings.
+
+The next index must therefore satisfy three construction invariants before
+another long parameter sweep:
+
+1. its postings are bounded by the number of rigid occurrences in the
+   indexed clauses, independent of run length, query order, and query depth;
+2. insertion is one traversal of a record rather than one traversal per
+   historical query feature; and
+3. every filtering result is checked by the existing exact compact matcher,
+   so collisions or feature coarsening can add candidates but never omit a
+   redex.
+
+The planned representation is a global rigid-edge index.  For every direct
+edge whose parent and child are rigid, store the key
+`(parent symbol, child number, child symbol)` and append the record ID once;
+duplicates within one record are removed.  A rigid pattern contributes all
+such edges at arbitrary depth.  Retrieval starts with the least-populated
+edge posting and may intersect other postings before scanning the surviving
+records for an exact occurrence of the complete pattern.  Total posting
+entries are at most the number of rigid parent-child occurrences, so this is
+occurrence-linear rather than `features * records` or `nodes * indexed
+depth`.
+
+This filter is complete for every pattern that contains a non-root rigid
+node: such a node necessarily has a rigid parent because pattern traversal
+stops below variables.  Root-only patterns and patterns whose immediate
+children are all variables are honestly broad and fall back to the existing
+root/tree route.  An edge may occur elsewhere in a candidate record, so an
+edge hit is deliberately only a conservative record filter.  Intersecting
+several edge postings reduces those false positives without adding bitmap
+space.  This does not claim answer-linear retrieval for every possible term
+distribution, but it removes the current arbitrary depth boundary and the
+variable-before-selective-suffix radix failure with a general linear-space
+contract.
+
+The implementation gate is: identical decreasing proof-ID answers under
+audit, insertion/deletion/compaction/checkpoint correctness, an arbitrary-
+depth variable-prefix stress whose lookup population stays constant as
+irrelevant records grow, and a paired CHAT prefix showing both the added
+linear byte slope and the avoided mature posting-group slope.  The old
+depth-four index remains available for A/B comparison until that gate passes.
+
 ## Remaining implementation sequence
 
 ### 1. Count and bound mature radix fanout
