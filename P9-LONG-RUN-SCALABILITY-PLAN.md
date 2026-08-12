@@ -7,6 +7,9 @@ This plan follows the frozen cross-problem compact-index candidate.  The
 selectivity evidence, but they do not establish bounded behavior after days of
 insert/delete churn or with tens of millions of live passive clauses.  This
 branch treats logical generality and asymptotic longevity as separate gates.
+RAM and CPU longevity are co-primary: a representation is not scalable merely
+because it stays resident-bounded if query, maintenance, or reconstruction work
+still grows with the number of clauses ever seen.
 
 ## 1. Product invariants
 
@@ -35,6 +38,10 @@ The work must preserve all of the following.
 8. Process RSS is not used as a synonym for total job RAM.  Long-run reports
    separate anonymous RSS, mapped/file RSS, and cgroup file cache where the
    host exposes those counters.
+9. For a fixed live logical population and query distribution, candidate,
+   posting, exact-test, decode, and rebuild work per operation must plateau
+   after maintenance.  No compact fallback may trade a memory win for a query
+   whose cost grows with historical insertions or an unrelated broad bucket.
 
 ## 2. Phase A: close known cumulative-growth defects
 
@@ -113,7 +120,9 @@ Every driver emits machine-readable samples containing active, physical,
 retired, allocated/used/peak bytes, query nodes/postings/exact tests, rebuild
 count/time, scratch high-water, and relevant disk bytes.  The summary computes
 bytes per active object, work per query, dead/live ratio, and the slope between
-successive population sizes.
+successive population sizes.  It also records user CPU, system CPU, elapsed
+time, query CPU, and maintenance CPU separately; operation counters are the
+portable authority when timing noise is too large for a short synthetic run.
 
 Required adversarial distributions include identical roots, identical feature
 vectors, variable roots, nonlinear variables, deep terms hidden by shallow
@@ -122,6 +131,8 @@ signatures, repeated rewriting, and broad true-answer sets.
 Gate:
 
 - fixed-live resident bytes plateau after each maintenance cycle;
+- fixed-live postings decoded, nodes examined, candidates, exact tests, and
+  materializations per identical query plateau after each maintenance cycle;
 - physical/live is at most `1 + stale_pct/100`, apart from the documented
   1,024-record floor;
 - maintenance consumes less than 10% of steady-state CPU;
@@ -129,6 +140,9 @@ Gate:
   unless an explicitly measured component exception is approved;
 - false-candidate work is no more than twice the corresponding legacy/strong
   reference index unless the true answer itself is broad; and
+- at successive powers of ten, CPU/query and counted work/query may grow only
+  in proportion to the true answer set, not total historical or unrelated
+  population; and
 - no configured 30-day projection reaches an internal representation limit.
 
 ## 5. Phase D: passive control plane for tens of millions of live clauses
@@ -201,7 +215,9 @@ Run gates in this order and retain failures as evidence:
 
 Long-run promotion requires all of the existing general-compact correctness
 and CPU gates, at least 80% lower total-job peak RAM than old P9 on every
-passive-dominated case, and no unexplained component accounting gap above 5%.
+passive-dominated case, no material CPU regression at the long prefixes (with
+25% a hard rejection threshold unless explicitly approved), and no unexplained
+component accounting gap above 5%.
 
 ## 8. Commit sequence
 
