@@ -1,0 +1,13 @@
+% Experimental file-backed dense passive directory.
+%
+% Load this after compact_otter_candidate.in (or another configuration using
+% passive_store=dense) and before the problem input:
+%   bin/prover9 -f prover9.examples/compact_otter_candidate.in \
+%     prover9.examples/compact_passive_file_directory_overlay.in problem.in
+%
+% The immutable passive bodies continue to use ancestor_store/passive_backing.
+% This option moves the fixed 64-byte selector directory to a separate private
+% temporary file.  The file is unlinked immediately and closes automatically
+% at normal exit or after process termination.  Selector heaps remain in RAM.
+
+assign(passive_directory,file).

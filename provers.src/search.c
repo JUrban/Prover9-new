@@ -2204,6 +2204,10 @@ Prover_options init_prover_options(void)
 				     "compressed",
 				     "dense");
 
+  p->passive_directory = init_stringparm("passive_directory", 2,
+                                         "memory",
+                                         "file");
+
   p->compact_unit_strategy =
     init_stringparm("compact_unit_strategy", 3,
                     "root_scan",
@@ -2597,6 +2601,8 @@ void update_memory_stats(void)
   struct clause_store_stats as = clause_store_get_stats(Glob.disabled);
   struct cold_passive_store_stats ps =
     cold_passive_store_get_stats(Dense_body_store);
+  struct dense_passive_directory_stats directory =
+    dense_passive_directory_stats();
   struct memory_stats ms;
   struct memory_process_stats process;
   memory_get_stats(&ms);
@@ -2619,6 +2625,14 @@ void update_memory_stats(void)
   dense_passive_memory(&Stats.dense_passive_record_bytes,
                        &Stats.dense_passive_heap_bytes,
                        &Stats.dense_passive_records);
+  Stats.dense_passive_directory_logical_bytes = directory.logical_bytes;
+  Stats.dense_passive_directory_allocated_bytes = directory.allocated_bytes;
+  Stats.dense_passive_directory_file_eviction_passes =
+    directory.file_eviction_passes;
+  Stats.dense_passive_directory_file_eviction_bytes =
+    directory.file_eviction_bytes;
+  Stats.dense_passive_directory_file_eviction_failures =
+    directory.file_eviction_failures;
   Stats.dense_passive_arena_records = ps.records;
   Stats.dense_passive_arena_record_bytes = ps.record_bytes;
   Stats.dense_passive_arena_backing_bytes = ps.backing_bytes;
@@ -3384,7 +3398,9 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
           comma_num(s.passive_estimated_full_body_bytes));
   if (dense_passive_mode())
     fprintf(fp,
-            "Dense_passive: backing=%s, records=%s, record_bytes=%s, "
+            "Dense_passive: backing=%s, directory=%s, records=%s, "
+            "record_bytes=%s, directory_logical=%s, "
+            "directory_allocated=%s, "
             "heap_bytes=%s, arena_records=%s, arena_record_bytes=%s, "
             "arena_backing=%s, arena_physical=%s, "
             "allocated_bytes_per_active=%.2f.\n",
@@ -3395,8 +3411,12 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
                  "ancestor-file" : "ancestor-memory") :
               cold_passive_store_mode_name(
                 cold_passive_store_get_stats(Dense_body_store).mode),
+            str_ident(stringparm1(Opt->passive_directory), "file") ?
+              "file" : "memory",
             comma_num(s.dense_passive_records),
             comma_num(s.dense_passive_record_bytes),
+            comma_num(s.dense_passive_directory_logical_bytes),
+            comma_num(s.dense_passive_directory_allocated_bytes),
             comma_num(s.dense_passive_heap_bytes),
             comma_num(s.dense_passive_arena_records),
             comma_num(s.dense_passive_arena_record_bytes),
@@ -3404,6 +3424,9 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             comma_num(s.dense_passive_arena_physical_bytes),
             s.dense_passive_records == 0 ? 0.0 :
             (double) (s.dense_passive_record_bytes +
+                      (str_ident(stringparm1(Opt->passive_directory),
+                                 "file") ?
+                         s.dense_passive_directory_allocated_bytes : 0) +
                       s.dense_passive_heap_bytes +
                       s.dense_passive_arena_backing_bytes) /
             s.dense_passive_records);
@@ -3414,7 +3437,9 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             "records_reclaimed=%s, arena_bytes_reclaimed=%s, "
             "file_reads=%s (%s bytes), file_writes=%s (%s bytes), "
             "file_cache_evictions=%s (%s bytes), file_syncs=%s, "
-            "file_cache_eviction_failures=%s.\n",
+            "file_cache_eviction_failures=%s, "
+            "directory_evictions=%s (%s bytes), "
+            "directory_eviction_failures=%s.\n",
             comma_num(s.dense_passive_arena_materializations),
             comma_num(s.dense_passive_arena_validation_failures),
             comma_num(s.dense_passive_compactions),
@@ -3428,7 +3453,11 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             comma_num(s.dense_passive_arena_file_cache_eviction_bytes),
             comma_num(s.dense_passive_arena_file_syncs),
             comma_num(
-              s.dense_passive_arena_file_cache_eviction_failures));
+              s.dense_passive_arena_file_cache_eviction_failures),
+            comma_num(s.dense_passive_directory_file_eviction_passes),
+            comma_num(s.dense_passive_directory_file_eviction_bytes),
+            comma_num(
+              s.dense_passive_directory_file_eviction_failures));
   fprintf(fp,
           "Hint_store: compressed=%s, body_bytes=%s, estimated_full=%s.\n",
           comma_num(s.hint_compressed_clauses),
@@ -16134,6 +16163,9 @@ Prover_results search(Prover_input p)
     cold_passive_store_free(Dense_body_store);
     Dense_body_store = NULL;
     Dense_arena_bytes_reclaimed = 0;
+    configure_dense_passive_directory(
+      str_ident(stringparm1(Opt->passive_directory), "file") ?
+        DENSE_DIRECTORY_FILE : DENSE_DIRECTORY_MEMORY);
     if (dense_passive_mode()) {
       if (str_ident(stringparm1(Opt->ancestor_store), "off"))
         fatal_error("passive_store=dense requires an ancestor store");

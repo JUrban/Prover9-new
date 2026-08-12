@@ -11,7 +11,7 @@ CFLAGS = $(XFLAGS) -g  -O0 -Wall
 # CFLAGS = $(XFLAGS) -pg -O -Wall
 # CFLAGS = $(XFLAGS)  -Wall -pedantic
 
-PROGRAMS = avltest memory_lifecycle_test allocator_churn_test bookkeeping_lifecycle_test ancestor_store_test ancestor_store_scale_test checkpoint_selector_test dense_selector_compaction_test cold_passive_store_test hint_postings_test hint_preview_test compressed_unit_match_test paramod_iterator_test hyper_iterator_test rewrite_only_store_test compact_term_pool_test compact_id_map_test compact_rewrite_test compact_unit_index_test compact_back_demod_test compact_feature_index_test compact_long_run_test
+PROGRAMS = avltest memory_lifecycle_test allocator_churn_test bookkeeping_lifecycle_test ancestor_store_test ancestor_store_scale_test checkpoint_selector_test dense_selector_compaction_test dense_selector_file_scale_test cold_passive_store_test hint_postings_test hint_preview_test compressed_unit_match_test paramod_iterator_test hyper_iterator_test rewrite_only_store_test compact_term_pool_test compact_id_map_test compact_rewrite_test compact_unit_index_test compact_back_demod_test compact_feature_index_test compact_long_run_test
 
 all: ladr apps
 
@@ -53,6 +53,9 @@ checkpoint_selector_test: checkpoint_selector_test.o ../provers.src/giv_select.o
 
 dense_selector_compaction_test: dense_selector_compaction_test.o ../provers.src/giv_select.o ../provers.src/semantics.o ../ladr/libladr.a
 	$(CC) $(CFLAGS) -o dense_selector_compaction_test dense_selector_compaction_test.o ../provers.src/giv_select.o ../provers.src/semantics.o ../ladr/libladr.a -lm
+
+dense_selector_file_scale_test: dense_selector_file_scale_test.o ../provers.src/giv_select.o ../provers.src/semantics.o ../ladr/libladr.a
+	$(CC) $(CFLAGS) -o dense_selector_file_scale_test dense_selector_file_scale_test.o ../provers.src/giv_select.o ../provers.src/semantics.o ../ladr/libladr.a -lm
 
 cold_passive_store_test: cold_passive_store_test.o ../provers.src/cold_passive_store.o ../ladr/libladr.a
 	$(CC) $(CFLAGS) -o cold_passive_store_test cold_passive_store_test.o ../provers.src/cold_passive_store.o ../ladr/libladr.a -lm
@@ -124,6 +127,9 @@ allocator-churn-bounded: allocator_churn_test
 checkpoint-tests: checkpoint_selector_test dense_selector_compaction_test
 	./checkpoint_selector_test
 	./dense_selector_compaction_test
+
+dense-selector-file-scale: dense_selector_file_scale_test
+	./dense_selector_file_scale_test
 
 cold-passive-store-test: cold_passive_store_test
 	./cold_passive_store_test

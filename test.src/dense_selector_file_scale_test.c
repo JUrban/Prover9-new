@@ -1,0 +1,99 @@
+/* Accelerated resident-memory probe for the file-backed dense directory. */
+
+#include "../ladr/ladr.h"
+#include "../provers.src/giv_select.h"
+
+#include <errno.h>
+#include <stdint.h>
+
+static size_t archive_clause(Topform c, unsigned *body_bytes,
+                             unsigned *justification_bytes,
+                             unsigned *logical_body_bytes)
+{
+  size_t position = (size_t) c->id;
+  *body_bytes = 0;
+  *justification_bytes = 0;
+  *logical_body_bytes = 0;
+  zap_topform(c);
+  return position;
+}
+
+static Topform activate_clause(size_t position, unsigned long long id,
+                               unsigned long long hint_id)
+{
+  Topform c;
+  (void) position;
+  (void) hint_id;
+  c = get_topform();
+  c->id = id;
+  return c;
+}
+
+static size_t parse_count(const char *text)
+{
+  unsigned long long value;
+  char *end = NULL;
+  errno = 0;
+  value = strtoull(text, &end, 10);
+  if (errno != 0 || end == text || *end != '\0' || value < 1000 ||
+      value > UINT32_MAX - 1)
+    fatal_error("dense_selector_file_scale_test: invalid count");
+  return (size_t) value;
+}
+
+int main(int argc, char **argv)
+{
+  size_t count = argc > 1 ? parse_count(argv[1]) : 2200000;
+  Plist rules = NULL;
+  Clist sos;
+  struct dense_passive_directory_stats directory;
+  struct memory_process_stats process;
+  unsigned long long record_bytes, heap_bytes, records;
+  size_t i;
+  if (argc > 2) {
+    fprintf(stderr, "usage: %s [records]\n", argv[0]);
+    return 2;
+  }
+  init_standard_ladr();
+  configure_dense_passive_directory(DENSE_DIRECTORY_FILE);
+  configure_dense_passive(TRUE, archive_clause, activate_clause);
+  rules = plist_append(
+    rules, selector_rule_term("Age", "low", "age", "all", 1));
+  init_giv_select(rules);
+  zap_plist_of_terms(rules);
+  sos = clist_init("file directory scale probe");
+  for (i = 0; i < count; i++) {
+    Topform c = get_topform();
+    c->id = (unsigned long long) i + 1;
+    insert_into_sos2(c, sos);
+  }
+  directory = dense_passive_directory_stats();
+  dense_passive_memory(&record_bytes, &heap_bytes, &records);
+  memory_get_process_stats(&process);
+  if (records != count || record_bytes != 0 ||
+      directory.logical_bytes != count * 64ULL ||
+      directory.file_eviction_passes == 0 ||
+      heap_bytes > count * sizeof(uint32_t) * 2ULL)
+    fatal_error("dense_selector_file_scale_test: accounting failure");
+  printf("{\"records\":%llu,\"directory_logical\":%llu,"
+         "\"directory_allocated\":%llu,\"heap_bytes\":%llu,"
+         "\"eviction_passes\":%llu,\"eviction_bytes\":%llu,"
+         "\"pss_kib\":%llu,\"anonymous_kib\":%llu}\n",
+         (unsigned long long) count, directory.logical_bytes,
+         directory.allocated_bytes, heap_bytes,
+         directory.file_eviction_passes,
+         directory.file_eviction_bytes, process.pss_kbytes,
+         process.anonymous_kbytes);
+  {
+    char *type = NULL;
+    Topform first = get_given_clause2(sos, 0, NULL, &type);
+    if (first == NULL || first->id != 1 || strcmp(type, "Age") != 0)
+      fatal_error("dense_selector_file_scale_test: age order changed");
+    zap_topform(first);
+  }
+  clist_free(sos);
+  zap_given_selectors();
+  configure_dense_passive(FALSE, NULL, NULL);
+  configure_dense_passive_directory(DENSE_DIRECTORY_MEMORY);
+  return 0;
+}

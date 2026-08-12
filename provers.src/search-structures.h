@@ -294,6 +294,7 @@ struct prover_options {
     multiple_interps,    // false_in_all, false_in_some
     search_loop,         // otter, discount
     passive_store,       // full, compressed
+    passive_directory,   // memory, file
     compact_unit_strategy, // root_scan, position, code_tree
     compact_back_demod_strategy, // mask8, signature32, trees, position, adaptive
     discount_demodulation, // selected, eager_legacy, eager_interreduced
@@ -548,6 +549,11 @@ struct prover_stats {
     dense_passive_records,
     dense_passive_record_bytes,
     dense_passive_heap_bytes,
+    dense_passive_directory_logical_bytes,
+    dense_passive_directory_allocated_bytes,
+    dense_passive_directory_file_eviction_passes,
+    dense_passive_directory_file_eviction_bytes,
+    dense_passive_directory_file_eviction_failures,
     dense_passive_arena_records,
     dense_passive_arena_record_bytes,
     dense_passive_arena_backing_bytes,

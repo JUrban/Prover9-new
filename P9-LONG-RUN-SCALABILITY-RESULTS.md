@@ -372,3 +372,43 @@ The complete compact nonunit index used 231,232 bytes, including 12,288 bytes
 of structural maps.  This validates the empty-result path and reporting in the
 real prover, while the synthetic identical-leaf family remains the relevant
 scale gate.
+
+## File-backed dense passive directory
+
+`assign(passive_directory,file).` moves the fixed 64-byte dense selection
+record array from anonymous memory to a separate private temporary file.  The
+file is created in `TMPDIR` (or `/tmp`), unlinked immediately, and therefore
+disappears automatically when the process closes or is killed.  It is distinct
+from both the ancestor archive and the compressed passive-body file.
+
+The mapping retains a 64 MiB hot tail.  At each additional 64 MiB of logical
+growth, page-aligned cold extents are synchronously committed, discarded from
+the mapping, and advised `DONTNEED` at the file-descriptor level.  Reports
+separate logical/file capacity from anonymous `record_bytes` and count every
+eviction, byte, and failure.  Age selectors compare monotone physical indexes
+directly, so their heap operations do not fault directory pages merely to read
+proof IDs.  Weight and hint-age selectors still access their keys through the
+mapping; external sorted selector runs remain the required general solution
+for those queues.
+
+The accelerated scale probe inserted 2.2 million active age-selected records:
+
+| Logical directory | Allocated file | Heap | PSS | Anonymous | Evicted |
+|---:|---:|---:|---:|---:|---:|
+| 140.8 MB | 155.0 MB | 9.69 MB | 45.97 MiB | 8.70 MiB | 64 MiB |
+
+Peak RSS was 47.36 MiB and the exact first-by-age selection was preserved.  A
+separate forced-compaction test rebuilt 900 live records into a new private
+mapping and preserved cursor restoration, payload totals, semantics, and all
+remaining selections.  The normal checkpoint selector test remains green.
+
+The 300-given real `chat_test.in` file-directory smoke also preserves 120,793
+generated and 5,737 kept clauses.  At that point 5,737 physical records used a
+367,168-byte logical directory, with zero anonymous directory bytes reported.
+
+At the 65.9-million-passive scale seen in the uploaded nine-hour clauses run,
+this stage moves roughly 4.22 GB of fixed directory records out of anonymous
+RAM.  It does **not** yet bound selector heaps: extrapolating the measured
+`out41` heap density still leaves roughly 0.42 GB at 65.9 million passives.
+Thus it is a material RAM step and a useful isolation boundary, not completion
+of the external passive control plane.

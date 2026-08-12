@@ -38,6 +38,20 @@ typedef Topform (*Dense_passive_activate_fn)(size_t store_position,
                                              unsigned long long id,
                                              unsigned long long hint_id);
 
+typedef enum {
+  DENSE_DIRECTORY_MEMORY,
+  DENSE_DIRECTORY_FILE
+} Dense_passive_directory_mode;
+
+struct dense_passive_directory_stats {
+  Dense_passive_directory_mode mode;
+  unsigned long long logical_bytes;
+  unsigned long long allocated_bytes;
+  unsigned long long file_eviction_passes;
+  unsigned long long file_eviction_bytes;
+  unsigned long long file_eviction_failures;
+};
+
 /* Read-only metadata for one active dense passive.  Dense passives are
    visited in insertion (and therefore clause-ID) order. */
 struct dense_passive_view {
@@ -65,6 +79,11 @@ typedef size_t (*Dense_passive_relocate_fn)(size_t old_position,
 void configure_dense_passive(BOOL enabled,
                              Dense_passive_archive_fn archive_fn,
                              Dense_passive_activate_fn activate_fn);
+
+void configure_dense_passive_directory(
+  Dense_passive_directory_mode mode);
+
+struct dense_passive_directory_stats dense_passive_directory_stats(void);
 
 BOOL dense_passive_enabled(void);
 

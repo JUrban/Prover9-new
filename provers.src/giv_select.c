@@ -21,6 +21,12 @@
 #include "../ladr/avltree.h"
 #include "../ladr/clause_eval.h"
 #include <stdint.h>
+#include <unistd.h>
+#ifndef __EMSCRIPTEN__
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#endif
 
 /* Private definitions and types */
 
@@ -53,6 +59,8 @@ struct giv_select {
 #define DENSE_PASSIVE_SEMANTICS_SHIFT 3U
 #define DENSE_PASSIVE_SEMANTICS_MASK  0x18U
 #define DENSE_PASSIVE_USED 0x20U
+#define DENSE_DIRECTORY_EVICT_STEP (64U * 1024U * 1024U)
+#define DENSE_DIRECTORY_HOT_WINDOW (64U * 1024U * 1024U)
 
 struct dense_passive_record {
   unsigned long long id;
@@ -93,6 +101,14 @@ static BOOL Dense_passive = FALSE;
 static Dense_passive_archive_fn Dense_archive = NULL;
 static Dense_passive_activate_fn Dense_activate = NULL;
 static struct dense_passive_record *Dense_records = NULL;
+static Dense_passive_directory_mode Dense_directory_mode =
+  DENSE_DIRECTORY_MEMORY;
+static int Dense_record_fd = -1;
+static size_t Dense_directory_advised_bytes = 0;
+static size_t Dense_directory_last_evict_bytes = 0;
+static unsigned long long Dense_directory_eviction_passes = 0;
+static unsigned long long Dense_directory_eviction_bytes = 0;
+static unsigned long long Dense_directory_eviction_failures = 0;
 static size_t Dense_record_count = 0;
 static size_t Dense_record_capacity = 0;
 static size_t Dense_active_count = 0;
@@ -108,6 +124,121 @@ static unsigned long long Dense_justification_bytes = 0;
 static unsigned long long Dense_logical_body_bytes = 0;
 
 static size_t dense_find_record(unsigned long long id);
+
+static void dense_release_directory(
+  struct dense_passive_record *records, size_t capacity, int fd,
+  Dense_passive_directory_mode mode)
+{
+  if (mode == DENSE_DIRECTORY_FILE) {
+#ifndef __EMSCRIPTEN__
+    if (records != NULL &&
+        munmap(records, capacity * sizeof(*records)) != 0)
+      fatal_error("dense_release_directory: munmap failed");
+    if (fd >= 0 && close(fd) != 0)
+      fatal_error("dense_release_directory: close failed");
+#else
+    (void) records;
+    (void) capacity;
+    (void) fd;
+#endif
+  }
+  else
+    safe_free(records);
+}
+
+static void dense_reset_directory_storage(void)
+{
+  dense_release_directory(Dense_records, Dense_record_capacity,
+                          Dense_record_fd, Dense_directory_mode);
+  Dense_records = NULL;
+  Dense_record_fd = -1;
+  Dense_record_capacity = 0;
+  Dense_directory_advised_bytes = 0;
+  Dense_directory_last_evict_bytes = 0;
+}
+
+static void dense_resize_directory(size_t capacity)
+{
+  if (capacity == 0 ||
+      capacity > SIZE_MAX / sizeof(*Dense_records))
+    fatal_error("dense_resize_directory: capacity overflow");
+  if (Dense_directory_mode == DENSE_DIRECTORY_MEMORY) {
+    Dense_records = safe_realloc(
+      Dense_records, capacity * sizeof(*Dense_records));
+    Dense_record_capacity = capacity;
+    return;
+  }
+#ifndef __EMSCRIPTEN__
+  {
+    size_t bytes = capacity * sizeof(*Dense_records);
+    void *mapping;
+    if (Dense_record_fd < 0) {
+      Dense_record_fd = open_private_temp_file(
+        "prover9-passive-directory-XXXXXX");
+      if (Dense_record_fd < 0)
+        fatal_error("dense_resize_directory: cannot create backing file");
+    }
+    if (ftruncate(Dense_record_fd, (off_t) bytes) != 0)
+      fatal_error("dense_resize_directory: cannot resize backing file");
+    mapping = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_SHARED,
+                   Dense_record_fd, 0);
+    if (mapping == MAP_FAILED)
+      fatal_error("dense_resize_directory: mmap failed");
+    if (Dense_records != NULL &&
+        munmap(Dense_records,
+               Dense_record_capacity * sizeof(*Dense_records)) != 0)
+      fatal_error("dense_resize_directory: old munmap failed");
+    Dense_records = mapping;
+    Dense_record_capacity = capacity;
+  }
+#else
+  fatal_error("dense_resize_directory: file mode is unavailable");
+#endif
+}
+
+static void dense_evict_directory_pages(void)
+{
+#if !defined(__EMSCRIPTEN__) && defined(POSIX_FADV_DONTNEED)
+  long page_size_long;
+  size_t logical, page_size, cold_end, begin;
+  if (Dense_directory_mode != DENSE_DIRECTORY_FILE ||
+      Dense_records == NULL)
+    return;
+  logical = Dense_record_count * sizeof(*Dense_records);
+  if (logical <= DENSE_DIRECTORY_HOT_WINDOW)
+    return;
+  if ((Dense_directory_last_evict_bytes == 0 &&
+       logical < DENSE_DIRECTORY_HOT_WINDOW +
+                   DENSE_DIRECTORY_EVICT_STEP) ||
+      (Dense_directory_last_evict_bytes != 0 &&
+       logical - Dense_directory_last_evict_bytes <
+         DENSE_DIRECTORY_EVICT_STEP))
+    return;
+  Dense_directory_last_evict_bytes = logical;
+  page_size_long = sysconf(_SC_PAGESIZE);
+  if (page_size_long <= 0)
+    return;
+  page_size = (size_t) page_size_long;
+  cold_end = (logical - DENSE_DIRECTORY_HOT_WINDOW) /
+    page_size * page_size;
+  begin = Dense_directory_advised_bytes;
+  if (cold_end <= begin)
+    return;
+  if (msync((unsigned char *) Dense_records + begin,
+            cold_end - begin, MS_SYNC) != 0 ||
+      madvise((unsigned char *) Dense_records + begin,
+              cold_end - begin, MADV_DONTNEED) != 0 ||
+      posix_fadvise(Dense_record_fd, (off_t) begin,
+                    (off_t) (cold_end - begin),
+                    POSIX_FADV_DONTNEED) != 0) {
+    Dense_directory_eviction_failures++;
+    return;
+  }
+  Dense_directory_advised_bytes = cold_end;
+  Dense_directory_eviction_passes++;
+  Dense_directory_eviction_bytes += cold_end - begin;
+#endif
+}
 
 static unsigned dense_semantics_flags(int semantics)
 {
@@ -218,6 +349,40 @@ void configure_dense_passive(BOOL enabled,
   if (enabled && (archive_fn == NULL || activate_fn == NULL))
     fatal_error("configure_dense_passive: callbacks are required");
 }  /* configure_dense_passive */
+
+/* PUBLIC */
+void configure_dense_passive_directory(
+  Dense_passive_directory_mode mode)
+{
+  if (mode != DENSE_DIRECTORY_MEMORY && mode != DENSE_DIRECTORY_FILE)
+    fatal_error("configure_dense_passive_directory: invalid mode");
+#ifdef __EMSCRIPTEN__
+  if (mode == DENSE_DIRECTORY_FILE)
+    fatal_error("configure_dense_passive_directory: file mode unavailable");
+#endif
+  if (Dense_record_count != 0 || Dense_record_capacity != 0)
+    fatal_error("configure_dense_passive_directory: live directory");
+  Dense_directory_mode = mode;
+  Dense_directory_eviction_passes = 0;
+  Dense_directory_eviction_bytes = 0;
+  Dense_directory_eviction_failures = 0;
+}
+
+/* PUBLIC */
+struct dense_passive_directory_stats dense_passive_directory_stats(void)
+{
+  struct dense_passive_directory_stats stats;
+  memset(&stats, 0, sizeof(stats));
+  stats.mode = Dense_directory_mode;
+  stats.logical_bytes =
+    (unsigned long long) Dense_record_count * sizeof(*Dense_records);
+  stats.allocated_bytes =
+    (unsigned long long) Dense_record_capacity * sizeof(*Dense_records);
+  stats.file_eviction_passes = Dense_directory_eviction_passes;
+  stats.file_eviction_bytes = Dense_directory_eviction_bytes;
+  stats.file_eviction_failures = Dense_directory_eviction_failures;
+  return stats;
+}
 
 /* PUBLIC */
 BOOL dense_passive_enabled(void)
@@ -435,8 +600,9 @@ void dense_passive_memory(unsigned long long *record_bytes,
     heaps += (unsigned long long) gs->dense_capacity * sizeof(uint32_t);
   }
   if (record_bytes != NULL)
-    *record_bytes = (unsigned long long) Dense_record_capacity *
-                    sizeof(struct dense_passive_record);
+    *record_bytes = Dense_directory_mode == DENSE_DIRECTORY_MEMORY ?
+      (unsigned long long) Dense_record_capacity *
+        sizeof(struct dense_passive_record) : 0;
   if (heap_bytes != NULL)
     *heap_bytes = heaps;
   if (records != NULL)
@@ -489,6 +655,11 @@ void dense_passive_compaction_stats(unsigned long long *compactions,
 
 static int dense_compare(Giv_select gs, uint32_t ai, uint32_t bi)
 {
+  /* Dense records are appended in strictly increasing proof-ID order and
+     compaction preserves that order.  Age comparison therefore needs no
+     access to the (possibly file-backed) directory. */
+  if (gs->order == GS_ORDER_AGE)
+    return ai < bi ? -1 : ai > bi ? 1 : 0;
   struct dense_passive_record *a = &Dense_records[ai];
   struct dense_passive_record *b = &Dense_records[bi];
   if (gs->order == GS_ORDER_WEIGHT) {
@@ -570,6 +741,8 @@ void dense_passive_compact(Dense_passive_relocate_fn relocate,
 {
   struct dense_passive_record *old_records = Dense_records;
   size_t old_count = Dense_record_count;
+  size_t old_capacity = Dense_record_capacity;
+  int old_fd = Dense_record_fd;
   size_t active = Dense_active_count;
   size_t capacity = 0;
   size_t i, n = 0;
@@ -577,15 +750,18 @@ void dense_passive_compact(Dense_passive_relocate_fn relocate,
 
   if (!Dense_passive || relocate == NULL)
     fatal_error("dense_passive_compact: invalid state or callback");
+  Dense_records = NULL;
+  Dense_record_fd = -1;
+  Dense_record_capacity = 0;
+  Dense_directory_advised_bytes = 0;
+  Dense_directory_last_evict_bytes = 0;
   if (active != 0) {
     capacity = active + active / 8 + 16;
     if (capacity < active ||
         capacity > SIZE_MAX / sizeof(struct dense_passive_record))
       fatal_error("dense_passive_compact: capacity overflow");
-    Dense_records = safe_malloc(capacity * sizeof(*Dense_records));
+    dense_resize_directory(capacity);
   }
-  else
-    Dense_records = NULL;
 
   for (i = 0; i < old_count; i++) {
     if ((old_records[i].flags & DENSE_PASSIVE_ACTIVE) != 0) {
@@ -598,9 +774,11 @@ void dense_passive_compact(Dense_passive_relocate_fn relocate,
   }
   if (n != active)
     fatal_error("dense_passive_compact: active-record count mismatch");
-  safe_free(old_records);
+  dense_release_directory(old_records, old_capacity, old_fd,
+                          Dense_directory_mode);
   Dense_record_count = active;
-  Dense_record_capacity = capacity;
+  if (active == 0)
+    Dense_record_capacity = 0;
 
   High.occurrences = 0;
   for (p = High.selectors; p != NULL; p = p->next) {
@@ -701,10 +879,8 @@ void reset_selector_indexes(void)
     gs->selected = 0;
   }
   Low.occurrences = 0;
-  safe_free(Dense_records);
-  Dense_records = NULL;
+  dense_reset_directory_storage();
   Dense_record_count = 0;
-  Dense_record_capacity = 0;
   Dense_active_count = 0;
   Dense_rewrite_epoch = 1;
   Dense_rewrite_fresh = 0;
@@ -966,12 +1142,11 @@ static void dense_insert_passive(Topform c)
     size_t capacity = dense_grow_capacity(
       Dense_record_capacity, sizeof(struct dense_passive_record),
       "dense_insert_passive: capacity overflow");
-    Dense_records = safe_realloc(Dense_records,
-                                  capacity * sizeof(*Dense_records));
-    Dense_record_capacity = capacity;
+    dense_resize_directory(capacity);
   }
   record = (uint32_t) Dense_record_count;
   Dense_records[Dense_record_count++] = r;
+  dense_evict_directory_pages();
   Dense_active_count++;
   dense_add_payload(&r);
   if (r.rewrite_epoch == Dense_rewrite_epoch) {
@@ -1615,10 +1790,8 @@ void zap_given_selectors(void)
     free_giv_select(gs);
   }
   zap_plist(Low.selectors);  /* shallow */
-  safe_free(Dense_records);
-  Dense_records = NULL;
+  dense_reset_directory_storage();
   Dense_record_count = 0;
-  Dense_record_capacity = 0;
   Dense_active_count = 0;
   Dense_rewrite_epoch = 1;
   Dense_rewrite_fresh = 0;
