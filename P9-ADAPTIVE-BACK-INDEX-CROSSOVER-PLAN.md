@@ -1,7 +1,8 @@
 # Adaptive backward-index crossover plan
 
-Status: implemented and locally validated on branch
-`adaptive-back-index-crossover`; mature-host acceptance remains open.
+Status: implementation and local debugging complete on branch
+`adaptive-back-index-crossover`; product promotion remains conditional on the
+documented mature-host acceptance run.
 
 This tranche addresses the remaining CPU risk in compact backward
 demodulation.  The complete large-chat `mask8` run saved 73.8% of peak RSS
@@ -53,8 +54,8 @@ The population class generalizes related queries without assuming evidence at
 saturated counters for:
 
 - query count;
-- observed symbol/mask, tree, and position logical costs;
-- sample counts for each available route; and
+- observed symbol/mask and tree logical costs;
+- sample counts for each profiled route; and
 - current preferred route and the evidence-backed switch count.
 
 The table is a cache, never an authority.  Collisions use deterministic least-
@@ -62,13 +63,13 @@ evidence replacement and merely lose performance history.  A compile-time
 assertion fixes each entry at 104 bytes, so all 4,096 entries occupy 425,984
 bytes (416 KiB), independent of clauses, queries, and runtime.
 
-Use operation-weighted integer cost rather than the sampled CPU clocks.  The
-cost function includes posting groups decoded, tree nodes, sibling checks,
-child-cache probes, position records/bitmap words, and candidates that must be
-validated.  Weights are fixed from implementation-level operation classes and
-tested on adversarial synthetic distributions; they are not fitted to Osborn
-or chat runtimes.  Saturating arithmetic prevents a month-long run from
-wrapping.
+Use a deterministic integer counted-work score rather than sampled CPU clocks.
+The score adds posting work, tree nodes, sibling checks, child-cache probes,
+occurrence scans, position record/bitmap checks, and one unit per 16 decoded
+bytes.  Candidate counts remain separately observable rather than being hidden
+inside that score.  The weights are fixed implementation-level units tested on
+adversarial synthetic distributions; they are not fitted to Osborn or chat
+runtimes.  Saturating arithmetic prevents a month-long run from wrapping.
 
 Before doing an expensive retrieval, the implementation counts compatible
 posting-list populations from path-bucket metadata.  Each bucket now maintains
@@ -126,30 +127,34 @@ flat total can no longer hide a progressively failing shape.
 
 1. Focused differential tests compare all candidate IDs and order for every
    strategy and route before and after admission.
-2. Mixed-shape adversarial tests use the same root for a selective rigid
-   pattern, a variable prefix with a selective suffix, and a broad true-answer
-   pattern.  They require different route choices and bounded probes rather
-   than one root-wide choice.
-3. Crossover tests grow the population through powers of ten and verify that
-   selective queries promote the tree, broad queries can return to mask, and a
-   useful position can replace either without oscillation.
+2. A same-root mixed-shape test contrasts a selective rigid pattern with a
+   broad true-answer pattern and requires different routes.  A complementary
+   10,000-record variable-prefix/rigid-suffix longevity test compares mask,
+   raw tree, and adaptive position behavior.
+3. The crossover test doubles the population across the exact base-two scale
+   boundary used by the key.  It requires a new mask baseline, exactly one tree
+   sample, a stable post-sample preference, and no repeated exploration tax.
+   Separate position tests cover admission, later growth, intersections,
+   demotion, and compaction.
 4. Fixed-live deletion/compaction tests verify exact answers, bounded table
-   bytes, state preservation, and renewed calibration when physical work
-   changes.
+   bytes, and preservation of logical calibration.  Because the score contains
+   no addresses or allocation capacities, a physical rebuild alone must not
+   cause retraining.
 5. Checkpoint/restart and ASan/UBSan runs verify deterministic behavior and
    ownership.  Existing unrelated LADR process-exit leaks remain documented,
    not attributed to this table.
-6. Bounded `chat_test.in` comparisons run in parallel at 300 and 1,000 givens:
-   `mask8`, the parent-branch adaptive mode, and the new router.  Generated,
+6. Bounded `chat_test.in` comparisons at 300 and 1,000 givens cover `mask8`,
+   the accepted router, and discarded intermediate policies.  Generated,
    kept, given, hints, proofs, query fingerprints, and output fingerprints must
-   match at corresponding boundaries.
-7. The new router may not regress total 1,000-given user CPU by more than 5%
-   from the faster compact control.  More importantly, its interval backward
-   work/query must have a materially flatter mature slope than `mask8`; a
-   short-prefix CPU tie is acceptable only when the counted crossover evidence
-   predicts lower mature work without growing resident state.
-8. Promotion still requires a complete large-chat or equivalent mature run on
-   the larger host.  Target: no more than 1.25 times old Prover9 total CPU while
+   match at corresponding boundaries; timing claims use paired same-host runs.
+7. The implementation gate rejects any policy which regresses total
+   1,000-given user CPU by more than 5% from the paired compact control.  A
+   short-prefix CPU tie is acceptable only as provisional evidence when counted
+   work falls without growing resident planner state; it is not a mature-slope
+   claim.
+8. The separate product-promotion gate still requires a complete large-chat or
+   equivalent mature run on the larger host.  Target: no more than 1.25 times
+   old Prover9 total CPU while
    preserving at least 70% measured peak-RSS saving, followed by work on the
    independent ordinary-demodulation bottleneck.  The local bounded tests will
    be reported as provisional rather than extrapolated into a false final RAM
@@ -209,3 +214,27 @@ and increased counted tree/mask work.  The branch therefore retains the
 per-query fourfold position gate which produced the accepted bounded result;
 the failed variants remain reviewable in history rather than being presented
 as improvements.
+
+## 8. Implementation completion audit
+
+The requested branch/plan/implementation/debugging tranche is complete.  This
+is distinct from enabling the mode by default, which remains governed by the
+external mature-run gate above.
+
+| Requirement | Authoritative evidence | Result |
+|:---|:---|:---:|
+| Isolated review branch | Current branch `adaptive-back-index-crossover`; plan commit `c105687` | complete |
+| Bounded reversible router | `compact_back_demod.c`: fixed two-way table, stable structural/scale key, mask/tree calibration and hysteresis | complete |
+| Fixed planner RAM | 104-byte compile-time layout assertion, 4,096-entry capacity, focused `route_profile_bytes` assertion | complete |
+| Complete candidate semantics | Same-root mixed-shape, alpha-renaming, all-strategy high-base, compaction, and ordered-ID differential tests | complete |
+| Long-growth counterexample | 10,000-record variable-prefix mask/tree/adaptive longevity gate | complete |
+| Maintenance lifecycle | Forced compaction preserves route state; `compact_back_adaptive.txt` save/rebuild/restore differential passes | complete |
+| Long-run observability | `Compact_back_route` statistics plus interval parser, Markdown/TSV/JSON fields and parser tests | complete |
+| Integrated debugging | Matched 300/1,000 chat trajectories; accepted CPU gate; two measured regressing alternatives removed and recorded | complete |
+| Release verification | Optimized suite, ASan/UBSan, compact audit/checkpoint/stability/eager-proof tests, release build and `make test1` | complete |
+| Default/product promotion | Full current-adaptive run to the 1.53-million-active mature endpoint | open external gate |
+
+The last row is deliberately not reported as an implementation failure or a
+performance pass.  The larger-host command and acceptance thresholds are in
+`P9-LONG-RUN-SCALABILITY-RESULTS.md`; its output is the evidence required for a
+later default-policy decision.
