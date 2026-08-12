@@ -27,6 +27,9 @@ struct compact_feature_index_stats {
   unsigned long long back_candidates;
   unsigned long long back_structural_rejects;
   unsigned long long back_variable_rejects;
+  unsigned long long back_structural_bitmap_queries;
+  unsigned long long back_structural_bitmap_words;
+  unsigned long long back_structural_bitmap_records;
   unsigned long long compactions;
   unsigned long long bytes_reclaimed;
   unsigned long long snapshot_records;
@@ -42,6 +45,7 @@ struct compact_feature_index_stats {
   unsigned long long posting_bytes;
   unsigned long long record_bytes;
   unsigned long long structural_bytes;
+  unsigned long long structural_index_bytes;
   unsigned long long hash_bytes;
   unsigned long long scratch_bytes;
   unsigned long long total_bytes;

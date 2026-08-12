@@ -329,3 +329,37 @@ less than 0.3 MiB and is dominated by the shared prover state.
 These are single bounded samples, not a statistically strong speed claim.
 They validate correctness, accounting, and plan selection.  The long-run
 crossover and work-slope gate remain open.
+
+## Selective structural retrieval for nonunit back subsumption
+
+The accelerated `same_feature_leaf` gate formerly retained 10,000 numerical
+feature matches and rejected 9,999 of them only after walking the posting.
+This was not the cause of `out41` (the integrated nonunit component used only
+about 3.3 seconds there), but it was a real singleton-overfitting defect.
+
+The structural summaries now have 96 bit-sliced membership maps: 64 rigid
+facts and 32 repeated-position facts.  A back-subsumption query chooses its
+rarest required fact and uses that map only when a conservative estimate—one
+logical bitmap pass plus its current live cardinality—is at least four times
+smaller than both the active index and the compatible numerical-feature
+population.  Broad/no-fact queries retain radix traversal.  Candidates are
+checked against all remaining necessary facts and numerical features, then
+sorted back into the exact radix-leaf order (ascending feature vectors and
+newest-first within an identical leaf) before the caller's authoritative
+subsumption test.
+
+At a 10,000-record identical numerical leaf with one structural match, counted
+work falls from 10,001 to 159: 157 bitmap words, one surviving record, and
+minimal plan traversal.  Total index storage grows from 857,872 to 1,056,832
+bytes in that harness, about 19.9 bytes per record including allocation
+rounding and the new parent/live-count fields.  The direct bitmap payload is
+12 bytes per physical record.  Focused tests preserve mixed-leaf and
+newest-first order before and after forced compaction.  ASan/UBSan reports no
+invalid access; the existing LADR parser/symbol lifetime still appears as
+process-exit leaks when leak detection is enabled.
+
+Forward subsumption has the reverse subset relation: a valid stored subsumer
+may have no rigid fact at all, so selecting one required query bit is not
+complete.  Its existing path remains measured separately; adding a bounded
+complement/forbidden-fact plan requires its own cost gate rather than reusing
+the back-subsumption rule.

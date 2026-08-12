@@ -8,6 +8,7 @@
 
 #define CFI_NONE 0U
 #define CFI_TOMBSTONE UINT64_MAX
+#define CFI_BACK_STRUCTURAL_BITS 96
 
 static unsigned Compaction_stale_pct = 25;
 
@@ -17,6 +18,8 @@ struct cfi_node {
   uint32_t first_child;
   uint32_t next_sibling;
   uint32_t first_posting;
+  uint32_t parent;
+  uint32_t live_count;
 };
 
 struct cfi_posting {
@@ -49,6 +52,9 @@ struct compact_feature_index {
   size_t record_count;
   size_t record_capacity;
   struct compact_feature_structural_summary *structural_summaries;
+  uint64_t *back_structural_bitmaps[CFI_BACK_STRUCTURAL_BITS];
+  size_t structural_bitmap_words;
+  unsigned long long structural_bit_counts[CFI_BACK_STRUCTURAL_BITS];
   unsigned long long *hash_keys;
   uint32_t *hash_values;
   size_t hash_capacity;
@@ -56,6 +62,8 @@ struct compact_feature_index {
   size_t hash_tombstones;
   unsigned long long *results;
   size_t result_capacity;
+  uint32_t *structural_results;
+  size_t structural_result_capacity;
   int feature_length;
   BOOL structural_filter;
   uint32_t root;
@@ -70,6 +78,9 @@ struct compact_feature_index {
   unsigned long long back_candidates;
   unsigned long long back_structural_rejects;
   unsigned long long back_variable_rejects;
+  unsigned long long back_structural_bitmap_queries;
+  unsigned long long back_structural_bitmap_words;
+  unsigned long long back_structural_bitmap_records;
   unsigned long long compactions;
   unsigned long long bytes_reclaimed;
   unsigned long long snapshot_records;
@@ -244,9 +255,12 @@ static unsigned long long index_bytes(Compact_feature_index index)
     index->record_capacity * sizeof(*index->records) +
     (index->structural_summaries == NULL ? 0 :
      index->record_capacity * sizeof(*index->structural_summaries)) +
+    (unsigned long long) CFI_BACK_STRUCTURAL_BITS *
+      index->structural_bitmap_words * sizeof(uint64_t) +
     index->hash_capacity *
       (sizeof(*index->hash_keys) + sizeof(*index->hash_values)) +
-    index->result_capacity * sizeof(*index->results);
+    index->result_capacity * sizeof(*index->results) +
+    index->structural_result_capacity * sizeof(*index->structural_results);
 }
 
 static void update_peak(Compact_feature_index index)
@@ -393,6 +407,7 @@ static uint32_t insert_vector(Compact_feature_index index,
         index, features, level, index->feature_length - level);
       uint32_t added = new_node(
         index, offset, (uint32_t) (index->feature_length - level));
+      index->nodes[added].parent = parent;
       if (previous == CFI_NONE) {
         index->nodes[added].next_sibling =
           index->nodes[parent].first_child;
@@ -421,6 +436,8 @@ static uint32_t insert_vector(Compact_feature_index index,
         uint32_t split = new_node(index, offset, common);
         uint32_t added_offset, added;
         index->nodes[split].next_sibling = old_next;
+        index->nodes[split].parent = parent;
+        index->nodes[split].live_count = index->nodes[current].live_count;
         if (previous == CFI_NONE)
           index->nodes[parent].first_child = split;
         else
@@ -428,6 +445,7 @@ static uint32_t insert_vector(Compact_feature_index index,
         index->nodes[current].label_offset += common;
         index->nodes[current].label_length -= common;
         index->nodes[current].next_sibling = CFI_NONE;
+        index->nodes[current].parent = split;
         index->nodes[split].first_child = current;
         level += (int) common;
         added_offset = append_labels(
@@ -435,6 +453,7 @@ static uint32_t insert_vector(Compact_feature_index index,
         added = new_node(
           index, added_offset,
           (uint32_t) (index->feature_length - level));
+        index->nodes[added].parent = split;
         if (first_label(index, added) < first_label(index, current)) {
           index->nodes[added].next_sibling = current;
           index->nodes[split].first_child = added;
@@ -446,6 +465,28 @@ static uint32_t insert_vector(Compact_feature_index index,
     }
   }
   return parent;
+}
+
+static void change_live_path(Compact_feature_index index, uint32_t node,
+                             BOOL adding)
+{
+  for (;;) {
+    if (node == CFI_NONE || node >= index->node_count)
+      fatal_error("compact_feature_index: corrupt live-count path");
+    if (adding) {
+      if (index->nodes[node].live_count == UINT32_MAX)
+        fatal_error("compact_feature_index: node live count overflow");
+      index->nodes[node].live_count++;
+    }
+    else {
+      if (index->nodes[node].live_count == 0)
+        fatal_error("compact_feature_index: node live count underflow");
+      index->nodes[node].live_count--;
+    }
+    if (node == index->root)
+      break;
+    node = index->nodes[node].parent;
+  }
 }
 
 static void ensure_records(Compact_feature_index index)
@@ -466,6 +507,77 @@ static void ensure_records(Compact_feature_index index)
              sizeof(*index->structural_summaries));
     }
   }
+}
+
+static void ensure_structural_bitmaps(Compact_feature_index index,
+                                      uint32_t record)
+{
+  size_t needed, words, i;
+  if (!index->structural_filter)
+    return;
+  needed = (size_t) record / 64 + 1;
+  if (needed <= index->structural_bitmap_words)
+    return;
+  words = index->structural_bitmap_words == 0 ? 1 :
+    index->structural_bitmap_words;
+  while (words < needed) {
+    if (words > SIZE_MAX / 2 || words * 2 > SIZE_MAX / sizeof(uint64_t))
+      fatal_error("compact_feature_index: structural bitmap overflow");
+    words *= 2;
+  }
+  for (i = 0; i < CFI_BACK_STRUCTURAL_BITS; i++) {
+    index->back_structural_bitmaps[i] = safe_realloc(
+      index->back_structural_bitmaps[i],
+      words * sizeof(*index->back_structural_bitmaps[i]));
+    memset(index->back_structural_bitmaps[i] +
+             index->structural_bitmap_words, 0,
+           (words - index->structural_bitmap_words) *
+             sizeof(*index->back_structural_bitmaps[i]));
+  }
+  index->structural_bitmap_words = words;
+}
+
+static void add_structural_bits(Compact_feature_index index,
+                                uint32_t record,
+                                struct compact_feature_structural_summary s)
+{
+  unsigned bit;
+  ensure_structural_bitmaps(index, record);
+  for (bit = 0; bit < 64; bit++)
+    if ((s.rigid & (UINT64_C(1) << bit)) != 0) {
+      index->back_structural_bitmaps[bit][record / 64] |=
+        UINT64_C(1) << (record % 64);
+      index->structural_bit_counts[bit]++;
+    }
+  for (bit = 0; bit < 32; bit++)
+    if ((s.equal_positions & (UINT32_C(1) << bit)) != 0) {
+      unsigned at = 64 + bit;
+      index->back_structural_bitmaps[at][record / 64] |=
+        UINT64_C(1) << (record % 64);
+      index->structural_bit_counts[at]++;
+    }
+}
+
+static void subtract_structural_bits(
+  Compact_feature_index index,
+  struct compact_feature_structural_summary s)
+{
+  unsigned bit;
+  if (!index->structural_filter)
+    return;
+  for (bit = 0; bit < 64; bit++)
+    if ((s.rigid & (UINT64_C(1) << bit)) != 0) {
+      if (index->structural_bit_counts[bit] == 0)
+        fatal_error("compact_feature_index: rigid count underflow");
+      index->structural_bit_counts[bit]--;
+    }
+  for (bit = 0; bit < 32; bit++)
+    if ((s.equal_positions & (UINT32_C(1) << bit)) != 0) {
+      unsigned at = 64 + bit;
+      if (index->structural_bit_counts[at] == 0)
+        fatal_error("compact_feature_index: equality count underflow");
+      index->structural_bit_counts[at]--;
+    }
 }
 
 Compact_feature_index compact_feature_index_init(int feature_length,
@@ -515,8 +627,11 @@ BOOL compact_feature_index_add(Compact_feature_index index,
   record->active = TRUE;
   if (index->structural_filter)
     index->structural_summaries[record_index] = structural;
+  if (index->structural_filter)
+    add_structural_bits(index, record_index, structural);
   node = insert_vector(index, features);
   record->leaf = node;
+  change_live_path(index, node, TRUE);
   ENSURE_ARRAY(index, postings, posting_count, posting_capacity,
                "compact_feature_index: posting overflow");
   if (index->posting_count > UINT32_MAX)
@@ -544,6 +659,9 @@ BOOL compact_feature_index_remove(Compact_feature_index index,
   size_t at;
   if (record == CFI_NONE || !index->records[record].active)
     return FALSE;
+  if (index->structural_filter)
+    subtract_structural_bits(index, index->structural_summaries[record]);
+  change_live_path(index, index->records[record].leaf, FALSE);
   index->records[record].active = FALSE;
   at = hash_slot(index, proof_id, FALSE);
   index->hash_keys[at] = CFI_TOMBSTONE;
@@ -618,14 +736,18 @@ static void reconstruct_record_features(Compact_feature_index index,
 
 static void free_index_arrays(struct compact_feature_index *index)
 {
+  size_t i;
   safe_free(index->nodes);
   safe_free(index->labels);
   safe_free(index->postings);
   safe_free(index->records);
   safe_free(index->structural_summaries);
+  for (i = 0; i < CFI_BACK_STRUCTURAL_BITS; i++)
+    safe_free(index->back_structural_bitmaps[i]);
   safe_free(index->hash_keys);
   safe_free(index->hash_values);
   safe_free(index->results);
+  safe_free(index->structural_results);
 }
 
 static void compact_feature_index_compact_internal(
@@ -646,6 +768,9 @@ static void compact_feature_index_compact_internal(
   unsigned long long forward_structural_rejects, forward_variable_rejects;
   unsigned long long back_queries, back_candidates;
   unsigned long long back_structural_rejects, back_variable_rejects;
+  unsigned long long back_structural_bitmap_queries;
+  unsigned long long back_structural_bitmap_words;
+  unsigned long long back_structural_bitmap_records;
   struct compact_query_profile forward_profile, back_profile;
   size_t i, written = 0;
   size_t feature_bytes;
@@ -678,6 +803,9 @@ static void compact_feature_index_compact_internal(
   back_candidates = index->back_candidates;
   back_structural_rejects = index->back_structural_rejects;
   back_variable_rejects = index->back_variable_rejects;
+  back_structural_bitmap_queries = index->back_structural_bitmap_queries;
+  back_structural_bitmap_words = index->back_structural_bitmap_words;
+  back_structural_bitmap_records = index->back_structural_bitmap_records;
   forward_profile = index->forward_profile;
   back_profile = index->back_profile;
 
@@ -767,6 +895,9 @@ static void compact_feature_index_compact_internal(
   index->back_candidates = back_candidates;
   index->back_structural_rejects = back_structural_rejects;
   index->back_variable_rejects = back_variable_rejects;
+  index->back_structural_bitmap_queries = back_structural_bitmap_queries;
+  index->back_structural_bitmap_words = back_structural_bitmap_words;
+  index->back_structural_bitmap_records = back_structural_bitmap_records;
   index->forward_profile = forward_profile;
   index->back_profile = back_profile;
   if (old_peak > index->peak_bytes)
@@ -795,6 +926,242 @@ static void ensure_results(Compact_feature_index index, size_t needed)
     index->results = safe_realloc(
       index->results, index->result_capacity * sizeof(*index->results));
   }
+}
+
+static void ensure_structural_results(Compact_feature_index index,
+                                      size_t needed)
+{
+  while (needed > index->structural_result_capacity) {
+    index->structural_result_capacity = grow_capacity(
+      index->structural_result_capacity,
+      sizeof(*index->structural_results),
+      "compact_feature_index: structural result overflow");
+    index->structural_results = safe_realloc(
+      index->structural_results,
+      index->structural_result_capacity *
+        sizeof(*index->structural_results));
+  }
+}
+
+static BOOL feature_edge_eligible(Compact_feature_index index,
+                                  uint32_t node, int level,
+                                  const int *query, BOOL forward)
+{
+  struct cfi_node *edge = &index->nodes[node];
+  uint32_t i;
+  BOOL eligible = level + (int) edge->label_length <=
+                  index->feature_length;
+  for (i = 0; eligible && i < edge->label_length; i++) {
+    int32_t label = index->labels[edge->label_offset + i];
+    int32_t bound = query[level + (int) i];
+    eligible = forward ? label <= bound : label >= bound;
+  }
+  return eligible;
+}
+
+static unsigned long long count_numeric_candidates(
+  Compact_feature_index index, uint32_t node, int level,
+  const int *query, BOOL forward)
+{
+  uint32_t child;
+  unsigned long long count = 0;
+  if (level == index->feature_length)
+    return index->nodes[node].live_count;
+  child = index->nodes[node].first_child;
+  if (!forward)
+    while (child != CFI_NONE && first_label(index, child) < query[level])
+      child = index->nodes[child].next_sibling;
+  while (child != CFI_NONE &&
+         (!forward || first_label(index, child) <= query[level])) {
+    struct cfi_node *edge = &index->nodes[child];
+    index->query_nodes++;
+    if (feature_edge_eligible(index, child, level, query, forward))
+      count += count_numeric_candidates(
+        index, child, level + (int) edge->label_length, query, forward);
+    child = edge->next_sibling;
+  }
+  return count;
+}
+
+static BOOL scaled_less(unsigned long long small,
+                        unsigned long long large, unsigned factor)
+{
+  return small <= ULLONG_MAX / factor && small * factor < large;
+}
+
+static BOOL choose_back_structural_bitmap(
+  Compact_feature_index index, const int *query,
+  struct compact_feature_structural_summary structural,
+  unsigned *selected_bit)
+{
+  unsigned bit;
+  unsigned long long rare = ULLONG_MAX, estimated, numerical;
+  size_t words = index->record_count / 64 +
+    (index->record_count % 64 != 0);
+  BOOL required = FALSE;
+  for (bit = 0; bit < 64; bit++)
+    if ((structural.rigid & (UINT64_C(1) << bit)) != 0) {
+      required = TRUE;
+      if (index->structural_bit_counts[bit] < rare) {
+        rare = index->structural_bit_counts[bit];
+        *selected_bit = bit;
+      }
+    }
+  for (bit = 0; bit < 32; bit++)
+    if ((structural.variable_constraints &
+         (UINT32_C(1) << bit)) != 0) {
+      unsigned at = 64 + bit;
+      required = TRUE;
+      if (index->structural_bit_counts[at] < rare) {
+        rare = index->structural_bit_counts[at];
+        *selected_bit = at;
+      }
+    }
+  if (!required)
+    return FALSE;
+  if (rare == 0)
+    return TRUE;
+  estimated = words > ULLONG_MAX - rare ? ULLONG_MAX : words + rare;
+  if (!scaled_less(estimated, index->active, 4))
+    return FALSE;
+  numerical = count_numeric_candidates(
+    index, index->root, 0, query, FALSE);
+  return scaled_less(estimated, numerical, 4);
+}
+
+static BOOL record_features_eligible(Compact_feature_index index,
+                                     uint32_t record_index,
+                                     const int *query, BOOL forward)
+{
+  uint32_t node = index->records[record_index].leaf;
+  size_t end = (size_t) index->feature_length;
+  while (node != index->root) {
+    struct cfi_node *edge;
+    size_t start, i;
+    if (node == CFI_NONE || node >= index->node_count)
+      fatal_error("compact_feature_index: corrupt feature test leaf");
+    edge = &index->nodes[node];
+    if (edge->label_length == 0 || edge->label_length > end)
+      fatal_error("compact_feature_index: corrupt feature test edge");
+    start = end - edge->label_length;
+    for (i = 0; i < edge->label_length; i++) {
+      int label = index->labels[edge->label_offset + i];
+      int bound = query[start + i];
+      if (forward ? label > bound : label < bound)
+        return FALSE;
+    }
+    end = start;
+    node = edge->parent;
+  }
+  if (end != 0)
+    fatal_error("compact_feature_index: incomplete feature test path");
+  return TRUE;
+}
+
+static int compare_record_features(Compact_feature_index index,
+                                   uint32_t left, uint32_t right)
+{
+  size_t position;
+  if (index->records[left].leaf == index->records[right].leaf)
+    return left < right ? 1 : left > right ? -1 : 0;
+  for (position = 0; position < (size_t) index->feature_length; position++) {
+    uint32_t node;
+    size_t end;
+    int values[2];
+    unsigned side;
+    uint32_t records[2] = {left, right};
+    for (side = 0; side < 2; side++) {
+      node = index->records[records[side]].leaf;
+      end = (size_t) index->feature_length;
+      for (;;) {
+        struct cfi_node *edge;
+        size_t start;
+        if (node == index->root)
+          fatal_error("compact_feature_index: missing sort feature");
+        if (node == CFI_NONE || node >= index->node_count)
+          fatal_error("compact_feature_index: corrupt sort leaf");
+        edge = &index->nodes[node];
+        start = end - edge->label_length;
+        if (position >= start && position < end) {
+          values[side] = index->labels[
+            edge->label_offset + position - start];
+          break;
+        }
+        end = start;
+        node = edge->parent;
+      }
+    }
+    if (values[0] < values[1])
+      return -1;
+    if (values[0] > values[1])
+      return 1;
+  }
+  fatal_error("compact_feature_index: distinct leaves have equal features");
+  return 0;
+}
+
+static Compact_feature_index Structural_sort_index;
+
+static int structural_record_order(const void *left, const void *right)
+{
+  return compare_record_features(
+    Structural_sort_index, *(const uint32_t *) left,
+    *(const uint32_t *) right);
+}
+
+static void collect_back_structural_bitmap(
+  Compact_feature_index index, const int *query,
+  struct compact_feature_structural_summary structural,
+  unsigned selected_bit, size_t *count)
+{
+  size_t words = index->record_count / 64 +
+    (index->record_count % 64 != 0);
+  size_t word, selected = 0, i;
+  index->back_structural_bitmap_queries++;
+  for (word = 0; word < words; word++) {
+    uint64_t bits = index->back_structural_bitmaps[selected_bit][word];
+    index->query_nodes++;
+    index->back_structural_bitmap_words++;
+    while (bits != 0) {
+      unsigned bit = (unsigned) __builtin_ctzll(bits);
+      size_t at = word * 64 + bit;
+      struct cfi_record *record;
+      struct compact_feature_structural_summary stored;
+      bits &= bits - 1;
+      if (at == 0 || at >= index->record_count)
+        continue;
+      record = &index->records[at];
+      index->query_postings++;
+      index->back_structural_bitmap_records++;
+      if (!record->active) {
+        index->query_dead++;
+        continue;
+      }
+      index->query_live++;
+      stored = index->structural_summaries[at];
+      if ((structural.rigid & ~stored.rigid) != 0)
+        index->query_structural_rejects++;
+      else if ((structural.variable_constraints &
+                ~stored.equal_positions) != 0)
+        index->query_variable_rejects++;
+      else if (record_features_eligible(
+                 index, (uint32_t) at, query, FALSE)) {
+        ensure_structural_results(index, selected + 1);
+        index->structural_results[selected++] = (uint32_t) at;
+      }
+    }
+  }
+  if (selected > 1) {
+    Structural_sort_index = index;
+    qsort(index->structural_results, selected,
+          sizeof(*index->structural_results), structural_record_order);
+    Structural_sort_index = NULL;
+  }
+  ensure_results(index, selected);
+  for (i = 0; i < selected; i++)
+    index->results[i] =
+      index->records[index->structural_results[i]].proof_id;
+  *count = selected;
 }
 
 static void collect_leaf(Compact_feature_index index, uint32_t node,
@@ -886,8 +1253,19 @@ static unsigned long long *candidates(Compact_feature_index index,
   index->query_dead = 0;
   index->query_structural_rejects = 0;
   index->query_variable_rejects = 0;
-  collect_candidates(index, index->root, 0, query, forward, structural,
-                     count);
+  if (!forward && index->structural_filter) {
+    unsigned selected_bit = 0;
+    if (choose_back_structural_bitmap(
+          index, query, structural, &selected_bit))
+      collect_back_structural_bitmap(
+        index, query, structural, selected_bit, count);
+    else
+      collect_candidates(index, index->root, 0, query, forward, structural,
+                         count);
+  }
+  else
+    collect_candidates(index, index->root, 0, query, forward, structural,
+                       count);
   answer = *count == 0 ? NULL : safe_malloc(*count * sizeof(*answer));
   if (*count != 0)
     memcpy(answer, index->results, *count * sizeof(*answer));
@@ -964,6 +1342,12 @@ void compact_feature_index_get_stats(Compact_feature_index index,
   stats->back_candidates = index->back_candidates;
   stats->back_structural_rejects = index->back_structural_rejects;
   stats->back_variable_rejects = index->back_variable_rejects;
+  stats->back_structural_bitmap_queries =
+    index->back_structural_bitmap_queries;
+  stats->back_structural_bitmap_words =
+    index->back_structural_bitmap_words;
+  stats->back_structural_bitmap_records =
+    index->back_structural_bitmap_records;
   stats->compactions = index->compactions;
   stats->bytes_reclaimed = index->bytes_reclaimed;
   stats->snapshot_records = index->snapshot_records;
@@ -980,9 +1364,13 @@ void compact_feature_index_get_stats(Compact_feature_index index,
   stats->record_bytes = index->record_capacity * sizeof(*index->records);
   stats->structural_bytes = index->structural_summaries == NULL ? 0 :
     index->record_capacity * sizeof(*index->structural_summaries);
+  stats->structural_index_bytes =
+    (unsigned long long) CFI_BACK_STRUCTURAL_BITS *
+      index->structural_bitmap_words * sizeof(uint64_t);
   stats->hash_bytes = index->hash_capacity *
     (sizeof(*index->hash_keys) + sizeof(*index->hash_values));
-  stats->scratch_bytes = index->result_capacity * sizeof(*index->results);
+  stats->scratch_bytes = index->result_capacity * sizeof(*index->results) +
+    index->structural_result_capacity * sizeof(*index->structural_results);
   stats->total_bytes = index_bytes(index);
   stats->peak_bytes = index->peak_bytes;
 }

@@ -169,6 +169,67 @@ int main(void)
   }
 
   {
+    enum { STRUCTURAL_FAMILY = 1024 };
+    const uint64_t rare = UINT64_C(1);
+    struct compact_feature_structural_summary query_summary = {
+      rare, 0, 0
+    };
+    int query_vector[2] = {0, 0};
+    int vector[2];
+    int j;
+    index = compact_feature_index_init(2, TRUE);
+    for (j = 0; j < STRUCTURAL_FAMILY; j++) {
+      struct compact_feature_structural_summary item = {
+        UINT64_C(1) << (1 + j % 63), 0, 0
+      };
+      vector[0] = 0;
+      vector[1] = 0;
+      if (j == 100) {
+        item.rigid |= rare;
+        vector[0] = 2;
+      }
+      else if (j == 300 || j == 700) {
+        item.rigid |= rare;
+        vector[0] = 1;
+        vector[1] = 1;
+      }
+      else if (j == 900) {
+        item.rigid |= rare;
+        vector[0] = 3;
+      }
+      CHECK(compact_feature_index_add(
+              index, (unsigned long long) 10000 + j,
+              vector, item),
+            "add rare-structure ordered family");
+    }
+    ids = compact_feature_back_candidates(
+      index, query_vector, query_summary, &count);
+    CHECK(count == 4 && ids[0] == 10700 && ids[1] == 10300 &&
+          ids[2] == 10100 && ids[3] == 10900,
+          "structural bitmap restores trie and leaf candidate order");
+    safe_free(ids);
+    compact_feature_index_get_stats(index, &stats);
+    CHECK(stats.back_structural_bitmap_queries == 1 &&
+          stats.back_structural_bitmap_records == 4 &&
+          stats.back_structural_bitmap_words == 17,
+          "rare structural fact avoids the broad numerical postings");
+    CHECK(compact_feature_index_remove(index, 10700),
+          "remove rare structural record before compaction");
+    compact_feature_index_compact_all_stale(index);
+    ids = compact_feature_back_candidates(
+      index, query_vector, query_summary, &count);
+    CHECK(count == 3 && ids[0] == 10300 && ids[1] == 10100 &&
+          ids[2] == 10900,
+          "structural bitmap order survives forced compaction");
+    safe_free(ids);
+    compact_feature_index_get_stats(index, &stats);
+    CHECK(stats.back_structural_bitmap_queries == 2 &&
+          stats.structural_index_bytes > 0,
+          "structural bitmap counters and bytes survive compaction");
+    compact_feature_index_free(index);
+  }
+
+  {
     enum { LIVE = 64, GENERATIONS = 100, RETIRED_PER_GENERATION = 1024 };
     unsigned long long next_id = 1000;
     unsigned long long plateau_bytes = 0;

@@ -189,10 +189,13 @@ void fprint_compact_nonunit_index(FILE *fp)
           "back_queries=%llu, "
           "back_candidates=%llu, back_exact_tests=%llu, "
           "back_path_rejects=%llu, back_variable_rejects=%llu, "
+          "back_structural_bitmap_queries=%llu, "
+          "back_structural_bitmap_words=%llu, "
+          "back_structural_bitmap_records=%llu, "
           "compactions=%llu, reclaimed=%llu, snapshot_records=%llu, "
           "snapshot_bytes=%llu, maintenance_scratch_peak=%llu, "
           "nodes=%llu, labels=%llu, postings=%llu, "
-          "records=%llu, structural=%llu, hash=%llu, "
+          "records=%llu, structural=%llu, structural_index=%llu, hash=%llu, "
           "scratch=%llu, bytes=%llu, peak_bytes=%llu.\n",
           Compact_nonunit_authoritative ? "authoritative" : "audit",
           Compact_nonunit_audit_failures, stats.active, stats.peak,
@@ -203,10 +206,14 @@ void fprint_compact_nonunit_index(FILE *fp)
           stats.back_queries, stats.back_candidates,
           Compact_nonunit_back_exact_tests, stats.back_structural_rejects,
           stats.back_variable_rejects,
+          stats.back_structural_bitmap_queries,
+          stats.back_structural_bitmap_words,
+          stats.back_structural_bitmap_records,
           stats.compactions, stats.bytes_reclaimed, stats.snapshot_records,
           stats.snapshot_bytes, stats.maintenance_scratch_peak,
           stats.node_bytes, stats.label_bytes, stats.posting_bytes,
-          stats.record_bytes, stats.structural_bytes, stats.hash_bytes,
+          stats.record_bytes, stats.structural_bytes,
+          stats.structural_index_bytes, stats.hash_bytes,
           stats.scratch_bytes, stats.total_bytes,
           stats.peak_bytes);
   compact_profile_fprint(fp, "nonunit", "forward_subsumption",

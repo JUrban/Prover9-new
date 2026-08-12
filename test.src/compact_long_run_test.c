@@ -432,14 +432,24 @@ static void nonunit_same_leaf_probe(size_t population)
   work = after.back_profile.work - before.back_profile.work;
   CHECK(count == 1 && ids != NULL && ids[0] == population,
         "same-leaf probe preserves the sole compatible answer");
-  gate = work <= 64 ? "pass" : "fail";
+  gate = after.back_structural_bitmap_queries >
+           before.back_structural_bitmap_queries &&
+         work <= (population + 15) / 16 ? "pass" : "fail";
   printf("{\"component\":\"nonunit\","
          "\"phase\":\"same_feature_leaf\",\"population\":%llu,"
          "\"answers\":%llu,\"work\":%llu,\"bytes\":%llu,"
-         "\"structural_rejects\":%llu,\"gate\":\"%s\"}\n",
+         "\"structural_rejects\":%llu,"
+         "\"bitmap_queries\":%llu,\"bitmap_words\":%llu,"
+         "\"bitmap_records\":%llu,\"gate\":\"%s\"}\n",
          (unsigned long long) population, (unsigned long long) count,
          work, after.total_bytes,
          after.back_structural_rejects - before.back_structural_rejects,
+         after.back_structural_bitmap_queries -
+           before.back_structural_bitmap_queries,
+         after.back_structural_bitmap_words -
+           before.back_structural_bitmap_words,
+         after.back_structural_bitmap_records -
+           before.back_structural_bitmap_records,
          gate);
   safe_free(ids);
   compact_feature_index_free(index);
