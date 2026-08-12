@@ -113,6 +113,8 @@ struct cbd_position_bucket {
   uint32_t last_record;
   uint32_t last_occurrence;
   uint32_t posting_count;
+  uint64_t *membership;
+  size_t membership_capacity;
   unsigned char active;
 };
 
@@ -128,6 +130,7 @@ struct cbd_position_query_feature {
   uint32_t symbol;
   uint32_t bucket;
   unsigned long long matching_records;
+  unsigned long long joint_records;
 };
 
 struct cbd_position_probation {
@@ -234,6 +237,10 @@ struct compact_back_demod_index {
   BOOL tree_complete;
   unsigned long long position_posting_count;
   unsigned long long position_queries;
+  unsigned long long position_intersection_queries;
+  unsigned long long position_intersection_scans;
+  unsigned long long position_intersection_bit_checks;
+  unsigned long long position_intersection_records;
   unsigned long long position_records_examined;
   unsigned long long position_admissions;
   unsigned long long position_rejections;
@@ -249,6 +256,7 @@ struct compact_back_demod_index {
   unsigned position_budget_pct;
   unsigned long long position_budget_bytes;
   unsigned long long position_budget_high_water;
+  unsigned long long position_bitmap_bytes;
   BOOL position_complete;
   BOOL position_rebuilding;
   BOOL position_admission_enabled;
@@ -379,7 +387,8 @@ static unsigned long long position_estimated_bytes(
       sizeof(*index->position_bucket_hash) +
     index->position_root_capacity * sizeof(*index->position_root_buckets) +
     index->position_block_capacity * sizeof(*index->position_blocks) +
-    index->position_probation_capacity * sizeof(*index->position_probation);
+    index->position_probation_capacity * sizeof(*index->position_probation) +
+    index->position_bitmap_bytes;
 }
 
 static unsigned long long tree_estimated_bytes(
@@ -415,6 +424,7 @@ static unsigned long long index_bytes(Compact_back_demod_index index)
     index->position_root_capacity * sizeof(*index->position_root_buckets) +
     index->position_block_capacity * sizeof(*index->position_blocks) +
     index->position_probation_capacity * sizeof(*index->position_probation) +
+    index->position_bitmap_bytes +
     index->occurrence_capacity * sizeof(*index->occurrences) +
     index->record_capacity * sizeof(*index->records) +
     (index->owns_term_pool ? terms.total_bytes : 0) +
@@ -807,6 +817,67 @@ static size_t projected_record_capacity(size_t capacity, size_t needed,
   return capacity;
 }
 
+static size_t projected_position_bitmap_capacity(size_t capacity,
+                                                 uint32_t record_index)
+{
+  size_t needed = (size_t) record_index / 64 + 1;
+  return projected_record_capacity(
+    capacity, needed, sizeof(uint64_t),
+    "compact_back_demod: position bitmap overflow");
+}
+
+static unsigned long long position_bitmap_growth(
+  struct cbd_position_bucket *bucket, uint32_t record_index)
+{
+  size_t projected = projected_position_bitmap_capacity(
+    bucket->membership_capacity, record_index);
+  return (unsigned long long) (projected - bucket->membership_capacity) *
+    sizeof(*bucket->membership);
+}
+
+static void add_position_bitmap_record(Compact_back_demod_index index,
+                                       struct cbd_position_bucket *bucket,
+                                       uint32_t record_index)
+{
+  size_t projected = projected_position_bitmap_capacity(
+    bucket->membership_capacity, record_index);
+  if (projected != bucket->membership_capacity) {
+    size_t old = bucket->membership_capacity;
+    unsigned long long added = (unsigned long long) (projected - old) *
+      sizeof(*bucket->membership);
+    if (ULLONG_MAX - index->position_bitmap_bytes < added)
+      fatal_error("compact_back_demod: position bitmap byte overflow");
+    bucket->membership = safe_realloc(
+      bucket->membership, projected * sizeof(*bucket->membership));
+    memset(bucket->membership + old, 0,
+           (projected - old) * sizeof(*bucket->membership));
+    bucket->membership_capacity = projected;
+    index->position_bitmap_bytes += added;
+  }
+  bucket->membership[record_index / 64] |=
+    UINT64_C(1) << (record_index % 64);
+}
+
+static BOOL position_bitmap_contains(struct cbd_position_bucket *bucket,
+                                     uint32_t record_index)
+{
+  size_t word = (size_t) record_index / 64;
+  return word < bucket->membership_capacity &&
+    (bucket->membership[word] &
+     (UINT64_C(1) << (record_index % 64))) != 0;
+}
+
+static void free_position_buckets(struct cbd_position_bucket *buckets,
+                                  size_t count)
+{
+  size_t i;
+  if (buckets == NULL)
+    return;
+  for (i = 1; i < count; i++)
+    safe_free(buckets[i].membership);
+  safe_free(buckets);
+}
+
 static size_t projected_position_hash_capacity(
   Compact_back_demod_index index, size_t bucket_count)
 {
@@ -823,7 +894,7 @@ static size_t projected_position_hash_capacity(
 
 static unsigned long long projected_position_bytes(
   Compact_back_demod_index index, size_t added_buckets,
-  size_t added_blocks)
+  size_t added_blocks, unsigned long long added_bitmap_bytes)
 {
   size_t buckets = projected_record_capacity(
     index->position_bucket_capacity,
@@ -841,7 +912,8 @@ static unsigned long long projected_position_bytes(
     blocks * sizeof(*index->position_blocks) +
     hash * sizeof(*index->position_bucket_hash) +
     index->position_root_capacity * sizeof(*index->position_root_buckets) +
-    index->position_probation_capacity * sizeof(*index->position_probation);
+    index->position_probation_capacity * sizeof(*index->position_probation) +
+    index->position_bitmap_bytes + added_bitmap_bytes;
 }
 
 static unsigned long long position_budget_limit(
@@ -2086,6 +2158,7 @@ static BOOL append_record_position_feature(
       safe_free(occurrences.occurrence_values);
     return FALSE;
   }
+  add_position_bitmap_record(index, bucket, record_index);
   stream_offset = (uint32_t) index->occurrence_count;
   for (i = 0; i < occurrences.occurrence_count; i++) {
     uint32_t offset = occurrences.occurrence_values[i].offset;
@@ -2632,6 +2705,151 @@ static uint32_t decode_position_value(
   return 0;
 }
 
+struct cbd_position_iterator {
+  Compact_back_demod_index index;
+  struct cbd_position_bucket *bucket;
+  uint32_t record;
+  uint32_t occurrence;
+  uint32_t block;
+  uint16_t position;
+  uint16_t entries;
+  unsigned char first;
+};
+
+static void note_position_intersection_scan(Compact_back_demod_index index,
+                                            uint32_t record_index)
+{
+  struct cbd_record *record;
+  if (record_index == CBD_NONE || record_index >= index->record_count)
+    fatal_error("compact_back_demod: corrupt position intersection record");
+  record = &index->records[record_index];
+  index->position_records_examined++;
+  index->position_intersection_scans++;
+  index->posting_groups_examined++;
+  index->query_work++;
+  if (record->active)
+    index->query_live++;
+  else {
+    index->query_dead++;
+    index->inactive_groups_examined++;
+  }
+  if (record->active && record->query_stamp == index->query_stamp) {
+    index->query_duplicates++;
+    index->duplicate_groups_examined++;
+  }
+}
+
+static void init_position_iterator(Compact_back_demod_index index,
+                                   uint32_t bucket_index,
+                                   struct cbd_position_iterator *iterator)
+{
+  memset(iterator, 0, sizeof(*iterator));
+  iterator->index = index;
+  iterator->bucket = &index->position_buckets[bucket_index];
+  iterator->record = iterator->bucket->inline_record;
+  iterator->occurrence = iterator->bucket->inline_occurrence;
+  iterator->block = iterator->bucket->posting_head;
+  iterator->first = TRUE;
+}
+
+static BOOL next_position_record(struct cbd_position_iterator *iterator,
+                                 uint32_t *record,
+                                 uint32_t *occurrence,
+                                 uint32_t *length)
+{
+  Compact_back_demod_index index = iterator->index;
+  if (iterator->first) {
+    iterator->first = FALSE;
+    if (iterator->record == CBD_NONE)
+      return FALSE;
+    if (iterator->bucket->inline_length == 0)
+      fatal_error("compact_back_demod: empty position intersection inline");
+    index->posting_bytes_decoded += 3 * sizeof(uint32_t);
+    index->query_bytes_decoded += 3 * sizeof(uint32_t);
+    *record = iterator->record;
+    *occurrence = iterator->occurrence;
+    *length = iterator->bucket->inline_length;
+    note_position_intersection_scan(index, *record);
+    return TRUE;
+  }
+  while (iterator->block != CBD_NONE) {
+    const struct cbd_position_block *current;
+    uint32_t delta, occurrence_delta;
+    if (iterator->block >= index->position_block_count)
+      fatal_error("compact_back_demod: corrupt position intersection block");
+    current = &index->position_blocks[iterator->block];
+    if (iterator->position == 0) {
+      index->posting_bytes_decoded += current->used;
+      index->query_bytes_decoded += current->used;
+    }
+    if (iterator->position == current->used) {
+      if (iterator->entries != current->count)
+        fatal_error("compact_back_demod: corrupt position intersection count");
+      iterator->block = current->next;
+      iterator->position = 0;
+      iterator->entries = 0;
+      continue;
+    }
+    delta = decode_position_value(current, &iterator->position);
+    occurrence_delta = decode_position_value(current, &iterator->position);
+    *length = decode_position_value(current, &iterator->position);
+    if (delta > UINT32_MAX - iterator->record ||
+        occurrence_delta > UINT32_MAX - iterator->occurrence ||
+        *length == 0)
+      fatal_error("compact_back_demod: position intersection overflow");
+    iterator->record += delta;
+    iterator->occurrence += occurrence_delta;
+    iterator->entries++;
+    *record = iterator->record;
+    *occurrence = iterator->occurrence;
+    note_position_intersection_scan(index, *record);
+    return TRUE;
+  }
+  return FALSE;
+}
+
+static void collect_position_intersection_record(
+  Compact_back_demod_index index, uint32_t record_index,
+  uint32_t occurrence_offset, uint32_t occurrence_length, Term pattern,
+  int32_t symbol, unsigned long long exclude_id, size_t *count)
+{
+  struct cbd_record *record = &index->records[record_index];
+  if (record->active && record->proof_id != exclude_id &&
+      record->query_stamp != index->query_stamp &&
+      posting_contains_pattern(index, occurrence_offset,
+                               occurrence_length, record, pattern, symbol))
+    collect_record(index, record_index, exclude_id, count);
+}
+
+static void collect_position_intersection(
+  Compact_back_demod_index index, uint32_t first_bucket,
+  uint32_t second_bucket, Term pattern, unsigned long long exclude_id,
+  size_t *count)
+{
+  struct cbd_position_iterator first;
+  uint32_t first_record, first_occurrence, first_length;
+  BOOL have_first;
+  struct cbd_position_bucket *membership =
+    &index->position_buckets[second_bucket];
+  index->position_queries++;
+  index->position_intersection_queries++;
+  init_position_iterator(index, first_bucket, &first);
+  have_first = next_position_record(
+    &first, &first_record, &first_occurrence, &first_length);
+  while (have_first) {
+    index->position_intersection_bit_checks++;
+    if (position_bitmap_contains(membership, first_record)) {
+      index->position_intersection_records++;
+      collect_position_intersection_record(
+        index, first_record, first_occurrence, first_length, pattern,
+        (int32_t) index->position_buckets[first_bucket].root_symbol,
+        exclude_id, count);
+    }
+    have_first = next_position_record(
+      &first, &first_record, &first_occurrence, &first_length);
+  }
+}
+
 static void collect_position_bucket(Compact_back_demod_index index,
                                     uint32_t bucket_index, Term pattern,
                                     unsigned long long exclude_id,
@@ -2706,18 +2924,26 @@ static void append_admitted_position_features(
 {
   struct cbd_record *record = &index->records[record_index];
   size_t i, added_blocks = 0;
+  unsigned long long bitmap_growth = 0;
   if (!strategy_uses_position(index->strategy) ||
       !index->position_complete || index->position_bucket_count <= 1)
     return;
   for (i = 1; i < index->position_bucket_count; i++) {
     struct cbd_position_bucket *bucket = &index->position_buckets[i];
-    if (bucket->active && record_has_position_bucket(index, record, bucket) &&
-        bucket->inline_record != CBD_NONE)
-      added_blocks++;
+    if (bucket->active && record_has_position_bucket(index, record, bucket)) {
+      unsigned long long growth = position_bitmap_growth(
+        bucket, record_index);
+      if (ULLONG_MAX - bitmap_growth < growth)
+        fatal_error("compact_back_demod: projected bitmap byte overflow");
+      bitmap_growth += growth;
+      if (bucket->inline_record != CBD_NONE)
+        added_blocks++;
+    }
   }
-  if (!index->position_rebuilding && added_blocks != 0 &&
+  if (!index->position_rebuilding &&
+      (added_blocks != 0 || bitmap_growth != 0) &&
       !position_budget_allows(index, projected_position_bytes(
-        index, 0, added_blocks))) {
+        index, 0, added_blocks, bitmap_growth))) {
     /* Position postings are optional refinements over the complete path
        index.  Demote only features matched by this record; unrelated features
        remain complete and useful until compaction reclaims the dead arrays. */
@@ -2740,12 +2966,13 @@ static void append_admitted_position_features(
 
 static void maybe_admit_position_feature(Compact_back_demod_index index,
                                          Term pattern,
-                                         unsigned long long query_work)
+                                         unsigned long long query_work,
+                                         uint32_t baseline_bucket)
 {
   size_t feature_count, i, best = SIZE_MAX;
   unsigned char *matched;
   uint32_t root;
-  unsigned long long matches, blocks, build_floor;
+  unsigned long long matches, blocks, build_floor, bitmap_bytes;
   if (!strategy_uses_position(index->strategy) ||
       !index->position_complete || !index->position_admission_enabled ||
       VARIABLE(pattern) || query_work == 0)
@@ -2783,24 +3010,31 @@ static void maybe_admit_position_feature(Compact_back_demod_index index,
       index, root, index->position_query[i].path,
       index->position_query[i].symbol);
     index->position_query[i].matching_records = 0;
+    index->position_query[i].joint_records = 0;
   }
   matched = safe_malloc(feature_count);
   clock_start(index->maintenance_clock);
   for (i = 1; i < index->record_count; i++)
     if (index->records[i].active) {
       size_t j;
+      BOOL baseline_match = baseline_bucket == CBD_NONE ||
+        position_bitmap_contains(
+          &index->position_buckets[baseline_bucket], (uint32_t) i);
       record_position_features(index, &index->records[i], root,
                                index->position_query, feature_count, matched);
       index->position_records_examined++;
       for (j = 0; j < feature_count; j++)
-        if (matched[j])
+        if (matched[j]) {
           index->position_query[j].matching_records++;
+          if (baseline_match)
+            index->position_query[j].joint_records++;
+        }
     }
   for (i = 0; i < feature_count; i++)
     if (index->position_query[i].bucket == CBD_NONE &&
         (best == SIZE_MAX ||
-         index->position_query[i].matching_records <
-           index->position_query[best].matching_records))
+         index->position_query[i].joint_records <
+           index->position_query[best].joint_records))
       best = i;
   if (best == SIZE_MAX) {
     for (i = 0; i < feature_count; i++)
@@ -2811,7 +3045,7 @@ static void maybe_admit_position_feature(Compact_back_demod_index index,
     clock_stop(index->maintenance_clock);
     return;
   }
-  matches = index->position_query[best].matching_records;
+  matches = index->position_query[best].joint_records;
   if (matches > query_work / index->position_min_gain) {
     index->position_rejections++;
     for (i = 0; i < feature_count; i++)
@@ -2822,10 +3056,13 @@ static void maybe_admit_position_feature(Compact_back_demod_index index,
     clock_stop(index->maintenance_clock);
     return;
   }
-  blocks = matches <= 1 ? 0 : matches - 1;
+  blocks = index->position_query[best].matching_records <= 1 ? 0 :
+    index->position_query[best].matching_records - 1;
+  bitmap_bytes = (unsigned long long) projected_position_bitmap_capacity(
+    0, (uint32_t) (index->record_count - 1)) * sizeof(uint64_t);
   if (blocks > SIZE_MAX ||
       !position_budget_allows(index, projected_position_bytes(
-        index, 1, (size_t) blocks))) {
+        index, 1, (size_t) blocks, bitmap_bytes))) {
     index->position_rejections++;
     index->position_budget_exhaustions++;
     for (i = 0; i < feature_count; i++)
@@ -2862,11 +3099,12 @@ static void maybe_admit_position_feature(Compact_back_demod_index index,
   clock_stop(index->maintenance_clock);
 }
 
-static uint32_t best_position_bucket(Compact_back_demod_index index,
-                                     Term pattern)
+static uint32_t best_position_buckets(Compact_back_demod_index index,
+                                      Term pattern, uint32_t *second)
 {
   size_t count, i;
   uint32_t root, best = CBD_NONE;
+  *second = CBD_NONE;
   if (!strategy_uses_position(index->strategy) ||
       !index->position_complete || VARIABLE(pattern))
     return CBD_NONE;
@@ -2877,10 +3115,18 @@ static uint32_t best_position_bucket(Compact_back_demod_index index,
       index, root, index->position_query[i].path,
       index->position_query[i].symbol);
     if (bucket != CBD_NONE && index->position_buckets[bucket].active &&
-        (best == CBD_NONE ||
-         index->position_buckets[bucket].posting_count <
-           index->position_buckets[best].posting_count))
-      best = bucket;
+        bucket != best && bucket != *second) {
+      if (best == CBD_NONE ||
+          index->position_buckets[bucket].posting_count <
+            index->position_buckets[best].posting_count) {
+        *second = best;
+        best = bucket;
+      }
+      else if (*second == CBD_NONE ||
+               index->position_buckets[bucket].posting_count <
+                 index->position_buckets[*second].posting_count)
+        *second = bucket;
+    }
   }
   return best;
 }
@@ -2972,10 +3218,22 @@ static void collect_pattern(Compact_back_demod_index index, Term pattern,
                             unsigned long long exclude_id, size_t *count)
 {
   unsigned long long before = index->query_work;
-  uint32_t position_bucket = best_position_bucket(index, pattern);
-  if (position_bucket != CBD_NONE)
-    collect_position_bucket(index, position_bucket, pattern,
-                            exclude_id, count);
+  uint32_t second_position;
+  uint32_t position_bucket = best_position_buckets(
+    index, pattern, &second_position);
+  if (position_bucket != CBD_NONE) {
+    unsigned long long observed;
+    if (second_position != CBD_NONE)
+      collect_position_intersection(
+        index, position_bucket, second_position, pattern, exclude_id, count);
+    else
+      collect_position_bucket(index, position_bucket, pattern,
+                              exclude_id, count);
+    observed = index->query_work - before;
+    if (observed >= index->position_admit_work)
+      maybe_admit_position_feature(
+        index, pattern, observed, position_bucket);
+  }
   else if (use_tree_for_pattern(index, pattern)) {
     unsigned long long nodes_before = index->tree_nodes_examined;
     unsigned long long observed;
@@ -2987,13 +3245,13 @@ static void collect_pattern(Compact_back_demod_index index, Term pattern,
       observed += index->query_work - before;
     /* In adaptive mode, a tree which fans out before a selective rigid
        position supplies the evidence for a complementary position posting. */
-    maybe_admit_position_feature(index, pattern, observed);
+    maybe_admit_position_feature(index, pattern, observed, CBD_NONE);
   }
   else {
     collect_symbol(index, pattern, exclude_id, count);
     maybe_admit_hot_root(index, pattern, index->query_work - before);
     maybe_admit_position_feature(index, pattern,
-                                 index->query_work - before);
+                                 index->query_work - before, CBD_NONE);
   }
 }
 
@@ -3344,7 +3602,7 @@ static void compact_back_demod_compact_internal(
   safe_free(old.tree_nodes);
   safe_free(old.tree_posting_lists);
   safe_free(old.tree_roots);
-  safe_free(old.position_buckets);
+  free_position_buckets(old.position_buckets, old.position_bucket_count);
   safe_free(old.position_bucket_hash);
   safe_free(old.position_root_buckets);
   safe_free(old.position_blocks);
@@ -3381,6 +3639,12 @@ static void compact_back_demod_compact_internal(
     old.tree_root_backfill_occurrences;
   index->tree_fallback_work = old.tree_fallback_work;
   index->position_queries = old.position_queries;
+  index->position_intersection_queries =
+    old.position_intersection_queries;
+  index->position_intersection_scans = old.position_intersection_scans;
+  index->position_intersection_bit_checks =
+    old.position_intersection_bit_checks;
+  index->position_intersection_records = old.position_intersection_records;
   index->position_records_examined = old.position_records_examined;
   index->position_admissions = old.position_admissions;
   index->position_rejections = old.position_rejections;
@@ -3511,7 +3775,7 @@ void compact_back_demod_compact_materialized(
   copy_position_definitions(replacement, &old);
   replacement->position_rebuilding = TRUE;
   safe_free(old.tree_roots);
-  safe_free(old.position_buckets);
+  free_position_buckets(old.position_buckets, old.position_bucket_count);
   safe_free(old.position_bucket_hash);
   safe_free(old.position_root_buckets);
   safe_free(old.position_blocks);
@@ -3578,6 +3842,12 @@ void compact_back_demod_compact_materialized(
     old.tree_root_backfill_occurrences;
   index->tree_fallback_work = old.tree_fallback_work;
   index->position_queries = old.position_queries;
+  index->position_intersection_queries =
+    old.position_intersection_queries;
+  index->position_intersection_scans = old.position_intersection_scans;
+  index->position_intersection_bit_checks =
+    old.position_intersection_bit_checks;
+  index->position_intersection_records = old.position_intersection_records;
   index->position_records_examined = old.position_records_examined;
   index->position_admissions = old.position_admissions;
   index->position_rejections = old.position_rejections;
@@ -3715,6 +3985,13 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
       stats->position_features++;
   stats->position_postings = index->position_posting_count;
   stats->position_queries = index->position_queries;
+  stats->position_intersection_queries =
+    index->position_intersection_queries;
+  stats->position_intersection_scans = index->position_intersection_scans;
+  stats->position_intersection_bit_checks =
+    index->position_intersection_bit_checks;
+  stats->position_intersection_records =
+    index->position_intersection_records;
   stats->position_records_examined = index->position_records_examined;
   stats->position_admissions = index->position_admissions;
   stats->position_rejections = index->position_rejections;
@@ -3730,6 +4007,7 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->position_estimated_bytes = position_estimated_bytes(index);
   stats->position_probation_bytes = index->position_probation_capacity *
     sizeof(*index->position_probation);
+  stats->position_bitmap_bytes = index->position_bitmap_bytes;
   stats->position_budget_exhaustions = index->position_budget_exhaustions;
   stats->position_budget_pct = index->position_budget_pct;
   stats->position_admit_work = index->position_admit_work;
@@ -3799,7 +4077,8 @@ void compact_back_demod_free(Compact_back_demod_index index)
   safe_free(index->tree_nodes);
   safe_free(index->tree_posting_lists);
   safe_free(index->tree_roots);
-  safe_free(index->position_buckets);
+  free_position_buckets(index->position_buckets,
+                        index->position_bucket_count);
   safe_free(index->position_bucket_hash);
   safe_free(index->position_root_buckets);
   safe_free(index->position_blocks);

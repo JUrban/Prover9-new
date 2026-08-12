@@ -640,6 +640,77 @@ int main(void)
   }
 
   {
+    enum { INTERSECTION_FAMILY = 128 };
+    Compact_back_demod_index intersected;
+    struct compact_back_demod_stats before_compact, after_compact;
+    Topform clauses[INTERSECTION_FAMILY], rule, later;
+    char text[160];
+    int j, round;
+    compact_back_demod_set_position_options(1, 4, 1, 65536, 20, TRUE);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_POSITION);
+    intersected = compact_back_demod_init();
+    for (j = 0; j < INTERSECTION_FAMILY; j++) {
+      (void) snprintf(text, sizeof(text),
+                      "w(f(a,z(h(j(a%d)),h(j(b%d))))).",
+                      j % 4, (j / 4) % 4);
+      clauses[j] = indexed_clause(text);
+      CHECK(compact_back_demod_add(intersected, clauses[j]),
+            "add correlated position-intersection family");
+    }
+    rule = indexed_clause("f(a,z(h(j(a0)),h(j(b0)))) = a.");
+    for (round = 0; round < 7; round++) {
+      ids = compact_back_demod_candidate_ids(
+        intersected, rule, ORIENTED, &count);
+      CHECK(count == INTERSECTION_FAMILY / 16,
+            "position intersection preserves every exact candidate");
+      safe_free(ids);
+    }
+    compact_back_demod_get_stats(intersected, &before_compact);
+    CHECK(before_compact.position_admissions == 2 &&
+          before_compact.position_features == 2 &&
+          before_compact.position_intersection_queries == 1 &&
+          before_compact.position_intersection_scans ==
+            INTERSECTION_FAMILY / 4 &&
+          before_compact.position_intersection_bit_checks ==
+            INTERSECTION_FAMILY / 4 &&
+          before_compact.position_intersection_records ==
+            INTERSECTION_FAMILY / 16 &&
+          before_compact.position_bitmap_bytes > 0,
+          "two broad features use a bounded bitmap intersection");
+    later = indexed_clause("w(f(a,z(h(j(a0)),h(j(b0))))).");
+    CHECK(compact_back_demod_add(intersected, later),
+          "add later clause to both intersected position features");
+    ids = compact_back_demod_candidate_ids(
+      intersected, rule, ORIENTED, &count);
+    CHECK(count == INTERSECTION_FAMILY / 16 + 1 && ids[0] == later->id,
+          "intersection membership stays complete after insertion");
+    safe_free(ids);
+    CHECK(compact_back_demod_remove(intersected, later->id),
+          "retire later intersected-position clause");
+    compact_back_demod_compact_all_stale(intersected);
+    ids = compact_back_demod_candidate_ids(
+      intersected, rule, ORIENTED, &count);
+    CHECK(count == INTERSECTION_FAMILY / 16,
+          "position intersection remains complete after compaction");
+    safe_free(ids);
+    compact_back_demod_get_stats(intersected, &after_compact);
+    CHECK(after_compact.position_features == 2 &&
+          after_compact.position_physical_features == 2 &&
+          after_compact.position_intersection_queries ==
+            before_compact.position_intersection_queries + 2 &&
+          after_compact.position_bitmap_bytes > 0,
+          "compaction rebuilds both intersection membership bitmaps");
+    compact_back_demod_free(intersected);
+    delete_clause(rule);
+    delete_clause(later);
+    for (j = 0; j < INTERSECTION_FAMILY; j++)
+      delete_clause(clauses[j]);
+    compact_back_demod_set_position_options(
+      4096, 4, 8, 65536, 20, TRUE);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
+  }
+
+  {
     enum { POSITION_ROOT_FAMILY = 64, POSITION_DEMOTION_LIMIT = 4096 };
     Compact_back_demod_index bounded_position;
     struct compact_back_demod_stats before_s, after_s, bounded_stats;

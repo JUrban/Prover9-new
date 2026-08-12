@@ -642,7 +642,11 @@ void fprint_compact_back_demod(FILE *fp)
           "tree_backfill_occurrences=%llu, tree_fallback_work=%llu, "
           "position_features=%llu, position_physical_features=%llu, "
           "position_postings=%llu, "
-          "position_queries=%llu, position_records_examined=%llu, "
+          "position_queries=%llu, position_intersection_queries=%llu, "
+          "position_intersection_scans=%llu, "
+          "position_intersection_bit_checks=%llu, "
+          "position_intersection_records=%llu, "
+          "position_records_examined=%llu, "
           "position_admissions=%llu, position_rejections=%llu, "
           "position_demotions=%llu, "
           "position_cost_deferrals=%llu, "
@@ -652,6 +656,7 @@ void fprint_compact_back_demod(FILE *fp)
           "position_budget=%llu, position_effective_budget=%llu, "
           "position_budget_pct=%u, "
           "position_estimated=%llu, position_probation_bytes=%llu, "
+          "position_bitmap_bytes=%llu, "
           "position_budget_exhaustions=%llu, "
           "position_admit_work=%u, position_min_gain=%u, "
           "position_build_factor=%u, position_admission=%s, "
@@ -688,7 +693,11 @@ void fprint_compact_back_demod(FILE *fp)
           stats.tree_root_backfill_occurrences, stats.tree_fallback_work,
           stats.position_features, stats.position_physical_features,
           stats.position_postings,
-          stats.position_queries, stats.position_records_examined,
+          stats.position_queries, stats.position_intersection_queries,
+          stats.position_intersection_scans,
+          stats.position_intersection_bit_checks,
+          stats.position_intersection_records,
+          stats.position_records_examined,
           stats.position_admissions, stats.position_rejections,
           stats.position_demotions,
           stats.position_cost_deferrals,
@@ -701,6 +710,7 @@ void fprint_compact_back_demod(FILE *fp)
           stats.position_budget_pct,
           stats.position_estimated_bytes,
           stats.position_probation_bytes,
+          stats.position_bitmap_bytes,
           stats.position_budget_exhaustions,
           stats.position_admit_work, stats.position_min_gain,
           stats.position_build_factor,
