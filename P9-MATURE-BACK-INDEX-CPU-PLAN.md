@@ -73,6 +73,13 @@ and file-cache memory reported separately.
 9. Every structural operation used to choose a route is charged to that
    route.  In particular, root-level sibling traversal cannot remain hidden
    from the tree cost merely because it occurs outside the recursive walker.
+10. Aggregate traffic sharing a root cannot buy a discrimination tree.  At
+    least one recent structural/population class must independently cross the
+    route-frequency threshold before its work can fund root construction.
+11. A calibration-count bound is insufficient unless each calibration is
+    itself bounded.  An initial tree probe may consume no more counted work
+    than the twofold promotion margin permits; an incomplete probe must be
+    discarded and followed by the complete mask route.
 
 ## 2. Admission before calibration
 
@@ -259,3 +266,48 @@ Additional local gates:
 4. Repeat bounded `chat_test.in` parity tests on the final binary, then use the
    external 7,365-given and complete-proof runs to evaluate both compact-mask
    parity and the actual 1.25-times-normal-P9 product gate.
+
+## 8. Second completion audit: construction must follow demonstrated use
+
+The first post-audit 300-given run exposed 399,774 discrimination-tree
+insertion sibling comparisons despite zero tree queries and zero admitted
+route profiles.  Root admission was pooling fallback work across unrelated
+query classes with the same leading symbol.  A byte/work construction budget
+does not repair this mismatch: it merely limits how much CPU can be spent on
+an optimization for which no repeated consumer exists.
+
+Feed pre-tree adaptive queries through the same bounded, aging count-min
+sketch used by profile admission.  Until a structural/population class reaches
+32 recent observations, its mask work cannot enter the root construction
+ledger.  Once qualified, only subsequent work funds the existing factor-8
+root census/backfill test.  This deliberately requires both demonstrated
+frequency and demonstrated aggregate savings before a tree is built.
+
+The initial tree calibration is cancellable.  Its allowance is half the
+population-scaled mask baseline, matching the required twofold promotion
+margin.  Charge nodes, siblings, child dispatch, representative matches,
+posting bytes, and posting groups before executing them.  If the allowance is
+exhausted, clear only result stamps added by that pattern, discard its partial
+IDs, and run the complete mask route under the same query stamp.  The partial
+work remains in CPU telemetry, while a conservative failed sample prevents
+promotion.
+
+Finally, any posting iterator that calls a builder must retain stable indices,
+not pointers into reallocatable storage.  The supplied `chat_test.new.out6`
+found exactly this lifecycle violation during root backfill: tree posting
+growth moved the shared posting-block array while the path-posting iterator
+held an interior pointer.  The acceptance suite therefore includes a
+1,024-duplicate-term backfill that forces reallocation during traversal.
+
+Local gates for this tranche:
+
+1. At 300, 600, and 1,000 givens, a cold workload must build no root tree and
+   perform no tree insertion work, while matching mask counters/fingerprints.
+2. A genuinely repeated synthetic class must still qualify, build, and probe;
+   an adversarial variable-prefix probe must abort within its mask-derived
+   allowance and reconstruct the exact decreasing-ID mask answer.
+3. The archived crash input must reproduce at `b6142ea`, then pass the crash
+   point with only the stable-index iterator fix.
+4. The external 3,000/7,365/proof-endpoint gates remain mandatory because the
+   new short-run result intentionally avoids speculative tree construction and
+   cannot prove the behavior after genuinely hot classes emerge.

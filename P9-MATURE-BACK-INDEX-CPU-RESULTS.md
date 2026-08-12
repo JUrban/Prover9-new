@@ -30,6 +30,12 @@ The changes are split into reviewable commits:
 | `0ad8d9b` | 10,000 cold/5,000 hot route churn test, position retry test, symbol-independent hard-budget semantics |
 | `000f7a6` | removal of cold adaptive double scans and premature position-feature traversal |
 | `e33f3b9` | frequency-sketch aging and a multi-window cold-churn test for mature runs |
+| `f5e55a9` | reopened completion audit against the 5,110-second normal-P9 proof baseline |
+| `b6142ea` | record-oriented incremental position maintenance and complete root-sibling accounting |
+| `3fa7599` | live position-root counts, relevant-occurrence filtering, and cached mature tree insertion |
+| `091c386` | mask-derived execution cap, rollback, and fallback for initial tree probes |
+| `3f0d83d` | stable-index root-backfill iterator fixing the supplied `out6` crash |
+| `ccd8f43` | repeated-class qualification before any adaptive root-tree construction |
 
 Candidate completeness and decreasing-ID order remain authoritative in the
 mask/tree/position paths.  Scheduling, wall time, and cache residency never
@@ -44,12 +50,19 @@ affect the selected route or the returned ID set.
   counter visit per two routed lookups amortized.
 - Fewer than 32 observations means an immediate complete mask lookup: no
   profile allocation and no tree probe.
+- The same threshold now applies before root construction.  Cold classes may
+  share a leading symbol but cannot pool their work to build and maintain a
+  tree unless one recent structural/population class is independently hot.
 - A full table admits an incoming class only when its deterministic
   frequency/recency score beats the selected resident.  Old population scales
   age out; singleton traffic cannot continuously replace current hot state.
 - A class gets one mask baseline and at most one initial tree probe.  Tree must
   show at least a 2x counted-work advantage before promotion.  The ordinary
   20% margin is retained for later reversion.
+- The initial probe is stopped when its charged work exceeds half the scaled
+  mask baseline.  Partial candidates and only their newly added query stamps
+  are rolled back before a complete mask fallback; actual partial work and the
+  conservative failed sample are reported separately.
 - The profile table is 448 KiB and the two sketch rows are 256 KiB, independent
   of run length.  Version-3 `compact_back_adaptive.txt` sidecars preserve the
   sketch, recency, profiles, and the position state below.
@@ -80,6 +93,12 @@ replace mask retrieval.
   numbering.
 - Queries below the 4,096-work admission floor still add their work to the
   global ledger, but do not traverse every rigid query feature for probation.
+- Incremental posting maintenance is record-oriented.  Each new serialized
+  clause is traversed once per subject occurrence whose root has live
+  features; hash probes find all matching `(root,path,symbol)` definitions and
+  one deduplicated match set drives budget checks, bitmaps, occurrences, and
+  postings.  Its work no longer multiplies by the total admitted-feature
+  count.  Roots whose last feature is demoted trigger no later traversal.
 
 At the supplied later `out51` state, the old route-observed work totals about
 8.128 billion units.  Applying the new default ledger to the same amount of
@@ -146,6 +165,9 @@ The 1,000-given and bounded 180-second pairs used release binary SHA-256
 After the final frequency-aging hardening, the 300-given pair was repeated
 with release binary SHA-256
 `3a830e1cf4ecfa8a5f43f6b3bde6284c2eef5d1997faa4e2bc33f14b2bc2161d`.
+The post-completion-audit 600- and 1,000-given pairs used release binary
+SHA-256
+`dd308c0d7a95e35d776c184a8e5b8042b108b12d2374435c7537e6be88348bc2`.
 Mask8 and adaptive cases ran with the same generated input on dedicated CPUs.
 
 | Gate | mask8 | adaptive | Result |
@@ -158,13 +180,30 @@ Mask8 and adaptive cases ran with the same generated input on dedicated CPUs.
 | bounded 180-second run, final given | 1,275 | 1,290 | adaptive +1.18% throughput |
 | bounded run, measured user CPU | 157.33 s | 156.81 s | parity |
 
-At 1,000 givens adaptive admitted only 42 of 23,587 route-table misses,
-performed 34 probes in 27,761 lookups, and performed no position census or
-backfill.  At the bounded 1,290-given endpoint it held 64 route profiles, used
-56 probes in 38,534 lookups, and still performed no position construction.
-The adaptive back index was 10.0 MB versus mask8's 4.14 MB at the unequal
-bounded endpoints, while both processes reported about 90.4 MiB peak RSS.
-The fixed adaptive metadata is visible but is not growing with class traffic.
+The final-binary cold-prefix gates are:
+
+| Gate | mask8 | adaptive | Result |
+|:---|---:|---:|:---|
+| 600 given, user CPU | 45.44 s | 45.38 s | parity |
+| 600 given, generated / kept | 497,430 / 16,974 | 497,430 / 16,974 | identical |
+| 1,000 given, user CPU | 95.23 s | 93.20 s | adaptive -2.1% |
+| 1,000 given, generated / kept | 1,268,285 / 33,909 | 1,268,285 / 33,909 | identical |
+
+At 1,000 givens all 27,764 adaptive lookups had been observed by the pre-tree
+frequency sketch and 370 were post-threshold observations, but the separate
+factor-8 construction test correctly deferred all six root censuses.  Thus
+adaptive built zero tree nodes, performed zero tree insertion comparisons,
+allocated zero route profiles, and issued zero probes.  Its back index was
+3.91 MB versus mask8's 3.08 MB; both external peak RSS values were about
+90.4 MiB.  Query-input/output fingerprints and all search counters matched.
+This is evidence that cold prefixes no longer pay speculative maintenance,
+not evidence about the still-open mature hot-class phase.
+
+In the pre-completion-audit 1,000-given pair, adaptive admitted 42 of 23,587
+route-table misses and performed 34 probes in 27,761 lookups.  At its bounded
+1,290-given endpoint it held 64 route profiles and used 56 probes in 38,534
+lookups.  Those historical values explain why the new construction gate was
+needed; they are not counters from the final binary.
 
 The first pre-fix 300-given pair is retained in `chat-mature-cpu-300`: it took
 23.92 versus 18.73 user seconds because adaptive redundantly scanned mask
@@ -184,6 +223,8 @@ tuning.
 `compact_back_demod_test` now checks:
 
 - 10,000 singleton route classes allocate zero profiles and issue zero probes;
+- pre-tree singleton classes allocate no root trees, while a genuinely
+  repeated class still crosses the qualification boundary and calibrates;
 - cold classes totaling 40 observations across two decay windows still
   allocate no profile, while one genuinely hot class remains admitted with a
   single probe;
@@ -195,8 +236,22 @@ tuning.
   one newly funded retry occurs;
 - budget exhaustion freezes admission while an unrelated feature remains
   complete through forced compaction;
-- checkpoint version 3 and compaction retain bounded adaptive state; and
-- high logical term-pool bases preserve exact candidates for every strategy.
+- checkpoint version 3 and compaction retain bounded adaptive state;
+- high logical term-pool bases preserve exact candidates for every strategy;
+- 32 simultaneously active position features still require one record walk,
+  and a fully demoted root requires none;
+- a variable-prefix calibration can append real candidates, exhaust its
+  allowance, roll those candidates/stamps back, and return the exact mask
+  order; and
+- a 1,024-duplicate root backfill can grow the shared posting array during
+  traversal without invalidating its iterator.
+
+The last item is a regression for the supplied `chat_test.new.out6` crash.
+The exact extracted input reproduces SIGSEGV at given 301 in `b6142ea`, at
+`process_root_postings+0x122` (`+0x2b832`).  Tree posting construction had
+reallocated the same block array through which root backfill retained a raw
+pointer.  With only commit `3f0d83d` applied to that commit, the same input
+passed given 523 under a 20-second cap without a fault.
 
 The accelerated 10,000-record longevity test also passes with factor 64 and
 the 16 MiB cap.  Its adversarial variable-prefix query admitted one selective
