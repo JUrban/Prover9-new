@@ -61,6 +61,8 @@ MIN_SAMPLED_LOOKUP_TIMINGS_PER_INTERVAL = 32
 CUMULATIVE_KEYS = (
     "given", "generated", "kept", "user_cpu", "system_cpu",
     "back_queries", "back_groups_examined", "back_tree_nodes_examined",
+    "back_mask_trie_queries", "back_mask_trie_nodes_examined",
+    "back_mask_trie_prunes",
     "back_tree_sibling_checks", "back_tree_child_lookups",
     "back_tree_insert_sibling_checks", "back_tree_insert_cache_lookups",
     "back_tree_insert_cache_hits", "back_tree_insert_cache_misses",
@@ -352,10 +354,12 @@ def derive_intervals(samples):
         delta_given = row.get("delta_given")
         delta_queries = row.get("delta_back_queries")
         delta_groups = row.get("delta_back_groups_examined")
+        delta_mask_nodes = row.get("delta_back_mask_trie_nodes_examined")
         delta_nodes = row.get("delta_back_tree_nodes_examined")
         delta_siblings = row.get("delta_back_tree_sibling_checks")
         delta_children = row.get("delta_back_tree_child_lookups")
-        components = (delta_groups, delta_nodes, delta_siblings,
+        components = (delta_groups, delta_mask_nodes, delta_nodes,
+                      delta_siblings,
                       delta_children)
         combined = (sum(value for value in components if value is not None)
                     if any(value is not None for value in components) else None)
@@ -365,6 +369,8 @@ def derive_intervals(samples):
             row.get("delta_generated"), delta_given)
         row["kept_per_given"] = safe_ratio(row.get("delta_kept"), delta_given)
         row["back_groups_per_query"] = safe_ratio(delta_groups, delta_queries)
+        row["back_mask_nodes_per_query"] = safe_ratio(
+            delta_mask_nodes, delta_queries)
         row["back_nodes_per_query"] = safe_ratio(delta_nodes, delta_queries)
         row["back_siblings_per_query"] = safe_ratio(
             delta_siblings, delta_queries)
@@ -1067,7 +1073,10 @@ TSV_COLUMNS = (
     "label", "sample", "user_cpu", "system_cpu", "wall_clock", "given",
     "generated", "kept", "delta_given", "delta_generated", "delta_kept",
     "given_per_cpu", "generated_per_given", "back_strategy", "back_active",
-    "delta_back_queries", "back_groups_per_query", "back_nodes_per_query",
+    "delta_back_queries", "back_groups_per_query",
+    "back_mask_trie_nodes", "delta_back_mask_trie_queries",
+    "back_mask_nodes_per_query", "delta_back_mask_trie_prunes",
+    "back_nodes_per_query",
     "back_siblings_per_query", "back_children_per_query",
     "back_combined_per_query", "back_lookup_cpu_pct", "back_child_hit_pct",
     "delta_back_tree_insert_sibling_checks",

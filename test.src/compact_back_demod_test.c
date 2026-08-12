@@ -429,6 +429,63 @@ int main(void)
   }
 
   {
+    enum { SHALLOW_FAMILY = 128, SHALLOW_TARGET = 73 };
+    Compact_back_demod_index mask32_index;
+    struct compact_back_demod_stats before, after;
+    Topform clauses[SHALLOW_FAMILY];
+    Topform rule;
+    unsigned long long *mask32_ids;
+    size_t mask32_count;
+    char text[128];
+    int j;
+
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK32);
+    mask32_index = compact_back_demod_init();
+    for (j = 0; j < SHALLOW_FAMILY; j++) {
+      (void) snprintf(
+        text, sizeof(text), "u(f(shallow_a%d,shallow_b%d)).", j, j);
+      clauses[j] = indexed_clause(text);
+      CHECK(compact_back_demod_add(mask32_index, clauses[j]),
+            "add shallow family clause to mask32 Patricia index");
+    }
+    (void) snprintf(
+      text, sizeof(text), "f(shallow_a%d,shallow_b%d) = shallow_a%d.",
+      SHALLOW_TARGET, SHALLOW_TARGET, SHALLOW_TARGET);
+    rule = indexed_clause(text);
+    mask32_ids = compact_back_demod_candidate_ids(
+      mask32_index, rule, ORIENTED, &mask32_count);
+    CHECK(mask32_count == 1 &&
+          mask32_ids[0] == clauses[SHALLOW_TARGET]->id,
+          "mask32 Patricia retrieval preserves the exact shallow answer");
+    compact_back_demod_note_exact_query(
+      mask32_index, mask32_count, mask32_count, 0);
+    compact_back_demod_get_stats(mask32_index, &before);
+    CHECK(before.mask_trie_nodes <= before.path_buckets * 2 &&
+          before.mask_trie_queries == 1 &&
+          before.mask_trie_nodes_examined < before.path_buckets &&
+          before.mask_trie_prunes > 0,
+          "mask32 Patricia storage is linear and prunes bucket enumeration");
+    CHECK(compact_back_demod_remove(
+            mask32_index, clauses[SHALLOW_TARGET]->id),
+          "remove shallow mask32 answer");
+    compact_back_demod_compact_all_stale(mask32_index);
+    safe_free(mask32_ids);
+    mask32_ids = compact_back_demod_candidate_ids(
+      mask32_index, rule, ORIENTED, &mask32_count);
+    CHECK(mask32_count == 0 && mask32_ids == NULL,
+          "mask32 Patricia retrieval survives forced compaction");
+    compact_back_demod_get_stats(mask32_index, &after);
+    CHECK(after.mask_trie_nodes <= after.path_buckets * 2 &&
+          after.mask_trie_queries == 2,
+          "compaction rebuilds the bounded mask32 Patricia directory");
+    compact_back_demod_free(mask32_index);
+    delete_clause(rule);
+    for (j = 0; j < SHALLOW_FAMILY; j++)
+      delete_clause(clauses[j]);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
+  }
+
+  {
     Compact_back_demod_index bounded;
     struct compact_back_demod_stats bounded_stats;
     Topform clause = indexed_clause("v(f(a,g(h(j(c))))).");

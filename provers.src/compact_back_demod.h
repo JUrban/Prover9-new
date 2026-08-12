@@ -173,6 +173,10 @@ struct compact_back_demod_stats {
   unsigned long long occurrences_examined;
   unsigned long long path_filter_checks;
   unsigned long long path_filter_rejects;
+  unsigned long long mask_trie_nodes;
+  unsigned long long mask_trie_queries;
+  unsigned long long mask_trie_nodes_examined;
+  unsigned long long mask_trie_prunes;
   unsigned long long inactive_groups_examined;
   unsigned long long duplicate_groups_examined;
   unsigned long long posting_bytes_decoded;

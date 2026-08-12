@@ -657,7 +657,10 @@ void fprint_compact_back_demod(FILE *fp)
           "peak=%llu, retired=%llu, physical=%llu, compactions=%llu, "
           "reclaimed=%llu, queries=%llu, "
           "candidates=%llu, exact_tests=%llu, posting_groups=%llu, "
-          "path_buckets=%llu, tree_nodes=%llu, tree_terminals=%llu, "
+          "path_buckets=%llu, mask_trie_nodes=%llu, "
+          "mask_trie_queries=%llu, mask_trie_nodes_examined=%llu, "
+          "mask_trie_prunes=%llu, "
+          "tree_nodes=%llu, tree_terminals=%llu, "
           "tree_queries=%llu, tree_nodes_examined=%llu, "
           "tree_sibling_checks=%llu, "
           "tree_child_lookups=%llu, tree_child_hits=%llu, "
@@ -733,6 +736,8 @@ void fprint_compact_back_demod(FILE *fp)
           stats.retired, stats.physical, stats.compactions,
           stats.bytes_reclaimed, stats.queries, stats.candidates,
           stats.exact_tests, stats.posting_groups, stats.path_buckets,
+          stats.mask_trie_nodes, stats.mask_trie_queries,
+          stats.mask_trie_nodes_examined, stats.mask_trie_prunes,
           stats.tree_nodes, stats.tree_terminals, stats.tree_queries,
           stats.tree_nodes_examined,
           stats.tree_sibling_checks,

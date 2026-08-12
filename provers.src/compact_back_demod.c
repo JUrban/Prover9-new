@@ -17,6 +17,7 @@
 #define CBD_EDGE_BLOCK_PAYLOAD 24
 #define CBD_EDGE_INTERSECTION_LIMIT 4
 #define CBD_EDGE_ROOT_MARKER UINT32_MAX
+#define CBD_MASK_TRIE_LEAF 32U
 #define CBD_TREE_CHILD_CACHE_MAX_BYTES (UINT64_C(8) * 1024 * 1024)
 #define CBD_TREE_CHILD_CACHE_MIN_SCAN 8
 #define CBD_ROUTE_PROFILE_CAPACITY 4096
@@ -81,6 +82,17 @@ struct cbd_path_bucket {
   uint32_t symbol;
   uint32_t posting_count;
   cbd_path_mask mask;
+};
+
+/* A Patricia trie indexes the distinct shallow32 masks of each root symbol.
+   Internal bit numbers decrease toward the leaves.  union_mask lets a query
+   reject a whole subtree when none of its leaves can contain every required
+   bit.  There is one leaf and at most one internal node per path bucket. */
+struct cbd_mask_trie_node {
+  uint32_t child[2];
+  uint32_t bucket;
+  cbd_path_mask union_mask;
+  unsigned char bit;
 };
 
 /* Radix edges refer directly to the shared serialized-term pool.  Only
@@ -258,6 +270,11 @@ struct compact_back_demod_index {
   size_t path_bucket_capacity;
   uint32_t *path_bucket_hash;
   size_t path_bucket_hash_capacity;
+  uint32_t *mask_trie_roots;
+  size_t mask_trie_root_capacity;
+  struct cbd_mask_trie_node *mask_trie_nodes;
+  size_t mask_trie_node_count;
+  size_t mask_trie_node_capacity;
   struct cbd_tree_node *tree_nodes;
   size_t tree_node_count;
   size_t tree_node_capacity;
@@ -360,6 +377,9 @@ struct compact_back_demod_index {
   unsigned long long occurrences_examined;
   unsigned long long path_filter_checks;
   unsigned long long path_filter_rejects;
+  unsigned long long mask_trie_queries;
+  unsigned long long mask_trie_nodes_examined;
+  unsigned long long mask_trie_prunes;
   unsigned long long tree_queries;
   unsigned long long tree_nodes_examined;
   unsigned long long tree_sibling_checks;
@@ -623,6 +643,8 @@ static unsigned long long index_bytes(Compact_back_demod_index index)
     index->symbol_capacity * sizeof(*index->symbol_hashes) +
     index->path_bucket_capacity * sizeof(*index->path_buckets) +
     index->path_bucket_hash_capacity * sizeof(*index->path_bucket_hash) +
+    index->mask_trie_root_capacity * sizeof(*index->mask_trie_roots) +
+    index->mask_trie_node_capacity * sizeof(*index->mask_trie_nodes) +
     index->tree_node_capacity * sizeof(*index->tree_nodes) +
     index->tree_posting_list_capacity *
       sizeof(*index->tree_posting_lists) +
@@ -731,6 +753,16 @@ static void ensure_symbols(Compact_back_demod_index index, unsigned symbol)
   memset(index->symbol_hashes + old_capacity, 0,
          (index->symbol_capacity - old_capacity) *
            sizeof(*index->symbol_hashes));
+  if (index->strategy == COMPACT_BACK_DEMOD_MASK32) {
+    size_t old_roots = index->mask_trie_root_capacity;
+    index->mask_trie_root_capacity = index->symbol_capacity;
+    index->mask_trie_roots = safe_realloc(
+      index->mask_trie_roots,
+      index->mask_trie_root_capacity * sizeof(*index->mask_trie_roots));
+    memset(index->mask_trie_roots + old_roots, 0,
+           (index->mask_trie_root_capacity - old_roots) *
+             sizeof(*index->mask_trie_roots));
+  }
   if (strategy_uses_hot_tree(index->strategy)) {
     size_t old_roots = index->tree_root_capacity;
     index->tree_root_capacity = index->symbol_capacity;
@@ -893,6 +925,108 @@ static void rehash_path_buckets(Compact_back_demod_index index,
   safe_free(old_hash);
 }
 
+static uint32_t new_mask_trie_node(Compact_back_demod_index index,
+                                   unsigned bit, uint32_t bucket,
+                                   cbd_path_mask union_mask)
+{
+  uint32_t node;
+  if (bit > CBD_MASK_TRIE_LEAF)
+    fatal_error("compact_back_demod: invalid mask-trie bit");
+  if (index->mask_trie_node_count == index->mask_trie_node_capacity) {
+    index->mask_trie_node_capacity = grow_record_capacity(
+      index->mask_trie_node_capacity, sizeof(*index->mask_trie_nodes),
+      "compact_back_demod: mask-trie node overflow");
+    index->mask_trie_nodes = safe_realloc(
+      index->mask_trie_nodes,
+      index->mask_trie_node_capacity * sizeof(*index->mask_trie_nodes));
+  }
+  if (index->mask_trie_node_count > UINT32_MAX)
+    fatal_error("compact_back_demod: mask-trie offsets exceed 32 bits");
+  node = (uint32_t) index->mask_trie_node_count++;
+  memset(&index->mask_trie_nodes[node], 0,
+         sizeof(index->mask_trie_nodes[node]));
+  index->mask_trie_nodes[node].bit = (unsigned char) bit;
+  index->mask_trie_nodes[node].bucket = bucket;
+  index->mask_trie_nodes[node].union_mask = union_mask;
+  return node;
+}
+
+static unsigned highest_mask_bit(cbd_path_mask mask)
+{
+  unsigned bit = 31;
+  if (mask == 0)
+    fatal_error("compact_back_demod: empty mask-trie difference");
+  while ((mask & (UINT32_C(1) << bit)) == 0)
+    bit--;
+  return bit;
+}
+
+static void insert_mask_trie_bucket(Compact_back_demod_index index,
+                                    uint32_t symbol, cbd_path_mask mask,
+                                    uint32_t bucket)
+{
+  uint32_t node, leaf, internal, existing_bucket;
+  uint32_t parent = CBD_NONE;
+  uint32_t ancestors[32];
+  size_t ancestor_count = 0, i;
+  unsigned side = 0, bit, existing_side, added_side;
+  cbd_path_mask existing_mask, difference;
+  if (index->strategy != COMPACT_BACK_DEMOD_MASK32)
+    return;
+  if ((size_t) symbol >= index->mask_trie_root_capacity ||
+      bucket == CBD_NONE || bucket >= index->path_bucket_count)
+    fatal_error("compact_back_demod: invalid mask-trie insertion");
+  node = index->mask_trie_roots[symbol];
+  if (node == CBD_NONE) {
+    index->mask_trie_roots[symbol] = new_mask_trie_node(
+      index, CBD_MASK_TRIE_LEAF, bucket, mask);
+    return;
+  }
+  while (index->mask_trie_nodes[node].bit != CBD_MASK_TRIE_LEAF) {
+    unsigned branch = (mask >> index->mask_trie_nodes[node].bit) & 1U;
+    node = index->mask_trie_nodes[node].child[branch];
+    if (node == CBD_NONE || node >= index->mask_trie_node_count)
+      fatal_error("compact_back_demod: corrupt mask trie");
+  }
+  existing_bucket = index->mask_trie_nodes[node].bucket;
+  if (existing_bucket == CBD_NONE ||
+      existing_bucket >= index->path_bucket_count)
+    fatal_error("compact_back_demod: corrupt mask-trie leaf");
+  existing_mask = index->path_buckets[existing_bucket].mask;
+  difference = existing_mask ^ mask;
+  if (difference == 0)
+    fatal_error("compact_back_demod: duplicate mask-trie leaf");
+  bit = highest_mask_bit(difference);
+
+  node = index->mask_trie_roots[symbol];
+  while (index->mask_trie_nodes[node].bit != CBD_MASK_TRIE_LEAF &&
+         index->mask_trie_nodes[node].bit > bit) {
+    if (ancestor_count >= sizeof(ancestors) / sizeof(ancestors[0]))
+      fatal_error("compact_back_demod: mask-trie depth overflow");
+    ancestors[ancestor_count++] = node;
+    parent = node;
+    side = (mask >> index->mask_trie_nodes[node].bit) & 1U;
+    node = index->mask_trie_nodes[node].child[side];
+  }
+  existing_side = (existing_mask >> bit) & 1U;
+  added_side = (mask >> bit) & 1U;
+  if (existing_side == added_side)
+    fatal_error("compact_back_demod: invalid mask-trie split");
+  leaf = new_mask_trie_node(
+    index, CBD_MASK_TRIE_LEAF, bucket, mask);
+  internal = new_mask_trie_node(
+    index, bit, CBD_NONE,
+    index->mask_trie_nodes[node].union_mask | mask);
+  index->mask_trie_nodes[internal].child[existing_side] = node;
+  index->mask_trie_nodes[internal].child[added_side] = leaf;
+  if (parent == CBD_NONE)
+    index->mask_trie_roots[symbol] = internal;
+  else
+    index->mask_trie_nodes[parent].child[side] = internal;
+  for (i = 0; i < ancestor_count; i++)
+    index->mask_trie_nodes[ancestors[i]].union_mask |= mask;
+}
+
 static uint32_t find_or_add_path_bucket(Compact_back_demod_index index,
                                         uint32_t symbol,
                                         cbd_path_mask mask)
@@ -935,6 +1069,7 @@ static uint32_t find_or_add_path_bucket(Compact_back_demod_index index,
   index->path_buckets[bucket].next = index->symbol_buckets[symbol];
   index->symbol_buckets[symbol] = bucket;
   index->path_bucket_hash[at] = bucket;
+  insert_mask_trie_bucket(index, symbol, mask, bucket);
   return bucket;
 }
 
@@ -2447,6 +2582,10 @@ static Compact_back_demod_index compact_back_demod_init_with_pool_strategy(
     memset(&index->path_buckets[0], 0, sizeof(index->path_buckets[0]));
     index->path_bucket_count = 1;
   }
+  if (strategy == COMPACT_BACK_DEMOD_MASK32 &&
+      new_mask_trie_node(
+        index, CBD_MASK_TRIE_LEAF, CBD_NONE, 0) != CBD_NONE)
+    fatal_error("compact_back_demod: invalid mask-trie sentinel");
   if (strategy_uses_position(strategy)) {
     ENSURE_ARRAY(index, position_buckets, position_bucket_count,
                  position_bucket_capacity,
@@ -4983,6 +5122,53 @@ static uint32_t best_position_bucket(Compact_back_demod_index index,
   return best;
 }
 
+static void collect_mask_trie_node(
+  Compact_back_demod_index index, uint32_t node_index,
+  cbd_path_mask required_mask, Term pattern, int32_t symbol,
+  unsigned long long exclude_id, size_t *count)
+{
+  struct cbd_mask_trie_node *node;
+  if (node_index == CBD_NONE || node_index >= index->mask_trie_node_count)
+    fatal_error("compact_back_demod: corrupt mask-trie query");
+  node = &index->mask_trie_nodes[node_index];
+  index->mask_trie_nodes_examined++;
+  if ((node->union_mask & required_mask) != required_mask) {
+    index->mask_trie_prunes++;
+    return;
+  }
+  if (node->bit == CBD_MASK_TRIE_LEAF) {
+    struct cbd_path_bucket *bucket;
+    if (node->bucket == CBD_NONE ||
+        node->bucket >= index->path_bucket_count)
+      fatal_error("compact_back_demod: corrupt mask-trie query leaf");
+    bucket = &index->path_buckets[node->bucket];
+    index->path_filter_checks++;
+    if ((bucket->mask & required_mask) != required_mask) {
+      index->path_filter_rejects++;
+      return;
+    }
+    collect_posting_list(index, bucket->inline_record,
+                         bucket->inline_occurrence, bucket->inline_length,
+                         bucket->posting_head, pattern, symbol,
+                         exclude_id, count);
+    return;
+  }
+  if (node->bit >= 32)
+    fatal_error("compact_back_demod: corrupt mask-trie branch");
+  if ((required_mask & (UINT32_C(1) << node->bit)) != 0)
+    collect_mask_trie_node(
+      index, node->child[1], required_mask, pattern, symbol,
+      exclude_id, count);
+  else {
+    collect_mask_trie_node(
+      index, node->child[0], required_mask, pattern, symbol,
+      exclude_id, count);
+    collect_mask_trie_node(
+      index, node->child[1], required_mask, pattern, symbol,
+      exclude_id, count);
+  }
+}
+
 static void collect_symbol(Compact_back_demod_index index, Term pattern,
                            unsigned long long exclude_id, size_t *count)
 {
@@ -5012,6 +5198,19 @@ static void collect_symbol(Compact_back_demod_index index, Term pattern,
   required_mask = term_path_mask(index, pattern);
   if ((size_t) symbol >= index->symbol_capacity)
     return;
+  if (index->strategy == COMPACT_BACK_DEMOD_MASK32) {
+    uint32_t root;
+    if ((size_t) symbol >= index->mask_trie_root_capacity)
+      return;
+    root = index->mask_trie_roots[symbol];
+    if (root == CBD_NONE)
+      return;
+    index->mask_trie_queries++;
+    collect_mask_trie_node(
+      index, root, required_mask, pattern, (int32_t) symbol,
+      exclude_id, count);
+    return;
+  }
   for (bucket_index = index->symbol_buckets[symbol];
        bucket_index != CBD_NONE;
        bucket_index = index->path_buckets[bucket_index].next) {
@@ -5310,6 +5509,42 @@ static BOOL route_tree_promotion_better(unsigned long long tree,
   return tree < mask && tree <= mask / 2;
 }
 
+static unsigned long long mask_trie_population(
+  Compact_back_demod_index index, uint32_t node_index,
+  cbd_path_mask required_mask)
+{
+  struct cbd_mask_trie_node *node;
+  if (node_index == CBD_NONE || node_index >= index->mask_trie_node_count)
+    fatal_error("compact_back_demod: corrupt mask-trie population query");
+  node = &index->mask_trie_nodes[node_index];
+  index->mask_trie_nodes_examined++;
+  if ((node->union_mask & required_mask) != required_mask) {
+    index->mask_trie_prunes++;
+    return 0;
+  }
+  if (node->bit == CBD_MASK_TRIE_LEAF) {
+    struct cbd_path_bucket *bucket;
+    if (node->bucket == CBD_NONE ||
+        node->bucket >= index->path_bucket_count)
+      fatal_error("compact_back_demod: corrupt mask-trie population leaf");
+    bucket = &index->path_buckets[node->bucket];
+    index->path_filter_checks++;
+    if ((bucket->mask & required_mask) != required_mask) {
+      index->path_filter_rejects++;
+      return 0;
+    }
+    return bucket->posting_count;
+  }
+  if (node->bit >= 32)
+    fatal_error("compact_back_demod: corrupt mask-trie population branch");
+  if ((required_mask & (UINT32_C(1) << node->bit)) != 0)
+    return mask_trie_population(
+      index, node->child[1], required_mask);
+  return saturating_add(
+    mask_trie_population(index, node->child[0], required_mask),
+    mask_trie_population(index, node->child[1], required_mask));
+}
+
 static unsigned long long route_mask_population(
   Compact_back_demod_index index, Term pattern)
 {
@@ -5323,6 +5558,16 @@ static unsigned long long route_mask_population(
   if ((size_t) symbol >= index->symbol_capacity)
     return 0;
   required = term_path_mask(index, pattern);
+  if (index->strategy == COMPACT_BACK_DEMOD_MASK32) {
+    uint32_t root;
+    if ((size_t) symbol >= index->mask_trie_root_capacity)
+      return 0;
+    root = index->mask_trie_roots[symbol];
+    if (root == CBD_NONE)
+      return 0;
+    index->mask_trie_queries++;
+    return mask_trie_population(index, root, required);
+  }
   for (bucket = index->symbol_buckets[symbol]; bucket != CBD_NONE;
        bucket = index->path_buckets[bucket].next)
     if ((index->path_buckets[bucket].mask & required) == required)
@@ -6388,6 +6633,8 @@ static void compact_back_demod_compact_internal(
   safe_free(old.symbol_hashes);
   safe_free(old.path_buckets);
   safe_free(old.path_bucket_hash);
+  safe_free(old.mask_trie_roots);
+  safe_free(old.mask_trie_nodes);
   safe_free(old.tree_nodes);
   safe_free(old.tree_posting_lists);
   safe_free(old.tree_child_cache);
@@ -6425,6 +6672,9 @@ static void compact_back_demod_compact_internal(
   index->occurrences_examined = occurrences_examined;
   index->path_filter_checks = path_checks;
   index->path_filter_rejects = path_rejects;
+  index->mask_trie_queries = old.mask_trie_queries;
+  index->mask_trie_nodes_examined = old.mask_trie_nodes_examined;
+  index->mask_trie_prunes = old.mask_trie_prunes;
   index->tree_queries = old.tree_queries;
   index->tree_nodes_examined = old.tree_nodes_examined;
   index->tree_sibling_checks = old.tree_sibling_checks;
@@ -6581,6 +6831,8 @@ void compact_back_demod_compact_materialized(
   safe_free(old.symbol_hashes);
   safe_free(old.path_buckets);
   safe_free(old.path_bucket_hash);
+  safe_free(old.mask_trie_roots);
+  safe_free(old.mask_trie_nodes);
   safe_free(old.tree_nodes);
   safe_free(old.tree_posting_lists);
   safe_free(old.tree_child_cache);
@@ -6659,6 +6911,9 @@ void compact_back_demod_compact_materialized(
   index->occurrences_examined = occurrences_examined;
   index->path_filter_checks = path_checks;
   index->path_filter_rejects = path_rejects;
+  index->mask_trie_queries = old.mask_trie_queries;
+  index->mask_trie_nodes_examined = old.mask_trie_nodes_examined;
+  index->mask_trie_prunes = old.mask_trie_prunes;
   index->tree_queries = old.tree_queries;
   index->tree_nodes_examined = old.tree_nodes_examined;
   index->tree_sibling_checks = old.tree_sibling_checks;
@@ -7331,6 +7586,11 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->occurrences_examined = index->occurrences_examined;
   stats->path_filter_checks = index->path_filter_checks;
   stats->path_filter_rejects = index->path_filter_rejects;
+  stats->mask_trie_nodes = index->mask_trie_node_count == 0 ? 0 :
+    index->mask_trie_node_count - 1;
+  stats->mask_trie_queries = index->mask_trie_queries;
+  stats->mask_trie_nodes_examined = index->mask_trie_nodes_examined;
+  stats->mask_trie_prunes = index->mask_trie_prunes;
   stats->inactive_groups_examined = index->inactive_groups_examined;
   stats->duplicate_groups_examined = index->duplicate_groups_examined;
   stats->posting_bytes_decoded = index->posting_bytes_decoded;
@@ -7365,6 +7625,8 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
     index->symbol_capacity * sizeof(*index->symbol_hashes) +
     index->path_bucket_capacity * sizeof(*index->path_buckets) +
     index->path_bucket_hash_capacity * sizeof(*index->path_bucket_hash) +
+    index->mask_trie_root_capacity * sizeof(*index->mask_trie_roots) +
+    index->mask_trie_node_capacity * sizeof(*index->mask_trie_nodes) +
     index->tree_node_capacity * sizeof(*index->tree_nodes) +
     index->tree_posting_list_capacity *
       sizeof(*index->tree_posting_lists) +
@@ -7411,6 +7673,8 @@ void compact_back_demod_free(Compact_back_demod_index index)
   safe_free(index->symbol_hashes);
   safe_free(index->path_buckets);
   safe_free(index->path_bucket_hash);
+  safe_free(index->mask_trie_roots);
+  safe_free(index->mask_trie_nodes);
   safe_free(index->tree_nodes);
   safe_free(index->tree_posting_lists);
   safe_free(index->tree_child_cache);
