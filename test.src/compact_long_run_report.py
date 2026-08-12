@@ -36,6 +36,7 @@ DEMOD_RE = re.compile(
 
 PREFIXES = (
     ("Compact_back_demod:", "back"),
+    ("Compact_back_edge:", "back_edge"),
     ("Compact_back_route:", "back_route"),
     ("Dense_passive:", "passive"),
     ("Dense_passive_selector:", "selector"),
@@ -96,6 +97,12 @@ CUMULATIVE_KEYS = (
     "back_position_credit_earned", "back_position_credit_spent",
     "back_position_credit_reservations",
     "back_position_admission_freezes",
+    "back_edge_queries", "back_edge_empty_queries",
+    "back_edge_bypass_queries", "back_edge_intersection_queries",
+    "back_edge_query_features", "back_edge_selected_features",
+    "back_edge_posting_records", "back_edge_candidate_records",
+    "back_edge_exact_rejects", "back_edge_append_records",
+    "back_edge_append_token_visits", "back_edge_append_feature_lookups",
     "rewrite_deep_cache_lookups", "rewrite_deep_cache_hits",
     "rewrite_deep_cache_misses", "rewrite_deep_cache_replacements",
     "rewrite_deep_cache_growth_denials",
@@ -364,6 +371,15 @@ def derive_intervals(samples):
         row["back_children_per_query"] = safe_ratio(
             delta_children, delta_queries)
         row["back_combined_per_query"] = safe_ratio(combined, delta_queries)
+        row["back_edge_posting_records_per_query"] = safe_ratio(
+            row.get("delta_back_edge_posting_records"), delta_queries)
+        row["back_edge_candidates_per_query"] = safe_ratio(
+            row.get("delta_back_edge_candidate_records"), delta_queries)
+        row["back_edge_exact_reject_pct"] = safe_ratio(
+            row.get("delta_back_edge_exact_rejects"),
+            row.get("delta_back_edge_candidate_records"))
+        if row["back_edge_exact_reject_pct"] is not None:
+            row["back_edge_exact_reject_pct"] *= 100.0
         row["back_lookup_cpu_pct"] = (None if delta_cpu is None else
             safe_ratio(row.get("delta_back_timing_lookup_seconds"), delta_cpu))
         if row["back_lookup_cpu_pct"] is not None:
@@ -900,6 +916,24 @@ def markdown(label, rows, summary, total_samples=None):
                 fmt(row.get("delta_back_route_reversions")),
                 fmt(row.get("delta_back_route_hysteresis_holds"))))
         print()
+    if any(number(row, "back_edge_enabled", 0) > 0 or
+           row.get("back_edge_enabled") == "yes" for row in rows):
+        print("| CPU s | Edge features | Edge MiB | Edge queries | "
+              "Empty | Bypassed | Posting records/query | "
+              "Candidates/query | Exact reject % |")
+        print("|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+        for row in rows:
+            print("| {} | {} | {} | {} | {} | {} | {} | {} | {} |".format(
+                fmt(row.get("user_cpu")),
+                fmt(row.get("back_edge_features")),
+                fmt(safe_ratio(row.get("back_edge_bytes"), 1024 * 1024), 1),
+                fmt(row.get("delta_back_edge_queries")),
+                fmt(row.get("delta_back_edge_empty_queries")),
+                fmt(row.get("delta_back_edge_bypass_queries")),
+                fmt(row.get("back_edge_posting_records_per_query"), 1),
+                fmt(row.get("back_edge_candidates_per_query"), 1),
+                fmt(row.get("back_edge_exact_reject_pct"), 1)))
+        print()
     if any(number(row, "rewrite_subject_atoms", 0) > 0 for row in rows):
         print("| CPU s | Rewrite atoms | Initial nodes/atom | Attempts/atom | "
               "Target nodes/attempt | Legacy/new prep nodes |")
@@ -1082,6 +1116,18 @@ TSV_COLUMNS = (
     "delta_back_position_credit_reservations",
     "delta_back_position_admission_freezes",
     "back_position_admission_frozen", "back_position_estimated",
+    "back_edge_enabled", "back_edge_features", "back_edge_postings",
+    "back_edge_bytes", "delta_back_edge_queries",
+    "delta_back_edge_empty_queries", "delta_back_edge_bypass_queries",
+    "delta_back_edge_intersection_queries",
+    "delta_back_edge_query_features", "delta_back_edge_selected_features",
+    "delta_back_edge_posting_records", "delta_back_edge_candidate_records",
+    "delta_back_edge_exact_rejects",
+    "back_edge_posting_records_per_query",
+    "back_edge_candidates_per_query", "back_edge_exact_reject_pct",
+    "delta_back_edge_append_records",
+    "delta_back_edge_append_token_visits",
+    "delta_back_edge_append_feature_lookups",
     "residency_pss", "residency_anonymous", "residency_swap",
     "passive_records", "passive_directory_logical", "selector_buffer_bytes",
     "selector_run_logical", "ancestor_file_reads_bytes",
