@@ -10711,6 +10711,8 @@ static void configure_search_indexes(void)
     (unsigned) parm(Opt->compact_index_stale_pct));
   configure_compact_unit_stale_pct(
     (unsigned) parm(Opt->compact_index_stale_pct));
+  configure_compact_nonunit_stale_pct(
+    (unsigned) parm(Opt->compact_index_stale_pct));
   compact_unit_index_set_strategy(
     str_ident(stringparm1(Opt->compact_unit_strategy), "position") ?
       COMPACT_UNIT_POSITION :

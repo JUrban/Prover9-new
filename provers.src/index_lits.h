@@ -104,6 +104,8 @@ void configure_compact_unit_stale_pct(unsigned percentage);
 void configure_compact_nonunit_index(BOOL audit, BOOL authoritative,
                                      BOOL path_filter);
 
+void configure_compact_nonunit_stale_pct(unsigned percentage);
+
 unsigned long long compact_unit_subsumption_audit_failures(void);
 
 void fprint_compact_unit_index(FILE *fp);

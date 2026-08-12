@@ -67,6 +67,18 @@ int main(void)
   CHECK(stats.label_bytes > 0 && stats.total_bytes > 0 &&
         stats.peak_bytes >= stats.total_bytes,
         "resident byte accounting is present");
+  compact_feature_index_compact_all_stale(index);
+  compact_feature_index_get_stats(index, &stats);
+  CHECK(stats.active == 4 && stats.physical == 4 &&
+        stats.retired == 1 && stats.compactions == 1,
+        "forced compaction removes the retired physical record");
+  CHECK(stats.snapshot_records == 4 && stats.snapshot_bytes > 0 &&
+        stats.maintenance_scratch_peak > 0,
+        "compaction snapshot and scratch accounting are present");
+  ids = compact_feature_forward_candidates(index, forward, none, &count);
+  CHECK(count == 3 && ids[0] == 30 && ids[1] == 50 && ids[2] == 10,
+        "compaction preserves forward candidate order");
+  safe_free(ids);
   compact_feature_index_free(index);
 
   {
@@ -154,6 +166,97 @@ int main(void)
     delete_clause(repeated);
     delete_clause(consistent);
     delete_clause(inconsistent);
+  }
+
+  {
+    enum { LIVE = 64, GENERATIONS = 100, RETIRED_PER_GENERATION = 1024 };
+    unsigned long long next_id = 1000;
+    unsigned long long plateau_bytes = 0;
+    unsigned long long *expected;
+    size_t expected_count = 0;
+    struct compact_feature_structural_summary query_structural = {
+      UINT64_MAX, UINT32_MAX, UINT32_MAX
+    };
+    int query[] = {100, 100};
+    int vector[2];
+    int generation, j;
+
+    compact_feature_index_set_compaction_stale_pct(25);
+    index = compact_feature_index_init(2, TRUE);
+    for (j = 0; j < LIVE; j++) {
+      struct compact_feature_structural_summary structural = {
+        UINT64_C(1) << (j % 16), 0, 0
+      };
+      vector[0] = j % 8;
+      vector[1] = (j / 8) % 8;
+      CHECK(compact_feature_index_add(index, (unsigned long long) j + 1,
+                                      vector, structural),
+            "add fixed-live aging record");
+    }
+    expected = compact_feature_forward_candidates(
+      index, query, query_structural, &expected_count);
+    CHECK(expected_count == LIVE,
+          "fixed-live aging baseline retrieves every live record");
+
+    for (generation = 0; generation < GENERATIONS; generation++) {
+      unsigned long long *before, *after;
+      size_t before_count = 0, after_count = 0;
+      unsigned long long dead_before, bytes_after;
+      for (j = 0; j < RETIRED_PER_GENERATION; j++) {
+        struct compact_feature_structural_summary structural = {
+          UINT64_C(1) << (j % 16), 0, 0
+        };
+        unsigned long long id = next_id++;
+        vector[0] = j % 16;
+        vector[1] = (j / 16) % 16;
+        CHECK(compact_feature_index_add(index, id, vector, structural),
+              "add transient aging record");
+        CHECK(compact_feature_index_remove(index, id),
+              "retire transient aging record");
+      }
+      CHECK(compact_feature_index_compaction_needed(index),
+            "fixed-live aging reaches deterministic compaction threshold");
+      compact_feature_index_get_stats(index, &stats);
+      dead_before = stats.forward_profile.dead_examined;
+      before = compact_feature_forward_candidates(
+        index, query, query_structural, &before_count);
+      CHECK(before_count == expected_count &&
+            memcmp(before, expected,
+                   expected_count * sizeof(*expected)) == 0,
+            "aging before compaction preserves candidate order");
+      compact_feature_index_get_stats(index, &stats);
+      CHECK(stats.forward_profile.dead_examined >=
+              dead_before + RETIRED_PER_GENERATION,
+            "aging query observes the accumulated dead postings");
+
+      compact_feature_index_compact(index);
+      after = compact_feature_forward_candidates(
+        index, query, query_structural, &after_count);
+      CHECK(after_count == expected_count &&
+            memcmp(after, expected,
+                   expected_count * sizeof(*expected)) == 0,
+            "aging compaction preserves candidate order");
+      compact_feature_index_get_stats(index, &stats);
+      CHECK(stats.active == LIVE && stats.physical == LIVE,
+            "fixed-live physical population returns to its live plateau");
+      bytes_after = stats.total_bytes;
+      if (generation == 0)
+        plateau_bytes = bytes_after;
+      CHECK(bytes_after == plateau_bytes,
+            "fixed-live allocated bytes return to a stable plateau");
+      safe_free(before);
+      safe_free(after);
+    }
+    compact_feature_index_get_stats(index, &stats);
+    CHECK(stats.compactions == GENERATIONS &&
+          stats.retired ==
+            (unsigned long long) GENERATIONS * RETIRED_PER_GENERATION &&
+          stats.snapshot_records ==
+            (unsigned long long) GENERATIONS * LIVE &&
+          stats.bytes_reclaimed > 0,
+          "fixed-live aging accounts for every rebuild and retired record");
+    safe_free(expected);
+    compact_feature_index_free(index);
   }
 
   if (Failures != 0) {

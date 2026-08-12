@@ -1,11 +1,15 @@
 #include "compact_feature_index.h"
 
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define CFI_NONE 0U
 #define CFI_TOMBSTONE UINT64_MAX
+
+static unsigned Compaction_stale_pct = 25;
 
 struct cfi_node {
   uint32_t label_offset;
@@ -22,7 +26,13 @@ struct cfi_posting {
 
 struct cfi_record {
   unsigned long long proof_id;
+  uint32_t leaf;
   unsigned char active;
+};
+
+struct cfi_snapshot_record {
+  unsigned long long proof_id;
+  struct compact_feature_structural_summary structural;
 };
 
 struct compact_feature_index {
@@ -60,6 +70,11 @@ struct compact_feature_index {
   unsigned long long back_candidates;
   unsigned long long back_structural_rejects;
   unsigned long long back_variable_rejects;
+  unsigned long long compactions;
+  unsigned long long bytes_reclaimed;
+  unsigned long long snapshot_records;
+  unsigned long long snapshot_bytes;
+  unsigned long long maintenance_scratch_peak;
   struct compact_query_profile forward_profile;
   struct compact_query_profile back_profile;
   unsigned long long query_nodes;
@@ -70,6 +85,7 @@ struct compact_feature_index {
   unsigned long long query_variable_rejects;
   Clock forward_lookup_clock;
   Clock back_lookup_clock;
+  Clock maintenance_clock;
   unsigned long long peak_bytes;
 };
 
@@ -463,6 +479,7 @@ Compact_feature_index compact_feature_index_init(int feature_length,
   index->structural_filter = structural_filter;
   index->forward_lookup_clock = clock_init("compact_nonunit_forward_lookup");
   index->back_lookup_clock = clock_init("compact_nonunit_back_lookup");
+  index->maintenance_clock = clock_init("compact_nonunit_maintenance");
   (void) new_node(index, 0, 0);  /* reserved null node */
   index->root = new_node(index, 0, 0);
   ENSURE_ARRAY(index, postings, posting_count, posting_capacity,
@@ -499,6 +516,7 @@ BOOL compact_feature_index_add(Compact_feature_index index,
   if (index->structural_filter)
     index->structural_summaries[record_index] = structural;
   node = insert_vector(index, features);
+  record->leaf = node;
   ENSURE_ARRAY(index, postings, posting_count, posting_capacity,
                "compact_feature_index: posting overflow");
   if (index->posting_count > UINT32_MAX)
@@ -535,6 +553,237 @@ BOOL compact_feature_index_remove(Compact_feature_index index,
   index->active--;
   index->retired++;
   return TRUE;
+}
+
+BOOL compact_feature_index_compaction_needed(Compact_feature_index index)
+{
+  unsigned long long physical, stale, threshold;
+  if (index == NULL || index->record_count <= 1)
+    return FALSE;
+  physical = index->record_count - 1;
+  stale = physical - index->active;
+  threshold = (index->active / 100) * Compaction_stale_pct +
+    ((index->active % 100) * Compaction_stale_pct + 99) / 100;
+  if (threshold < 1024)
+    threshold = 1024;
+  return stale >= threshold;
+}
+
+void compact_feature_index_set_compaction_stale_pct(unsigned percentage)
+{
+  if (percentage == 0 || percentage > 1000)
+    fatal_error("compact_feature_index: invalid stale percentage");
+  Compaction_stale_pct = percentage;
+}
+
+static void set_parent_links(Compact_feature_index index, uint32_t parent,
+                             uint32_t *parents)
+{
+  uint32_t child;
+  for (child = index->nodes[parent].first_child; child != CFI_NONE;
+       child = index->nodes[child].next_sibling) {
+    if (child >= index->node_count || parents[child] != CFI_NONE)
+      fatal_error("compact_feature_index: corrupt radix parent link");
+    parents[child] = parent;
+    set_parent_links(index, child, parents);
+  }
+}
+
+static void reconstruct_record_features(Compact_feature_index index,
+                                        const struct cfi_record *record,
+                                        const uint32_t *parents,
+                                        int *features)
+{
+  uint32_t node = record->leaf;
+  size_t end = (size_t) index->feature_length;
+  if (node == CFI_NONE || node >= index->node_count)
+    fatal_error("compact_feature_index: corrupt record leaf");
+  while (node != index->root) {
+    const struct cfi_node *edge = &index->nodes[node];
+    size_t i;
+    if (edge->label_length == 0 || edge->label_length > end ||
+        edge->label_offset > index->label_count ||
+        edge->label_length > index->label_count - edge->label_offset)
+      fatal_error("compact_feature_index: corrupt radix record path");
+    end -= edge->label_length;
+    for (i = 0; i < edge->label_length; i++)
+      features[end + i] = index->labels[edge->label_offset + i];
+    node = parents[node];
+    if (node == CFI_NONE)
+      fatal_error("compact_feature_index: disconnected record leaf");
+  }
+  if (end != 0)
+    fatal_error("compact_feature_index: incomplete record feature path");
+}
+
+static void free_index_arrays(struct compact_feature_index *index)
+{
+  safe_free(index->nodes);
+  safe_free(index->labels);
+  safe_free(index->postings);
+  safe_free(index->records);
+  safe_free(index->structural_summaries);
+  safe_free(index->hash_keys);
+  safe_free(index->hash_values);
+  safe_free(index->results);
+}
+
+static void compact_feature_index_compact_internal(
+  Compact_feature_index index, BOOL force)
+{
+  Compact_feature_index replacement;
+  struct compact_feature_index old;
+  struct cfi_snapshot_record snapshot_record;
+  uint32_t *parents;
+  int *features;
+  FILE *snapshot;
+  int snapshot_fd;
+  unsigned long long old_bytes, old_peak, old_peak_active;
+  unsigned long long retired, compactions, reclaimed;
+  unsigned long long snapshot_records, snapshot_bytes;
+  unsigned long long maintenance_scratch_peak;
+  unsigned long long forward_queries, forward_candidates;
+  unsigned long long forward_structural_rejects, forward_variable_rejects;
+  unsigned long long back_queries, back_candidates;
+  unsigned long long back_structural_rejects, back_variable_rejects;
+  struct compact_query_profile forward_profile, back_profile;
+  size_t i, written = 0;
+  size_t feature_bytes;
+
+  if (index == NULL ||
+      (!force && !compact_feature_index_compaction_needed(index)) ||
+      (force && index->record_count - 1 == index->active))
+    return;
+  if ((size_t) index->feature_length > SIZE_MAX / sizeof(*features))
+    fatal_error("compact_feature_index: feature snapshot overflow");
+  feature_bytes = (size_t) index->feature_length * sizeof(*features);
+  if (index->node_count > SIZE_MAX / sizeof(*parents))
+    fatal_error("compact_feature_index: parent snapshot overflow");
+
+  clock_start(index->maintenance_clock);
+  old_bytes = index_bytes(index);
+  old_peak = index->peak_bytes;
+  old_peak_active = index->peak;
+  retired = index->retired;
+  compactions = index->compactions;
+  reclaimed = index->bytes_reclaimed;
+  snapshot_records = index->snapshot_records;
+  snapshot_bytes = index->snapshot_bytes;
+  maintenance_scratch_peak = index->maintenance_scratch_peak;
+  forward_queries = index->forward_queries;
+  forward_candidates = index->forward_candidates;
+  forward_structural_rejects = index->forward_structural_rejects;
+  forward_variable_rejects = index->forward_variable_rejects;
+  back_queries = index->back_queries;
+  back_candidates = index->back_candidates;
+  back_structural_rejects = index->back_structural_rejects;
+  back_variable_rejects = index->back_variable_rejects;
+  forward_profile = index->forward_profile;
+  back_profile = index->back_profile;
+
+  parents = safe_calloc(index->node_count, sizeof(*parents));
+  features = safe_malloc(feature_bytes);
+  set_parent_links(index, index->root, parents);
+  {
+    unsigned long long scratch =
+      (unsigned long long) index->node_count * sizeof(*parents) +
+      feature_bytes;
+    if (scratch > maintenance_scratch_peak)
+      maintenance_scratch_peak = scratch;
+    if (old_bytes <= ULLONG_MAX - scratch && old_bytes + scratch > old_peak)
+      old_peak = old_bytes + scratch;
+  }
+
+  snapshot_fd = open_private_temp_file("prover9-nonunit-XXXXXX");
+  if (snapshot_fd < 0)
+    fatal_error("compact_feature_index: cannot create rebuild snapshot");
+  snapshot = fdopen(snapshot_fd, "w+b");
+  if (snapshot == NULL) {
+    close(snapshot_fd);
+    fatal_error("compact_feature_index: cannot open rebuild snapshot");
+  }
+  for (i = 1; i < index->record_count; i++)
+    if (index->records[i].active) {
+      snapshot_record.proof_id = index->records[i].proof_id;
+      memset(&snapshot_record.structural, 0,
+             sizeof(snapshot_record.structural));
+      if (index->structural_filter)
+        snapshot_record.structural = index->structural_summaries[i];
+      reconstruct_record_features(index, &index->records[i], parents,
+                                  features);
+      if (fwrite(&snapshot_record, sizeof(snapshot_record), 1, snapshot) != 1 ||
+          fwrite(features, feature_bytes, 1, snapshot) != 1)
+        fatal_error("compact_feature_index: cannot write rebuild snapshot");
+      written++;
+    }
+  if (written != index->active || fflush(snapshot) != 0 ||
+      fseek(snapshot, 0, SEEK_SET) != 0)
+    fatal_error("compact_feature_index: incomplete rebuild snapshot");
+  safe_free(parents);
+  safe_free(features);
+
+  /* The complete live recipe is now on disk.  Release predecessor arrays
+     before allocating the replacement so compaction does not double a large
+     nonunit index in process RAM. */
+  old = *index;
+  free_index_arrays(&old);
+  replacement = compact_feature_index_init(old.feature_length,
+                                           old.structural_filter);
+  features = safe_malloc(feature_bytes);
+  for (i = 0; i < written; i++) {
+    if (fread(&snapshot_record, sizeof(snapshot_record), 1, snapshot) != 1 ||
+        fread(features, feature_bytes, 1, snapshot) != 1)
+      fatal_error("compact_feature_index: cannot read rebuild snapshot");
+    if (!compact_feature_index_add(replacement, snapshot_record.proof_id,
+                                   features, snapshot_record.structural))
+      fatal_error("compact_feature_index: cannot rebuild live record");
+  }
+  safe_free(features);
+  if (fclose(snapshot) != 0)
+    fatal_error("compact_feature_index: cannot close rebuild snapshot");
+
+  free_clock(replacement->forward_lookup_clock);
+  free_clock(replacement->back_lookup_clock);
+  free_clock(replacement->maintenance_clock);
+  replacement->forward_lookup_clock = old.forward_lookup_clock;
+  replacement->back_lookup_clock = old.back_lookup_clock;
+  replacement->maintenance_clock = old.maintenance_clock;
+  *index = *replacement;
+  safe_free(replacement);
+
+  index->retired = retired;
+  index->compactions = compactions + 1;
+  index->bytes_reclaimed = reclaimed +
+    (old_bytes > index_bytes(index) ? old_bytes - index_bytes(index) : 0);
+  index->snapshot_records = snapshot_records + written;
+  index->snapshot_bytes = snapshot_bytes + written *
+    (sizeof(snapshot_record) + feature_bytes);
+  index->maintenance_scratch_peak = maintenance_scratch_peak;
+  index->forward_queries = forward_queries;
+  index->forward_candidates = forward_candidates;
+  index->forward_structural_rejects = forward_structural_rejects;
+  index->forward_variable_rejects = forward_variable_rejects;
+  index->back_queries = back_queries;
+  index->back_candidates = back_candidates;
+  index->back_structural_rejects = back_structural_rejects;
+  index->back_variable_rejects = back_variable_rejects;
+  index->forward_profile = forward_profile;
+  index->back_profile = back_profile;
+  if (old_peak > index->peak_bytes)
+    index->peak_bytes = old_peak;
+  if (old_peak_active > index->peak)
+    index->peak = old_peak_active;
+  clock_stop(index->maintenance_clock);
+}
+
+void compact_feature_index_compact(Compact_feature_index index)
+{
+  compact_feature_index_compact_internal(index, FALSE);
+}
+
+void compact_feature_index_compact_all_stale(Compact_feature_index index)
+{
+  compact_feature_index_compact_internal(index, TRUE);
 }
 
 static void ensure_results(Compact_feature_index index, size_t needed)
@@ -715,10 +964,16 @@ void compact_feature_index_get_stats(Compact_feature_index index,
   stats->back_candidates = index->back_candidates;
   stats->back_structural_rejects = index->back_structural_rejects;
   stats->back_variable_rejects = index->back_variable_rejects;
+  stats->compactions = index->compactions;
+  stats->bytes_reclaimed = index->bytes_reclaimed;
+  stats->snapshot_records = index->snapshot_records;
+  stats->snapshot_bytes = index->snapshot_bytes;
+  stats->maintenance_scratch_peak = index->maintenance_scratch_peak;
   stats->forward_profile = index->forward_profile;
   stats->back_profile = index->back_profile;
   stats->forward_lookup_seconds = clock_seconds(index->forward_lookup_clock);
   stats->back_lookup_seconds = clock_seconds(index->back_lookup_clock);
+  stats->maintenance_seconds = clock_seconds(index->maintenance_clock);
   stats->node_bytes = index->node_capacity * sizeof(*index->nodes);
   stats->label_bytes = index->label_capacity * sizeof(*index->labels);
   stats->posting_bytes = index->posting_capacity * sizeof(*index->postings);
@@ -736,15 +991,9 @@ void compact_feature_index_free(Compact_feature_index index)
 {
   if (index == NULL)
     return;
-  safe_free(index->nodes);
-  safe_free(index->labels);
-  safe_free(index->postings);
-  safe_free(index->records);
-  safe_free(index->structural_summaries);
-  safe_free(index->hash_keys);
-  safe_free(index->hash_values);
-  safe_free(index->results);
+  free_index_arrays(index);
   free_clock(index->forward_lookup_clock);
   free_clock(index->back_lookup_clock);
+  free_clock(index->maintenance_clock);
   safe_free(index);
 }

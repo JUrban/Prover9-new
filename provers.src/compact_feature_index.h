@@ -27,10 +27,16 @@ struct compact_feature_index_stats {
   unsigned long long back_candidates;
   unsigned long long back_structural_rejects;
   unsigned long long back_variable_rejects;
+  unsigned long long compactions;
+  unsigned long long bytes_reclaimed;
+  unsigned long long snapshot_records;
+  unsigned long long snapshot_bytes;
+  unsigned long long maintenance_scratch_peak;
   struct compact_query_profile forward_profile;
   struct compact_query_profile back_profile;
   double forward_lookup_seconds;
   double back_lookup_seconds;
+  double maintenance_seconds;
   unsigned long long node_bytes;
   unsigned long long label_bytes;
   unsigned long long posting_bytes;
@@ -61,6 +67,16 @@ BOOL compact_feature_index_add(Compact_feature_index index,
 
 BOOL compact_feature_index_remove(Compact_feature_index index,
                                   unsigned long long proof_id);
+
+BOOL compact_feature_index_compaction_needed(Compact_feature_index index);
+
+void compact_feature_index_set_compaction_stale_pct(unsigned percentage);
+
+void compact_feature_index_compact(Compact_feature_index index);
+
+/* Focused-test and coordinated-maintenance entry point.  This removes every
+   stale record if at least one is present, irrespective of the normal floor. */
+void compact_feature_index_compact_all_stale(Compact_feature_index index);
 
 /* Candidate orders exactly follow di_tree_forward()/di_tree_back().  The
    caller owns the result and applies the exact subsumption test. */

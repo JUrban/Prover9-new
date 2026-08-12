@@ -165,6 +165,11 @@ void configure_compact_nonunit_index(BOOL audit, BOOL authoritative,
   Compact_nonunit_back_exact_tests = 0;
 }
 
+void configure_compact_nonunit_stale_pct(unsigned percentage)
+{
+  compact_feature_index_set_compaction_stale_pct(percentage);
+}
+
 static BOOL compact_nonunit_index_mode(void)
 {
   return Compact_nonunit_audit || Compact_nonunit_authoritative;
@@ -184,6 +189,8 @@ void fprint_compact_nonunit_index(FILE *fp)
           "back_queries=%llu, "
           "back_candidates=%llu, back_exact_tests=%llu, "
           "back_path_rejects=%llu, back_variable_rejects=%llu, "
+          "compactions=%llu, reclaimed=%llu, snapshot_records=%llu, "
+          "snapshot_bytes=%llu, maintenance_scratch_peak=%llu, "
           "nodes=%llu, labels=%llu, postings=%llu, "
           "records=%llu, structural=%llu, hash=%llu, "
           "scratch=%llu, bytes=%llu, peak_bytes=%llu.\n",
@@ -196,6 +203,8 @@ void fprint_compact_nonunit_index(FILE *fp)
           stats.back_queries, stats.back_candidates,
           Compact_nonunit_back_exact_tests, stats.back_structural_rejects,
           stats.back_variable_rejects,
+          stats.compactions, stats.bytes_reclaimed, stats.snapshot_records,
+          stats.snapshot_bytes, stats.maintenance_scratch_peak,
           stats.node_bytes, stats.label_bytes, stats.posting_bytes,
           stats.record_bytes, stats.structural_bytes, stats.hash_bytes,
           stats.scratch_bytes, stats.total_bytes,
@@ -209,11 +218,13 @@ void fprint_compact_nonunit_index(FILE *fp)
           "Compact_index_timing: component=nonunit, "
           "summary_seconds=%.3f, forward_lookup_seconds=%.3f, "
           "back_lookup_seconds=%.3f, "
-          "exact_seconds=%.3f, materialize_seconds=%.3f.\n",
+          "exact_seconds=%.3f, materialize_seconds=%.3f, "
+          "maintenance_seconds=%.3f.\n",
           clock_seconds(Compact_nonunit_summary_clock),
           stats.forward_lookup_seconds, stats.back_lookup_seconds,
           clock_seconds(Compact_nonunit_exact_clock),
-          clock_seconds(Compact_nonunit_materialize_clock));
+          clock_seconds(Compact_nonunit_materialize_clock),
+          stats.maintenance_seconds);
 }
 
 static void compact_nonunit_audit_mismatch(const char *operation,
@@ -636,6 +647,9 @@ void index_literals(Topform c, Indexop op, Clock clock, BOOL no_fapl)
         fatal_error(op == INSERT ?
           "index_literals: duplicate compact nonunit" :
           "index_literals: missing compact nonunit");
+      if (op == DELETE &&
+          compact_feature_index_compaction_needed(Compact_nonunits))
+        compact_feature_index_compact(Compact_nonunits);
     }
     if (!Compact_nonunit_authoritative) {
       if (op == INSERT)
