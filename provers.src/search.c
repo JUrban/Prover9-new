@@ -2935,6 +2935,8 @@ void update_stats(void)
 static
 void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
 {
+  fprintf(fp, "Statistics_format: comma_num_buffers=%d.\n",
+          comma_num_buffer_count());
   fprintf(fp,"\nGiven=%s. Generated=%s. Kept=%s. proofs=%s.\n",
 	  comma_num(s.given), comma_num(s.generated),
 	  comma_num(s.kept), comma_num(s.proofs));

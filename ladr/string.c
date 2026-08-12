@@ -395,6 +395,12 @@ If comma formatting is disabled, returns plain number string.
 #define COMMA_NUM_SIZE 32  /* enough for 64-bit with commas */
 
 /* PUBLIC */
+int comma_num_buffer_count(void)
+{
+  return COMMA_NUM_BUFFERS;
+}
+
+/* PUBLIC */
 char *comma_num(unsigned long long n)
 {
   static char buffers[COMMA_NUM_BUFFERS][COMMA_NUM_SIZE];

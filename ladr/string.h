@@ -68,4 +68,6 @@ void set_comma_formatting(BOOL enabled);
 
 char *comma_num(unsigned long long n);
 
+int comma_num_buffer_count(void);
+
 #endif  /* conditional compilation of whole file */

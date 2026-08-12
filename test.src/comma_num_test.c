@@ -15,6 +15,13 @@ int main(void)
   char *formatted[REPORT_ARGUMENTS];
   int i;
 
+  if (comma_num_buffer_count() < REPORT_ARGUMENTS) {
+    fprintf(stderr,
+            "comma_num_test: only %d live slots for %d report arguments\n",
+            comma_num_buffer_count(), REPORT_ARGUMENTS);
+    return EXIT_FAILURE;
+  }
+
   set_comma_formatting(FALSE);
   for (i = 0; i < REPORT_ARGUMENTS; i++)
     formatted[i] = comma_num(1000000000000ULL + (unsigned long long) i);
