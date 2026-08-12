@@ -76,6 +76,9 @@ struct dense_passive_selector_stats {
   unsigned long long file_evictions;
   unsigned long long file_eviction_bytes;
   unsigned long long file_eviction_failures;
+  unsigned long long file_read_evictions;
+  unsigned long long file_read_eviction_bytes;
+  unsigned long long file_read_eviction_failures;
   unsigned long long stale_entries_discarded;
 };
 

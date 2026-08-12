@@ -40,7 +40,12 @@ enum { GS_ORDER_WEIGHT,
 typedef struct giv_select *Giv_select;
 
 #define DENSE_SELECTOR_RUN_LEVELS 64
-#define DENSE_SELECTOR_READ_ENTRIES 256
+/* 8,192 24-byte entries make a 192 KiB block, a multiple of both common 4 KiB
+   and 64 KiB page sizes.  Besides amortizing pread/fadvise calls, this lets
+   consumed sequential ranges be discarded without retaining a partial page
+   needed by the next block.  One buffer exists only for each logarithmically
+   bounded live run. */
+#define DENSE_SELECTOR_READ_ENTRIES 8192
 
 struct dense_selector_entry {
   unsigned long long id;
@@ -90,6 +95,9 @@ struct giv_select {
   unsigned long long dense_file_evictions;
   unsigned long long dense_file_eviction_bytes;
   unsigned long long dense_file_eviction_failures;
+  unsigned long long dense_file_read_evictions;
+  unsigned long long dense_file_read_eviction_bytes;
+  unsigned long long dense_file_read_eviction_failures;
   unsigned long long dense_stale_entries_discarded;
 };  /* struct giv_select */
 
@@ -829,6 +837,9 @@ static BOOL dense_selector_run_next(Giv_select gs,
       (size_t) run->remaining : DENSE_SELECTOR_READ_ENTRIES;
     size_t bytes = request * sizeof(*run->read_buffer);
     size_t done = 0;
+#if defined(POSIX_FADV_DONTNEED)
+    off_t block_offset = run->next_offset;
+#endif
     if (run->read_buffer == NULL)
       run->read_buffer = safe_malloc(
         DENSE_SELECTOR_READ_ENTRIES * sizeof(*run->read_buffer));
@@ -846,6 +857,18 @@ static BOOL dense_selector_run_next(Giv_select gs,
     run->read_at = 0;
     gs->dense_file_reads++;
     gs->dense_file_read_bytes += bytes;
+#if defined(POSIX_FADV_DONTNEED)
+    /* pread has copied the immutable block into the bounded userspace buffer;
+       neither selection nor a merge will revisit this file range.  Discard it
+       now so a long-lived run cannot turn consumed history into cgroup cache. */
+    if (posix_fadvise(run->fd, block_offset, (off_t) bytes,
+                      POSIX_FADV_DONTNEED) != 0)
+      gs->dense_file_read_eviction_failures++;
+    else {
+      gs->dense_file_read_evictions++;
+      gs->dense_file_read_eviction_bytes += bytes;
+    }
+#endif
   }
   *entry = run->read_buffer[run->read_at++];
   run->remaining--;
@@ -1137,6 +1160,9 @@ static void dense_selector_initialize(Giv_select gs)
   gs->dense_file_evictions = 0;
   gs->dense_file_eviction_bytes = 0;
   gs->dense_file_eviction_failures = 0;
+  gs->dense_file_read_evictions = 0;
+  gs->dense_file_read_eviction_bytes = 0;
+  gs->dense_file_read_eviction_failures = 0;
   gs->dense_stale_entries_discarded = 0;
 }
 
@@ -1178,6 +1204,10 @@ static void dense_selector_add_stats(
   stats->file_evictions += gs->dense_file_evictions;
   stats->file_eviction_bytes += gs->dense_file_eviction_bytes;
   stats->file_eviction_failures += gs->dense_file_eviction_failures;
+  stats->file_read_evictions += gs->dense_file_read_evictions;
+  stats->file_read_eviction_bytes += gs->dense_file_read_eviction_bytes;
+  stats->file_read_eviction_failures +=
+    gs->dense_file_read_eviction_failures;
   stats->stale_entries_discarded += gs->dense_stale_entries_discarded;
 }
 

@@ -51,9 +51,12 @@ does not reward false candidates or broad index scans, excludes warm-up, and
 still catches both cumulative drift and an unstable tail.  Raw first-to-last
 CPU/query and the separately reported tree/group/sibling/child work counts
 remain diagnostic because those operations do not have equal costs.  Missing
-evidence is
-`unknown`, never a pass.  `eligible` still requires independent proof checking
-and total-job/cgroup accounting.  For uncompressed matrix output, a neighboring
+evidence is `unknown`, never a pass.  `eligible` still requires independent
+proof checking and total-job/cgroup accounting.  A file-selector candidate
+must exercise at least one read, successfully advise at least 99% of its
+consumed read bytes out of cache, and report zero advice failures; heap
+selectors pass this not-applicable gate.  For uncompressed matrix output, a
+neighboring
 GNU `time` file such as `case.time` is discovered automatically and takes
 precedence over Prover9's allocator peak.  Both matrix runners use their first
 selected case as the comparison reference in `long-run-summary.md`.
@@ -740,3 +743,32 @@ remove the roughly 4.22 GB directory and approximately 0.42 GB selector heaps
 from anonymous RAM.  This does not reduce compact inference-index memory or
 the OS-accounted file cache; those remain separate totals in the 80--90% RAM
 acceptance calculation.
+
+### Consumed selector-run cache eviction
+
+The first file-selector implementation evicted newly written immutable runs,
+but blocks later fetched by `pread` for selection or merging remained eligible
+to stay in the kernel page cache until the entire run closed.  A long-lived
+large run could therefore turn consumed historical entries into gigabytes of
+cgroup-charged cache while process RSS still looked small.
+
+Selector reads now use 8,192-entry (192 KiB) blocks.  Once `pread` has copied a
+block into the bounded userspace buffer, `POSIX_FADV_DONTNEED` is issued for
+that exact consumed range.  A 192 KiB block is a multiple of both common 4 KiB
+and 64 KiB page sizes, avoiding host-specific partial-page retention.  One read
+buffer exists only for each logarithmically bounded live run.  Whole-run write
+eviction and consumed-read eviction have separate call, byte, and failure
+counters.
+
+The 2.2-million-record probe read 252,051,456 bytes in 1,282 calls and reported
+exactly 1,282 successful read evictions covering all 252,051,456 bytes, with
+zero failures.  Its anonymous residency remained about 2.6 MiB.  Three short
+before/after runs had overlapping timing noise; the medians were about 2.42 and
+1.63 seconds of user+system CPU respectively, but this is not treated as a
+speed claim.  A real 300-given chat run with 1,024-entry insertion buffers
+exercised three live runs and advised all 221,184 read bytes in seven calls with
+zero failures.  File-versus-heap ordering, full drain/compaction behavior,
+checkpoint/restart at boundaries zero and two, the release proof smoke, and
+isolated ASan/UBSan 200,000-record tests pass.  Because advice is not a guarantee
+that the kernel reclaimed every page immediately, the final claim still uses
+the delegated-cgroup peak rather than these counters alone.

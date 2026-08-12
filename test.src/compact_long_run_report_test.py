@@ -24,7 +24,7 @@ Compact_back_demod: mode=authoritative, strategy=adaptive, failures=0, active=50
 Compact_index_timing: component=back_demod, lookup_seconds=2.0, exact_seconds=0.1, materialize_seconds=0.2, maintenance_seconds=0.3.
 Compact_query_profile: component=back_demod, op=candidate_lookup, queries=20, candidates=4, exact_tests=4, exact_successes=3.
 Dense_passive: backing=ancestor-file, directory=file, records=20, directory_logical=1280.
-Dense_passive_selector: store=file, buffer_bytes=240, run_logical=480, reads=3 (72 bytes), writes=4 (96 bytes).
+Dense_passive_selector: store=file, buffer_bytes=240, run_logical=480, reads=3 (72 bytes), writes=4 (96 bytes), read_evictions=2 (48 bytes), read_eviction_failures=0.
 Dense_passive_gc: validation_failures=0.
 Ancestor_store: validation_failures=0, file_reads=10 (1000 bytes), file_writes=5 (500 bytes).
 Process_residency_kb: pss=10240, anonymous=8192, swap=0.
@@ -72,6 +72,9 @@ class ReportTest(unittest.TestCase):
         self.assertAlmostEqual(rows[1]["clock_demod_cpu_pct"], 40.0)
         self.assertEqual(rows[0]["ancestor_file_reads_bytes"], 1000)
         self.assertEqual(rows[0]["selector_writes_bytes"], 96)
+        self.assertEqual(rows[0]["selector_read_evictions_bytes"], 48)
+        self.assertAlmostEqual(rows[0]["selector_read_eviction_pct"],
+                               100.0 * 48 / 72)
         self.assertAlmostEqual(rows[1]["pss_mib"], 12.0)
         self.assertEqual(rows[1]["statistics_format_comma_num_buffers"], 32)
         self.assertAlmostEqual(rows[0]["ancestor_io_mib_per_cpu"],
@@ -189,6 +192,7 @@ User_CPU=2.0, System_CPU=0.0, Wall_clock=2.
             "back_lookup_normalized_cpu_slope_ratio": 1.0,
             "back_lookup_normalized_cpu_samples": 7,
             "back_lookup_normalized_steady_slope_ratio": 1.0,
+            "last_selector_store": "heap",
         }
         candidate = {
             "label": "new", "last_given": 100, "last_generated": 1000,
@@ -199,6 +203,7 @@ User_CPU=2.0, System_CPU=0.0, Wall_clock=2.
             "back_lookup_normalized_cpu_slope_ratio": 4.0,
             "back_lookup_normalized_cpu_samples": 8,
             "back_lookup_normalized_steady_slope_ratio": 1.20,
+            "last_selector_store": "heap",
         }
         comparison = REPORT.compare_summaries(reference, candidate)
         self.assertEqual(comparison["result"], "eligible")
@@ -212,6 +217,21 @@ User_CPU=2.0, System_CPU=0.0, Wall_clock=2.
         self.assertEqual(cpu_slope_failure["slope_gate"], "fail")
         self.assertEqual(cpu_slope_failure["result"], "reject")
         candidate["back_lookup_normalized_steady_slope_ratio"] = 1.20
+
+        candidate.update({
+            "last_selector_store": "file",
+            "last_selector_read_bytes": 1000,
+            "last_selector_read_eviction_pct": 98.0,
+            "last_selector_read_eviction_failures": 0,
+        })
+        cache_failure = REPORT.compare_summaries(reference, candidate)
+        self.assertEqual(cache_failure["selector_read_cache_gate"], "fail")
+        self.assertEqual(cache_failure["result"], "reject")
+        candidate["last_selector_read_eviction_pct"] = 100.0
+        cache_pass = REPORT.compare_summaries(reference, candidate)
+        self.assertEqual(cache_pass["selector_read_cache_gate"], "pass")
+        self.assertEqual(cache_pass["result"], "eligible")
+        candidate["last_selector_store"] = "heap"
 
         candidate["peak_rss_kb"] = 100000
         candidate["peak_rss_mib"] = 100000 / 1024
@@ -242,6 +262,7 @@ User_CPU=2.0, System_CPU=0.0, Wall_clock=2.
             "interval_gate": "pass",
             "candidate_back_normalized_cpu_slope_ratio": 1.1,
             "slope_gate": "pass",
+            "selector_read_cache_gate": "pass",
             "max_cpu_ratio": 1.25, "min_ram_saving_pct": 80.0,
             "max_back_slope_ratio": 1.25,
             "required_slope_samples": 7,

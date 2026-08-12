@@ -212,7 +212,11 @@ differential also passes at two boundaries, and a default-buffer 1,000-given
 comparison has no material CPU regression.  The 100-million projection,
 week-scale checkpoint validation, mature-run IO gate, and multi-million
 Osborn/AIM validation remain open; the file selector therefore stays explicit
-and non-default.
+and non-default.  Sequential blocks consumed by selection or merging are now
+advised out of the kernel cache immediately after `pread`; separate counters
+make complete advice coverage and failures visible.  This closes an identified
+cumulative cgroup-cache path, but actual whole-job cache residency remains part
+of the mature delegated-cgroup gate.
 
 ## 6. Phase E: remaining indexes and offset spaces
 

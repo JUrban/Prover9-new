@@ -120,13 +120,15 @@ started by the reporter.  Put the reference first and add
 periodic evidence, and post-warm-up back-lookup CPU normalized by query count
 plus exact successful answers.  Seven complete intervals are required; the
 gate compares robust early/tail windows and tail stability.  Matrix runs
-discover their adjacent
-GNU `time` sidecars automatically and include this audit when more than one
-case is selected.  Set `CHAT_REFERENCE_OUTPUT` to reuse an archived baseline
-without rerunning its prover; comparison thresholds have corresponding
+discover their adjacent GNU `time` sidecars automatically and include this
+audit when more than one case is selected.  Set `CHAT_REFERENCE_OUTPUT` to
+reuse an archived baseline without rerunning its prover; comparison thresholds
+have corresponding
 `CHAT_COMPARE_*` variables.  `CHAT_CGROUP_ACCOUNTING=1` measures whole-job
 cgroup-v2 peak memory, including charged file cache, and refuses with exit 77
-when the current scope is not delegated.  See
+when the current scope is not delegated.  File-selector candidates must also
+exercise reads and successfully advise at least 99% of consumed bytes out of
+cache.  See
 `P9-LONG-RUN-SCALABILITY-RESULTS.md` for exact mature-run commands,
 measurement caveats, and acceptance criteria.
 

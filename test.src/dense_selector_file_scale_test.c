@@ -4,6 +4,7 @@
 #include "../provers.src/giv_select.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdint.h>
 
 static size_t archive_clause(Topform c, unsigned *body_bytes,
@@ -48,6 +49,7 @@ int main(int argc, char **argv)
   Clist sos;
   struct dense_passive_directory_stats directory;
   struct dense_passive_selector_stats selectors;
+  struct dense_passive_selector_stats after_select;
   struct memory_process_stats process;
   unsigned long long record_bytes, heap_bytes, records;
   size_t i;
@@ -82,19 +84,6 @@ int main(int argc, char **argv)
       selectors.run_entries + selectors.buffered_entries != count ||
       heap_bytes > 4ULL * 1024ULL * 1024ULL)
     fatal_error("dense_selector_file_scale_test: accounting failure");
-  printf("{\"records\":%llu,\"directory_logical\":%llu,"
-         "\"directory_allocated\":%llu,\"heap_bytes\":%llu,"
-         "\"selector_runs\":%llu,\"selector_run_bytes\":%llu,"
-         "\"selector_writes\":%llu,\"selector_write_bytes\":%llu,"
-         "\"eviction_passes\":%llu,\"eviction_bytes\":%llu,"
-         "\"pss_kib\":%llu,\"anonymous_kib\":%llu}\n",
-         (unsigned long long) count, directory.logical_bytes,
-         directory.allocated_bytes, heap_bytes,
-         selectors.runs, selectors.run_logical_bytes,
-         selectors.file_writes, selectors.file_write_bytes,
-         directory.file_eviction_passes,
-         directory.file_eviction_bytes, process.pss_kbytes,
-         process.anonymous_kbytes);
   {
     char *type = NULL;
     Topform first = get_given_clause2(sos, 0, NULL, &type);
@@ -102,6 +91,36 @@ int main(int argc, char **argv)
       fatal_error("dense_selector_file_scale_test: age order changed");
     zap_topform(first);
   }
+  after_select = dense_passive_selector_stats();
+#if !defined(__EMSCRIPTEN__) && defined(POSIX_FADV_DONTNEED)
+  if ((selectors.runs != 0 && after_select.file_reads == 0) ||
+      after_select.file_read_evictions != after_select.file_reads ||
+      after_select.file_read_eviction_bytes !=
+        after_select.file_read_bytes ||
+      after_select.file_read_eviction_failures != 0)
+    fatal_error("dense_selector_file_scale_test: read cache eviction failure");
+#endif
+  printf("{\"records\":%llu,\"directory_logical\":%llu,"
+         "\"directory_allocated\":%llu,\"heap_bytes\":%llu,"
+         "\"selector_runs\":%llu,\"selector_run_bytes\":%llu,"
+         "\"selector_reads\":%llu,\"selector_read_bytes\":%llu,"
+         "\"selector_read_evictions\":%llu,"
+         "\"selector_read_eviction_bytes\":%llu,"
+         "\"selector_read_eviction_failures\":%llu,"
+         "\"selector_writes\":%llu,\"selector_write_bytes\":%llu,"
+         "\"eviction_passes\":%llu,\"eviction_bytes\":%llu,"
+         "\"pss_kib\":%llu,\"anonymous_kib\":%llu}\n",
+         (unsigned long long) count, directory.logical_bytes,
+         directory.allocated_bytes, heap_bytes,
+         selectors.runs, selectors.run_logical_bytes,
+         after_select.file_reads, after_select.file_read_bytes,
+         after_select.file_read_evictions,
+         after_select.file_read_eviction_bytes,
+         after_select.file_read_eviction_failures,
+         selectors.file_writes, selectors.file_write_bytes,
+         directory.file_eviction_passes,
+         directory.file_eviction_bytes, process.pss_kbytes,
+         process.anonymous_kbytes);
   clist_free(sos);
   zap_given_selectors();
   configure_dense_passive(FALSE, NULL, NULL);
