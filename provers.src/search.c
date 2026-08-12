@@ -1937,6 +1937,8 @@ Prover_options init_prover_options(void)
     init_flag("compact_back_position_admission", FALSE);
   p->compact_back_sparse_positions =
     init_flag("compact_back_sparse_positions", FALSE);
+  p->compact_back_edge_filter =
+    init_flag("compact_back_edge_filter", FALSE);
   p->compact_nonunit_subsumption_audit =
     init_flag("compact_nonunit_subsumption_audit", FALSE);
   p->compact_otter_nonunit_index =
@@ -11014,6 +11016,8 @@ static void configure_search_indexes(void)
     flag(Opt->compact_back_sparse_positions));
   configure_compact_back_demod_eager_position_depth(
     (unsigned) parm(Opt->compact_back_eager_position_depth));
+  configure_compact_back_demod_edge_filter(
+    flag(Opt->compact_back_edge_filter));
   configure_compact_unit_term_pool(Compact_terms);
   configure_compact_unit_index(
     flag(Opt->compact_unit_subsumption_audit),

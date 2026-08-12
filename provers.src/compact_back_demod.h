@@ -112,6 +112,22 @@ struct compact_back_demod_stats {
   BOOL position_admission_frozen;
   BOOL position_complete;
   BOOL position_sparse;
+  BOOL edge_enabled;
+  unsigned long long edge_features;
+  unsigned long long edge_postings;
+  unsigned long long edge_queries;
+  unsigned long long edge_empty_queries;
+  unsigned long long edge_bypass_queries;
+  unsigned long long edge_intersection_queries;
+  unsigned long long edge_query_features;
+  unsigned long long edge_selected_features;
+  unsigned long long edge_posting_records_examined;
+  unsigned long long edge_candidate_records;
+  unsigned long long edge_exact_rejects;
+  unsigned long long edge_append_records;
+  unsigned long long edge_append_token_visits;
+  unsigned long long edge_append_feature_lookups;
+  unsigned long long edge_bytes;
   unsigned long long route_profile_capacity;
   unsigned long long route_profile_occupied;
   unsigned long long route_profile_bytes;
@@ -215,6 +231,11 @@ void compact_back_demod_set_position_options(unsigned admit_work,
 /* Build exact sparse (root,path,symbol) postings incrementally for every
    rigid path through this depth.  Zero preserves demand-built positions. */
 void compact_back_demod_set_eager_position_depth(unsigned depth);
+
+/* Build a complete occurrence-linear index of direct rigid parent-child
+   edges.  Queries use it only as a conservative record filter; exact compact
+   matching remains authoritative. */
+void compact_back_demod_set_edge_filter(BOOL enabled);
 
 BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause);
 

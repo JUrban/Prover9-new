@@ -14,6 +14,8 @@
 #define CBD_TREE_INDEX_MASK UINT32_C(0x7fffffff)
 #define CBD_TREE_DIRECT_RECORD UINT32_C(0x80000000)
 #define CBD_POSITION_BLOCK_PAYLOAD 24
+#define CBD_EDGE_BLOCK_PAYLOAD 24
+#define CBD_EDGE_INTERSECTION_LIMIT 4
 #define CBD_TREE_CHILD_CACHE_MAX_BYTES (UINT64_C(8) * 1024 * 1024)
 #define CBD_TREE_CHILD_CACHE_MIN_SCAN 8
 #define CBD_ROUTE_PROFILE_CAPACITY 4096
@@ -48,6 +50,7 @@ static unsigned long long Back_demod_position_budget_bytes =
 static unsigned long long Back_demod_tree_budget_bytes =
   UINT64_C(64) * 1024 * 1024;
 static unsigned Back_demod_tree_budget_pct = 0;
+static BOOL Back_demod_edge_filter = FALSE;
 
 typedef uint32_t cbd_path_mask;
 
@@ -168,6 +171,35 @@ struct cbd_position_block {
   unsigned char data[CBD_POSITION_BLOCK_PAYLOAD];
 };
 
+/* Every posting names a record containing at least one occurrence of this
+   direct rigid edge.  Edges are deduplicated within a record, making the
+   complete index no larger than the rigid parent-child occurrence
+   population.  Exact whole-pattern matching remains authoritative. */
+struct cbd_edge_bucket {
+  uint32_t parent_symbol;
+  uint32_t child_symbol;
+  uint32_t child_index;
+  uint32_t posting_head;
+  uint32_t posting_tail;
+  uint32_t inline_record;
+  uint32_t last_record;
+  uint32_t posting_count;
+};
+
+struct cbd_edge_block {
+  uint32_t next;
+  uint16_t used;
+  uint16_t count;
+  unsigned char data[CBD_EDGE_BLOCK_PAYLOAD];
+};
+
+struct cbd_edge_query_feature {
+  uint32_t parent_symbol;
+  uint32_t child_symbol;
+  uint32_t child_index;
+  uint32_t bucket;
+};
+
 struct cbd_position_query_feature {
   uint64_t path;
   uint32_t symbol;
@@ -257,6 +289,18 @@ struct compact_back_demod_index {
   size_t position_token_end_capacity;
   struct cbd_position_probation *position_probation;
   size_t position_probation_capacity;
+  struct cbd_edge_bucket *edge_buckets;
+  size_t edge_bucket_count;
+  size_t edge_bucket_capacity;
+  uint32_t *edge_bucket_hash;
+  size_t edge_bucket_hash_capacity;
+  struct cbd_edge_block *edge_blocks;
+  size_t edge_block_count;
+  size_t edge_block_capacity;
+  struct cbd_edge_query_feature *edge_query;
+  size_t edge_query_capacity;
+  uint32_t *edge_append_buckets;
+  size_t edge_append_capacity;
   struct cbd_route_profile *route_profiles;
   size_t route_profile_capacity;
   uint16_t *route_frequency;
@@ -388,6 +432,20 @@ struct compact_back_demod_index {
   BOOL position_admission_frozen;
   BOOL position_sparse;
   unsigned position_eager_depth;
+  BOOL edge_enabled;
+  unsigned long long edge_posting_count;
+  unsigned long long edge_queries;
+  unsigned long long edge_empty_queries;
+  unsigned long long edge_bypass_queries;
+  unsigned long long edge_intersection_queries;
+  unsigned long long edge_query_features;
+  unsigned long long edge_selected_features;
+  unsigned long long edge_posting_records_examined;
+  unsigned long long edge_candidate_records;
+  unsigned long long edge_exact_rejects;
+  unsigned long long edge_append_records;
+  unsigned long long edge_append_token_visits;
+  unsigned long long edge_append_feature_lookups;
   unsigned long long inactive_groups_examined;
   unsigned long long duplicate_groups_examined;
   unsigned long long posting_bytes_decoded;
@@ -422,6 +480,8 @@ struct cbd_symbol_set {
 
 static void append_admitted_position_features(
   Compact_back_demod_index index, uint32_t record_index);
+static unsigned long long saturating_add(unsigned long long a,
+                                         unsigned long long b);
 
 static size_t grow_capacity(size_t current, size_t item_size,
                             const char *message)
@@ -570,6 +630,9 @@ static unsigned long long index_bytes(Compact_back_demod_index index)
       sizeof(*index->position_root_active_counts) +
     index->position_block_capacity * sizeof(*index->position_blocks) +
     index->position_probation_capacity * sizeof(*index->position_probation) +
+    index->edge_bucket_capacity * sizeof(*index->edge_buckets) +
+    index->edge_bucket_hash_capacity * sizeof(*index->edge_bucket_hash) +
+    index->edge_block_capacity * sizeof(*index->edge_blocks) +
     index->route_profile_capacity * sizeof(*index->route_profiles) +
     index->route_frequency_capacity * 2 * sizeof(*index->route_frequency) +
     index->position_bitmap_bytes +
@@ -583,7 +646,9 @@ static unsigned long long index_bytes(Compact_back_demod_index index)
     index->position_append_match_capacity *
       sizeof(*index->position_append_matches) +
     index->position_token_end_capacity *
-      sizeof(*index->position_token_ends);
+      sizeof(*index->position_token_ends) +
+    index->edge_query_capacity * sizeof(*index->edge_query) +
+    index->edge_append_capacity * sizeof(*index->edge_append_buckets);
 }
 
 static unsigned long long tree_budget_limit(Compact_back_demod_index index)
@@ -1107,6 +1172,168 @@ static void free_position_buckets(struct cbd_position_bucket *buckets,
   for (i = 1; i < count; i++)
     safe_free(buckets[i].membership);
   safe_free(buckets);
+}
+
+static uint64_t edge_feature_key(Compact_back_demod_index index,
+                                 uint32_t parent_symbol,
+                                 uint32_t child_index,
+                                 uint32_t child_symbol)
+{
+  return hash_id(stable_symbol_hash(index, parent_symbol) ^
+    (hash_id((uint64_t) child_index + 1) *
+      UINT64_C(0x9e3779b97f4a7c15)) ^
+    (stable_symbol_hash(index, child_symbol) *
+      UINT64_C(0x85ebca77c2b2ae63)));
+}
+
+static size_t edge_hash_slot(Compact_back_demod_index index,
+                             uint32_t parent_symbol,
+                             uint32_t child_index,
+                             uint32_t child_symbol)
+{
+  size_t at = (size_t) edge_feature_key(
+    index, parent_symbol, child_index, child_symbol) &
+    (index->edge_bucket_hash_capacity - 1);
+  for (;;) {
+    uint32_t bucket = index->edge_bucket_hash[at];
+    if (bucket == CBD_NONE ||
+        (index->edge_buckets[bucket].parent_symbol == parent_symbol &&
+         index->edge_buckets[bucket].child_index == child_index &&
+         index->edge_buckets[bucket].child_symbol == child_symbol))
+      return at;
+    at = (at + 1) & (index->edge_bucket_hash_capacity - 1);
+  }
+}
+
+static void rehash_edge_buckets(Compact_back_demod_index index,
+                                size_t capacity)
+{
+  uint32_t *old_hash = index->edge_bucket_hash;
+  size_t i;
+  index->edge_bucket_hash = safe_calloc(
+    capacity, sizeof(*index->edge_bucket_hash));
+  index->edge_bucket_hash_capacity = capacity;
+  for (i = 1; i < index->edge_bucket_count; i++) {
+    struct cbd_edge_bucket *bucket = &index->edge_buckets[i];
+    size_t at = edge_hash_slot(index, bucket->parent_symbol,
+                               bucket->child_index,
+                               bucket->child_symbol);
+    index->edge_bucket_hash[at] = (uint32_t) i;
+  }
+  safe_free(old_hash);
+}
+
+static uint32_t lookup_edge_bucket(Compact_back_demod_index index,
+                                   uint32_t parent_symbol,
+                                   uint32_t child_index,
+                                   uint32_t child_symbol)
+{
+  size_t at;
+  if (index->edge_bucket_hash_capacity == 0)
+    return CBD_NONE;
+  at = edge_hash_slot(index, parent_symbol, child_index, child_symbol);
+  return index->edge_bucket_hash[at];
+}
+
+static uint32_t add_edge_bucket(Compact_back_demod_index index,
+                                uint32_t parent_symbol,
+                                uint32_t child_index,
+                                uint32_t child_symbol)
+{
+  size_t at;
+  uint32_t bucket;
+  ensure_symbols(index, parent_symbol);
+  ensure_symbols(index, child_symbol);
+  if (index->edge_bucket_hash_capacity == 0)
+    rehash_edge_buckets(index, 128);
+  else if ((index->edge_bucket_count + 1) * 20 >=
+           index->edge_bucket_hash_capacity * 17) {
+    if (index->edge_bucket_hash_capacity > SIZE_MAX / 2)
+      fatal_error("compact_back_demod: edge hash overflow");
+    rehash_edge_buckets(index, index->edge_bucket_hash_capacity * 2);
+  }
+  at = edge_hash_slot(index, parent_symbol, child_index, child_symbol);
+  bucket = index->edge_bucket_hash[at];
+  if (bucket != CBD_NONE)
+    return bucket;
+  if (index->edge_bucket_count == index->edge_bucket_capacity) {
+    index->edge_bucket_capacity = grow_record_capacity(
+      index->edge_bucket_capacity, sizeof(*index->edge_buckets),
+      "compact_back_demod: edge bucket overflow");
+    index->edge_buckets = safe_realloc(
+      index->edge_buckets,
+      index->edge_bucket_capacity * sizeof(*index->edge_buckets));
+  }
+  if (index->edge_bucket_count > UINT32_MAX)
+    fatal_error("compact_back_demod: edge bucket offsets exceed 32 bits");
+  bucket = (uint32_t) index->edge_bucket_count++;
+  memset(&index->edge_buckets[bucket], 0,
+         sizeof(index->edge_buckets[bucket]));
+  index->edge_buckets[bucket].parent_symbol = parent_symbol;
+  index->edge_buckets[bucket].child_index = child_index;
+  index->edge_buckets[bucket].child_symbol = child_symbol;
+  index->edge_bucket_hash[at] = bucket;
+  return bucket;
+}
+
+static uint32_t new_edge_block(Compact_back_demod_index index)
+{
+  uint32_t block;
+  if (index->edge_block_count == index->edge_block_capacity) {
+    index->edge_block_capacity = grow_record_capacity(
+      index->edge_block_capacity, sizeof(*index->edge_blocks),
+      "compact_back_demod: edge block overflow");
+    index->edge_blocks = safe_realloc(
+      index->edge_blocks,
+      index->edge_block_capacity * sizeof(*index->edge_blocks));
+  }
+  if (index->edge_block_count > UINT32_MAX)
+    fatal_error("compact_back_demod: edge block offsets exceed 32 bits");
+  block = (uint32_t) index->edge_block_count++;
+  memset(&index->edge_blocks[block], 0,
+         sizeof(index->edge_blocks[block]));
+  return block;
+}
+
+static void append_edge_record(Compact_back_demod_index index,
+                               uint32_t bucket_index,
+                               uint32_t record_index)
+{
+  unsigned char encoded[5];
+  size_t length;
+  uint32_t block;
+  struct cbd_edge_bucket *bucket = &index->edge_buckets[bucket_index];
+  struct cbd_edge_block *tail;
+  if (record_index <= bucket->last_record)
+    fatal_error("compact_back_demod: nonmonotone edge posting");
+  if (bucket->inline_record == CBD_NONE) {
+    bucket->inline_record = record_index;
+    bucket->last_record = record_index;
+    bucket->posting_count = 1;
+    index->edge_posting_count++;
+    return;
+  }
+  length = encode_u32(encoded, record_index - bucket->last_record);
+  block = bucket->posting_tail;
+  if (block == CBD_NONE ||
+      index->edge_blocks[block].used + length > CBD_EDGE_BLOCK_PAYLOAD) {
+    uint32_t added = new_edge_block(index);
+    if (block == CBD_NONE)
+      bucket->posting_head = added;
+    else
+      index->edge_blocks[block].next = added;
+    bucket->posting_tail = added;
+    block = added;
+  }
+  tail = &index->edge_blocks[block];
+  memcpy(tail->data + tail->used, encoded, length);
+  tail->used += (uint16_t) length;
+  tail->count++;
+  bucket->last_record = record_index;
+  if (bucket->posting_count == UINT32_MAX)
+    fatal_error("compact_back_demod: edge population exceeds 32 bits");
+  bucket->posting_count++;
+  index->edge_posting_count++;
 }
 
 static size_t projected_position_hash_capacity(
@@ -2181,6 +2408,7 @@ static Compact_back_demod_index compact_back_demod_init_with_pool_strategy(
   index->position_admission_enabled = Back_demod_position_admission;
   index->position_sparse = Back_demod_sparse_positions;
   index->position_eager_depth = Back_demod_eager_position_depth;
+  index->edge_enabled = Back_demod_edge_filter;
   if (index->position_eager_depth != 0 &&
       (!index->position_sparse || index->position_budget_bytes != 0))
     fatal_error("compact_back_demod: eager positions require sparse storage "
@@ -2219,6 +2447,15 @@ static Compact_back_demod_index compact_back_demod_init_with_pool_strategy(
     index->position_bucket_count = 1;
     if (new_position_block(index) != CBD_NONE)
       fatal_error("compact_back_demod: invalid position block sentinel");
+  }
+  if (index->edge_enabled) {
+    ENSURE_ARRAY(index, edge_buckets, edge_bucket_count,
+                 edge_bucket_capacity,
+                 "compact_back_demod: edge bucket overflow");
+    memset(&index->edge_buckets[0], 0, sizeof(index->edge_buckets[0]));
+    index->edge_bucket_count = 1;
+    if (new_edge_block(index) != CBD_NONE)
+      fatal_error("compact_back_demod: invalid edge block sentinel");
   }
   ensure_records(index);
   memset(&index->records[0], 0, sizeof(index->records[0]));
@@ -2319,6 +2556,102 @@ void compact_back_demod_set_eager_position_depth(unsigned depth)
   Back_demod_eager_position_depth = depth;
 }
 
+void compact_back_demod_set_edge_filter(BOOL enabled)
+{
+  Back_demod_edge_filter = enabled;
+}
+
+static void ensure_edge_append(Compact_back_demod_index index,
+                               size_t needed)
+{
+  while (needed > index->edge_append_capacity) {
+    index->edge_append_capacity = grow_record_capacity(
+      index->edge_append_capacity, sizeof(*index->edge_append_buckets),
+      "compact_back_demod: edge append scratch overflow");
+    index->edge_append_buckets = safe_realloc(
+      index->edge_append_buckets,
+      index->edge_append_capacity * sizeof(*index->edge_append_buckets));
+  }
+}
+
+static uint32_t collect_record_edges_rec(Compact_back_demod_index index,
+                                         const int32_t *tokens,
+                                         uint32_t token_end,
+                                         uint32_t position,
+                                         size_t *count)
+{
+  int32_t parent;
+  uint32_t child;
+  int i, arity;
+  if (position >= token_end)
+    fatal_error("compact_back_demod: corrupt edge subject");
+  parent = tokens[position];
+  arity = parent < 0 ? 0 : sn_to_arity(parent);
+  child = position + 1;
+  if (index->edge_append_token_visits != ULLONG_MAX)
+    index->edge_append_token_visits++;
+  for (i = 0; i < arity; i++) {
+    int32_t child_symbol;
+    uint32_t bucket;
+    if (child >= token_end)
+      fatal_error("compact_back_demod: corrupt edge child");
+    child_symbol = tokens[child];
+    if (child_symbol >= 0) {
+      if (index->edge_append_feature_lookups != ULLONG_MAX)
+        index->edge_append_feature_lookups++;
+      bucket = lookup_edge_bucket(
+        index, (uint32_t) parent, (uint32_t) i,
+        (uint32_t) child_symbol);
+      if (bucket == CBD_NONE)
+        bucket = add_edge_bucket(
+          index, (uint32_t) parent, (uint32_t) i,
+          (uint32_t) child_symbol);
+      ensure_edge_append(index, *count + 1);
+      index->edge_append_buckets[(*count)++] = bucket;
+    }
+    child = collect_record_edges_rec(
+      index, tokens, token_end, child, count);
+  }
+  return child;
+}
+
+static int increasing_u32(const void *left, const void *right)
+{
+  uint32_t a = *(const uint32_t *) left;
+  uint32_t b = *(const uint32_t *) right;
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+static void append_record_edges(Compact_back_demod_index index,
+                                uint32_t record_index)
+{
+  struct cbd_record *record;
+  const int32_t *tokens;
+  uint32_t position, end;
+  size_t count = 0, i;
+  if (!index->edge_enabled)
+    return;
+  if (index->edge_append_records != ULLONG_MAX)
+    index->edge_append_records++;
+  record = &index->records[record_index];
+  end = compact_term_slice_length(record->tokens);
+  if (end == 0)
+    return;
+  tokens = compact_term_pool_slice_tokens(index->term_pool, record->tokens);
+  position = 0;
+  while (position < end)
+    position = collect_record_edges_rec(
+      index, tokens, end, position, &count);
+  if (count > 1)
+    qsort(index->edge_append_buckets, count,
+          sizeof(*index->edge_append_buckets), increasing_u32);
+  for (i = 0; i < count; i++)
+    if (i == 0 || index->edge_append_buckets[i] !=
+                    index->edge_append_buckets[i - 1])
+      append_edge_record(
+        index, index->edge_append_buckets[i], record_index);
+}
+
 BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
 {
   uint32_t record_index;
@@ -2344,7 +2677,7 @@ BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
   symbols.occurrence_values = symbols.occurrence_fixed;
   symbols.occurrence_capacity = sizeof(symbols.occurrence_fixed) /
     sizeof(symbols.occurrence_fixed[0]);
-  if (index->position_eager_depth != 0) {
+  if (index->position_eager_depth != 0 || index->edge_enabled) {
     Compact_term_slice clause_tokens = compact_term_pool_intern_clause(
       index->term_pool, clause->id, clause->literals);
     record_base = compact_term_slice_offset(clause_tokens);
@@ -2411,6 +2744,7 @@ BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
   }
 
   append_admitted_position_features(index, record_index);
+  append_record_edges(index, record_index);
 
   if (strategy_uses_tree(index->strategy) &&
       (index->tree_complete ||
@@ -3636,6 +3970,255 @@ static BOOL record_contains_pattern(Compact_back_demod_index index,
         return TRUE;
     }
   return FALSE;
+}
+
+static uint32_t decode_edge_value(const struct cbd_edge_block *block,
+                                  uint16_t *position)
+{
+  uint32_t value = 0;
+  unsigned shift = 0;
+  while (*position < block->used) {
+    unsigned char byte = block->data[(*position)++];
+    if (shift == 28 && (byte & 0xf0U) != 0)
+      fatal_error("compact_back_demod: corrupt edge delta");
+    value |= (uint32_t) (byte & 0x7fU) << shift;
+    if ((byte & 0x80U) == 0)
+      return value;
+    shift += 7;
+    if (shift > 28)
+      fatal_error("compact_back_demod: corrupt edge value");
+  }
+  fatal_error("compact_back_demod: truncated edge value");
+  return 0;
+}
+
+struct cbd_edge_iterator {
+  Compact_back_demod_index index;
+  struct cbd_edge_bucket *bucket;
+  uint32_t record;
+  uint32_t block;
+  uint16_t position;
+  uint16_t entries;
+  unsigned char first;
+};
+
+static void note_edge_posting_scan(Compact_back_demod_index index,
+                                   uint32_t record_index)
+{
+  struct cbd_record *record;
+  if (record_index == CBD_NONE || record_index >= index->record_count)
+    fatal_error("compact_back_demod: corrupt edge posting record");
+  record = &index->records[record_index];
+  index->edge_posting_records_examined++;
+  index->posting_groups_examined++;
+  index->query_work++;
+  if (record->active)
+    index->query_live++;
+  else {
+    index->query_dead++;
+    index->inactive_groups_examined++;
+  }
+  if (record->active && record->query_stamp == index->query_stamp) {
+    index->query_duplicates++;
+    index->duplicate_groups_examined++;
+  }
+}
+
+static void init_edge_iterator(Compact_back_demod_index index,
+                               uint32_t bucket_index,
+                               struct cbd_edge_iterator *iterator)
+{
+  memset(iterator, 0, sizeof(*iterator));
+  iterator->index = index;
+  iterator->bucket = &index->edge_buckets[bucket_index];
+  iterator->record = iterator->bucket->inline_record;
+  iterator->block = iterator->bucket->posting_head;
+  iterator->first = TRUE;
+}
+
+static BOOL next_edge_record(struct cbd_edge_iterator *iterator,
+                             uint32_t *record)
+{
+  Compact_back_demod_index index = iterator->index;
+  if (iterator->first) {
+    iterator->first = FALSE;
+    if (iterator->record == CBD_NONE)
+      return FALSE;
+    index->posting_bytes_decoded += sizeof(uint32_t);
+    index->query_bytes_decoded += sizeof(uint32_t);
+    *record = iterator->record;
+    note_edge_posting_scan(index, *record);
+    return TRUE;
+  }
+  while (iterator->block != CBD_NONE) {
+    const struct cbd_edge_block *current;
+    uint32_t delta;
+    if (iterator->block >= index->edge_block_count)
+      fatal_error("compact_back_demod: corrupt edge posting block");
+    current = &index->edge_blocks[iterator->block];
+    if (iterator->position == 0) {
+      index->posting_bytes_decoded += current->used;
+      index->query_bytes_decoded += current->used;
+    }
+    if (iterator->position == current->used) {
+      if (iterator->entries != current->count)
+        fatal_error("compact_back_demod: corrupt edge posting count");
+      iterator->block = current->next;
+      iterator->position = 0;
+      iterator->entries = 0;
+      continue;
+    }
+    delta = decode_edge_value(current, &iterator->position);
+    if (delta == 0 || delta > UINT32_MAX - iterator->record)
+      fatal_error("compact_back_demod: edge posting overflow");
+    iterator->record += delta;
+    iterator->entries++;
+    *record = iterator->record;
+    note_edge_posting_scan(index, *record);
+    return TRUE;
+  }
+  return FALSE;
+}
+
+static void ensure_edge_query(Compact_back_demod_index index, size_t needed)
+{
+  while (needed > index->edge_query_capacity) {
+    index->edge_query_capacity = grow_record_capacity(
+      index->edge_query_capacity, sizeof(*index->edge_query),
+      "compact_back_demod: edge query scratch overflow");
+    index->edge_query = safe_realloc(
+      index->edge_query,
+      index->edge_query_capacity * sizeof(*index->edge_query));
+  }
+}
+
+static void collect_pattern_edges_rec(Compact_back_demod_index index,
+                                      Term pattern, size_t *count,
+                                      BOOL *missing)
+{
+  uint32_t parent;
+  int i;
+  if (VARIABLE(pattern))
+    return;
+  parent = (uint32_t) SYMNUM(pattern);
+  for (i = 0; i < ARITY(pattern); i++) {
+    Term child = ARG(pattern, i);
+    if (!VARIABLE(child)) {
+      uint32_t child_symbol = (uint32_t) SYMNUM(child);
+      uint32_t bucket = lookup_edge_bucket(
+        index, parent, (uint32_t) i, child_symbol);
+      size_t j;
+      if (bucket == CBD_NONE)
+        *missing = TRUE;
+      else {
+        for (j = 0; j < *count; j++)
+          if (index->edge_query[j].bucket == bucket)
+            break;
+        if (j == *count) {
+          ensure_edge_query(index, *count + 1);
+          index->edge_query[*count].parent_symbol = parent;
+          index->edge_query[*count].child_index = (uint32_t) i;
+          index->edge_query[*count].child_symbol = child_symbol;
+          index->edge_query[*count].bucket = bucket;
+          (*count)++;
+        }
+      }
+      collect_pattern_edges_rec(index, child, count, missing);
+    }
+  }
+}
+
+enum cbd_edge_query_status {
+  CBD_EDGE_NO_FEATURE,
+  CBD_EDGE_EMPTY,
+  CBD_EDGE_AVAILABLE
+};
+
+static enum cbd_edge_query_status prepare_edge_query(
+  Compact_back_demod_index index, Term pattern, size_t *selected)
+{
+  size_t count = 0, i, out;
+  BOOL missing = FALSE;
+  *selected = 0;
+  if (!index->edge_enabled || VARIABLE(pattern))
+    return CBD_EDGE_NO_FEATURE;
+  collect_pattern_edges_rec(index, pattern, &count, &missing);
+  index->edge_query_features = saturating_add(
+    index->edge_query_features, count);
+  if (missing)
+    return CBD_EDGE_EMPTY;
+  if (count == 0)
+    return CBD_EDGE_NO_FEATURE;
+
+  /* Put the rarest features first.  Only similarly sized secondary streams
+     are intersected: scanning a ubiquitous edge can cost more than applying
+     the exact matcher to the rare primary stream. */
+  for (out = 0; out < count && out < CBD_EDGE_INTERSECTION_LIMIT; out++) {
+    size_t best = out;
+    for (i = out + 1; i < count; i++)
+      if (index->edge_buckets[index->edge_query[i].bucket].posting_count <
+            index->edge_buckets[index->edge_query[best].bucket].posting_count)
+        best = i;
+    if (best != out) {
+      struct cbd_edge_query_feature saved = index->edge_query[out];
+      index->edge_query[out] = index->edge_query[best];
+      index->edge_query[best] = saved;
+    }
+    if (out != 0) {
+      unsigned long long primary = index->edge_buckets[
+        index->edge_query[0].bucket].posting_count;
+      unsigned long long population = index->edge_buckets[
+        index->edge_query[out].bucket].posting_count;
+      if (primary < (population + 3) / 4)
+        break;
+    }
+    (*selected)++;
+  }
+  index->edge_selected_features = saturating_add(
+    index->edge_selected_features, *selected);
+  return CBD_EDGE_AVAILABLE;
+}
+
+static void collect_edge_candidates(Compact_back_demod_index index,
+                                    Term pattern, size_t selected,
+                                    unsigned long long exclude_id,
+                                    size_t *count)
+{
+  struct cbd_edge_iterator iterators[CBD_EDGE_INTERSECTION_LIMIT];
+  uint32_t current[CBD_EDGE_INTERSECTION_LIMIT];
+  unsigned char have[CBD_EDGE_INTERSECTION_LIMIT];
+  uint32_t primary;
+  size_t i;
+  index->edge_queries++;
+  if (selected > 1)
+    index->edge_intersection_queries++;
+  for (i = 0; i < selected; i++) {
+    init_edge_iterator(
+      index, index->edge_query[i].bucket, &iterators[i]);
+    have[i] = next_edge_record(&iterators[i], &current[i]);
+  }
+  while (have[0]) {
+    BOOL member = TRUE;
+    primary = current[0];
+    for (i = 1; i < selected && member; i++) {
+      while (have[i] && current[i] < primary)
+        have[i] = next_edge_record(&iterators[i], &current[i]);
+      member = have[i] && current[i] == primary;
+    }
+    if (member) {
+      struct cbd_record *record = &index->records[primary];
+      index->edge_candidate_records++;
+      if (record->active && record->proof_id != exclude_id &&
+          record->query_stamp != index->query_stamp) {
+        if (record_contains_pattern(
+              index, record, pattern, (int32_t) SYMNUM(pattern)))
+          collect_record(index, primary, exclude_id, count);
+        else
+          index->edge_exact_rejects++;
+      }
+    }
+    have[0] = next_edge_record(&iterators[0], &current[0]);
+  }
 }
 
 static size_t position_bitmap_word_limit(
@@ -5021,8 +5604,32 @@ static void collect_pattern(Compact_back_demod_index index, Term pattern,
                             unsigned long long exclude_id, size_t *count)
 {
   unsigned long long before = index->query_work;
+  size_t selected_edges;
   size_t selected_positions;
   size_t position_feature_count;
+  enum cbd_edge_query_status edge_status = prepare_edge_query(
+    index, pattern, &selected_edges);
+  if (edge_status == CBD_EDGE_EMPTY) {
+    index->edge_empty_queries++;
+    return;
+  }
+  if (edge_status == CBD_EDGE_AVAILABLE) {
+    unsigned long long edge_population = index->edge_buckets[
+      index->edge_query[0].bucket].posting_count;
+    unsigned long long root_population;
+    if (strategy_uses_hot_tree(index->strategy))
+      root_population = route_root_population(index, pattern);
+    else if (strategy_uses_paths(index->strategy))
+      root_population = route_mask_population(index, pattern);
+    else
+      root_population = index->active;
+    if (edge_population <= root_population / 2) {
+      collect_edge_candidates(
+        index, pattern, selected_edges, exclude_id, count);
+      return;
+    }
+    index->edge_bypass_queries++;
+  }
   uint32_t position_bucket = best_position_bucket(
     index, pattern, &selected_positions, &position_feature_count);
   if (index->strategy == COMPACT_BACK_DEMOD_ADAPTIVE &&
@@ -5516,6 +6123,27 @@ static void copy_position_definitions(Compact_back_demod_index destination,
   }
 }
 
+static void copy_edge_counters(Compact_back_demod_index destination,
+                               Compact_back_demod_index source)
+{
+  destination->edge_queries = source->edge_queries;
+  destination->edge_empty_queries = source->edge_empty_queries;
+  destination->edge_bypass_queries = source->edge_bypass_queries;
+  destination->edge_intersection_queries =
+    source->edge_intersection_queries;
+  destination->edge_query_features = source->edge_query_features;
+  destination->edge_selected_features = source->edge_selected_features;
+  destination->edge_posting_records_examined =
+    source->edge_posting_records_examined;
+  destination->edge_candidate_records = source->edge_candidate_records;
+  destination->edge_exact_rejects = source->edge_exact_rejects;
+  destination->edge_append_records = source->edge_append_records;
+  destination->edge_append_token_visits =
+    source->edge_append_token_visits;
+  destination->edge_append_feature_lookups =
+    source->edge_append_feature_lookups;
+}
+
 static void finish_position_rebuild(Compact_back_demod_index index)
 {
   if (!strategy_uses_position(index->strategy))
@@ -5564,6 +6192,7 @@ static void compact_back_demod_compact_internal(
   replacement->tree_complete = index->tree_complete;
   copy_hot_root_states(replacement, index);
   copy_position_definitions(replacement, index);
+  copy_edge_counters(replacement, index);
   copy_route_profiles(replacement, index);
   replacement->position_rebuilding = TRUE;
   record_map = safe_calloc(index->record_count, sizeof(*record_map));
@@ -5583,6 +6212,7 @@ static void compact_back_demod_compact_internal(
         fatal_error("compact_back_demod: duplicate compacted proof ID");
       replacement->active++;
       append_admitted_position_features(replacement, added);
+      append_record_edges(replacement, added);
     }
   finish_position_rebuild(replacement);
   if (strategy_uses_tree(index->strategy) && index->tree_complete) {
@@ -5719,6 +6349,11 @@ static void compact_back_demod_compact_internal(
   safe_free(old.position_append_matches);
   safe_free(old.position_token_ends);
   safe_free(old.position_probation);
+  safe_free(old.edge_buckets);
+  safe_free(old.edge_bucket_hash);
+  safe_free(old.edge_blocks);
+  safe_free(old.edge_query);
+  safe_free(old.edge_append_buckets);
   safe_free(old.route_profiles);
   safe_free(old.route_frequency);
   safe_free(old.occurrences);
@@ -5906,6 +6541,7 @@ void compact_back_demod_compact_materialized(
     old.term_pool, old.strategy);
   copy_hot_root_states(replacement, &old);
   copy_position_definitions(replacement, &old);
+  copy_edge_counters(replacement, &old);
   copy_route_profiles(replacement, &old);
   replacement->position_rebuilding = TRUE;
   safe_free(old.tree_roots);
@@ -5918,6 +6554,11 @@ void compact_back_demod_compact_materialized(
   safe_free(old.position_append_matches);
   safe_free(old.position_token_ends);
   safe_free(old.position_probation);
+  safe_free(old.edge_buckets);
+  safe_free(old.edge_bucket_hash);
+  safe_free(old.edge_blocks);
+  safe_free(old.edge_query);
+  safe_free(old.edge_append_buckets);
   safe_free(old.route_profiles);
   safe_free(old.route_frequency);
   replacement->owns_term_pool = old.owns_term_pool;
@@ -6561,6 +7202,28 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->position_admission_frozen = index->position_admission_frozen;
   stats->position_complete = index->position_complete;
   stats->position_sparse = index->position_sparse;
+  stats->edge_enabled = index->edge_enabled;
+  stats->edge_features = index->edge_bucket_count == 0 ? 0 :
+    index->edge_bucket_count - 1;
+  stats->edge_postings = index->edge_posting_count;
+  stats->edge_queries = index->edge_queries;
+  stats->edge_empty_queries = index->edge_empty_queries;
+  stats->edge_bypass_queries = index->edge_bypass_queries;
+  stats->edge_intersection_queries = index->edge_intersection_queries;
+  stats->edge_query_features = index->edge_query_features;
+  stats->edge_selected_features = index->edge_selected_features;
+  stats->edge_posting_records_examined =
+    index->edge_posting_records_examined;
+  stats->edge_candidate_records = index->edge_candidate_records;
+  stats->edge_exact_rejects = index->edge_exact_rejects;
+  stats->edge_append_records = index->edge_append_records;
+  stats->edge_append_token_visits = index->edge_append_token_visits;
+  stats->edge_append_feature_lookups =
+    index->edge_append_feature_lookups;
+  stats->edge_bytes =
+    index->edge_bucket_capacity * sizeof(*index->edge_buckets) +
+    index->edge_bucket_hash_capacity * sizeof(*index->edge_bucket_hash) +
+    index->edge_block_capacity * sizeof(*index->edge_blocks);
   stats->route_profile_capacity = index->route_profile_capacity;
   stats->route_profile_occupied = index->route_profile_occupied;
   stats->route_profile_bytes = index->route_profile_capacity *
@@ -6635,7 +7298,8 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->posting_bytes =
     index->posting_block_capacity * sizeof(*index->posting_blocks) +
     index->occurrence_capacity * sizeof(*index->occurrences) +
-    index->position_block_capacity * sizeof(*index->position_blocks);
+    index->position_block_capacity * sizeof(*index->position_blocks) +
+    index->edge_block_capacity * sizeof(*index->edge_blocks);
   stats->posting_stream_used = index->posting_stream_used;
   stats->posting_stream_bytes =
     index->posting_block_capacity * sizeof(*index->posting_blocks);
@@ -6661,7 +7325,9 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
       sizeof(*index->position_bucket_hash) +
     index->position_root_capacity * sizeof(*index->position_root_buckets) +
     index->position_root_capacity *
-      sizeof(*index->position_root_active_counts);
+      sizeof(*index->position_root_active_counts) +
+    index->edge_bucket_capacity * sizeof(*index->edge_buckets) +
+    index->edge_bucket_hash_capacity * sizeof(*index->edge_bucket_hash);
   stats->root_bytes += index->position_probation_capacity *
     sizeof(*index->position_probation);
   stats->root_bytes += index->route_profile_capacity *
@@ -6676,7 +7342,9 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
     index->position_append_match_capacity *
       sizeof(*index->position_append_matches) +
     index->position_token_end_capacity *
-      sizeof(*index->position_token_ends);
+      sizeof(*index->position_token_ends) +
+    index->edge_query_capacity * sizeof(*index->edge_query) +
+    index->edge_append_capacity * sizeof(*index->edge_append_buckets);
   stats->total_bytes = index_bytes(index);
   stats->peak_bytes = index->peak_bytes;
 }
@@ -6705,6 +7373,11 @@ void compact_back_demod_free(Compact_back_demod_index index)
   safe_free(index->position_append_matches);
   safe_free(index->position_token_ends);
   safe_free(index->position_probation);
+  safe_free(index->edge_buckets);
+  safe_free(index->edge_bucket_hash);
+  safe_free(index->edge_blocks);
+  safe_free(index->edge_query);
+  safe_free(index->edge_append_buckets);
   safe_free(index->route_profiles);
   safe_free(index->route_frequency);
   safe_free(index->occurrences);

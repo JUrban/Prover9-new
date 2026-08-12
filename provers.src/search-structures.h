@@ -95,6 +95,7 @@ struct prover_options {
     compact_otter_back_demod_index, // pointer-free redex index authoritative
     compact_back_position_admission, // enable bounded exact-feature probation
     compact_back_sparse_positions, // compressed postings, no bitmap/feature
+    compact_back_edge_filter, // complete occurrence-linear rigid-edge filter
     compact_nonunit_subsumption_audit, // compare compact/legacy feature trie
     compact_otter_nonunit_index, // stable-ID nonunit feature trie authoritative
     compact_nonunit_path_filter, // rigid-path prefilter before materialization

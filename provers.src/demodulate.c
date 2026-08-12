@@ -112,6 +112,11 @@ void configure_compact_back_demod_eager_position_depth(unsigned depth)
   compact_back_demod_set_eager_position_depth(depth);
 }
 
+void configure_compact_back_demod_edge_filter(BOOL enabled)
+{
+  compact_back_demod_set_edge_filter(enabled);
+}
+
 static BOOL compact_back_demod_mode(void)
 {
   return Compact_back_demod_audit || Compact_back_demod_authoritative;
@@ -805,6 +810,23 @@ void fprint_compact_back_demod(FILE *fp)
           stats.posting_bytes, stats.record_bytes, stats.root_bytes,
           stats.token_bytes, stats.hash_bytes, stats.scratch_bytes,
           stats.total_bytes, stats.peak_bytes);
+  fprintf(fp,
+          "Compact_back_edge: enabled=%s, features=%llu, postings=%llu, "
+          "queries=%llu, empty_queries=%llu, bypass_queries=%llu, "
+          "intersection_queries=%llu, query_features=%llu, "
+          "selected_features=%llu, posting_records=%llu, "
+          "candidate_records=%llu, exact_rejects=%llu, "
+          "append_records=%llu, append_token_visits=%llu, "
+          "append_feature_lookups=%llu, bytes=%llu.\n",
+          stats.edge_enabled ? "yes" : "no",
+          stats.edge_features, stats.edge_postings, stats.edge_queries,
+          stats.edge_empty_queries, stats.edge_bypass_queries,
+          stats.edge_intersection_queries, stats.edge_query_features,
+          stats.edge_selected_features,
+          stats.edge_posting_records_examined,
+          stats.edge_candidate_records, stats.edge_exact_rejects,
+          stats.edge_append_records, stats.edge_append_token_visits,
+          stats.edge_append_feature_lookups, stats.edge_bytes);
   fprintf(fp,
           "Compact_back_route: capacity=%llu, occupied=%llu, bytes=%llu, "
           "collisions=%llu, replacements=%llu, mask_choices=%llu, "

@@ -1879,6 +1879,108 @@ int main(void)
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
   }
 
+  {
+    enum { EDGE_RECORDS = 1000, EDGE_DEPTH = 40 };
+    Compact_back_demod_index edge_index;
+    struct compact_back_demod_stats before_edge, after_edge;
+    Topform clauses[EDGE_RECORDS + 2];
+    Topform edge_rule, absent_rule;
+    char irrelevant_text[1024], hit_text[1024], rule_text[1024];
+    char *at;
+    int i, depth;
+
+    at = irrelevant_text;
+    at += sprintf(at, "p(f(k(b),");
+    for (depth = 0; depth < EDGE_DEPTH; depth++)
+      at += sprintf(at, "s(");
+    at += sprintf(at, "g(b)");
+    for (depth = 0; depth < EDGE_DEPTH; depth++)
+      at += sprintf(at, ")");
+    sprintf(at, ")).");
+    at = hit_text;
+    at += sprintf(at, "p(f(k(b),");
+    for (depth = 0; depth < EDGE_DEPTH; depth++)
+      at += sprintf(at, "s(");
+    at += sprintf(at, "g(a)");
+    for (depth = 0; depth < EDGE_DEPTH; depth++)
+      at += sprintf(at, ")");
+    sprintf(at, ")).");
+    at = rule_text;
+    at += sprintf(at, "f(x,");
+    for (depth = 0; depth < EDGE_DEPTH; depth++)
+      at += sprintf(at, "s(");
+    at += sprintf(at, "g(a)");
+    for (depth = 0; depth < EDGE_DEPTH; depth++)
+      at += sprintf(at, ")");
+    sprintf(at, ") = x.");
+
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_ADAPTIVE);
+    compact_back_demod_set_position_options(
+      4096, 4, 32, 0, 50, TRUE, TRUE);
+    compact_back_demod_set_eager_position_depth(0);
+    compact_back_demod_set_edge_filter(TRUE);
+    edge_index = compact_back_demod_init();
+    for (i = 0; i < EDGE_RECORDS; i++) {
+      clauses[i] = indexed_clause(irrelevant_text);
+      CHECK(compact_back_demod_add(edge_index, clauses[i]),
+            "edge stress indexes an irrelevant deep record");
+    }
+    clauses[EDGE_RECORDS] = indexed_clause(hit_text);
+    clauses[EDGE_RECORDS + 1] = indexed_clause(hit_text);
+    CHECK(compact_back_demod_add(edge_index, clauses[EDGE_RECORDS]) &&
+          compact_back_demod_add(edge_index, clauses[EDGE_RECORDS + 1]),
+          "edge stress indexes deep matching records");
+    edge_rule = indexed_clause(rule_text);
+    absent_rule = indexed_clause("f(x,s(g(edge_absent))) = x.");
+    compact_back_demod_get_stats(edge_index, &before_edge);
+    ids = compact_back_demod_candidate_ids(
+      edge_index, edge_rule, ORIENTED, &count);
+    CHECK(count == 2 && ids[0] == clauses[EDGE_RECORDS + 1]->id &&
+          ids[1] == clauses[EDGE_RECORDS]->id,
+          "arbitrary-depth edge retrieval is exact and decreasing");
+    safe_free(ids);
+    compact_back_demod_get_stats(edge_index, &after_edge);
+    CHECK(after_edge.edge_queries == before_edge.edge_queries + 1 &&
+          after_edge.edge_posting_records_examined -
+            before_edge.edge_posting_records_examined <= 2 &&
+          after_edge.edge_candidate_records -
+            before_edge.edge_candidate_records == 2,
+          "rare deep edge keeps lookup independent of root population");
+    before_edge = after_edge;
+    ids = compact_back_demod_candidate_ids(
+      edge_index, absent_rule, ORIENTED, &count);
+    CHECK(count == 0 && ids == NULL,
+          "missing rigid edge proves an empty candidate set");
+    compact_back_demod_get_stats(edge_index, &after_edge);
+    CHECK(after_edge.edge_empty_queries ==
+            before_edge.edge_empty_queries + 1 &&
+          after_edge.edge_posting_records_examined ==
+            before_edge.edge_posting_records_examined,
+          "missing edge requires no population scan");
+    CHECK(after_edge.edge_postings <=
+            after_edge.edge_append_feature_lookups &&
+          after_edge.edge_bytes > 0 && after_edge.edge_enabled,
+          "edge storage is bounded by rigid-edge occurrences");
+    CHECK(compact_back_demod_remove(
+            edge_index, clauses[EDGE_RECORDS + 1]->id),
+          "retire one deep-edge record");
+    compact_back_demod_compact_all_stale(edge_index);
+    ids = compact_back_demod_candidate_ids(
+      edge_index, edge_rule, ORIENTED, &count);
+    CHECK(count == 1 && ids[0] == clauses[EDGE_RECORDS]->id,
+          "forced compaction rebuilds complete edge postings");
+    safe_free(ids);
+    compact_back_demod_free(edge_index);
+    delete_clause(edge_rule);
+    delete_clause(absent_rule);
+    for (i = 0; i < EDGE_RECORDS + 2; i++)
+      delete_clause(clauses[i]);
+    compact_back_demod_set_edge_filter(FALSE);
+    compact_back_demod_set_position_options(
+      4096, 4, 8, 65536, 20, TRUE, FALSE);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
+  }
+
   compact_back_demod_set_tree_min_tokens(1);
   compact_back_demod_set_tree_budget_kb(65536);
   compact_back_demod_set_tree_admit_work(1);
