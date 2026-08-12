@@ -34,6 +34,7 @@ GNU_TIME_RSS_RE = re.compile(
 
 PREFIXES = (
     ("Compact_back_demod:", "back"),
+    ("Compact_back_route:", "back_route"),
     ("Dense_passive:", "passive"),
     ("Dense_passive_selector:", "selector"),
     ("Dense_passive_gc:", "passive_gc"),
@@ -59,6 +60,16 @@ CUMULATIVE_KEYS = (
     "back_timing_exact_seconds", "back_timing_materialize_seconds",
     "back_timing_maintenance_seconds", "demod_attempts", "demod_rewrites",
     "back_profile_exact_tests", "back_profile_exact_successes",
+    "back_route_collisions", "back_route_replacements",
+    "back_route_mask_choices", "back_route_tree_choices",
+    "back_route_position_choices", "back_route_mask_probes",
+    "back_route_tree_probes", "back_route_position_probes",
+    "back_route_switches", "back_route_reversions",
+    "back_route_hysteresis_holds", "back_route_mask_observed_cost",
+    "back_route_tree_observed_cost", "back_route_position_observed_cost",
+    "back_route_mask_estimated_cost", "back_route_tree_estimated_cost",
+    "back_route_position_estimated_cost", "back_route_mask_candidates",
+    "back_route_tree_candidates", "back_route_position_candidates",
     "clock_infer", "clock_preprocess", "clock_demod", "clock_hints",
     "clock_subsume", "clock_back_demod", "ancestor_file_reads_bytes",
     "ancestor_file_writes_bytes", "selector_reads_bytes",
@@ -342,6 +353,22 @@ def derive_intervals(samples):
         delta_exact_successes = row.get("delta_back_profile_exact_successes")
         row["back_exact_successes_per_query"] = safe_ratio(
             delta_exact_successes, delta_queries)
+        route_choices = sum(number(row, "delta_back_route_" + route +
+                                   "_choices", 0)
+                            for route in ("mask", "tree", "position"))
+        row["back_route_choices"] = route_choices
+        for route in ("mask", "tree", "position"):
+            choices = row.get("delta_back_route_" + route + "_choices")
+            row["back_route_" + route + "_choice_pct"] = safe_ratio(
+                choices, route_choices)
+            if row["back_route_" + route + "_choice_pct"] is not None:
+                row["back_route_" + route + "_choice_pct"] *= 100.0
+            row["back_route_" + route + "_cost_per_choice"] = safe_ratio(
+                row.get("delta_back_route_" + route + "_observed_cost"),
+                choices)
+            row["back_route_" + route + "_candidates_per_choice"] = safe_ratio(
+                row.get("delta_back_route_" + route + "_candidates"),
+                choices)
         answer_units = (
             delta_queries + delta_exact_successes
             if isinstance(delta_queries, (int, float)) and
@@ -574,6 +601,19 @@ def run_summary(label, rows):
         "last_anonymous_mib": last.get("anonymous_mib"),
         "last_swap_mib": last.get("swap_mib"),
         "last_back_mib": last.get("back_mib"),
+        "last_back_route_profile_occupied": last.get(
+            "back_route_occupied"),
+        "last_back_route_profile_capacity": last.get(
+            "back_route_capacity"),
+        "last_back_route_profile_bytes": last.get("back_route_bytes"),
+        "last_back_route_mask_choice_pct": last.get(
+            "back_route_mask_choice_pct"),
+        "last_back_route_tree_choice_pct": last.get(
+            "back_route_tree_choice_pct"),
+        "last_back_route_position_choice_pct": last.get(
+            "back_route_position_choice_pct"),
+        "last_back_route_switches": last.get("back_route_switches"),
+        "last_back_route_reversions": last.get("back_route_reversions"),
         "last_child_hit_pct": last.get("back_child_hit_pct"),
         "peak_rss_kb": peak_rss_kb,
         "peak_rss_mib": safe_ratio(peak_rss_kb, 1024),
@@ -767,6 +807,24 @@ def markdown(label, rows, summary, total_samples=None):
             fmt(row.get("back_child_hit_pct"), 1),
             fmt(row.get("back_mib"), 1)))
     print()
+    if any(row.get("back_route_capacity") is not None for row in rows):
+        print("| CPU s | Mask route % | Tree route % | Position route % | "
+              "Mask cost/choice | Tree cost/choice | Position cost/choice | "
+              "Switches | Reversions | Hysteresis holds |")
+        print("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+        for row in rows:
+            print("| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |".format(
+                fmt(row.get("user_cpu")),
+                fmt(row.get("back_route_mask_choice_pct"), 1),
+                fmt(row.get("back_route_tree_choice_pct"), 1),
+                fmt(row.get("back_route_position_choice_pct"), 1),
+                fmt(row.get("back_route_mask_cost_per_choice"), 1),
+                fmt(row.get("back_route_tree_cost_per_choice"), 1),
+                fmt(row.get("back_route_position_cost_per_choice"), 1),
+                fmt(row.get("delta_back_route_switches")),
+                fmt(row.get("delta_back_route_reversions")),
+                fmt(row.get("delta_back_route_hysteresis_holds"))))
+        print()
     markdown_summary(summary)
 
 
@@ -780,6 +838,15 @@ def markdown_summary(summary):
     print("Peak memory={} MiB ({}).".format(
         fmt(summary.get("peak_rss_mib"), 1),
         fmt(summary.get("peak_rss_source"))))
+    if summary.get("last_back_route_profile_capacity") is not None:
+        print("Final adaptive route table={}/{} entries ({} bytes); last "
+              "interval route mix: mask={}%, tree={}%, position={}%.".format(
+                  fmt(summary.get("last_back_route_profile_occupied")),
+                  fmt(summary.get("last_back_route_profile_capacity")),
+                  fmt(summary.get("last_back_route_profile_bytes")),
+                  fmt(summary.get("last_back_route_mask_choice_pct"), 1),
+                  fmt(summary.get("last_back_route_tree_choice_pct"), 1),
+                  fmt(summary.get("last_back_route_position_choice_pct"), 1)))
     print("First-to-last interval ratios: counted back work/query={}, "
           "back lookup CPU/query={}, answer-normalized back CPU={}, "
           "given/CPU={}.".format(
@@ -881,6 +948,15 @@ TSV_COLUMNS = (
     "delta_back_timing_lookup_samples", "back_lookup_timing_sufficient",
     "delta_back_profile_exact_successes", "back_exact_successes_per_query",
     "back_lookup_seconds_per_answer_unit", "back_lookup_us_per_answer_unit",
+    "back_route_capacity", "back_route_occupied", "back_route_bytes",
+    "delta_back_route_mask_choices", "delta_back_route_tree_choices",
+    "delta_back_route_position_choices", "back_route_mask_choice_pct",
+    "back_route_tree_choice_pct", "back_route_position_choice_pct",
+    "back_route_mask_cost_per_choice", "back_route_tree_cost_per_choice",
+    "back_route_position_cost_per_choice", "delta_back_route_mask_probes",
+    "delta_back_route_tree_probes", "delta_back_route_position_probes",
+    "delta_back_route_switches", "delta_back_route_reversions",
+    "delta_back_route_hysteresis_holds",
     "back_tree_child_parents", "back_tree_child_bytes", "back_bytes",
     "residency_pss", "residency_anonymous", "residency_swap",
     "passive_records", "passive_directory_logical", "selector_buffer_bytes",
