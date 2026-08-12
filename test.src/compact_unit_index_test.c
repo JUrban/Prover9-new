@@ -16,6 +16,66 @@ static Topform indexed_unit(const char *text)
   return c;
 }
 
+static void check_high_base_strategy(Compact_unit_strategy strategy)
+{
+  Compact_term_pool pool = compact_term_pool_init();
+  Compact_term_rebase_map map = compact_term_rebase_map_init();
+  Compact_unit_index index;
+  Topform general = indexed_unit("hp(x).");
+  Topform exact = indexed_unit("hp(a).");
+  Topform unifier = indexed_unit("hr(f(x),x).");
+  Topform occurs = indexed_unit("hr(y,f(y)).");
+  Topform query;
+  unsigned long long *ids;
+  size_t count;
+  int pass;
+
+  compact_term_pool_set_logical_base(
+    pool, (unsigned long long) UINT32_MAX + 417ULL);
+  compact_unit_index_set_strategy(strategy);
+  index = compact_unit_index_init_with_pool(pool);
+  CHECK(compact_unit_index_add(index, general) &&
+        compact_unit_index_add(index, exact) &&
+        compact_unit_index_add(index, unifier) &&
+        compact_unit_index_add(index, occurs),
+        "all unit strategies index terms above the 32-bit boundary");
+
+  for (pass = 0; pass < 2; pass++) {
+    query = parse_clause_from_string("hp(a).");
+    CHECK(compact_unit_generalization_first(
+            index, query->literals->atom, TRUE, 0) == general->id,
+          "high-base generalization follows discrimination-tree order");
+    ids = compact_unit_instance_ids(
+      index, query->literals->atom, TRUE, 0, &count);
+    CHECK(count == 1 && ids != NULL && ids[0] == exact->id,
+          "high-base instance retrieval is exact");
+    safe_free(ids);
+    delete_clause(query);
+
+    query = parse_clause_from_string("hr(f(a),a).");
+    ids = compact_unit_unifier_ids(
+      index, query->literals->atom, TRUE, 0, &count);
+    CHECK(count == 1 && ids != NULL && ids[0] == unifier->id,
+          "high-base unification preserves bindings and the occurs check");
+    safe_free(ids);
+    delete_clause(query);
+
+    if (pass == 0) {
+      compact_unit_index_retain_live_clauses(index, map);
+      compact_term_pool_compact_retained(pool, map);
+      compact_unit_index_rebase_term_pool(index, pool, map);
+    }
+  }
+
+  compact_unit_index_free(index);
+  compact_term_rebase_map_free(map);
+  compact_term_pool_free(pool);
+  delete_clause(general);
+  delete_clause(exact);
+  delete_clause(unifier);
+  delete_clause(occurs);
+}
+
 int main(void)
 {
   Compact_unit_index index;
@@ -335,6 +395,11 @@ int main(void)
       delete_clause(units[i]);
     compact_unit_index_set_strategy(COMPACT_UNIT_ROOT_SCAN);
   }
+
+  check_high_base_strategy(COMPACT_UNIT_ROOT_SCAN);
+  check_high_base_strategy(COMPACT_UNIT_POSITION);
+  check_high_base_strategy(COMPACT_UNIT_CODE_TREE);
+  compact_unit_index_set_strategy(COMPACT_UNIT_ROOT_SCAN);
 
   if (Failures != 0) {
     fprintf(stderr, "compact_unit_index_test: %d failure(s)\n", Failures);

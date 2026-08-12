@@ -10,8 +10,7 @@ static unsigned Compaction_stale_pct = 25;
 static Compact_unit_strategy Unit_strategy = COMPACT_UNIT_ROOT_SCAN;
 
 struct cui_node {
-  uint32_t token_offset;
-  uint32_t token_length;
+  Compact_term_slice tokens;
   uint32_t first_child;
   uint32_t next_sibling;
   uint32_t first_posting;
@@ -26,13 +25,18 @@ struct cui_posting {
 struct cui_record {
   unsigned long long proof_id;
   uint64_t symbol_mask;
-  uint32_t token_offset;
-  uint32_t token_length;
+  Compact_term_slice tokens;
   uint32_t next_root;
   uint32_t query_stamp;
   unsigned char sign;
   unsigned char active;
+  uint32_t root_symbol;
 };
+
+typedef char compact_unit_node_must_remain_24_bytes[
+  sizeof(struct cui_node) == 24 ? 1 : -1];
+typedef char compact_unit_record_must_remain_40_bytes[
+  sizeof(struct cui_record) == 40 ? 1 : -1];
 
 struct cui_feature_bucket {
   uint64_t key;
@@ -74,7 +78,6 @@ struct compact_unit_index {
   size_t feature_posting_count;
   size_t feature_posting_capacity;
   Compact_term_pool term_pool;
-  const int32_t *tokens;
   BOOL owns_term_pool;
   Compact_id_map id_map;
   struct cui_query_term *query;
@@ -301,6 +304,7 @@ static void append_feature_posting(Compact_unit_index index, uint64_t key,
 }
 
 static uint32_t index_token_features(Compact_unit_index index,
+                                     const int32_t *tokens,
                                      uint32_t record, uint32_t position,
                                      uint32_t end, uint64_t path,
                                      unsigned depth)
@@ -309,7 +313,7 @@ static uint32_t index_token_features(Compact_unit_index index,
   int i, arity;
   if (position >= end)
     fatal_error("compact_unit_index: truncated feature term");
-  code = index->tokens[position++];
+  code = tokens[position++];
   if (code < 0) {
     if (depth != 0)
       append_feature_posting(index,
@@ -325,7 +329,7 @@ static uint32_t index_token_features(Compact_unit_index index,
                            record);
   arity = sn_to_arity(code);
   for (i = 0; i < arity; i++)
-    position = index_token_features(index, record, position, end,
+    position = index_token_features(index, tokens, record, position, end,
                                     child_path(path, (unsigned) i),
                                     depth + 1);
   return position;
@@ -395,7 +399,7 @@ static int code_compare(int32_t a, int32_t b)
 }
 
 static uint32_t new_node(Compact_unit_index index,
-                         uint32_t token_offset, uint32_t token_length)
+                         Compact_term_slice tokens)
 {
   uint32_t node;
   if (index->node_count == index->node_capacity) {
@@ -409,36 +413,42 @@ static uint32_t new_node(Compact_unit_index index,
     fatal_error("compact_unit_index: node offsets exceed 32 bits");
   node = (uint32_t) index->node_count++;
   memset(&index->nodes[node], 0, sizeof(index->nodes[node]));
-  index->nodes[node].token_offset = token_offset;
-  index->nodes[node].token_length = token_length;
+  index->nodes[node].tokens = tokens;
   return node;
 }
 
 static int32_t first_code(Compact_unit_index index, uint32_t node)
 {
   struct cui_node *n = &index->nodes[node];
-  if (n->token_length == 0)
+  if (compact_term_slice_length(n->tokens) == 0)
     fatal_error("compact_unit_index: empty nonroot radix edge");
-  return index->tokens[n->token_offset];
+  return compact_term_pool_slice_tokens(index->term_pool, n->tokens)[0];
 }
 
 static uint32_t insert_token_path(Compact_unit_index index, uint32_t root,
-                                  uint32_t offset, uint32_t length)
+                                  Compact_term_slice slice)
 {
   uint32_t parent = root;
   uint32_t position = 0;
+  uint32_t length = compact_term_slice_length(slice);
+  const int32_t *tokens = compact_term_pool_slice_tokens(
+    index->term_pool, slice);
   while (position < length) {
     uint32_t current = index->nodes[parent].first_child;
     uint32_t previous = CUI_NONE;
-    int32_t wanted = index->tokens[offset + position];
+    int32_t wanted = tokens[position];
     while (current != CUI_NONE &&
            code_compare(first_code(index, current), wanted) < 0) {
       previous = current;
       current = index->nodes[current].next_sibling;
     }
     if (current == CUI_NONE || first_code(index, current) != wanted) {
-      uint32_t added = new_node(index, offset + position,
-                                length - position);
+      Compact_term_slice suffix;
+      uint32_t added;
+      if (!compact_term_slice_subslice(
+            slice, position, length - position, &suffix))
+        fatal_error("compact_unit_index: invalid radix suffix");
+      added = new_node(index, suffix);
       if (previous == CUI_NONE) {
         index->nodes[added].next_sibling =
           index->nodes[parent].first_child;
@@ -452,12 +462,13 @@ static uint32_t insert_token_path(Compact_unit_index index, uint32_t root,
       return added;
     }
     else {
-      uint32_t old_offset = index->nodes[current].token_offset;
-      uint32_t old_length = index->nodes[current].token_length;
+      Compact_term_slice old_slice = index->nodes[current].tokens;
+      const int32_t *old_tokens = compact_term_pool_slice_tokens(
+        index->term_pool, old_slice);
+      uint32_t old_length = compact_term_slice_length(old_slice);
       uint32_t common = 0;
       while (common < old_length && position + common < length &&
-             index->tokens[old_offset + common] ==
-             index->tokens[offset + position + common])
+             old_tokens[common] == tokens[position + common])
         common++;
       if (common == old_length) {
         position += common;
@@ -465,23 +476,34 @@ static uint32_t insert_token_path(Compact_unit_index index, uint32_t root,
       }
       else {
         uint32_t old_next = index->nodes[current].next_sibling;
-        uint32_t split = new_node(index, old_offset, common);
+        Compact_term_slice prefix, old_suffix;
+        uint32_t split;
         uint32_t added;
         if (common == 0)
           fatal_error("compact_unit_index: invalid zero-length radix split");
+        if (!compact_term_slice_subslice(old_slice, 0, common, &prefix) ||
+            !compact_term_slice_subslice(
+              old_slice, common, old_length - common, &old_suffix))
+          fatal_error("compact_unit_index: invalid radix split slices");
+        split = new_node(index, prefix);
         index->nodes[split].next_sibling = old_next;
         if (previous == CUI_NONE)
           index->nodes[parent].first_child = split;
         else
           index->nodes[previous].next_sibling = split;
-        index->nodes[current].token_offset += common;
-        index->nodes[current].token_length -= common;
+        index->nodes[current].tokens = old_suffix;
         index->nodes[current].next_sibling = CUI_NONE;
         index->nodes[split].first_child = current;
         position += common;
         if (position == length)
           return split;
-        added = new_node(index, offset + position, length - position);
+        {
+          Compact_term_slice suffix;
+          if (!compact_term_slice_subslice(
+                slice, position, length - position, &suffix))
+            fatal_error("compact_unit_index: invalid added radix suffix");
+          added = new_node(index, suffix);
+        }
         if (code_compare(first_code(index, added),
                          first_code(index, current)) < 0) {
           index->nodes[added].next_sibling = current;
@@ -496,21 +518,23 @@ static uint32_t insert_token_path(Compact_unit_index index, uint32_t root,
   return parent;
 }
 
-static uint32_t append_tokens(Compact_unit_index index, Topform unit,
-                              Term atom,
-                              uint32_t *length, uint64_t *symbol_mask)
+static Compact_term_slice append_tokens(Compact_unit_index index,
+                                        Topform unit, Term atom,
+                                        uint64_t *symbol_mask)
 {
-  uint32_t offset = compact_term_pool_intern(
-    index->term_pool, unit->id, unit->literals, atom, length);
+  Compact_term_slice slice = compact_term_pool_intern_slice(
+    index->term_pool, unit->id, unit->literals, atom);
+  const int32_t *tokens = compact_term_pool_slice_tokens(
+    index->term_pool, slice);
+  uint32_t length = compact_term_slice_length(slice);
   uint32_t i;
-  index->tokens = compact_term_pool_tokens(index->term_pool);
   *symbol_mask = 0;
-  for (i = 0; i < *length; i++) {
-    int32_t code = index->tokens[offset + i];
+  for (i = 0; i < length; i++) {
+    int32_t code = tokens[i];
     if (code >= 0)
       *symbol_mask |= symbol_bit((unsigned) code);
   }
-  return offset;
+  return slice;
 }
 
 static void ensure_unifier_symbol(Compact_unit_index index, unsigned symbol)
@@ -540,8 +564,11 @@ static void ensure_unifier_symbol(Compact_unit_index index, unsigned symbol)
 static void index_record(Compact_unit_index index, uint32_t record)
 {
   struct cui_record *r = &index->records[record];
+  const int32_t *tokens = compact_term_pool_slice_tokens(
+    index->term_pool, r->tokens);
+  uint32_t length = compact_term_slice_length(r->tokens);
   uint32_t node = insert_token_path(
-    index, index->roots[r->sign ? 1 : 0], r->token_offset, r->token_length);
+    index, index->roots[r->sign ? 1 : 0], r->tokens);
   uint32_t posting;
   ENSURE_ARRAY(index, postings, posting_count, posting_capacity,
                "compact_unit_index: posting overflow");
@@ -556,10 +583,9 @@ static void index_record(Compact_unit_index index, uint32_t record)
     index->postings[index->nodes[node].last_posting].next = posting;
   index->nodes[node].last_posting = posting;
   if (index->strategy == COMPACT_UNIT_POSITION &&
-      index_token_features(index, record, r->token_offset,
-                           r->token_offset + r->token_length,
+      index_token_features(index, tokens, record, 0, length,
                            UINT64_C(0x726f6f745f706174), 0) !=
-        r->token_offset + r->token_length)
+        length)
     fatal_error("compact_unit_index: malformed feature term");
 }
 
@@ -571,16 +597,15 @@ static Compact_unit_index compact_unit_index_init_with_pool_strategy(
     fatal_error("compact_unit_index_init_with_pool: null term pool");
   index->term_pool = pool;
   index->strategy = strategy;
-  index->tokens = compact_term_pool_tokens(pool);
   index->id_map = compact_id_map_init(1);
   index->generalization_clock = clock_init("compact_unit_generalization");
   index->instance_clock = clock_init("compact_unit_instance");
   index->unifier_clock = clock_init("compact_unit_unifier");
   index->sort_clock = clock_init("compact_unit_sort");
   index->maintenance_clock = clock_init("compact_unit_maintenance");
-  (void) new_node(index, 0, 0);  /* reserved null node */
-  index->roots[0] = new_node(index, 0, 0);
-  index->roots[1] = new_node(index, 0, 0);
+  (void) new_node(index, 0);  /* reserved null node */
+  index->roots[0] = new_node(index, 0);
+  index->roots[1] = new_node(index, 0);
   ENSURE_ARRAY(index, postings, posting_count, posting_capacity,
                "compact_unit_index: posting overflow");
   memset(&index->postings[0], 0, sizeof(index->postings[0]));
@@ -624,6 +649,7 @@ Compact_unit_index compact_unit_index_init(void)
 BOOL compact_unit_index_add(Compact_unit_index index, Topform unit)
 {
   struct cui_record *record;
+  const int32_t *tokens;
   uint32_t at_record;
   if (index == NULL || unit == NULL || unit->id == 0 ||
       unit->literals == NULL || unit->literals->next != NULL ||
@@ -639,13 +665,14 @@ BOOL compact_unit_index_add(Compact_unit_index index, Topform unit)
   record->proof_id = unit->id;
   record->sign = unit->literals->sign;
   record->active = TRUE;
-  record->token_offset = append_tokens(index, unit, unit->literals->atom,
-                                        &record->token_length,
-                                        &record->symbol_mask);
-  if (record->token_length == 0 || index->tokens[record->token_offset] < 0)
+  record->tokens = append_tokens(index, unit, unit->literals->atom,
+                                 &record->symbol_mask);
+  tokens = compact_term_pool_slice_tokens(index->term_pool, record->tokens);
+  if (compact_term_slice_length(record->tokens) == 0 || tokens[0] < 0)
     fatal_error("compact_unit_index: unit atom has no fixed root");
+  record->root_symbol = (uint32_t) tokens[0];
   {
-    unsigned root = (unsigned) index->tokens[record->token_offset];
+    unsigned root = record->root_symbol;
     ensure_unifier_symbol(index, root);
     record->next_root = index->unifier_heads[record->sign ? 1 : 0][root];
     index->unifier_heads[record->sign ? 1 : 0][root] = at_record;
@@ -694,8 +721,7 @@ static void copy_live_record(Compact_unit_index destination,
   record->next_root = CUI_NONE;
   record->query_stamp = 0;
   {
-    unsigned root = (unsigned)
-      destination->tokens[record->token_offset];
+    unsigned root = record->root_symbol;
     ensure_unifier_symbol(destination, root);
     record->next_root =
       destination->unifier_heads[record->sign ? 1 : 0][root];
@@ -798,7 +824,6 @@ static void compact_unit_index_compact_internal(Compact_unit_index index,
   replacement = compact_unit_index_init_with_pool_strategy(
     old.term_pool, old.strategy);
   replacement->owns_term_pool = old.owns_term_pool;
-  replacement->tokens = compact_term_pool_tokens(old.term_pool);
   safe_free(replacement->records);
   replacement->records = old.records;
   replacement->record_capacity = packed;
@@ -891,14 +916,13 @@ void compact_unit_index_rebase_term_pool(Compact_unit_index index,
   if (index == NULL)
     return;
   for (i = 1; i < index->record_count; i++)
-    index->records[i].token_offset = compact_term_rebase_offset(
-      map, index->records[i].token_offset);
+    index->records[i].tokens = compact_term_rebase_slice(
+      map, index->records[i].tokens);
   for (i = 1; i < index->node_count; i++)
-    if (index->nodes[i].token_length != 0)
-      index->nodes[i].token_offset = compact_term_rebase_offset(
-        map, index->nodes[i].token_offset);
+    if (compact_term_slice_length(index->nodes[i].tokens) != 0)
+      index->nodes[i].tokens = compact_term_rebase_slice(
+        map, index->nodes[i].tokens);
   index->term_pool = pool;
-  index->tokens = compact_term_pool_tokens(pool);
   update_peak(index);
 }
 
@@ -929,10 +953,13 @@ static BOOL match_generalization_edge(
   uint32_t *next_position)
 {
   struct cui_node *edge = &index->nodes[node];
+  const int32_t *tokens = compact_term_pool_slice_tokens(
+    index->term_pool, edge->tokens);
+  uint32_t length = compact_term_slice_length(edge->tokens);
   uint32_t i;
   *new_count = 0;
-  for (i = 0; i < edge->token_length; i++) {
-    int32_t code = index->tokens[edge->token_offset + i];
+  for (i = 0; i < length; i++) {
+    int32_t code = tokens[i];
     Term query_term;
     if (position >= end)
       return FALSE;
@@ -1020,7 +1047,6 @@ unsigned long long compact_unit_generalization_first(
     return 0;
   memset(&work, 0, sizeof(work));
   clock_start(index->generalization_clock);
-  index->tokens = compact_term_pool_tokens(index->term_pool);
   index->generalization_queries++;
   memset(bindings, 0, sizeof(bindings));
   flatten_query(index, target, &count);
@@ -1040,25 +1066,25 @@ unsigned long long compact_unit_generalization_first(
   return result;
 }
 
-static uint32_t token_term_end(Compact_unit_index index, uint32_t position,
+static uint32_t token_term_end(const int32_t *tokens, uint32_t position,
                                uint32_t end)
 {
   int32_t code;
   int i;
   if (position >= end)
     return UINT32_MAX;
-  code = index->tokens[position++];
+  code = tokens[position++];
   if (code < 0)
     return position;
   for (i = 0; i < sn_to_arity(code); i++) {
-    position = token_term_end(index, position, end);
+    position = token_term_end(tokens, position, end);
     if (position == UINT32_MAX)
       return UINT32_MAX;
   }
   return position;
 }
 
-static BOOL pattern_matches_tokens(Compact_unit_index index, Term pattern,
+static BOOL pattern_matches_tokens(const int32_t *tokens, Term pattern,
                                    uint32_t *position, uint32_t end,
                                    uint32_t *starts, uint32_t *ends)
 {
@@ -1069,7 +1095,7 @@ static BOOL pattern_matches_tokens(Compact_unit_index index, Term pattern,
   if (VARIABLE(pattern)) {
     unsigned variable = (unsigned) VARNUM(pattern);
     uint32_t start = *position;
-    uint32_t finish = token_term_end(index, start, end);
+    uint32_t finish = token_term_end(tokens, start, end);
     if (variable >= MAX_VARS || finish == UINT32_MAX)
       return FALSE;
     if (starts[variable] == UINT32_MAX) {
@@ -1080,18 +1106,18 @@ static BOOL pattern_matches_tokens(Compact_unit_index index, Term pattern,
       size_t old_length = ends[variable] - starts[variable];
       size_t new_length = finish - start;
       if (old_length != new_length ||
-          memcmp(index->tokens + starts[variable], index->tokens + start,
-                 new_length * sizeof(*index->tokens)) != 0)
+          memcmp(tokens + starts[variable], tokens + start,
+                 new_length * sizeof(*tokens)) != 0)
         return FALSE;
     }
     *position = finish;
     return TRUE;
   }
-  code = index->tokens[(*position)++];
+  code = tokens[(*position)++];
   if (code < 0 || code != SYMNUM(pattern))
     return FALSE;
   for (i = 0; i < ARITY(pattern); i++)
-    if (!pattern_matches_tokens(index, ARG(pattern, i), position, end,
+    if (!pattern_matches_tokens(tokens, ARG(pattern, i), position, end,
                                 starts, ends))
       return FALSE;
   return TRUE;
@@ -1143,13 +1169,16 @@ static void collect_instance_tree_candidates(
   unsigned long long *dead)
 {
   struct cui_node *edge = &index->nodes[node];
+  const int32_t *edge_tokens = compact_term_pool_slice_tokens(
+    index->term_pool, edge->tokens);
+  uint32_t edge_length = compact_term_slice_length(edge->tokens);
   uint32_t at;
   uint32_t child;
 
   (*visited)++;
   index->instance_tree_nodes_examined++;
-  for (at = 0; at < edge->token_length; at++) {
-    int32_t code = index->tokens[edge->token_offset + at];
+  for (at = 0; at < edge_length; at++) {
+    int32_t code = edge_tokens[at];
     if (pending != 0) {
       int arity = code < 0 ? 0 : sn_to_arity(code);
       pending--;
@@ -1190,6 +1219,8 @@ static void collect_instance_tree_candidates(
          posting = index->postings[posting].next) {
       struct cui_record *record =
         &index->records[index->postings[posting].record];
+      const int32_t *record_tokens;
+      uint32_t record_length;
       uint32_t position;
       uint32_t starts[MAX_VARS], ends[MAX_VARS];
       unsigned variable;
@@ -1204,11 +1235,13 @@ static void collect_instance_tree_candidates(
       index->instance_exact_tests++;
       for (variable = 0; variable < MAX_VARS; variable++)
         starts[variable] = UINT32_MAX;
-      position = record->token_offset;
-      if (pattern_matches_tokens(
-            index, pattern, &position,
-            record->token_offset + record->token_length, starts, ends) &&
-          position == record->token_offset + record->token_length)
+      record_tokens = compact_term_pool_slice_tokens(
+        index->term_pool, record->tokens);
+      record_length = compact_term_slice_length(record->tokens);
+      position = 0;
+      if (pattern_matches_tokens(record_tokens, pattern, &position,
+                                 record_length, starts, ends) &&
+          position == record_length)
         append_result_id(index, record->proof_id, found);
     }
     return;
@@ -1235,7 +1268,6 @@ unsigned long long *compact_unit_instance_ids(
   if (index == NULL || pattern == NULL)
     return NULL;
   clock_start(index->instance_clock);
-  index->tokens = compact_term_pool_tokens(index->term_pool);
   index->instance_queries++;
   tests_before = index->instance_exact_tests;
   if (index->strategy == COMPACT_UNIT_CODE_TREE) {
@@ -1255,6 +1287,8 @@ unsigned long long *compact_unit_instance_ids(
     wanted = resident_symbol_mask(pattern);
     for (i = 1; i < index->record_count; i++) {
       struct cui_record *record = &index->records[i];
+      const int32_t *record_tokens;
+      uint32_t record_length;
       uint32_t position;
       uint32_t starts[MAX_VARS], ends[MAX_VARS];
       unsigned j;
@@ -1270,11 +1304,13 @@ unsigned long long *compact_unit_instance_ids(
       index->instance_exact_tests++;
       for (j = 0; j < MAX_VARS; j++)
         starts[j] = UINT32_MAX;
-      position = record->token_offset;
-      if (pattern_matches_tokens(
-            index, pattern, &position,
-            record->token_offset + record->token_length, starts, ends) &&
-          position == record->token_offset + record->token_length) {
+      record_tokens = compact_term_pool_slice_tokens(
+        index->term_pool, record->tokens);
+      record_length = compact_term_slice_length(record->tokens);
+      position = 0;
+      if (pattern_matches_tokens(record_tokens, pattern, &position,
+                                 record_length, starts, ends) &&
+          position == record_length) {
         append_result_id(index, record->proof_id, &found);
       }
     }
@@ -1315,7 +1351,7 @@ struct cui_expr {
 };
 
 struct cui_unify_state {
-  Compact_unit_index index;
+  const int32_t *tokens;
   struct cui_expr resident_bindings[MAX_VARS];
   struct cui_expr token_bindings[MAX_VARS];
   BOOL resident_bound[MAX_VARS];
@@ -1329,7 +1365,7 @@ static BOOL expr_variable(struct cui_unify_state *state,
     int32_t code;
     if (expr.value.position >= expr.token_end)
       return FALSE;
-    code = state->index->tokens[expr.value.position];
+    code = state->tokens[expr.value.position];
     if (code >= 0)
       return FALSE;
     *variable = (unsigned) (-code - 1);
@@ -1367,7 +1403,7 @@ static struct cui_expr dereference_expr(struct cui_unify_state *state,
 
 static int expr_symbol(struct cui_unify_state *state, struct cui_expr expr)
 {
-  return expr.token ? state->index->tokens[expr.value.position] :
+  return expr.token ? state->tokens[expr.value.position] :
                       SYMNUM(expr.value.resident);
 }
 
@@ -1388,7 +1424,7 @@ static struct cui_expr expr_child(struct cui_unify_state *state,
     int i;
     uint32_t position = expr.value.position + 1;
     for (i = 0; i < child; i++)
-      position = token_term_end(state->index, position, expr.token_end);
+      position = token_term_end(state->tokens, position, expr.token_end);
     expr.value.position = position;
     return expr;
   }
@@ -1469,13 +1505,14 @@ static BOOL resident_unifies_record(Compact_unit_index index, Term query,
   struct cui_unify_state state;
   struct cui_expr resident, token;
   memset(&state, 0, sizeof(state));
-  state.index = index;
+  state.tokens = compact_term_pool_slice_tokens(index->term_pool,
+                                                 record->tokens);
   resident.token = FALSE;
   resident.value.resident = query;
   resident.token_end = 0;
   token.token = TRUE;
-  token.value.position = record->token_offset;
-  token.token_end = record->token_offset + record->token_length;
+  token.value.position = 0;
+  token.token_end = compact_term_slice_length(record->tokens);
   return unify_exprs(&state, resident, token);
 }
 
@@ -1492,13 +1529,16 @@ static void collect_code_tree_candidates(
   unsigned long long *dead)
 {
   struct cui_node *edge = &index->nodes[node];
+  const int32_t *edge_tokens = compact_term_pool_slice_tokens(
+    index->term_pool, edge->tokens);
+  uint32_t edge_length = compact_term_slice_length(edge->tokens);
   uint32_t at;
   uint32_t child;
 
   (*visited)++;
   index->code_tree_nodes_examined++;
-  for (at = 0; at < edge->token_length; at++) {
-    int32_t code = index->tokens[edge->token_offset + at];
+  for (at = 0; at < edge_length; at++) {
+    int32_t code = edge_tokens[at];
     if (pending != 0) {
       int arity = code < 0 ? 0 : sn_to_arity(code);
       pending--;
@@ -1667,8 +1707,9 @@ static void collect_position_bucket(
     }
     (*live)++;
     if (record->sign != (unsigned char) sign ||
-        record->proof_id == exclude_id || record->token_length == 0 ||
-        index->tokens[record->token_offset] != SYMNUM(query))
+        record->proof_id == exclude_id ||
+        compact_term_slice_length(record->tokens) == 0 ||
+        record->root_symbol != (unsigned) SYMNUM(query))
       continue;
     index->unifier_exact_tests++;
     if (resident_unifies_record(index, query, record)) {
@@ -1693,7 +1734,6 @@ unsigned long long *compact_unit_unifier_ids(
   if (index == NULL || query == NULL || VARIABLE(query))
     return NULL;
   clock_start(index->unifier_clock);
-  index->tokens = compact_term_pool_tokens(index->term_pool);
   index->unifier_queries++;
   tests_before = index->unifier_exact_tests;
   query_root = SYMNUM(query);
@@ -1746,8 +1786,9 @@ unsigned long long *compact_unit_unifier_ids(
       else
         dead++;
       if (!record->active || record->sign != (unsigned char) sign ||
-          record->proof_id == exclude_id || record->token_length == 0 ||
-          index->tokens[record->token_offset] != query_root)
+          record->proof_id == exclude_id ||
+          compact_term_slice_length(record->tokens) == 0 ||
+          record->root_symbol != (unsigned) query_root)
         continue;
       index->unifier_exact_tests++;
       if (resident_unifies_record(index, query, record)) {

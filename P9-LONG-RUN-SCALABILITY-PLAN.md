@@ -332,19 +332,23 @@ listed hot layouts retain their previous sizes, before/after candidate and
 proof trajectories are identical, and mature lookup CPU stays within the
 existing 25% hard limit.  Passing the numerical test alone is not promotion.
 
-Implementation status: the pool foundation and compact rewrite consumer are
-implemented.  Packed slice encoding/sub-slicing, the two-word proof-ID
+Implementation status: the pool foundation plus compact rewrite and unit
+consumers are implemented.  Packed slice encoding/sub-slicing, the two-word proof-ID
 directory, clause serialization and lookup, arbitrary-order copy compaction,
 both in-memory and file-sorted retained compaction, and binary-search rebasing
-operate above `UINT32_MAX` in bounded high-logical-base tests.  Rewrite radix
+operate above `UINT32_MAX` in bounded high-logical-base tests.  Rewrite and unit radix
 nodes and rules now store slices directly and remain 24 bytes each; matching,
 contractum construction, overlap discovery, copying, and rebasing resolve
 logical slices to local token spans once per operation.  Four rewrite metadata
 bits share the proof-ID word, preserving the rule layout with a checked 60-bit
-proof-ID ceiling.  The rebase entry remains 16 bytes and the sharing-profile
-table remains 16 bytes per slot.  Unit and back-demod consumers still use the
-compatibility 32-bit pool API and are the next tranche; production is therefore
-still capped until those fields and inner loops migrate and pass the CPU gates.
+proof-ID ceiling.  Unit records remain 40 bytes and use their former tail
+padding to cache the root symbol, avoiding a new slice-resolution cost in
+root-scan and position-filter candidate loops.  All three unit strategies pass
+generalization, instance, and unification tests before and after high-base pool
+rebasing.  The rebase entry remains 16 bytes and the sharing-profile table
+remains 16 bytes per slot.  Back-demod consumers still use the compatibility
+32-bit pool API and are the next tranche; production is therefore still capped
+until those fields and inner loops migrate and pass the CPU gates.
 
 ## 7. Validation ladder
 

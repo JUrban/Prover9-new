@@ -862,6 +862,16 @@ The conversion also covers rule copying and overlap matching, and resolves
 each stored slice once outside the inner token loops.  Rule type and active
 state use the high four bits of the existing proof-ID word, leaving a checked
 60-bit proof-ID space instead of enlarging every rule.  Focused debug and
-AddressSanitizer/UndefinedBehaviorSanitizer runs pass.  Unit and back-demod
-indexes remain on the checked legacy API, so production is still capped until
-those consumers are migrated and the mature CPU gate is measured.
+AddressSanitizer/UndefinedBehaviorSanitizer runs pass.
+
+The compact unit consumer is also migrated without layout growth: radix nodes
+remain 24 bytes and records remain 40 bytes.  Record tail padding now caches
+the fixed root symbol, so root-scan and position-filter rejection do not pay a
+slice lookup for every candidate.  Exact matching resolves the record once;
+generalization, instance-tree, and code-tree walks resolve once per radix edge;
+and the unifier carries one local token base for all recursive expressions.
+Each of root-scan, position-feature, and code-tree strategies passes high-base
+generalization, instance, binding/occurs-check, retained compaction, and
+post-rebase checks.  Optimized and ASan/UBSan test builds pass.
+Back-demodulation is now the remaining shared-pool consumer before the
+production token-offset ceiling is removed and mature CPU comparison begins.
