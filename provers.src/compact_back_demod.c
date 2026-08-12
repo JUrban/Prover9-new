@@ -64,9 +64,11 @@ struct cbd_posting_block {
 
 /* Occurrences with one root symbol and one structural signature share a
    posting chain.  mask8 preserves the original shallow 8-bit signature;
-   signature32 uses two bits per rigid fact at arbitrary depth.  A query only
-   opens buckets whose signature contains all of its fixed path features; hash
-   collisions can add candidates but the structural matcher remains final. */
+   mask32 uses the same bounded depth and one of all 32 stored bits per rigid
+   fact; signature32 uses two bits per rigid fact at arbitrary depth.  A query
+   only opens buckets whose signature contains all of its fixed path features;
+   hash collisions can add candidates but the structural matcher remains
+   final. */
 struct cbd_path_bucket {
   uint32_t next;
   uint32_t posting_head;
@@ -565,11 +567,17 @@ static BOOL strategy_uses_paths(Compact_back_demod_strategy strategy)
   return strategy != COMPACT_BACK_DEMOD_CODE_TREE;
 }
 
-static BOOL strategy_uses_mask8(Compact_back_demod_strategy strategy)
+static BOOL strategy_uses_shallow_mask(Compact_back_demod_strategy strategy)
 {
   return strategy == COMPACT_BACK_DEMOD_MASK8 ||
+    strategy == COMPACT_BACK_DEMOD_MASK32 ||
     strategy == COMPACT_BACK_DEMOD_HYBRID_TREE ||
     strategy_uses_hot_tree(strategy) || strategy_uses_position(strategy);
+}
+
+static unsigned shallow_mask_width(Compact_back_demod_strategy strategy)
+{
+  return strategy == COMPACT_BACK_DEMOD_MASK32 ? 32U : 8U;
 }
 
 static unsigned long long position_estimated_bytes(
@@ -2164,12 +2172,12 @@ static cbd_path_mask path_feature_bits(Compact_back_demod_index index,
                                        uint64_t path, uint32_t symbol)
 {
   uint64_t stable = stable_symbol_hash(index, symbol);
-  if (strategy_uses_mask8(index->strategy)) {
+  if (strategy_uses_shallow_mask(index->strategy)) {
     uint32_t mixed = (uint32_t) path * UINT32_C(0x9e3779b1) ^
                      (uint32_t) stable * UINT32_C(0x85ebca6b) ^
                      (uint32_t) (stable >> 32);
     mixed ^= mixed >> 16;
-    return UINT64_C(1) << (mixed % 8U);
+    return UINT32_C(1) << (mixed % shallow_mask_width(index->strategy));
   }
   else {
     uint64_t mixed = hash_id(
@@ -2197,12 +2205,12 @@ static cbd_path_mask token_path_mask_rec(Compact_back_demod_index index,
   arity = code < 0 ? 0 : sn_to_arity(code);
   for (i = 0; i < arity; i++) {
     uint64_t child_path =
-      strategy_uses_mask8(index->strategy) ?
+      strategy_uses_shallow_mask(index->strategy) ?
         (uint32_t) path * 17U + (uint32_t) i + 1U :
         signature_child_path(path, (unsigned) i);
     if (*position >= end)
       fatal_error("compact_back_demod: corrupt path child offset");
-    if ((!strategy_uses_mask8(index->strategy) ||
+    if ((!strategy_uses_shallow_mask(index->strategy) ||
          depth < CBD_PATH_DEPTH) && tokens[*position] >= 0)
       mask |= path_feature_bits(
         index,
@@ -2210,7 +2218,7 @@ static cbd_path_mask token_path_mask_rec(Compact_back_demod_index index,
     mask |= token_path_mask_rec(index, tokens, end, position,
                                 depth + 1, child_path);
   }
-  return !strategy_uses_mask8(index->strategy) ||
+  return !strategy_uses_shallow_mask(index->strategy) ||
          depth < CBD_PATH_DEPTH ? mask : 0;
 }
 
@@ -2229,13 +2237,13 @@ static cbd_path_mask term_path_mask_rec(Term term, unsigned depth,
   cbd_path_mask mask = 0;
   int i;
   if (VARIABLE(term) ||
-      (strategy_uses_mask8(index->strategy) &&
+      (strategy_uses_shallow_mask(index->strategy) &&
        depth >= CBD_PATH_DEPTH))
     return 0;
   for (i = 0; i < ARITY(term); i++) {
     Term child = ARG(term, i);
     uint64_t child_path =
-      strategy_uses_mask8(index->strategy) ?
+      strategy_uses_shallow_mask(index->strategy) ?
         (uint32_t) path * 17U + (uint32_t) i + 1U :
         signature_child_path(path, (unsigned) i);
     if (!VARIABLE(child)) {
@@ -2485,6 +2493,7 @@ Compact_back_demod_index compact_back_demod_init(void)
 void compact_back_demod_set_strategy(Compact_back_demod_strategy strategy)
 {
   if (strategy != COMPACT_BACK_DEMOD_MASK8 &&
+      strategy != COMPACT_BACK_DEMOD_MASK32 &&
       strategy != COMPACT_BACK_DEMOD_SIGNATURE32 &&
       strategy != COMPACT_BACK_DEMOD_CODE_TREE &&
       strategy != COMPACT_BACK_DEMOD_HYBRID_TREE &&

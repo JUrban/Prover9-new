@@ -265,19 +265,22 @@ int main(void)
 
   {
     enum { DEEP_FAMILY = 128, DEEP_TARGET = 73 };
-    Compact_back_demod_index mask_index, signature_index, tree_index,
-      hybrid_index;
-    struct compact_back_demod_stats mask_stats, signature_stats, tree_stats,
-      hybrid_stats;
+    Compact_back_demod_index mask_index, mask32_index, signature_index,
+      tree_index, hybrid_index;
+    struct compact_back_demod_stats mask_stats, mask32_stats, signature_stats,
+      tree_stats, hybrid_stats;
     Topform deep_clauses[DEEP_FAMILY];
     Topform deep_demod, cache_demod;
-    unsigned long long *mask_ids, *signature_ids, *tree_ids, *hybrid_ids;
-    size_t mask_count, signature_count, tree_count, hybrid_count;
+    unsigned long long *mask_ids, *mask32_ids, *signature_ids, *tree_ids,
+      *hybrid_ids;
+    size_t mask_count, mask32_count, signature_count, tree_count, hybrid_count;
     char text[128];
     int j;
 
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
     mask_index = compact_back_demod_init();
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK32);
+    mask32_index = compact_back_demod_init();
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_SIGNATURE32);
     signature_index = compact_back_demod_init();
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_CODE_TREE);
@@ -292,6 +295,8 @@ int main(void)
       deep_clauses[j] = indexed_clause(text);
       CHECK(compact_back_demod_add(mask_index, deep_clauses[j]),
             "add deep family clause to mask8 index");
+      CHECK(compact_back_demod_add(mask32_index, deep_clauses[j]),
+            "add deep family clause to mask32 index");
       CHECK(compact_back_demod_add(signature_index, deep_clauses[j]),
             "add deep family clause to signature32 index");
       CHECK(compact_back_demod_add(tree_index, deep_clauses[j]),
@@ -304,19 +309,25 @@ int main(void)
     deep_demod = indexed_clause(text);
     mask_ids = compact_back_demod_candidate_ids(
       mask_index, deep_demod, ORIENTED, &mask_count);
+    mask32_ids = compact_back_demod_candidate_ids(
+      mask32_index, deep_demod, ORIENTED, &mask32_count);
     signature_ids = compact_back_demod_candidate_ids(
       signature_index, deep_demod, ORIENTED, &signature_count);
     tree_ids = compact_back_demod_candidate_ids(
       tree_index, deep_demod, ORIENTED, &tree_count);
     hybrid_ids = compact_back_demod_candidate_ids(
       hybrid_index, deep_demod, ORIENTED, &hybrid_count);
-    CHECK(mask_count == 1 && signature_count == mask_count &&
+    CHECK(mask_count == 1 && mask32_count == mask_count &&
+          signature_count == mask_count &&
           tree_count == mask_count && hybrid_count == mask_count &&
           mask_ids[0] == deep_clauses[DEEP_TARGET]->id &&
+          mask32_ids[0] == mask_ids[0] &&
           signature_ids[0] == mask_ids[0] && tree_ids[0] == mask_ids[0] &&
           hybrid_ids[0] == mask_ids[0],
           "arbitrary-depth indexes preserve the exact deep candidate");
     compact_back_demod_note_exact_query(mask_index, mask_count, mask_count, 0);
+    compact_back_demod_note_exact_query(
+      mask32_index, mask32_count, mask32_count, 0);
     compact_back_demod_note_exact_query(
       signature_index, signature_count, signature_count, 0);
     compact_back_demod_note_exact_query(
@@ -324,10 +335,12 @@ int main(void)
     compact_back_demod_note_exact_query(
       hybrid_index, hybrid_count, hybrid_count, 0);
     compact_back_demod_get_stats(mask_index, &mask_stats);
+    compact_back_demod_get_stats(mask32_index, &mask32_stats);
     compact_back_demod_get_stats(signature_index, &signature_stats);
     compact_back_demod_get_stats(tree_index, &tree_stats);
     compact_back_demod_get_stats(hybrid_index, &hybrid_stats);
     CHECK(mask_stats.strategy == COMPACT_BACK_DEMOD_MASK8 &&
+          mask32_stats.strategy == COMPACT_BACK_DEMOD_MASK32 &&
           signature_stats.strategy == COMPACT_BACK_DEMOD_SIGNATURE32 &&
           tree_stats.strategy == COMPACT_BACK_DEMOD_CODE_TREE,
           "back-demod indexes retain their configured strategies");
@@ -336,6 +349,8 @@ int main(void)
           hybrid_stats.path_buckets > 0 && hybrid_stats.tree_nodes > 0,
           "hybrid keeps a complete fallback and selective tree partition");
     CHECK(mask_stats.posting_groups_examined >= DEEP_FAMILY &&
+          mask32_stats.posting_groups_examined <=
+            mask_stats.posting_groups_examined &&
           signature_stats.posting_groups_examined <= 8 &&
           signature_stats.posting_groups_examined * 16 <
             mask_stats.posting_groups_examined,
@@ -400,7 +415,9 @@ int main(void)
           "code-tree strategy survives deletion and forced rebuild");
 
     safe_free(mask_ids);
+    safe_free(mask32_ids);
     compact_back_demod_free(mask_index);
+    compact_back_demod_free(mask32_index);
     compact_back_demod_free(signature_index);
     compact_back_demod_free(tree_index);
     compact_back_demod_free(hybrid_index);
@@ -1987,6 +2004,7 @@ int main(void)
   compact_back_demod_set_tree_build_factor(1);
   compact_back_demod_set_position_options(1, 1, 1, 65536, 20, TRUE, FALSE);
   check_high_base_strategy(COMPACT_BACK_DEMOD_MASK8);
+  check_high_base_strategy(COMPACT_BACK_DEMOD_MASK32);
   check_high_base_strategy(COMPACT_BACK_DEMOD_SIGNATURE32);
   check_high_base_strategy(COMPACT_BACK_DEMOD_CODE_TREE);
   check_high_base_strategy(COMPACT_BACK_DEMOD_HYBRID_TREE);

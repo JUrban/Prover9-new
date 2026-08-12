@@ -2244,8 +2244,9 @@ Prover_options init_prover_options(void)
                     "code_tree");
 
   p->compact_back_demod_strategy =
-    init_stringparm("compact_back_demod_strategy", 7,
+    init_stringparm("compact_back_demod_strategy", 8,
                     "mask8",
+                    "mask32",
                     "signature32",
                     "code_tree",
                     "hybrid_tree",
@@ -10987,6 +10988,8 @@ static void configure_search_indexes(void)
   configure_compact_back_demod_stale_pct(
     (unsigned) parm(Opt->compact_index_stale_pct));
   configure_compact_back_demod_strategy(
+    str_ident(stringparm1(Opt->compact_back_demod_strategy), "mask32") ?
+      COMPACT_BACK_DEMOD_MASK32 :
     str_ident(stringparm1(Opt->compact_back_demod_strategy), "signature32") ?
       COMPACT_BACK_DEMOD_SIGNATURE32 :
     str_ident(stringparm1(Opt->compact_back_demod_strategy), "code_tree") ?

@@ -14,7 +14,10 @@ typedef enum {
   COMPACT_BACK_DEMOD_HYBRID_TREE,
   COMPACT_BACK_DEMOD_HOT_ROOT_TREE,
   COMPACT_BACK_DEMOD_POSITION,
-  COMPACT_BACK_DEMOD_ADAPTIVE
+  COMPACT_BACK_DEMOD_ADAPTIVE,
+  /* Appended so checkpoint/debug values of the older strategies do not
+     change when the wider shallow control is enabled. */
+  COMPACT_BACK_DEMOD_MASK32
 } Compact_back_demod_strategy;
 
 struct compact_back_demod_stats {

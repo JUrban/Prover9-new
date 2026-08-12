@@ -721,6 +721,7 @@ void fprint_compact_back_demod(FILE *fp)
           "occurrence_stream=%llu, postings=%llu, records=%llu, roots=%llu, "
           "tokens=%llu, hash=%llu, scratch=%llu, bytes=%llu, peak_bytes=%llu.\n",
           Compact_back_demod_authoritative ? "authoritative" : "audit",
+          stats.strategy == COMPACT_BACK_DEMOD_MASK32 ? "mask32" :
           stats.strategy == COMPACT_BACK_DEMOD_SIGNATURE32 ? "signature32" :
           stats.strategy == COMPACT_BACK_DEMOD_CODE_TREE ? "code_tree" :
           stats.strategy == COMPACT_BACK_DEMOD_HYBRID_TREE ? "hybrid_tree" :

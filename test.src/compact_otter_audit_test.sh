@@ -54,6 +54,14 @@ assign(stats,all).' "$repo_dir/prover9.examples/x2.in" | \
   "$repo_dir/bin/prover9" > "$test_tmp/back-signature-audit.out" 2> "$test_tmp/back-signature-audit.err"
 
 sed '1i\
+assign(compact_back_demod_strategy,mask32).\
+set(compact_otter_demodulation).\
+set(compact_otter_unit_index).\
+set(compact_back_demod_audit).\
+assign(stats,all).' "$repo_dir/prover9.examples/x2.in" | \
+  "$repo_dir/bin/prover9" > "$test_tmp/back-mask32-audit.out" 2> "$test_tmp/back-mask32-audit.err"
+
+sed '1i\
 assign(compact_back_demod_strategy,code_tree).\
 set(compact_otter_demodulation).\
 set(compact_otter_unit_index).\
@@ -136,6 +144,8 @@ grep -Eq 'Compact_back_demod: mode=audit, strategy=mask8, failures=0, active=[1-
   "$test_tmp/back-demod-audit.out"
 grep -Eq 'Compact_back_demod: mode=audit, strategy=signature32, failures=0, active=[1-9][0-9]*, peak=[1-9][0-9]*,' \
   "$test_tmp/back-signature-audit.out"
+grep -Eq 'Compact_back_demod: mode=audit, strategy=mask32, failures=0, active=[1-9][0-9]*, peak=[1-9][0-9]*,' \
+  "$test_tmp/back-mask32-audit.out"
 grep -Eq 'Compact_back_demod: mode=audit, strategy=code_tree, failures=0, active=[1-9][0-9]*, peak=[1-9][0-9]*,' \
   "$test_tmp/back-tree-audit.out"
 grep -Eq 'Compact_back_demod: mode=audit, strategy=hybrid_tree, failures=0, active=[1-9][0-9]*, peak=[1-9][0-9]*,' \
@@ -160,6 +170,10 @@ if grep -q 'compact_back_demod_audit: mismatch' "$test_tmp/back-demod-audit.err"
 fi
 if grep -q 'compact_back_demod_audit: mismatch' "$test_tmp/back-signature-audit.err"; then
   cat "$test_tmp/back-signature-audit.err" >&2
+  exit 1
+fi
+if grep -q 'compact_back_demod_audit: mismatch' "$test_tmp/back-mask32-audit.err"; then
+  cat "$test_tmp/back-mask32-audit.err" >&2
   exit 1
 fi
 if grep -q 'compact_back_demod_audit: mismatch' "$test_tmp/back-tree-audit.err"; then
@@ -199,6 +213,8 @@ fi
   > "$test_tmp/back-demod-audit.proof"
 "$repo_dir/bin/prooftrans" parents_only < "$test_tmp/back-signature-audit.out" \
   > "$test_tmp/back-signature-audit.proof"
+"$repo_dir/bin/prooftrans" parents_only < "$test_tmp/back-mask32-audit.out" \
+  > "$test_tmp/back-mask32-audit.proof"
 "$repo_dir/bin/prooftrans" parents_only < "$test_tmp/back-tree-audit.out" \
   > "$test_tmp/back-tree-audit.proof"
 "$repo_dir/bin/prooftrans" parents_only < "$test_tmp/back-hybrid-audit.out" \
@@ -226,6 +242,8 @@ sed -n '/^% Length of proof:/,/^============================== end of proof/p' \
 sed -n '/^% Length of proof:/,/^============================== end of proof/p' \
   "$test_tmp/back-signature-audit.proof" > "$test_tmp/back-signature-audit.norm"
 sed -n '/^% Length of proof:/,/^============================== end of proof/p' \
+  "$test_tmp/back-mask32-audit.proof" > "$test_tmp/back-mask32-audit.norm"
+sed -n '/^% Length of proof:/,/^============================== end of proof/p' \
   "$test_tmp/back-tree-audit.proof" > "$test_tmp/back-tree-audit.norm"
 sed -n '/^% Length of proof:/,/^============================== end of proof/p' \
   "$test_tmp/back-hybrid-audit.proof" > "$test_tmp/back-hybrid-audit.norm"
@@ -242,13 +260,14 @@ cmp "$test_tmp/reference.norm" "$test_tmp/unit-tree-audit.norm"
 cmp "$test_tmp/reference.norm" "$test_tmp/unit-compact.norm"
 cmp "$test_tmp/reference.norm" "$test_tmp/back-demod-audit.norm"
 cmp "$test_tmp/reference.norm" "$test_tmp/back-signature-audit.norm"
+cmp "$test_tmp/reference.norm" "$test_tmp/back-mask32-audit.norm"
 cmp "$test_tmp/reference.norm" "$test_tmp/back-tree-audit.norm"
 cmp "$test_tmp/reference.norm" "$test_tmp/back-hybrid-audit.norm"
 cmp "$test_tmp/reference.norm" "$test_tmp/back-hot-root-audit.norm"
 cmp "$test_tmp/reference.norm" "$test_tmp/back-edge-audit.norm"
 cmp "$test_tmp/reference.norm" "$test_tmp/back-demod-compact.norm"
 
-for run in reference audit compact unit-audit unit-tree-audit unit-compact back-demod-audit back-signature-audit back-tree-audit back-hybrid-audit back-hot-root-audit back-edge-audit back-demod-compact; do
+for run in reference audit compact unit-audit unit-tree-audit unit-compact back-demod-audit back-mask32-audit back-signature-audit back-tree-audit back-hybrid-audit back-hot-root-audit back-edge-audit back-demod-compact; do
   grep '^Given=' "$test_tmp/$run.out" | tail -n 1 > "$test_tmp/$run.search"
   grep '^Usable=' "$test_tmp/$run.out" | tail -n 1 >> "$test_tmp/$run.search"
 done
@@ -259,6 +278,7 @@ cmp "$test_tmp/reference.search" "$test_tmp/unit-tree-audit.search"
 cmp "$test_tmp/reference.search" "$test_tmp/unit-compact.search"
 cmp "$test_tmp/reference.search" "$test_tmp/back-demod-audit.search"
 cmp "$test_tmp/reference.search" "$test_tmp/back-signature-audit.search"
+cmp "$test_tmp/reference.search" "$test_tmp/back-mask32-audit.search"
 cmp "$test_tmp/reference.search" "$test_tmp/back-tree-audit.search"
 cmp "$test_tmp/reference.search" "$test_tmp/back-hybrid-audit.search"
 cmp "$test_tmp/reference.search" "$test_tmp/back-hot-root-audit.search"

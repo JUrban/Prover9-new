@@ -23,7 +23,7 @@ compact_back_tree_budget_pct=${CHAT_COMPACT_BACK_TREE_BUDGET_PCT:-200}
 passive_selector_buffer=${CHAT_PASSIVE_SELECTOR_BUFFER:-65536}
 new_prover=${CHAT_NEW_PROVER:-"$repo_dir/bin/prover9"}
 old_prover=${CHAT_OLD_PROVER:-/project/Prover9-old-LADR-2026-6A/bin/prover9}
-all_cases='old_otter new_otter_fpa new_otter_packed new_otter_packed_fast new_otter_compact_full new_otter_compact_packed_fast new_otter_compact_file_mask new_otter_compact_file_signature new_otter_compact_file_heap new_otter_compact_file_runs new_otter_compact_file_linear discount_clauses_selected discount_clauses_eager collective_balanced_selected collective_balanced_legacy collective_balanced_eager'
+all_cases='old_otter new_otter_fpa new_otter_packed new_otter_packed_fast new_otter_compact_full new_otter_compact_packed_fast new_otter_compact_file_mask new_otter_compact_file_mask32 new_otter_compact_file_signature new_otter_compact_file_heap new_otter_compact_file_runs new_otter_compact_file_linear discount_clauses_selected discount_clauses_eager collective_balanced_selected collective_balanced_legacy collective_balanced_eager'
 selected_cases=${CHAT_CASES:-$all_cases}
 reference_output=${CHAT_REFERENCE_OUTPUT:-}
 compare_max_cpu_ratio=${CHAT_COMPARE_MAX_CPU_RATIO:-1.25}
@@ -242,6 +242,20 @@ set(compact_otter_unit_index).
 set(compact_otter_back_demod_index).
 set(compact_otter_nonunit_index).
 assign(compact_back_demod_strategy,mask8).'
+
+write_case new_otter_compact_file_mask32 '
+assign(search_loop,otter).
+assign(passive_store,dense).
+assign(passive_directory,file).
+assign(passive_selector_store,heap).
+assign(hint_index,packed_fast).
+assign(inference_frontier,clauses).
+assign(ancestor_store,file).
+set(compact_otter_demodulation).
+set(compact_otter_unit_index).
+set(compact_otter_back_demod_index).
+set(compact_otter_nonunit_index).
+assign(compact_back_demod_strategy,mask32).'
 
 write_case new_otter_compact_file_signature '
 assign(search_loop,otter).
