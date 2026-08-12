@@ -550,7 +550,8 @@ int main(void)
     Compact_back_demod_index adaptive;
     Compact_back_demod_index restored;
     struct compact_back_demod_stats selective_stats, broad_stats,
-      renamed_stats, growth_stats, stable_growth_stats, compacted_stats;
+      renamed_stats, growth_stats, growth_probe_stats,
+      stable_growth_stats, compacted_stats;
     Topform clauses[ROUTE_FAMILY], growth[ROUTE_FAMILY];
     Topform selective, broad, renamed;
     char text[128];
@@ -633,21 +634,34 @@ int main(void)
           "population-crossover probe preserves every answer");
     safe_free(ids);
     compact_back_demod_get_stats(adaptive, &growth_stats);
-    CHECK(growth_stats.route_tree_choices ==
-            renamed_stats.route_tree_choices + 1 &&
-          growth_stats.route_tree_probes ==
-            renamed_stats.route_tree_probes + 1,
-          "doubling physical population triggers one logical tree reprobe");
+    CHECK(growth_stats.route_profile_occupied ==
+            renamed_stats.route_profile_occupied + 1 &&
+          growth_stats.route_mask_choices ==
+            renamed_stats.route_mask_choices + 1 &&
+          growth_stats.route_tree_choices ==
+            renamed_stats.route_tree_choices,
+          "doubling population opens one scale-class mask baseline");
     ids = compact_back_demod_candidate_ids(
       adaptive, broad, ORIENTED, &count);
     CHECK(count == ROUTE_FAMILY * 2,
           "post-crossover mask route preserves every answer");
     safe_free(ids);
+    compact_back_demod_get_stats(adaptive, &growth_probe_stats);
+    CHECK(growth_probe_stats.route_tree_choices ==
+            growth_stats.route_tree_choices + 1 &&
+          growth_probe_stats.route_tree_probes ==
+            growth_stats.route_tree_probes + 1,
+          "new population scale samples its tree exactly once");
+    ids = compact_back_demod_candidate_ids(
+      adaptive, broad, ORIENTED, &count);
+    CHECK(count == ROUTE_FAMILY * 2,
+          "stable post-crossover route preserves every answer");
+    safe_free(ids);
     compact_back_demod_get_stats(adaptive, &stable_growth_stats);
     CHECK(stable_growth_stats.route_tree_choices ==
-            growth_stats.route_tree_choices &&
+            growth_probe_stats.route_tree_choices &&
           stable_growth_stats.route_mask_choices ==
-            growth_stats.route_mask_choices + 1,
+            growth_probe_stats.route_mask_choices + 1,
           "stable population pays no repeated exploration tax");
 
     for (j = 0; j < ROUTE_FAMILY / 4; j++)

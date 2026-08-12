@@ -126,7 +126,6 @@ struct cbd_route_profile {
   unsigned long long last_sample[CBD_ROUTE_COUNT];
   unsigned long long queries;
   uint32_t samples[CBD_ROUTE_COUNT];
-  unsigned long long position_generation;
   unsigned char preferred;
   unsigned char occupied;
 };
@@ -190,8 +189,8 @@ typedef char compact_back_demod_tree_list_must_remain_16_bytes[
   sizeof(struct cbd_tree_posting_list) == 16 ? 1 : -1];
 typedef char compact_back_demod_record_must_remain_24_bytes[
   sizeof(struct cbd_record) == 24 ? 1 : -1];
-typedef char compact_back_demod_route_profile_must_remain_120_bytes[
-  sizeof(struct cbd_route_profile) == 120 ? 1 : -1];
+typedef char compact_back_demod_route_profile_must_remain_104_bytes[
+  sizeof(struct cbd_route_profile) == 104 ? 1 : -1];
 
 struct compact_back_demod_index {
   Compact_back_demod_strategy strategy;
@@ -3765,59 +3764,80 @@ static uint64_t query_term_fingerprint(Compact_back_demod_index index,
   return value;
 }
 
-static uint64_t route_pattern_fingerprint_rec(
-  Compact_back_demod_index index, Term term,
-  uint32_t variable_names[MAX_VARS], uint32_t *next_variable)
+struct cbd_route_pattern_summary {
+  uint32_t nodes;
+  uint32_t rigid_prefix;
+  uint32_t variable_occurrences;
+  uint32_t max_depth;
+  unsigned char saw_variable;
+  unsigned char repeated_variable;
+  unsigned char variables[MAX_VARS];
+};
+
+static void route_pattern_summary_rec(
+  Term term, unsigned depth, struct cbd_route_pattern_summary *summary)
 {
-  uint64_t value;
   int i;
+  if (summary->nodes != UINT32_MAX)
+    summary->nodes++;
+  if (depth > summary->max_depth)
+    summary->max_depth = depth;
   if (VARIABLE(term)) {
     int variable = VARNUM(term);
-    uint32_t canonical;
-    if (variable < 0 || variable >= MAX_VARS)
-      return hash_id(UINT64_C(0x243f6a8885a308d3) ^
-                     (uint32_t) variable);
-    canonical = variable_names[variable];
-    if (canonical == UINT32_MAX) {
-      canonical = (*next_variable)++;
-      variable_names[variable] = canonical;
+    if (summary->variable_occurrences != UINT32_MAX)
+      summary->variable_occurrences++;
+    if (variable >= 0 && variable < MAX_VARS) {
+      if (summary->variables[variable])
+        summary->repeated_variable = TRUE;
+      else
+        summary->variables[variable] = TRUE;
     }
-    return hash_id(UINT64_C(0x243f6a8885a308d3) ^ canonical);
+    summary->saw_variable = TRUE;
+    return;
   }
-  value = hash_id(UINT64_C(0x13198a2e03707344) ^
-                  stable_symbol_hash(index, (uint32_t) SYMNUM(term)) ^
-                  ((uint64_t) ARITY(term) << 32));
+  if (!summary->saw_variable && summary->rigid_prefix != UINT32_MAX)
+    summary->rigid_prefix++;
   for (i = 0; i < ARITY(term); i++)
-    value = hash_id(value ^ route_pattern_fingerprint_rec(
-                      index, ARG(term, i), variable_names, next_variable) ^
-                    (UINT64_C(0x9e3779b97f4a7c15) *
-                     ((uint64_t) i + 1)));
-  return value;
+    route_pattern_summary_rec(ARG(term, i), depth + 1, summary);
 }
 
-static uint64_t route_pattern_fingerprint(Compact_back_demod_index index,
-                                          Term pattern)
+static uint64_t route_pattern_fingerprint(
+  Compact_back_demod_index index, Term pattern,
+  unsigned long long mask_population)
 {
-  uint32_t variable_names[MAX_VARS];
-  uint32_t next_variable = 0;
-  uint64_t key;
-  size_t i;
-  for (i = 0; i < MAX_VARS; i++)
-    variable_names[i] = UINT32_MAX;
-  key = route_pattern_fingerprint_rec(
-    index, pattern, variable_names, &next_variable);
+  struct cbd_route_pattern_summary summary;
+  uint64_t shape, key;
+  unsigned population_bucket = 0;
+  memset(&summary, 0, sizeof(summary));
+  route_pattern_summary_rec(pattern, 0, &summary);
+  while (mask_population > 1) {
+    mask_population >>= 1;
+    population_bucket++;
+  }
+  shape = (summary.nodes > 4095 ? 4095 : summary.nodes) |
+    ((uint64_t) (summary.rigid_prefix > 255 ? 255 :
+                 summary.rigid_prefix) << 12) |
+    ((uint64_t) (summary.variable_occurrences > 255 ? 255 :
+                 summary.variable_occurrences) << 20) |
+    ((uint64_t) (summary.max_depth > 255 ? 255 : summary.max_depth) << 28) |
+    ((uint64_t) summary.repeated_variable << 36) |
+    ((uint64_t) (unsigned) ARITY(pattern) << 40) |
+    ((uint64_t) population_bucket << 48);
+  key = hash_id(stable_symbol_hash(index, (uint32_t) SYMNUM(pattern)) ^
+                shape ^ UINT64_C(0x13198a2e03707344));
   return key == 0 ? 1 : key;
 }
 
 static struct cbd_route_profile *route_profile_for_pattern(
-  Compact_back_demod_index index, Term pattern)
+  Compact_back_demod_index index, Term pattern,
+  unsigned long long mask_population)
 {
   uint64_t key;
   size_t sets, first;
   struct cbd_route_profile *a, *b, *entry;
   if (index->route_profile_capacity < 2)
     return NULL;
-  key = route_pattern_fingerprint(index, pattern);
+  key = route_pattern_fingerprint(index, pattern, mask_population);
   sets = index->route_profile_capacity / 2;
   first = ((size_t) key & (sets - 1)) * 2;
   a = &index->route_profiles[first];
@@ -3846,7 +3866,6 @@ static struct cbd_route_profile *route_profile_for_pattern(
   entry->occupied = TRUE;
   entry->key = key;
   entry->preferred = CBD_ROUTE_MASK;
-  entry->position_generation = index->position_generation;
   return entry;
 }
 
@@ -4061,25 +4080,6 @@ static enum cbd_route choose_adaptive_route(
     *probe = chosen != (enum cbd_route) profile->preferred;
   }
 
-  /* Recalibrate on powers-of-two physical growth or shrinkage, not elapsed
-     queries.  A stable mature index therefore pays no exploration tax, while
-     a day-long growing index still samples every materially new scale. */
-  if (profile->samples[chosen] != 0)
-    for (route = CBD_ROUTE_MASK; route < CBD_ROUTE_COUNT; route++)
-      if (available[route] && route != profile->preferred &&
-          profile->samples[route] != 0 &&
-          ((profile->population[route] != 0 &&
-            population[route] >= profile->population[route] &&
-            population[route] - profile->population[route] >=
-              profile->population[route]) ||
-           (population[route] < profile->population[route] &&
-            profile->population[route] - population[route] >=
-              population[route]))) {
-        chosen = route;
-        *probe = TRUE;
-        break;
-      }
-
   if (*probe) {
     index->route_probes[chosen]++;
   }
@@ -4194,33 +4194,28 @@ static void collect_pattern(Compact_back_demod_index index, Term pattern,
     index, pattern, &selected_positions, &position_feature_count);
   if (index->strategy == COMPACT_BACK_DEMOD_ADAPTIVE &&
       !VARIABLE(pattern)) {
-    struct cbd_route_profile *profile = route_profile_for_pattern(
-      index, pattern);
+    struct cbd_route_profile *profile;
     struct cbd_route_work_snapshot work_before, work_after;
     unsigned char available[CBD_ROUTE_COUNT] = {TRUE, FALSE, FALSE};
     unsigned long long population[CBD_ROUTE_COUNT];
+    unsigned long long observed;
     enum cbd_route route;
     BOOL probe;
     size_t count_before = *count;
-    if (profile == NULL)
-      fatal_error("compact_back_demod: missing adaptive route table");
-    if (profile->position_generation != index->position_generation) {
-      profile->cost[CBD_ROUTE_POSITION] = 0;
-      profile->population[CBD_ROUTE_POSITION] = 0;
-      profile->last_sample[CBD_ROUTE_POSITION] = 0;
-      profile->samples[CBD_ROUTE_POSITION] = 0;
-      profile->position_generation = index->position_generation;
-    }
     available[CBD_ROUTE_TREE] = use_tree_for_pattern(index, pattern);
-    available[CBD_ROUTE_POSITION] = position_bucket != CBD_NONE;
     population[CBD_ROUTE_MASK] = route_mask_population(index, pattern);
     population[CBD_ROUTE_TREE] = population[CBD_ROUTE_MASK];
     population[CBD_ROUTE_POSITION] = route_position_population(
       index, position_bucket, selected_positions, position_feature_count);
-    route = choose_adaptive_route(
-      index, profile, available, population, &probe);
-    work_before = route_work_snapshot(index);
-    if (route == CBD_ROUTE_POSITION) {
+
+    /* An admitted position has exact current posting metadata.  Use it only
+       for the same fourfold gain required at construction; marginal features
+       remain available but cannot displace a safer mask/tree route. */
+    if (position_bucket != CBD_NONE &&
+        population[CBD_ROUTE_MASK] >= 4 &&
+        population[CBD_ROUTE_POSITION] <=
+          population[CBD_ROUTE_MASK] / 4) {
+      work_before = route_work_snapshot(index);
       if (selected_positions > 1 && use_dense_position_intersection(
             index, position_bucket, position_feature_count))
         collect_position_bitmap_intersection(
@@ -4233,15 +4228,54 @@ static void collect_pattern(Compact_back_demod_index index, Term pattern,
       else
         collect_position_bucket(index, position_bucket, pattern,
                                 exclude_id, count);
+      work_after = route_work_snapshot(index);
+      observed = route_observed_work(&work_before, &work_after);
+      index->route_choices[CBD_ROUTE_POSITION]++;
+      index->route_observed_cost[CBD_ROUTE_POSITION] = saturating_add(
+        index->route_observed_cost[CBD_ROUTE_POSITION], observed);
+      index->route_estimated_cost[CBD_ROUTE_POSITION] = saturating_add(
+        index->route_estimated_cost[CBD_ROUTE_POSITION],
+        population[CBD_ROUTE_POSITION]);
+      index->route_candidates[CBD_ROUTE_POSITION] = saturating_add(
+        index->route_candidates[CBD_ROUTE_POSITION], *count - count_before);
+      maybe_admit_position_feature(index, pattern, observed);
+      return;
     }
-    else if (route == CBD_ROUTE_TREE)
+
+    /* Do not allocate or hash a shape profile before its tree exists.  Cold
+       roots simply accumulate the same complete fallback evidence as before. */
+    if (!available[CBD_ROUTE_TREE]) {
+      work_before = route_work_snapshot(index);
+      collect_symbol(index, pattern, exclude_id, count);
+      work_after = route_work_snapshot(index);
+      observed = route_observed_work(&work_before, &work_after);
+      index->route_choices[CBD_ROUTE_MASK]++;
+      index->route_observed_cost[CBD_ROUTE_MASK] = saturating_add(
+        index->route_observed_cost[CBD_ROUTE_MASK], observed);
+      index->route_estimated_cost[CBD_ROUTE_MASK] = saturating_add(
+        index->route_estimated_cost[CBD_ROUTE_MASK],
+        population[CBD_ROUTE_MASK]);
+      index->route_candidates[CBD_ROUTE_MASK] = saturating_add(
+        index->route_candidates[CBD_ROUTE_MASK], *count - count_before);
+      maybe_admit_hot_root(index, pattern, index->query_work - before);
+      maybe_admit_position_feature(index, pattern, observed);
+      return;
+    }
+
+    profile = route_profile_for_pattern(
+      index, pattern, population[CBD_ROUTE_MASK]);
+    if (profile == NULL)
+      fatal_error("compact_back_demod: missing adaptive route table");
+    route = choose_adaptive_route(
+      index, profile, available, population, &probe);
+    work_before = route_work_snapshot(index);
+    if (route == CBD_ROUTE_TREE)
       collect_tree(index, pattern, exclude_id, count);
     else
       collect_symbol(index, pattern, exclude_id, count);
     work_after = route_work_snapshot(index);
     {
-      unsigned long long observed = route_observed_work(
-        &work_before, &work_after);
+      observed = route_observed_work(&work_before, &work_after);
       note_adaptive_route(
         index, profile, route, population[route], observed,
         *count - count_before, available, population);
@@ -5143,12 +5177,11 @@ BOOL compact_back_demod_write_adaptive_state(
     struct cbd_route_profile *entry = &index->route_profiles[i];
     if (entry->occupied)
       fprintf(fp,
-              "Q %lu %016llx %u %llu %llu "
+              "Q %lu %016llx %u %llu "
               "%llu %llu %llu %llu %llu %llu "
               "%llu %llu %llu %u %u %u\n",
               (unsigned long) i, (unsigned long long) entry->key,
               (unsigned) entry->preferred, entry->queries,
-              entry->position_generation,
               entry->cost[CBD_ROUTE_MASK], entry->cost[CBD_ROUTE_TREE],
               entry->cost[CBD_ROUTE_POSITION],
               entry->population[CBD_ROUTE_MASK],
@@ -5282,21 +5315,20 @@ BOOL compact_back_demod_read_adaptive_state(
   index->route_profile_occupied = 0;
   for (i = 0; i < route_count; i++) {
     unsigned preferred, sample_mask, sample_tree, sample_position;
-    unsigned long long key, queries, position_generation;
+    unsigned long long key, queries;
     unsigned long long cost_mask, cost_tree, cost_position;
     unsigned long long population_mask, population_tree, population_position;
     unsigned long long last_mask, last_tree, last_position;
     struct cbd_route_profile *entry;
     if (fscanf(fp,
-               " %31s %lu %llx %u %llu %llu "
+               " %31s %lu %llx %u %llu "
                "%llu %llu %llu %llu %llu %llu "
                "%llu %llu %llu %u %u %u",
                label, &at, &key, &preferred, &queries,
-               &position_generation,
                &cost_mask, &cost_tree, &cost_position,
                &population_mask, &population_tree, &population_position,
                &last_mask, &last_tree, &last_position,
-               &sample_mask, &sample_tree, &sample_position) != 18 ||
+               &sample_mask, &sample_tree, &sample_position) != 17 ||
         strcmp(label, "Q") != 0 || at >= route_capacity ||
         preferred >= CBD_ROUTE_COUNT || index->route_profiles[at].occupied) {
       fclose(fp);
@@ -5307,7 +5339,6 @@ BOOL compact_back_demod_read_adaptive_state(
     entry->key = (uint64_t) key;
     entry->preferred = (unsigned char) preferred;
     entry->queries = queries;
-    entry->position_generation = position_generation;
     entry->cost[CBD_ROUTE_MASK] = cost_mask;
     entry->cost[CBD_ROUTE_TREE] = cost_tree;
     entry->cost[CBD_ROUTE_POSITION] = cost_position;
