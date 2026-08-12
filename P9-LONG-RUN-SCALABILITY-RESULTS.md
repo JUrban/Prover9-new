@@ -218,3 +218,39 @@ until it reaches the hard cap, verifies exactly one demotion and complete
 fallback answers, confirms the other feature still uses position retrieval,
 and forces compaction.  Physical features then fall from two to the one active
 feature without globally disabling the position index.
+
+### Bounded 240-user-second `chat_test.in` comparison
+
+A three-way run requested 2,000 given clauses with a 300-second prover limit.
+The external 330-wall-second guard stopped the three concurrent processes
+before any reached 2,000; all produced a comparable 240-user-second report.
+
+| Strategy | Given at 240 s | Back groups | Tree nodes | Worst groups | Back bytes | PSS (KiB) |
+|:---|---:|---:|---:|---:|---:|---:|
+| mask8 | 1,678 | 65,408,330 | 0 | 64,514 | 4,394,315 | 81,096 |
+| hot root | 1,671 | 556,500 | 176,787,113 | 7,820 | 11,120,965 | 91,221 |
+| adaptive | 1,665 | 37,725,091 | 64,083,061 | 7,820 | 11,494,981 | 89,617 |
+
+At 180 user seconds the given counts were also essentially tied: 1,503,
+1,502, and 1,499 respectively.  Thus neither stronger strategy had a stable
+integrated CPU win by this prefix.  Hot roots replaced almost all posting work
+with a larger number of cheaper tree-node visits.  Adaptive positions removed
+about 112.7 million of those tree-node visits, but added about 37.2 million
+posting groups.  The relative cost of these operations plus construction and
+the rest of preprocessing left `mask8` marginally ahead.
+
+This result supersedes any interpretation of the 1,000-given timings as a
+proven crossover.  It does *not* show that `mask8` will remain ahead: the
+uploaded 8,800-given trace reaches 6,085 groups per lookup and spends 30.4% of
+all user CPU in back lookup, so its slope is still unacceptable.  It shows
+that posting-count reduction alone is an invalid proxy for CPU, and that a
+stronger index must be selected using measured end-to-end work across longer
+prefixes.
+
+An experimental per-feature recheck was also tested and rejected.  It bypassed
+position postings once their current size no longer beat the last alternative
+measurement by four times.  On the 1,000-given prefix it increased admissions
+from 28 to 33 and backfill records from 476,055 to 564,822; total user CPU rose
+to 85.77 seconds, worse than both the 82.39-second `mask8` baseline and the
+78.49-second earlier adaptive sample.  The implementation was removed rather
+than retaining an apparently principled policy which regressed the real case.

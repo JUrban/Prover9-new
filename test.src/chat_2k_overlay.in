@@ -1,0 +1,6 @@
+% Bounded long-prefix developer run for the user-supplied bob/chat_test.in.
+% Load after the compact candidate/strategy overlay and before chat_test.in.
+
+assign(max_given,2000).
+assign(max_seconds,300).
+assign(report,60).
