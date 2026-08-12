@@ -1363,6 +1363,38 @@ int main(void)
   }
 
   {
+    Compact_back_demod_index path_word;
+    struct compact_back_demod_stats path_stats;
+    Topform left, right, rule;
+    compact_back_demod_set_position_options(1, 4, 1, 0, 50, TRUE, TRUE);
+    compact_back_demod_set_eager_position_depth(2);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_POSITION);
+    path_word = compact_back_demod_init();
+    left = indexed_clause("w(path_root(path_left(path_shared))).");
+    right = indexed_clause("w(path_root(path_right(path_other))).");
+    CHECK(compact_back_demod_add(path_word, left) &&
+          compact_back_demod_add(path_word, right),
+          "add rooted path-word distinction clauses");
+    rule = indexed_clause(
+      "path_root(path_right(path_shared)) = path_done.");
+    ids = compact_back_demod_candidate_ids(path_word, rule, ORIENTED, &count);
+    CHECK(count == 0 && ids == NULL,
+          "rooted path word rejects a leaf under the wrong rigid ancestor");
+    compact_back_demod_get_stats(path_word, &path_stats);
+    CHECK(path_stats.position_empty_queries == 1 &&
+          path_stats.posting_groups_examined == 0,
+          "rooted path-word absence returns without a leaf-only scan");
+    compact_back_demod_free(path_word);
+    delete_clause(left);
+    delete_clause(right);
+    delete_clause(rule);
+    compact_back_demod_set_eager_position_depth(0);
+    compact_back_demod_set_position_options(
+      4096, 4, 8, 65536, 20, TRUE, FALSE);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
+  }
+
+  {
     enum { SPARSE_POSITION_SIDE = 8, SPARSE_POSITION_FAMILY = 64 };
     Compact_back_demod_index sparse_intersection;
     struct compact_back_demod_stats sparse_stats;

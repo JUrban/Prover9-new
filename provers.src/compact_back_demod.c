@@ -3164,10 +3164,14 @@ static BOOL occurrence_matches(const int32_t *tokens, uint32_t token_end,
   return match_token_term(tokens, token_end, pattern, &position, bindings);
 }
 
-static uint64_t position_child_path(uint64_t path, unsigned child)
+static uint64_t position_child_path(Compact_back_demod_index index,
+                                    uint64_t path, unsigned child,
+                                    uint32_t symbol)
 {
+  uint64_t semantic = stable_symbol_hash(index, symbol);
   return hash_id(path ^
-    (UINT64_C(0x9e3779b97f4a7c15) * ((uint64_t) child + 1)));
+    (UINT64_C(0x9e3779b97f4a7c15) * ((uint64_t) child + 1)) ^
+    hash_id(semantic ^ UINT64_C(0x3c6ef372fe94f82b)));
 }
 
 static void ensure_position_query(Compact_back_demod_index index,
@@ -3192,10 +3196,11 @@ static void collect_pattern_position_features_rec(
     return;
   for (i = 0; i < ARITY(term); i++) {
     Term child = ARG(term, i);
-    uint64_t child_path = position_child_path(path, (unsigned) i);
     if (!VARIABLE(child)) {
       size_t j;
       uint32_t symbol = (uint32_t) SYMNUM(child);
+      uint64_t child_path = position_child_path(
+        index, path, (unsigned) i, symbol);
       for (j = 0; j < *count; j++)
         if (index->position_query[j].path == child_path &&
             index->position_query[j].symbol == symbol)
@@ -3225,7 +3230,7 @@ static size_t collect_pattern_position_features(
 }
 
 static uint32_t mark_subject_position_features_rec(
-  const int32_t *tokens, uint32_t token_end,
+  Compact_back_demod_index index, const int32_t *tokens, uint32_t token_end,
   uint32_t position, uint64_t path,
   struct cbd_position_query_feature *features, size_t feature_count,
   unsigned char *matched)
@@ -3238,19 +3243,22 @@ static uint32_t mark_subject_position_features_rec(
   arity = code < 0 ? 0 : sn_to_arity(code);
   for (i = 0; i < arity; i++) {
     uint32_t child_start = position;
-    uint64_t child_path = position_child_path(path, (unsigned) i);
+    uint64_t child_path = path;
     int32_t child_code;
     size_t j;
     if (child_start >= token_end)
       fatal_error("compact_back_demod: corrupt position child");
     child_code = tokens[child_start];
-    if (child_code >= 0)
+    if (child_code >= 0) {
+      child_path = position_child_path(
+        index, path, (unsigned) i, (uint32_t) child_code);
       for (j = 0; j < feature_count; j++)
         if (!matched[j] && features[j].path == child_path &&
             features[j].symbol == (uint32_t) child_code)
           matched[j] = TRUE;
+    }
     position = mark_subject_position_features_rec(
-      tokens, token_end, child_start, child_path,
+      index, tokens, token_end, child_start, child_path,
       features, feature_count, matched);
   }
   return position;
@@ -3270,7 +3278,7 @@ static void record_position_features(
   for (i = 0; i < end; i++)
     if (tokens[i] >= 0 && (uint32_t) tokens[i] == root_symbol)
       (void) mark_subject_position_features_rec(
-        tokens, end, i, 0, features, feature_count, matched);
+        index, tokens, end, i, 0, features, feature_count, matched);
 }
 
 static void record_position_occurrences(
@@ -3287,7 +3295,7 @@ static void record_position_occurrences(
     if (tokens[i] >= 0 && (uint32_t) tokens[i] == root_symbol) {
       unsigned char matched = FALSE;
       (void) mark_subject_position_features_rec(
-        tokens, end, i, 0, feature, 1, &matched);
+        index, tokens, end, i, 0, feature, 1, &matched);
       if (matched)
         note_symbol(occurrences, root_symbol,
                     i, 0, 0);
@@ -4743,13 +4751,15 @@ static uint32_t collect_position_append_matches_rec(
   arity = code < 0 ? 0 : sn_to_arity(code);
   for (i = 0; i < arity; i++) {
     uint32_t child_start = position;
-    uint64_t child_path = position_child_path(path, (unsigned) i);
+    uint64_t child_path = path;
     int32_t child_code;
     if (child_start >= token_end)
       fatal_error("compact_back_demod: corrupt incremental position child");
     child_code = tokens[child_start];
     if (child_code >= 0) {
       uint32_t bucket;
+      child_path = position_child_path(
+        index, path, (unsigned) i, (uint32_t) child_code);
       if (index->position_append_feature_lookups != ULLONG_MAX)
         index->position_append_feature_lookups++;
       bucket = lookup_position_bucket(
@@ -4820,14 +4830,17 @@ static uint32_t collect_eager_position_matches_rec(
   arity = tokens[position] < 0 ? 0 : sn_to_arity(tokens[position]);
   child = position + 1;
   for (i = 0; i < arity; i++) {
-    uint64_t child_path = position_child_path(path, (unsigned) i);
+    uint64_t child_path = path;
     unsigned child_depth = depth + 1;
     int32_t child_code;
     if (child >= token_end || index->position_token_ends[child] > token_end)
       fatal_error("compact_back_demod: corrupt eager-position child");
     child_code = tokens[child];
     if (child_code >= 0 && child_depth <= index->position_eager_depth) {
-      uint32_t bucket = lookup_position_bucket(
+      uint32_t bucket;
+      child_path = position_child_path(
+        index, path, (unsigned) i, (uint32_t) child_code);
+      bucket = lookup_position_bucket(
         index, root_symbol, child_path, (uint32_t) child_code);
       if (index->position_append_feature_lookups != ULLONG_MAX)
         index->position_append_feature_lookups++;
@@ -7239,7 +7252,7 @@ BOOL compact_back_demod_write_adaptive_state(
   for (i = 0; i < index->route_frequency_capacity * 2; i++)
     if (index->route_frequency[i] != 0)
       frequencies++;
-  fprintf(fp, "P9_COMPACT_BACK_ADAPTIVE 3\n");
+  fprintf(fp, "P9_COMPACT_BACK_ADAPTIVE 4\n");
   fprintf(fp, "GENERATION %llu %llu\n",
           index->position_generation, index->position_budget_high_water);
   fprintf(fp, "POSITION_LEDGER %llu %llu %llu %llu %u %llu\n",
@@ -7338,7 +7351,7 @@ BOOL compact_back_demod_read_adaptive_state(
     return TRUE;  /* An older checkpoint starts with safe cold calibration. */
   if (fscanf(fp, " %31s %u", label, &version) != 2 ||
       strcmp(label, "P9_COMPACT_BACK_ADAPTIVE") != 0 ||
-      (version < 1 || version > 3) ||
+      (version < 1 || version > 4) ||
       fscanf(fp, " %31s %llu %llu", label, &generation,
              &budget_high_water) != 3 || strcmp(label, "GENERATION") != 0) {
     fclose(fp);
@@ -7402,7 +7415,7 @@ BOOL compact_back_demod_read_adaptive_state(
       fclose(fp);
       return FALSE;
     }
-    if (index->position_eager_depth == 0) {
+    if (version >= 4 && index->position_eager_depth == 0) {
       bucket = add_position_bucket(
         index, root, (uint64_t) path_value, symbol);
       for (record = 1; record < index->record_count; record++)
@@ -7537,13 +7550,37 @@ BOOL compact_back_demod_read_adaptive_state(
   }
   if (fclose(fp) != 0)
     return FALSE;
-  index->position_generation = generation;
-  index->position_credit_balance = credit_balance;
-  index->position_credit_earned = credit_earned;
-  index->position_credit_spent = credit_spent;
-  index->position_credit_reservations = credit_reservations;
-  index->position_admission_frozen = (BOOL) admission_frozen;
-  index->position_admission_freezes = admission_freezes;
+  if (version >= 4) {
+    index->position_generation = generation;
+    index->position_credit_balance = credit_balance;
+    index->position_credit_earned = credit_earned;
+    index->position_credit_spent = credit_spent;
+    index->position_credit_reservations = credit_reservations;
+    index->position_admission_frozen = (BOOL) admission_frozen;
+    index->position_admission_freezes = admission_freezes;
+  }
+  else {
+    /* Version 4 made a position key a full rooted symbol/argument path.
+       Older leaf-only paths are safe filters but no longer name the same
+       feature, so resume with cold position calibration rather than silently
+       importing stale populations or a stale admission freeze.  Tree and
+       mask route evidence remains valid. */
+    safe_free(index->position_probation);
+    index->position_probation = NULL;
+    index->position_probation_capacity = 0;
+    index->position_budget_high_water = 0;
+    for (i = 0; i < index->route_profile_capacity; i++) {
+      struct cbd_route_profile *entry = &index->route_profiles[i];
+      if (entry->occupied) {
+        entry->cost[CBD_ROUTE_POSITION] = 0;
+        entry->population[CBD_ROUTE_POSITION] = 0;
+        entry->last_sample[CBD_ROUTE_POSITION] = 0;
+        entry->samples[CBD_ROUTE_POSITION] = 0;
+        if (entry->preferred == CBD_ROUTE_POSITION)
+          entry->preferred = CBD_ROUTE_MASK;
+      }
+    }
+  }
   index->route_sequence = route_sequence;
   update_peak(index);
   return TRUE;
