@@ -796,6 +796,7 @@ void fprint_compact_back_demod(FILE *fp)
           "profile_hits=%llu, profile_misses=%llu, cold_fallbacks=%llu, "
           "admission_attempts=%llu, admission_rejections=%llu, "
           "aged_replacements=%llu, frequency_decays=%llu, "
+          "pre_tree_observations=%llu, pre_tree_hot_observations=%llu, "
           "tree_choices=%llu, position_choices=%llu, mask_probes=%llu, "
           "tree_probes=%llu, position_probes=%llu, "
           "tree_probe_aborts=%llu, tree_probe_budget=%llu, "
@@ -814,6 +815,8 @@ void fprint_compact_back_demod(FILE *fp)
           stats.route_cold_fallbacks, stats.route_admission_attempts,
           stats.route_admission_rejections, stats.route_aged_replacements,
           stats.route_frequency_decays,
+          stats.route_pre_tree_observations,
+          stats.route_pre_tree_hot_observations,
           stats.route_tree_choices, stats.route_position_choices,
           stats.route_mask_probes, stats.route_tree_probes,
           stats.route_position_probes, stats.route_tree_probe_aborts,

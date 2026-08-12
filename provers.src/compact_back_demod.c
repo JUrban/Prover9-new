@@ -265,6 +265,8 @@ struct compact_back_demod_index {
   unsigned long long route_admission_rejections;
   unsigned long long route_aged_replacements;
   unsigned long long route_frequency_decays;
+  unsigned long long route_pre_tree_observations;
+  unsigned long long route_pre_tree_hot_observations;
   unsigned long long route_profile_collisions;
   unsigned long long route_profile_replacements;
   unsigned long long route_choices[CBD_ROUTE_COUNT];
@@ -3121,7 +3123,8 @@ static unsigned long long process_root_postings(
 
 static void maybe_admit_hot_root(Compact_back_demod_index index,
                                  Term pattern,
-                                 unsigned long long query_work)
+                                 unsigned long long query_work,
+                                 BOOL repeated_shape)
 {
   unsigned symbol;
   struct cbd_tree_root_state *state;
@@ -3133,6 +3136,9 @@ static void maybe_admit_hot_root(Compact_back_demod_index index,
   if ((size_t) symbol >= index->tree_root_capacity)
     return;
   state = &index->tree_roots[symbol];
+  if (state->admitted || state->rejected ||
+      (index->strategy == COMPACT_BACK_DEMOD_ADAPTIVE && !repeated_shape))
+    return;
   if (ULLONG_MAX - state->fallback_work < query_work)
     state->fallback_work = ULLONG_MAX;
   else
@@ -3141,8 +3147,7 @@ static void maybe_admit_hot_root(Compact_back_demod_index index,
     index->tree_fallback_work = ULLONG_MAX;
   else
     index->tree_fallback_work += query_work;
-  if (state->admitted || state->rejected ||
-      state->fallback_work <
+  if (state->fallback_work <
         (state->next_check_work == 0 ? index->tree_admit_work :
          state->next_check_work))
     return;
@@ -4293,6 +4298,24 @@ static unsigned route_frequency_note(Compact_back_demod_index index,
   return *a < *b ? *a : *b;
 }
 
+static unsigned note_pre_tree_route_frequency(
+  Compact_back_demod_index index, Term pattern,
+  unsigned long long mask_population)
+{
+  uint64_t key = route_pattern_fingerprint(
+    index, pattern, mask_population);
+  unsigned frequency;
+  if (index->route_sequence != ULLONG_MAX)
+    index->route_sequence++;
+  frequency = route_frequency_note(index, key);
+  if (index->route_pre_tree_observations != ULLONG_MAX)
+    index->route_pre_tree_observations++;
+  if (frequency >= CBD_ROUTE_ADMIT_HITS)
+    if (index->route_pre_tree_hot_observations != ULLONG_MAX)
+      index->route_pre_tree_hot_observations++;
+  return frequency;
+}
+
 static unsigned long long route_profile_residency_score(
   const struct cbd_route_profile *profile, unsigned long long sequence)
 {
@@ -4825,9 +4848,13 @@ static void collect_pattern(Compact_back_demod_index index, Term pattern,
     }
 
 adaptive_nonposition:
-    /* Do not allocate or hash a shape profile before its tree exists.  Cold
-       roots simply accumulate the same complete fallback evidence as before. */
+    /* Do not allocate a shape profile before its tree exists, but feed the
+       bounded recent-frequency sketch.  Aggregate root traffic cannot buy a
+       tree: at least one structural/population class must first demonstrate
+       repeated demand. */
     if (!available[CBD_ROUTE_TREE]) {
+      unsigned recent_frequency = note_pre_tree_route_frequency(
+        index, pattern, population[CBD_ROUTE_MASK]);
       work_before = route_work_snapshot(index);
       collect_symbol(index, pattern, exclude_id, count);
       work_after = route_work_snapshot(index);
@@ -4840,7 +4867,9 @@ adaptive_nonposition:
         population[CBD_ROUTE_MASK]);
       index->route_candidates[CBD_ROUTE_MASK] = saturating_add(
         index->route_candidates[CBD_ROUTE_MASK], *count - count_before);
-      maybe_admit_hot_root(index, pattern, index->query_work - before);
+      maybe_admit_hot_root(
+        index, pattern, index->query_work - before,
+        recent_frequency >= CBD_ROUTE_ADMIT_HITS);
       maybe_admit_position_feature(index, pattern, observed, TRUE);
       return;
     }
@@ -4862,7 +4891,8 @@ adaptive_nonposition:
         population[CBD_ROUTE_MASK]);
       index->route_candidates[CBD_ROUTE_MASK] = saturating_add(
         index->route_candidates[CBD_ROUTE_MASK], *count - count_before);
-      maybe_admit_hot_root(index, pattern, index->query_work - before);
+      maybe_admit_hot_root(
+        index, pattern, index->query_work - before, TRUE);
       maybe_admit_position_feature(index, pattern, observed, TRUE);
       return;
     }
@@ -4925,7 +4955,7 @@ adaptive_nonposition:
         *count - count_before, available, population);
       if (route == CBD_ROUTE_MASK)
         maybe_admit_hot_root(
-          index, pattern, index->query_work - before);
+          index, pattern, index->query_work - before, TRUE);
       /* Each completed non-position lookup funds the shared construction
          ledger once; the number of rigid query features is irrelevant. */
       maybe_admit_position_feature(index, pattern, observed, TRUE);
@@ -4963,7 +4993,8 @@ adaptive_nonposition:
   }
   else {
     collect_symbol(index, pattern, exclude_id, count);
-    maybe_admit_hot_root(index, pattern, index->query_work - before);
+    maybe_admit_hot_root(
+      index, pattern, index->query_work - before, TRUE);
     maybe_admit_position_feature(index, pattern,
                                  index->query_work - before, TRUE);
   }
@@ -5163,6 +5194,10 @@ static void copy_route_profiles(Compact_back_demod_index destination,
   destination->route_aged_replacements =
     source->route_aged_replacements;
   destination->route_frequency_decays = source->route_frequency_decays;
+  destination->route_pre_tree_observations =
+    source->route_pre_tree_observations;
+  destination->route_pre_tree_hot_observations =
+    source->route_pre_tree_hot_observations;
   destination->route_profile_collisions = source->route_profile_collisions;
   destination->route_profile_replacements =
     source->route_profile_replacements;
@@ -6287,6 +6322,10 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->route_admission_rejections = index->route_admission_rejections;
   stats->route_aged_replacements = index->route_aged_replacements;
   stats->route_frequency_decays = index->route_frequency_decays;
+  stats->route_pre_tree_observations =
+    index->route_pre_tree_observations;
+  stats->route_pre_tree_hot_observations =
+    index->route_pre_tree_hot_observations;
   stats->route_mask_choices = index->route_choices[CBD_ROUTE_MASK];
   stats->route_tree_choices = index->route_choices[CBD_ROUTE_TREE];
   stats->route_position_choices = index->route_choices[CBD_ROUTE_POSITION];

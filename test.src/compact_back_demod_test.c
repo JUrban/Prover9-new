@@ -734,7 +734,9 @@ int main(void)
     CHECK(cold_stats.route_profile_occupied == 0 &&
           cold_stats.route_tree_choices == 0 &&
           cold_stats.route_tree_probes == 0 &&
-          cold_stats.route_cold_fallbacks >= 15,
+          cold_stats.tree_root_admissions == 0 &&
+          cold_stats.route_pre_tree_observations == 16 &&
+          cold_stats.route_pre_tree_hot_observations == 0,
           "cold route class allocates no profile and pays no tree probe");
     for (; j < 35; j++) {
       ids = compact_back_demod_candidate_ids(
@@ -1009,7 +1011,10 @@ int main(void)
     compact_back_demod_get_stats(churn, &churn_stats);
     CHECK(churn_stats.route_profile_occupied == 0 &&
           churn_stats.route_tree_probes == 0 &&
-          churn_stats.route_cold_fallbacks == COLD_ROUTE_CLASSES,
+          churn_stats.tree_root_admissions == 0 &&
+          churn_stats.route_pre_tree_observations ==
+            COLD_ROUTE_CLASSES * 2 &&
+          churn_stats.route_pre_tree_hot_observations == 0,
           "ten thousand singleton classes allocate no profiles or probes");
     for (round = 0; round < 32; round++)
       for (j = 0; j < HOT_ROUTE_CLASSES; j++) {
