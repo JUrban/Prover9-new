@@ -2068,6 +2068,7 @@ int main(void)
   check_high_base_strategy(COMPACT_BACK_DEMOD_HOT_ROOT_TREE);
   check_high_base_strategy(COMPACT_BACK_DEMOD_POSITION);
   check_high_base_strategy(COMPACT_BACK_DEMOD_ADAPTIVE);
+  check_high_base_strategy(COMPACT_BACK_DEMOD_ADAPTIVE32);
   compact_back_demod_set_tree_min_tokens(8);
   compact_back_demod_set_tree_admit_work(4096);
   compact_back_demod_set_tree_build_factor(8);

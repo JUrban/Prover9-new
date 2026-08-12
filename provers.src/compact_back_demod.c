@@ -566,13 +566,27 @@ static uint64_t hash_id(uint64_t x)
 static BOOL strategy_uses_hot_tree(Compact_back_demod_strategy strategy)
 {
   return strategy == COMPACT_BACK_DEMOD_HOT_ROOT_TREE ||
-    strategy == COMPACT_BACK_DEMOD_ADAPTIVE;
+    strategy == COMPACT_BACK_DEMOD_ADAPTIVE ||
+    strategy == COMPACT_BACK_DEMOD_ADAPTIVE32;
 }
 
 static BOOL strategy_uses_position(Compact_back_demod_strategy strategy)
 {
   return strategy == COMPACT_BACK_DEMOD_POSITION ||
-    strategy == COMPACT_BACK_DEMOD_ADAPTIVE;
+    strategy == COMPACT_BACK_DEMOD_ADAPTIVE ||
+    strategy == COMPACT_BACK_DEMOD_ADAPTIVE32;
+}
+
+static BOOL strategy_is_adaptive(Compact_back_demod_strategy strategy)
+{
+  return strategy == COMPACT_BACK_DEMOD_ADAPTIVE ||
+    strategy == COMPACT_BACK_DEMOD_ADAPTIVE32;
+}
+
+static BOOL strategy_uses_mask_trie(Compact_back_demod_strategy strategy)
+{
+  return strategy == COMPACT_BACK_DEMOD_MASK32 ||
+    strategy == COMPACT_BACK_DEMOD_ADAPTIVE32;
 }
 
 static BOOL strategy_uses_tree(Compact_back_demod_strategy strategy)
@@ -597,7 +611,7 @@ static BOOL strategy_uses_shallow_mask(Compact_back_demod_strategy strategy)
 
 static unsigned shallow_mask_width(Compact_back_demod_strategy strategy)
 {
-  return strategy == COMPACT_BACK_DEMOD_MASK32 ? 32U : 8U;
+  return strategy_uses_mask_trie(strategy) ? 32U : 8U;
 }
 
 static unsigned long long position_estimated_bytes(
@@ -753,7 +767,7 @@ static void ensure_symbols(Compact_back_demod_index index, unsigned symbol)
   memset(index->symbol_hashes + old_capacity, 0,
          (index->symbol_capacity - old_capacity) *
            sizeof(*index->symbol_hashes));
-  if (index->strategy == COMPACT_BACK_DEMOD_MASK32) {
+  if (strategy_uses_mask_trie(index->strategy)) {
     size_t old_roots = index->mask_trie_root_capacity;
     index->mask_trie_root_capacity = index->symbol_capacity;
     index->mask_trie_roots = safe_realloc(
@@ -971,7 +985,7 @@ static void insert_mask_trie_bucket(Compact_back_demod_index index,
   size_t ancestor_count = 0, i;
   unsigned side = 0, bit, existing_side, added_side;
   cbd_path_mask existing_mask, difference;
-  if (index->strategy != COMPACT_BACK_DEMOD_MASK32)
+  if (!strategy_uses_mask_trie(index->strategy))
     return;
   if ((size_t) symbol >= index->mask_trie_root_capacity ||
       bucket == CBD_NONE || bucket >= index->path_bucket_count)
@@ -2557,7 +2571,7 @@ static Compact_back_demod_index compact_back_demod_init_with_pool_strategy(
       (!index->position_sparse || index->position_budget_bytes != 0))
     fatal_error("compact_back_demod: eager positions require sparse storage "
                 "and a zero absolute budget");
-  if (strategy == COMPACT_BACK_DEMOD_ADAPTIVE) {
+  if (strategy_is_adaptive(strategy)) {
     index->route_profile_capacity = CBD_ROUTE_PROFILE_CAPACITY;
     index->route_profiles = safe_calloc(
       index->route_profile_capacity, sizeof(*index->route_profiles));
@@ -2582,7 +2596,7 @@ static Compact_back_demod_index compact_back_demod_init_with_pool_strategy(
     memset(&index->path_buckets[0], 0, sizeof(index->path_buckets[0]));
     index->path_bucket_count = 1;
   }
-  if (strategy == COMPACT_BACK_DEMOD_MASK32 &&
+  if (strategy_uses_mask_trie(strategy) &&
       new_mask_trie_node(
         index, CBD_MASK_TRIE_LEAF, CBD_NONE, 0) != CBD_NONE)
     fatal_error("compact_back_demod: invalid mask-trie sentinel");
@@ -2633,6 +2647,7 @@ void compact_back_demod_set_strategy(Compact_back_demod_strategy strategy)
 {
   if (strategy != COMPACT_BACK_DEMOD_MASK8 &&
       strategy != COMPACT_BACK_DEMOD_MASK32 &&
+      strategy != COMPACT_BACK_DEMOD_ADAPTIVE32 &&
       strategy != COMPACT_BACK_DEMOD_SIGNATURE32 &&
       strategy != COMPACT_BACK_DEMOD_CODE_TREE &&
       strategy != COMPACT_BACK_DEMOD_HYBRID_TREE &&
@@ -3722,7 +3737,7 @@ static void maybe_admit_hot_root(Compact_back_demod_index index,
     return;
   state = &index->tree_roots[symbol];
   if (state->admitted || state->rejected ||
-      (index->strategy == COMPACT_BACK_DEMOD_ADAPTIVE && !repeated_shape))
+      (strategy_is_adaptive(index->strategy) && !repeated_shape))
     return;
   if (ULLONG_MAX - state->fallback_work < query_work)
     state->fallback_work = ULLONG_MAX;
@@ -5198,7 +5213,7 @@ static void collect_symbol(Compact_back_demod_index index, Term pattern,
   required_mask = term_path_mask(index, pattern);
   if ((size_t) symbol >= index->symbol_capacity)
     return;
-  if (index->strategy == COMPACT_BACK_DEMOD_MASK32) {
+  if (strategy_uses_mask_trie(index->strategy)) {
     uint32_t root;
     if ((size_t) symbol >= index->mask_trie_root_capacity)
       return;
@@ -5558,7 +5573,7 @@ static unsigned long long route_mask_population(
   if ((size_t) symbol >= index->symbol_capacity)
     return 0;
   required = term_path_mask(index, pattern);
-  if (index->strategy == COMPACT_BACK_DEMOD_MASK32) {
+  if (strategy_uses_mask_trie(index->strategy)) {
     uint32_t root;
     if ((size_t) symbol >= index->mask_trie_root_capacity)
       return 0;
@@ -5609,6 +5624,8 @@ static unsigned long long route_position_population(
 
 struct cbd_route_work_snapshot {
   unsigned long long query_work;
+  unsigned long long path_filter_checks;
+  unsigned long long mask_trie_nodes;
   unsigned long long tree_nodes;
   unsigned long long tree_siblings;
   unsigned long long tree_child_lookups;
@@ -5623,6 +5640,8 @@ static struct cbd_route_work_snapshot route_work_snapshot(
 {
   struct cbd_route_work_snapshot value;
   value.query_work = index->query_work;
+  value.path_filter_checks = index->path_filter_checks;
+  value.mask_trie_nodes = index->mask_trie_nodes_examined;
   value.tree_nodes = index->tree_nodes_examined;
   value.tree_siblings = index->tree_sibling_checks;
   value.tree_child_lookups = index->tree_child_cache_lookups;
@@ -5639,6 +5658,10 @@ static unsigned long long route_observed_work(
   const struct cbd_route_work_snapshot *after)
 {
   unsigned long long work = after->query_work - before->query_work;
+  work = saturating_add(
+    work, after->path_filter_checks - before->path_filter_checks);
+  work = saturating_add(
+    work, after->mask_trie_nodes - before->mask_trie_nodes);
   work = saturating_add(work, after->tree_nodes - before->tree_nodes);
   work = saturating_add(work, after->tree_siblings - before->tree_siblings);
   work = saturating_add(
@@ -5892,6 +5915,8 @@ static void collect_pattern(Compact_back_demod_index index, Term pattern,
   size_t selected_positions;
   size_t position_feature_count;
   uint32_t position_bucket;
+  unsigned long long mask_population = 0;
+  BOOL mask_population_known = FALSE;
   enum cbd_edge_query_status edge_status = prepare_edge_query(
     index, pattern, &selected_edges);
   if (edge_status == CBD_EDGE_EMPTY) {
@@ -5908,8 +5933,11 @@ static void collect_pattern(Compact_back_demod_index index, Term pattern,
       edge_work = saturating_add(
         edge_work, index->edge_buckets[
           index->edge_query[i].bucket].posting_count);
-    if (strategy_uses_paths(index->strategy))
+    if (strategy_uses_paths(index->strategy)) {
       fallback_population = route_mask_population(index, pattern);
+      mask_population = fallback_population;
+      mask_population_known = TRUE;
+    }
     else
       fallback_population = index->active;
     if (position_bucket != CBD_NONE) {
@@ -5930,7 +5958,7 @@ static void collect_pattern(Compact_back_demod_index index, Term pattern,
     }
     index->edge_bypass_queries++;
   }
-  if (index->strategy == COMPACT_BACK_DEMOD_ADAPTIVE &&
+  if (strategy_is_adaptive(index->strategy) &&
       !VARIABLE(pattern)) {
     struct cbd_route_profile *profile;
     struct cbd_route_work_snapshot work_before, work_after;
@@ -5956,7 +5984,11 @@ static void collect_pattern(Compact_back_demod_index index, Term pattern,
       /* Root population is a cheap scale-class hint, not a safe comparison
          with the mask path filter.  Pay the exact bucket census only after an
          admitted position passes that coarse screen. */
-      population[CBD_ROUTE_MASK] = route_mask_population(index, pattern);
+      if (!mask_population_known) {
+        mask_population = route_mask_population(index, pattern);
+        mask_population_known = TRUE;
+      }
+      population[CBD_ROUTE_MASK] = mask_population;
       population[CBD_ROUTE_TREE] = population[CBD_ROUTE_MASK];
       if (population[CBD_ROUTE_MASK] < 4 ||
           population[CBD_ROUTE_POSITION] >
@@ -7048,7 +7080,7 @@ BOOL compact_back_demod_write_adaptive_state(
   size_t i, roots = 0, positions = 0, probation = 0, routes = 0;
   size_t frequencies = 0;
   BOOL ok;
-  if (index == NULL || index->strategy != COMPACT_BACK_DEMOD_ADAPTIVE)
+  if (index == NULL || !strategy_is_adaptive(index->strategy))
     return TRUE;
   if (!adaptive_state_path(path, sizeof(path), directory))
     return FALSE;
@@ -7164,7 +7196,7 @@ BOOL compact_back_demod_read_adaptive_state(
   unsigned long long credit_spent = 0, credit_reservations = 0;
   unsigned long long admission_freezes = 0;
   unsigned admission_frozen = 0;
-  if (index == NULL || index->strategy != COMPACT_BACK_DEMOD_ADAPTIVE)
+  if (index == NULL || !strategy_is_adaptive(index->strategy))
     return TRUE;
   if (!adaptive_state_path(path, sizeof(path), directory))
     return FALSE;

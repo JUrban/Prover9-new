@@ -17,7 +17,10 @@ typedef enum {
   COMPACT_BACK_DEMOD_ADAPTIVE,
   /* Appended so checkpoint/debug values of the older strategies do not
      change when the wider shallow control is enabled. */
-  COMPACT_BACK_DEMOD_MASK32
+  COMPACT_BACK_DEMOD_MASK32,
+  /* Keep legacy adaptive reproducible while testing the stable 32-bit
+     complete fallback with the same retained tree/position scheduler. */
+  COMPACT_BACK_DEMOD_ADAPTIVE32
 } Compact_back_demod_strategy;
 
 struct compact_back_demod_stats {

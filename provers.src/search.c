@@ -2244,9 +2244,10 @@ Prover_options init_prover_options(void)
                     "code_tree");
 
   p->compact_back_demod_strategy =
-    init_stringparm("compact_back_demod_strategy", 8,
+    init_stringparm("compact_back_demod_strategy", 9,
                     "mask8",
                     "mask32",
+                    "adaptive32",
                     "signature32",
                     "code_tree",
                     "hybrid_tree",
@@ -10988,6 +10989,8 @@ static void configure_search_indexes(void)
   configure_compact_back_demod_stale_pct(
     (unsigned) parm(Opt->compact_index_stale_pct));
   configure_compact_back_demod_strategy(
+    str_ident(stringparm1(Opt->compact_back_demod_strategy), "adaptive32") ?
+      COMPACT_BACK_DEMOD_ADAPTIVE32 :
     str_ident(stringparm1(Opt->compact_back_demod_strategy), "mask32") ?
       COMPACT_BACK_DEMOD_MASK32 :
     str_ident(stringparm1(Opt->compact_back_demod_strategy), "signature32") ?
@@ -11015,7 +11018,8 @@ static void configure_search_indexes(void)
     (unsigned) parm(Opt->compact_back_position_budget_kb),
     (unsigned) parm(Opt->compact_back_position_budget_pct),
     flag(Opt->compact_back_position_admission) ||
-      str_ident(stringparm1(Opt->compact_back_demod_strategy), "adaptive"),
+      str_ident(stringparm1(Opt->compact_back_demod_strategy), "adaptive") ||
+      str_ident(stringparm1(Opt->compact_back_demod_strategy), "adaptive32"),
     flag(Opt->compact_back_sparse_positions));
   configure_compact_back_demod_eager_position_depth(
     (unsigned) parm(Opt->compact_back_eager_position_depth));
