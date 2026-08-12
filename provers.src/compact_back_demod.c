@@ -3644,7 +3644,8 @@ static void maybe_admit_position_feature(Compact_back_demod_index index,
       ULLONG_MAX - index->position_credit_balance < query_work ? ULLONG_MAX :
       index->position_credit_balance + query_work;
   }
-  if (index->position_admission_frozen || VARIABLE(pattern))
+  if (index->position_admission_frozen || VARIABLE(pattern) ||
+      query_work < index->position_admit_work)
     return;
 
   build_floor = index->active >
@@ -3779,7 +3780,8 @@ static uint32_t best_position_bucket(Compact_back_demod_index index,
   *selected = 0;
   *feature_count = 0;
   if (!strategy_uses_position(index->strategy) ||
-      !index->position_complete || VARIABLE(pattern))
+      !index->position_complete || index->position_bucket_count <= 1 ||
+      VARIABLE(pattern))
     return CBD_NONE;
   count = collect_pattern_position_features(index, pattern);
   *feature_count = count;
@@ -4118,6 +4120,17 @@ static unsigned long long route_mask_population(
   return population;
 }
 
+static unsigned long long route_root_population(
+  Compact_back_demod_index index, Term pattern)
+{
+  unsigned symbol;
+  if (VARIABLE(pattern))
+    return index->record_count - 1;
+  symbol = (unsigned) SYMNUM(pattern);
+  return (size_t) symbol < index->tree_root_capacity ?
+    index->tree_roots[symbol].physical_groups : 0;
+}
+
 static unsigned long long route_position_population(
   Compact_back_demod_index index, uint32_t first_bucket,
   size_t selected_positions, size_t feature_count)
@@ -4395,7 +4408,7 @@ static void collect_pattern(Compact_back_demod_index index, Term pattern,
     BOOL probe;
     size_t count_before = *count;
     available[CBD_ROUTE_TREE] = use_tree_for_pattern(index, pattern);
-    population[CBD_ROUTE_MASK] = route_mask_population(index, pattern);
+    population[CBD_ROUTE_MASK] = route_root_population(index, pattern);
     population[CBD_ROUTE_TREE] = population[CBD_ROUTE_MASK];
     population[CBD_ROUTE_POSITION] = route_position_population(
       index, position_bucket, selected_positions, position_feature_count);
@@ -4407,6 +4420,15 @@ static void collect_pattern(Compact_back_demod_index index, Term pattern,
         population[CBD_ROUTE_MASK] >= 4 &&
         population[CBD_ROUTE_POSITION] <=
           population[CBD_ROUTE_MASK] / 4) {
+      /* Root population is a cheap scale-class hint, not a safe comparison
+         with the mask path filter.  Pay the exact bucket census only after an
+         admitted position passes that coarse screen. */
+      population[CBD_ROUTE_MASK] = route_mask_population(index, pattern);
+      population[CBD_ROUTE_TREE] = population[CBD_ROUTE_MASK];
+      if (population[CBD_ROUTE_MASK] < 4 ||
+          population[CBD_ROUTE_POSITION] >
+            population[CBD_ROUTE_MASK] / 4)
+        goto adaptive_nonposition;
       work_before = route_work_snapshot(index);
       if (selected_positions > 1 && use_dense_position_intersection(
             index, position_bucket, position_feature_count))
@@ -4434,6 +4456,7 @@ static void collect_pattern(Compact_back_demod_index index, Term pattern,
       return;
     }
 
+adaptive_nonposition:
     /* Do not allocate or hash a shape profile before its tree exists.  Cold
        roots simply accumulate the same complete fallback evidence as before. */
     if (!available[CBD_ROUTE_TREE]) {
