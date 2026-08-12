@@ -40,6 +40,7 @@ The changes are split into reviewable commits:
 | `3f0d83d` | stable-index root-backfill iterator fixing the supplied `out6` crash |
 | `ccd8f43` | repeated-class qualification before any adaptive root-tree construction |
 | `4ddf9ed` | bounded compact forward-rewrite hot-path acceleration |
+| `b12c84c` | bounded dense intersections for packed-fast hint back-demodulation |
 
 Candidate completeness and decreasing-ID order remain authoritative in the
 mask/tree/position paths.  Scheduling, wall time, and cache residency never
@@ -78,6 +79,40 @@ The long-lived memory cost is four bytes per physical radix node plus one
 `uint32_t` per allocated P9 symbol slot.  It is independent of query and
 rewrite-attempt counts.  On the 1,500-given CHAT prefix the root map is 1 KiB;
 the parallel first-code array is about 256 KiB at the current capacity.
+
+### Packed-fast hint back-demodulation
+
+The 2,000-given paired run exposed a second mature multiplier.  Its packed
+hint bank had scanned 789,746,162 correlated posting entries for 10,058,011
+unique candidates while back-demodulating hints.  `packed_fast` already had
+an exact stable-ID dense/sparse intersection engine for ordinary hint
+matching, but this path still used the older repeated posting-vector scan.
+
+Commit `b12c84c` sends back-hint retrieval through the same intersection
+engine.  A narrow posting remains the sparse seed and is not copied; the
+other feature memberships are tested through dense words.  Broad postings
+are intersected word-wise after their one-bit-per-word summaries reject empty
+blocks.  The decreasing-ID sort, activity check, materialization, and
+`rewritable_clause_type` remain authoritative.  If any dense view is absent
+or cannot be allocated, the query executes the complete old sparse
+intersection.
+
+Dense posting bits plus summaries have a hard 16 MiB cap, including after a
+stale-posting rebuild.  If a later hint ID would require a cached view to grow
+beyond the cap, that view is discarded before the sparse posting is appended;
+an incomplete dense view can therefore never suppress an answer.  The cap is
+independent of run duration and the number of queries.  `Better_packed_postings`
+reports both `dense_budget_bytes` and `dense_budget_denials`.
+
+In a same-time, fixed-core 600-given comparison against the immediately
+preceding binary, total user CPU fell from 40.96 to 38.09 seconds (7.0%).
+Back-hint posting entries visited fell from 176,431,500 to 4,100,930 (97.7%).
+Both runs ended at 601 given with 497,430 generated, 16,974 kept, 13,568 new
+demodulators, 42,741 exact back-hint rewrites, and the same candidate totals.
+The final dense bank used 7,143,424 bytes of bits and 111,616 bytes of
+summaries; peak RSS changed only from 90,420 to 90,552 KiB.  This is a
+mechanical scan reduction, but the longer paired gate below remains the CPU
+acceptance authority.
 
 ### Route calibration
 
