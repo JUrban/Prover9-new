@@ -35,6 +35,7 @@ struct clause_store_stats {
   unsigned long long file_read_bytes;
   unsigned long long file_writes;
   unsigned long long file_write_bytes;
+  unsigned long long offset_lookups;
 };
 
 Clause_store clause_store_init(const char *name);

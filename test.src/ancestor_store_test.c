@@ -439,6 +439,75 @@ static void archive_preserve_body_test(Clause_store_archive_mode mode)
         "preserve-body archive teardown removes the tagged ID");
 }
 
+static void archive_direct_offset_aging_test(Clause_store_archive_mode mode)
+{
+  enum { VERSIONS = 4096 };
+  Clause_store store = clause_store_init("ancestor-direct-offset-aging");
+  Topform current, materialized, hint;
+  unsigned long long id;
+  struct clause_store_stats before, after;
+  Ilist parents;
+  BOOL known = FALSE;
+  size_t i, position = 0;
+
+  CHECK(clause_store_enable_archive(store, mode),
+        "direct-offset aging archive initializes");
+  current = clause("-archive_scale(f(x),a).");
+  current->justification = input_just();
+  assign_clause_id(current);
+  id = current->id;
+  hint = get_topform();
+  hint->id = 777;
+
+  for (i = 0; i < VERSIONS; i++) {
+    position = clause_store_length(store);
+    current->matching_hint = hint;
+    clause_store_append(store, current);
+    if (!clause_store_archive_clause(store, current)) {
+      CHECK(FALSE, "direct-offset aging version archives");
+      break;
+    }
+    current = NULL;
+    if (i + 1 < VERSIONS) {
+      current = clause_store_activate(store, position);
+      if (current == NULL) {
+        CHECK(FALSE, "direct-offset aging version activates");
+        break;
+      }
+    }
+  }
+  CHECK(i == VERSIONS && clause_store_length(store) == VERSIONS &&
+        !clause_store_position_is_current(store, 0) &&
+        clause_store_position_is_current(store, position),
+        "aging leaves one current record behind many obsolete versions");
+
+  before = clause_store_get_stats(store);
+  materialized = clause_store_materialize_by_id(id);
+  CHECK(materialized != NULL && materialized->id == id &&
+        negative_clause_possibly_compressed(materialized),
+        "by-ID materialization reads the current archive offset directly");
+  parents = clause_parents_by_id(id);
+  CHECK(parents == NULL,
+        "by-ID parent lookup reads the current archive offset directly");
+  CHECK(clause_negative_by_id(id, &known) && known,
+        "by-ID sign lookup reads the current archive offset directly");
+  CHECK(clause_store_matching_hint_id(id) == 777,
+        "by-ID hint lookup reads the current archive offset directly");
+  after = clause_store_get_stats(store);
+  CHECK(after.offset_lookups == before.offset_lookups + 4,
+        "four by-ID operations perform four offset-native lookups");
+  if (mode == CLAUSE_STORE_ARCHIVE_FILE)
+    CHECK(after.file_reads - before.file_reads <= 8,
+          "file by-ID lookup I/O is independent of obsolete handle count");
+
+  clause_store_release_materialized(materialized);
+  clause_store_delete_clauses(store);
+  hint->id = 0;
+  zap_topform(hint);
+  CHECK(find_clause_by_id(id) == NULL,
+        "direct-offset aging teardown removes the current archived ID");
+}
+
 int main(void)
 {
   struct clause_id_table_stats ids;
@@ -450,12 +519,15 @@ int main(void)
   justification_codec_test();
   archive_round_trip(CLAUSE_STORE_ARCHIVE_MEMORY);
   archive_preserve_body_test(CLAUSE_STORE_ARCHIVE_MEMORY);
+  archive_direct_offset_aging_test(CLAUSE_STORE_ARCHIVE_MEMORY);
 #ifndef __EMSCRIPTEN__
   tmpdir_failure_test();
   archive_round_trip(CLAUSE_STORE_ARCHIVE_MMAP);
   archive_preserve_body_test(CLAUSE_STORE_ARCHIVE_MMAP);
+  archive_direct_offset_aging_test(CLAUSE_STORE_ARCHIVE_MMAP);
   archive_round_trip(CLAUSE_STORE_ARCHIVE_FILE);
   archive_preserve_body_test(CLAUSE_STORE_ARCHIVE_FILE);
+  archive_direct_offset_aging_test(CLAUSE_STORE_ARCHIVE_FILE);
 #endif
   ids = clause_id_table_get_stats();
   CHECK(ids.entries == 0 && ids.pages == 0,

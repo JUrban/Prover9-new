@@ -587,6 +587,7 @@ struct prover_stats {
     ancestor_file_read_bytes,
     ancestor_file_writes,
     ancestor_file_write_bytes,
+    ancestor_offset_lookups,
     disabled_store_bytes,
     disabled_legacy_clist_bytes,
     clause_id_entries,

@@ -61,6 +61,7 @@ struct clause_store {
   unsigned long long file_read_bytes;
   unsigned long long file_writes;
   unsigned long long file_write_bytes;
+  unsigned long long offset_lookups;
 };
 
 /* The ID table stores only a tagged offset, so one archive-enabled store is
@@ -898,22 +899,13 @@ BOOL clause_store_negative(Clause_store store, size_t position)
 }
 
 /* PUBLIC */
-Ilist clause_store_parents(Clause_store store, size_t position)
+static Ilist clause_store_parents_view(const struct record_view *v)
 {
-  uintptr_t ref;
-  struct record_view v;
   Ilist parents = NULL;
   Ilist *tail = &parents;
   unsigned i;
-  if (store == NULL || position >= store->length)
-    return NULL;
-  ref = store->refs[position];
-  if (!ref_is_archive(ref))
-    return get_parents(((Topform) ref)->justification, TRUE);
-  if (!record_view(store, ref_offset(ref), &v))
-    fatal_error("clause_store_parents: corrupt ancestor record");
-  for (i = 0; i < v.parent_count; i++) {
-    uint64_t id = get64(v.parents + (size_t) i * 8);
+  for (i = 0; i < v->parent_count; i++) {
+    uint64_t id = get64(v->parents + (size_t) i * 8);
     Ilist n;
     if (id > INT_MAX)
       fatal_error("clause_store_parents: parent ID exceeds justification range");
@@ -926,6 +918,27 @@ Ilist clause_store_parents(Clause_store store, size_t position)
   return parents;
 }
 
+static Ilist clause_store_parents_offset(Clause_store store,
+                                         unsigned long long offset)
+{
+  struct record_view v;
+  if (!record_view(store, offset, &v))
+    fatal_error("clause_store_parents: corrupt ancestor record");
+  return clause_store_parents_view(&v);
+}
+
+/* PUBLIC */
+Ilist clause_store_parents(Clause_store store, size_t position)
+{
+  uintptr_t ref;
+  if (store == NULL || position >= store->length)
+    return NULL;
+  ref = store->refs[position];
+  return ref_is_archive(ref) ?
+    clause_store_parents_offset(store, ref_offset(ref)) :
+    get_parents(((Topform) ref)->justification, TRUE);
+}
+
 /* PUBLIC */
 Topform clause_store_get(Clause_store store, size_t position)
 {
@@ -936,22 +949,16 @@ Topform clause_store_get(Clause_store store, size_t position)
   return (Topform) store->refs[position];
 }
 
-/* PUBLIC */
-Topform clause_store_materialize(Clause_store store, size_t position)
+static Topform clause_store_materialize_offset(Clause_store store,
+                                               unsigned long long offset)
 {
-  uintptr_t ref;
   struct record_view v;
   Topform c;
   Term t;
   double weight;
   Ilist parents = NULL, p;
   unsigned parent_count = 0;
-  if (store == NULL || position >= store->length)
-    return NULL;
-  ref = store->refs[position];
-  if (!ref_is_archive(ref))
-    return (Topform) ref;
-  if (!record_view(store, ref_offset(ref), &v))
+  if (!record_view(store, offset, &v))
     return NULL;
   if (sizeof(double) != sizeof(uint64_t))
     fatal_error("clause_store_materialize: ancestor format requires 64-bit double");
@@ -1025,6 +1032,17 @@ bad:
 }
 
 /* PUBLIC */
+Topform clause_store_materialize(Clause_store store, size_t position)
+{
+  uintptr_t ref;
+  if (store == NULL || position >= store->length)
+    return NULL;
+  ref = store->refs[position];
+  return ref_is_archive(ref) ?
+    clause_store_materialize_offset(store, ref_offset(ref)) : (Topform) ref;
+}
+
+/* PUBLIC */
 Topform clause_store_activate(Clause_store store, size_t position)
 {
   uintptr_t ref;
@@ -1053,23 +1071,19 @@ Topform clause_store_activate(Clause_store store, size_t position)
 Topform clause_store_materialize_by_id(unsigned long long id)
 {
   unsigned long long offset;
-  size_t i;
   if (Active_archive_store == NULL ||
       !clause_id_archive_offset(id, &offset))
     return NULL;
-  for (i = 0; i < Active_archive_store->length; i++)
-    if (ref_is_archive(Active_archive_store->refs[i]) &&
-        ref_offset(Active_archive_store->refs[i]) == offset) {
-      Topform c = clause_store_materialize(Active_archive_store, i);
-      if (c != NULL && c->id != id) {
-        Active_archive_store->validation_failures++;
-        clause_store_release_materialized(c);
-        return NULL;
-      }
-      return c;
+  Active_archive_store->offset_lookups++;
+  {
+    Topform c = clause_store_materialize_offset(Active_archive_store, offset);
+    if (c != NULL && c->id != id) {
+      Active_archive_store->validation_failures++;
+      clause_store_release_materialized(c);
+      return NULL;
     }
-  Active_archive_store->validation_failures++;
-  return NULL;
+    return c;
+  }
 }
 
 /* PUBLIC */
@@ -1077,7 +1091,6 @@ Ilist clause_parents_by_id(unsigned long long id)
 {
   Topform c = find_clause_by_id(id);
   unsigned long long offset;
-  size_t i;
   if (c != NULL) {
     BOOL was_packed = c->compressed != NULL && c->packed_justification;
     Ilist parents;
@@ -1091,16 +1104,13 @@ Ilist clause_parents_by_id(unsigned long long id)
   if (Active_archive_store == NULL ||
       !clause_id_archive_offset(id, &offset))
     return NULL;
-  for (i = 0; i < Active_archive_store->length; i++)
-    if (ref_is_archive(Active_archive_store->refs[i]) &&
-        ref_offset(Active_archive_store->refs[i]) == offset) {
-      struct record_view v;
-      if (!record_view(Active_archive_store, offset, &v) || v.id != id)
-        fatal_error("clause_parents_by_id: corrupt ancestor identity");
-      return clause_store_parents(Active_archive_store, i);
-    }
-  fatal_error("clause_parents_by_id: missing ancestor record");
-  return NULL;
+  Active_archive_store->offset_lookups++;
+  {
+    struct record_view v;
+    if (!record_view(Active_archive_store, offset, &v) || v.id != id)
+      fatal_error("clause_parents_by_id: corrupt ancestor identity");
+    return clause_store_parents_view(&v);
+  }
 }
 
 /* PUBLIC */
@@ -1108,7 +1118,6 @@ BOOL clause_negative_by_id(unsigned long long id, BOOL *known)
 {
   Topform c = find_clause_by_id(id);
   unsigned long long offset;
-  size_t i;
   if (known != NULL)
     *known = FALSE;
   if (c != NULL) {
@@ -1118,39 +1127,30 @@ BOOL clause_negative_by_id(unsigned long long id, BOOL *known)
   if (Active_archive_store == NULL ||
       !clause_id_archive_offset(id, &offset))
     return FALSE;
-  for (i = 0; i < Active_archive_store->length; i++) {
-    uintptr_t ref = Active_archive_store->refs[i];
-    if (ref_is_archive(ref) && ref_offset(ref) == offset) {
-      struct record_view v;
-      if (!record_view(Active_archive_store, offset, &v) || v.id != id)
-        fatal_error("clause_negative_by_id: corrupt ancestor record");
-      if (known != NULL) *known = TRUE;
-      return (v.flags & AF_NEGATIVE) != 0;
-    }
+  Active_archive_store->offset_lookups++;
+  {
+    struct record_view v;
+    if (!record_view(Active_archive_store, offset, &v) || v.id != id)
+      fatal_error("clause_negative_by_id: corrupt ancestor record");
+    if (known != NULL) *known = TRUE;
+    return (v.flags & AF_NEGATIVE) != 0;
   }
-  fatal_error("clause_negative_by_id: missing ancestor record");
-  return FALSE;
 }
 
 /* PUBLIC */
 unsigned long long clause_store_matching_hint_id(unsigned long long id)
 {
   unsigned long long offset;
-  size_t i;
   if (Active_archive_store == NULL ||
       !clause_id_archive_offset(id, &offset))
     return 0;
-  for (i = 0; i < Active_archive_store->length; i++) {
-    uintptr_t ref = Active_archive_store->refs[i];
-    if (ref_is_archive(ref) && ref_offset(ref) == offset) {
-      struct record_view v;
-      if (!record_view(Active_archive_store, offset, &v) || v.id != id)
-        fatal_error("clause_store_matching_hint_id: corrupt ancestor record");
-      return v.hint_id;
-    }
+  Active_archive_store->offset_lookups++;
+  {
+    struct record_view v;
+    if (!record_view(Active_archive_store, offset, &v) || v.id != id)
+      fatal_error("clause_store_matching_hint_id: corrupt ancestor record");
+    return v.hint_id;
   }
-  fatal_error("clause_store_matching_hint_id: missing ancestor record");
-  return 0;
 }
 
 /* PUBLIC */
@@ -1305,6 +1305,7 @@ struct clause_store_stats clause_store_get_stats(Clause_store store)
     stats.file_read_bytes = store->file_read_bytes;
     stats.file_writes = store->file_writes;
     stats.file_write_bytes = store->file_write_bytes;
+    stats.offset_lookups = store->offset_lookups;
   }
   return stats;
 }

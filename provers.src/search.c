@@ -2724,6 +2724,7 @@ void update_memory_stats(void)
   Stats.ancestor_file_read_bytes = as.file_read_bytes;
   Stats.ancestor_file_writes = as.file_writes;
   Stats.ancestor_file_write_bytes = as.file_write_bytes;
+  Stats.ancestor_offset_lookups = as.offset_lookups;
 
   Stats.disabled_store_bytes = clause_store_allocated_bytes(Glob.disabled);
   Stats.disabled_legacy_clist_bytes =
@@ -3423,7 +3424,7 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
           "mmap_eviction_passes=%s, mmap_eviction_bytes=%s, "
           "mmap_scan_eviction_passes=%s, mmap_scan_eviction_bytes=%s, "
           "io_buffer=%s, file_reads=%s (%s bytes), "
-          "file_writes=%s (%s bytes).\n",
+          "file_writes=%s (%s bytes), offset_lookups=%s.\n",
           comma_num(s.ancestor_records), comma_num(s.ancestor_record_bytes),
           comma_num(s.ancestor_backing_bytes), comma_num(s.ancestor_handle_bytes),
           comma_num(s.ancestor_materializations),
@@ -3436,7 +3437,8 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
           comma_num(s.ancestor_file_reads),
           comma_num(s.ancestor_file_read_bytes),
           comma_num(s.ancestor_file_writes),
-          comma_num(s.ancestor_file_write_bytes));
+          comma_num(s.ancestor_file_write_bytes),
+          comma_num(s.ancestor_offset_lookups));
   if (compact_otter_passive_mode())
     fprintf(fp,
             "Compact_passive_cache: budget=%s, metadata_bytes=%s, "
