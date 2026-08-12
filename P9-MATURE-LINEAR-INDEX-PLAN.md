@@ -1,10 +1,11 @@
 # Mature-run CPU recovery: linear-space indexes, not expiring caches
 
-Status: the first retained-linear implementation landed in `950b230`, derived
-from the complete large CHAT run and the `out61`, `out71`, and `out81`
-measurements.  Short prefixes remain useful for correctness and profiling,
-but they are not performance acceptance evidence for this work.  A new full
-CHAT run is still required before the CPU gate can be claimed.
+Status: the first retained-linear implementation landed in `950b230` and the
+global shallow sparse-path stage landed in `1f1643d`, derived from the
+complete large CHAT run and the `out61`, `out71`, and `out81` measurements.
+Short prefixes remain useful for correctness and profiling, but they are not
+performance acceptance evidence for this work.  A new full CHAT run is still
+required before the CPU gate can be claimed.
 
 ## Corrected diagnosis
 
@@ -143,6 +144,60 @@ over enforcing a transient byte cap.  This guarantees linear rather than
 product space, but a general workload with a worse tree/base ratio still
 needs the density-aware rebuild to impose a tighter constant.
 
+### Implemented global shallow sparse paths
+
+The demand-built stage can retain a selective feature after discovering it,
+but discovery still depends on a repeated query shape and may happen too late
+in a mature search.  Commit `1f1643d` adds
+`compact_back_eager_position_depth`.  A nonzero value constructs complete
+compressed `(subject root, exact child path, rigid symbol)` posting streams as
+records enter the index, through only the stated depth.  It has four important
+properties:
+
+- construction is independent of query count and query order;
+- a clause is traversed once, subtree boundaries are computed once, and local
+  feature/occurrence pairs are sorted and deduplicated before append;
+- the number of occurrence postings is linear in serialized term occurrences
+  for fixed depth and signature, with no record-sized bitmap per feature; and
+- query path hashes are only a conservative selector.  The existing compact
+  matcher remains authoritative, so a hash collision can add work but cannot
+  remove a candidate.
+
+Eager mode deliberately disables demand admission for deeper positions in
+this first version.  It therefore cannot reintroduce the historical
+`features * records` census/backfill term.  Patterns without a useful rigid
+position through the configured depth continue through the complete adaptive
+tree or mask route.  Compaction reconstructs the shallow definitions from the
+live records, and checkpoint sidecars omit them because they are derived
+state.  The new complete-clause token-slice API makes that reconstruction safe
+for multi-literal clauses and repeated argument terms; the older min/max
+argument span was not necessarily a well-formed prefix forest.
+
+The option defaults to zero and rejects an inconsistent configuration.  A
+nonzero depth requires:
+
+```prolog
+set(compact_back_sparse_positions).
+assign(compact_back_position_budget_kb,0).
+```
+
+The 10,000-record variable-prefix stress case returns the same sole answer
+while reducing steady lookup work from 10,000 groups/query to one, with zero
+bitmap bytes and zero demotions.  Focused insertion, later insertion,
+deletion, forced compaction, checkpoint, decreasing-order, multi-literal, and
+ASan/UBSan checks pass.  The depth-16 synthetic case is intentionally a
+correctness stress configuration, not a production memory recommendation.
+
+On four same-binary 600-given CHAT runs, depths 0, 1, 2, and 3 all ended at
+the identical 601-given, 497,430-generated, 16,974-kept trajectory and used
+38.79--39.26 user seconds.  Depth three selected a sparse path for 4,471 of
+13,571 routed lookups and reduced total backward posting groups from
+3,124,571 to 1,233,135 (60.5%).  The compact back-index allocation rose from
+2,319,336 to 4,724,941 bytes and peak process RSS rose by only 256 KiB at this
+short endpoint.  Equal total CPU here means only that the avoided back lookup
+work has not yet become dominant; the 7,000--11,000-given external interval
+is the acceptance test.
+
 The first full CHAT validation should retain the existing compact/file store
 settings and add the following complete strategy block:
 
@@ -154,6 +209,7 @@ set(compact_back_sparse_positions).
 assign(compact_back_position_budget_kb,0).
 assign(compact_back_position_budget_pct,50).
 assign(compact_back_position_build_factor,32).
+assign(compact_back_eager_position_depth,3).
 assign(compact_back_tree_budget_kb,65536).
 assign(compact_back_tree_budget_pct,200).
 assign(compact_rewrite_deep_cache_kb,0).

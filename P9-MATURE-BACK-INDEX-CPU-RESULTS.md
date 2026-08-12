@@ -9,6 +9,35 @@ regression.  The external 7,365-given run and proof endpoint remain open;
 these bounded runs are not a claim that a week-long run has already been
 reproduced.
 
+The later `chat_test.new.out61` is not a valid measurement of the final
+recommended block: it omitted both `compact_unit_strategy=code_tree` and
+`compact_nonunit_path_filter`.  Its root-scan unit index had performed
+14.108 billion exact conflict tests and used 3,252.106 sampled seconds by
+11,015 givens.  The completed compact `out4` used only 39.945 million
+code-tree candidates and 173.981 sampled seconds by its proof.  This explains
+a large part of `out61`, but not all of it: every adaptive tree and position
+feature also exhausted its fixed allowance and the run fell back to mature
+mask scans.  The retained-linear commits `950b230` and `1f1643d` address that
+independent collapse; a new proof-endpoint run is still required.
+
+## Post-`ccd8f43` shallow sparse-path stage
+
+Commit `1f1643d` adds a query-order-independent shallow exact-path index for
+back demodulation.  With `compact_back_eager_position_depth=3`, every new
+record contributes compressed postings for rigid descendant facts through
+depth three.  The narrowest complete posting is queried directly, and the
+exact compact matcher remains the final authority.  Space is occurrence
+linear for fixed depth; no per-feature record bitmap, historical census, or
+backfill is used.
+
+At 600 givens on the large CHAT input, depth three preserved the exact search
+trajectory and total user CPU (38.79 seconds versus 38.98 at depth zero), cut
+backward posting groups from 3,124,571 to 1,233,135, and increased compact
+back-index bytes from 2,319,336 to 4,724,941.  The equality in total CPU is
+expected at this prefix because back lookup is not yet dominant.  This is a
+structural work reduction and a regression gate, not an extrapolated claim
+about the complete run.
+
 ## Why the former adaptive mode failed
 
 At the matched 7,363/7,365-given state in the supplied
@@ -210,17 +239,12 @@ position-record-examinations plus 164.5 million backfill visits.  It is not a
 measured 7,689-given runtime result; it is the implemented accounting bound
 that the external run must verify.
 
-## New options and recommended run
+## Current options and recommended run
 
-The two new P9 parameters have conservative defaults and may be stated
-explicitly for reproducibility:
-
-```text
-assign(compact_back_position_budget_kb,16384).
-assign(compact_back_position_build_factor,32).
-```
-
-Use them with the previously recommended compact OTTER configuration:
+For the next mature comparison, use the complete block below.  In particular,
+do not reuse the `out61` block: `code_tree`, the nonunit path filter, sparse
+positions, the zero absolute position budget, and eager depth three are all
+material parts of this configuration.
 
 ```text
 assign(search_loop,otter).
@@ -244,18 +268,29 @@ set(compact_otter_demodulation).
 set(compact_otter_unit_index).
 set(compact_otter_back_demod_index).
 set(compact_otter_nonunit_index).
+assign(compact_unit_strategy,code_tree).
+set(compact_nonunit_path_filter).
 assign(compact_back_demod_strategy,adaptive).
+set(compact_back_sparse_positions).
 
 assign(compact_passive_cache,0).
 assign(compact_index_stale_pct,25).
 assign(compact_term_reclaim_kb,8192).
-assign(compact_back_position_budget_kb,16384).
+assign(compact_back_position_budget_kb,0).
+assign(compact_back_position_budget_pct,50).
 assign(compact_back_position_build_factor,32).
+assign(compact_back_eager_position_depth,3).
+assign(compact_back_tree_budget_kb,65536).
+assign(compact_back_tree_budget_pct,200).
+assign(compact_rewrite_deep_cache_kb,0).
 ```
 
 `passive_selector_store,heap` remains useful for a controlled comparison; the
-file selector is the intended bounded-RAM long-run setting.  The two position
-parameters should not be relaxed for the first mature comparison.
+file selector is the intended bounded-RAM long-run setting.  Depth zero is the
+retained demand-built control and depth two is the lower-memory diagnostic;
+depth three is the current production candidate because it covered 32.9% of
+routed back lookups at 600 givens and cut total posting-group work by 60.5%.
+Do not use the synthetic depth-16 setting on a large run.
 
 ## Bounded `chat_test.in` evidence
 
