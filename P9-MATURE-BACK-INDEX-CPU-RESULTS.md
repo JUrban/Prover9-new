@@ -23,7 +23,7 @@ independent collapse; a new proof-endpoint run is still required.
 ## Post-`ccd8f43` shallow sparse-path stage
 
 Commit `1f1643d` adds a query-order-independent shallow exact-path index for
-back demodulation.  With `compact_back_eager_position_depth=3`, every new
+back demodulation.  With `compact_back_eager_position_depth=4`, every new
 record contributes compressed postings for rigid descendant facts through
 depth three.  The narrowest complete posting is queried directly, and the
 exact compact matcher remains the final authority.  Space is occurrence
@@ -37,6 +37,17 @@ back-index bytes from 2,319,336 to 4,724,941.  The equality in total CPU is
 expected at this prefix because back lookup is not yet dominant.  This is a
 structural work reduction and a regression gate, not an extrapolated claim
 about the complete run.
+
+Depth four is the measured knee: at 600 givens it reduced posting groups
+another 15.0% from depth three for about 0.55 MiB more back-index allocation,
+whereas depth five bought only another 0.7% work reduction.  At 1,500 givens,
+depth zero, three, and four all ended at the exact same
+2,947,136-generated/66,933-kept trajectory.  Depth four reduced user CPU from
+187.30 to 165.27 seconds (11.8%), backward posting groups from 43,343,242 to
+10,846,020 (75.0%), and sampled back lookup time from 21.828 to 6.900 seconds.
+Peak RSS was 107,904 KiB versus 99,280 KiB at depth zero.  This bounded
+crossover selects depth four for the external run; it does not prove how the
+constant evolves through 11,000 givens.
 
 ## Why the former adaptive mode failed
 
@@ -243,7 +254,7 @@ that the external run must verify.
 
 For the next mature comparison, use the complete block below.  In particular,
 do not reuse the `out61` block: `code_tree`, the nonunit path filter, sparse
-positions, the zero absolute position budget, and eager depth three are all
+positions, the zero absolute position budget, and eager depth four are all
 material parts of this configuration.
 
 ```text
@@ -279,7 +290,7 @@ assign(compact_term_reclaim_kb,8192).
 assign(compact_back_position_budget_kb,0).
 assign(compact_back_position_budget_pct,50).
 assign(compact_back_position_build_factor,32).
-assign(compact_back_eager_position_depth,3).
+assign(compact_back_eager_position_depth,4).
 assign(compact_back_tree_budget_kb,65536).
 assign(compact_back_tree_budget_pct,200).
 assign(compact_rewrite_deep_cache_kb,0).
@@ -288,8 +299,8 @@ assign(compact_rewrite_deep_cache_kb,0).
 `passive_selector_store,heap` remains useful for a controlled comparison; the
 file selector is the intended bounded-RAM long-run setting.  Depth zero is the
 retained demand-built control and depth two is the lower-memory diagnostic;
-depth three is the current production candidate because it covered 32.9% of
-routed back lookups at 600 givens and cut total posting-group work by 60.5%.
+depth four is the current production candidate because it covered 41.0% of
+routed back lookups at 600 givens and cut total posting-group work by 66.5%.
 Do not use the synthetic depth-16 setting on a large run.
 
 ## Bounded `chat_test.in` evidence

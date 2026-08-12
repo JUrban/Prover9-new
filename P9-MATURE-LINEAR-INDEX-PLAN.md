@@ -198,6 +198,23 @@ short endpoint.  Equal total CPU here means only that the avoided back lookup
 work has not yet become dominant; the 7,000--11,000-given external interval
 is the acceptance test.
 
+A follow-up depth-4/5 guard found the useful knee.  Depth four served 5,571
+of the routed lookups and reduced posting groups to 1,048,333 while increasing
+the back index to 5,282,285 bytes.  Depth five served only 89 additional
+lookups and reduced another 7,641 groups (0.7%), despite creating another 749
+feature definitions.  The production candidate is therefore depth four, not
+an arbitrarily deep index.
+
+The paired 1,500-given depth-zero/depth-three runs and the same-binary depth-
+four follow-up all preserved the exact 1,501-given, 2,947,136-generated,
+66,933-kept trajectory.  Depth zero used 187.30 user seconds and 99,280 KiB
+peak RSS.  Depth three used 171.65 seconds and 108,644 KiB.  Depth four used
+165.27 seconds and 107,904 KiB, an 11.8% user-CPU reduction from depth zero.
+Its backward posting groups fell from 43,343,242 to 10,846,020 (75.0%) and
+sampled lookup time fell from 21.828 to 6.900 seconds.  This establishes a
+bounded crossover and selects the parameter; it still does not close the
+proof-endpoint gate.
+
 The first full CHAT validation should retain the existing compact/file store
 settings and add the following complete strategy block:
 
@@ -209,7 +226,7 @@ set(compact_back_sparse_positions).
 assign(compact_back_position_budget_kb,0).
 assign(compact_back_position_budget_pct,50).
 assign(compact_back_position_build_factor,32).
-assign(compact_back_eager_position_depth,3).
+assign(compact_back_eager_position_depth,4).
 assign(compact_back_tree_budget_kb,65536).
 assign(compact_back_tree_budget_pct,200).
 assign(compact_rewrite_deep_cache_kb,0).
