@@ -95,6 +95,10 @@ compact-generalization-validate:
 compact-generalization-smoke: all
 	./test.src/compact_generalization_smoke_test.sh
 
+long-run-scalability-tests: all
+	cd test.src && $(MAKE) compact_long_run_test ancestor_store_scale_test
+	./test.src/compact_long_run_test
+
 clean:
 	cd ladr             && $(MAKE) realclean
 	cd apps.src         && $(MAKE) realclean

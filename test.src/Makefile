@@ -11,7 +11,7 @@ CFLAGS = $(XFLAGS) -g  -O0 -Wall
 # CFLAGS = $(XFLAGS) -pg -O -Wall
 # CFLAGS = $(XFLAGS)  -Wall -pedantic
 
-PROGRAMS = avltest memory_lifecycle_test allocator_churn_test bookkeeping_lifecycle_test ancestor_store_test ancestor_store_scale_test checkpoint_selector_test dense_selector_compaction_test cold_passive_store_test hint_postings_test hint_preview_test compressed_unit_match_test paramod_iterator_test hyper_iterator_test rewrite_only_store_test compact_term_pool_test compact_id_map_test compact_rewrite_test compact_unit_index_test compact_back_demod_test compact_feature_index_test
+PROGRAMS = avltest memory_lifecycle_test allocator_churn_test bookkeeping_lifecycle_test ancestor_store_test ancestor_store_scale_test checkpoint_selector_test dense_selector_compaction_test cold_passive_store_test hint_postings_test hint_preview_test compressed_unit_match_test paramod_iterator_test hyper_iterator_test rewrite_only_store_test compact_term_pool_test compact_id_map_test compact_rewrite_test compact_unit_index_test compact_back_demod_test compact_feature_index_test compact_long_run_test
 
 all: ladr apps
 
@@ -92,6 +92,9 @@ compact_back_demod_test: compact_back_demod_test.o ../provers.src/compact_back_d
 
 compact_feature_index_test: compact_feature_index_test.o ../provers.src/compact_feature_index.o ../ladr/libladr.a
 	$(CC) $(CFLAGS) -o compact_feature_index_test compact_feature_index_test.o ../provers.src/compact_feature_index.o ../ladr/libladr.a -lm
+
+compact_long_run_test: compact_long_run_test.o ../provers.src/compact_feature_index.o ../provers.src/compact_back_demod.o ../provers.src/compact_term_pool.o ../provers.src/compact_id_map.o ../ladr/libladr.a
+	$(CC) $(CFLAGS) -o compact_long_run_test compact_long_run_test.o ../provers.src/compact_feature_index.o ../provers.src/compact_back_demod.o ../provers.src/compact_term_pool.o ../provers.src/compact_id_map.o ../ladr/libladr.a -lm
 
 memory_lifecycle_test.o allocator_churn_test.o bookkeeping_lifecycle_test.o ancestor_store_test.o: ../ladr/topform.h
 
