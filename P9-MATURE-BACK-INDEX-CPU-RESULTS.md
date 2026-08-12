@@ -1,10 +1,12 @@
 # Mature backward-index CPU recovery: implementation and bounded results
 
 Status: implemented and locally validated on branch
-`mature-back-index-cpu`.  An exact 1,500-given CHAT gate is now within 5.1%
-of normal P9 user CPU while using 67.2% less peak RSS.  The external
-7,365-given and proof-endpoint gates remain open; these bounded runs are not a
-claim that a week-long run has already been reproduced.
+`mature-back-index-cpu`.  A same-time, fixed-core 1,500-given CHAT pair is at
+CPU parity while compact uses 67.2% less peak RSS.  The corresponding
+2,000-given pair is 8.7% slower while using 66.5% less peak RSS, and its last
+500-given interval is 21.7% slower.  The external 7,365-given and
+proof-endpoint gates remain open; these bounded runs are not a claim that a
+week-long run has already been reproduced.
 
 ## Why the former adaptive mode failed
 
@@ -116,10 +118,10 @@ replace mask retrieval.
 - A reservation costs
   `2 * active_records * compact_back_position_build_factor`; it buys at most
   one full census and, if accepted, one full backfill.
-- The default factor is 64.  Therefore active census-plus-backfill record
-  visits are at most total credited retrieval work divided by 64.  With the
+- The default factor is 32.  Therefore active census-plus-backfill record
+  visits are at most total credited retrieval work divided by 32.  With the
   default 25% stale-index rebuild threshold, physical loop iterations are at
-  most credited work divided by 51.2 between rebuilds.
+  most credited work divided by 25.6 between rebuilds.
 - A rejected feature cannot retry until active population doubles.  A
   budget-demoted feature has no retry in the same index generation.
 - The first hard position-budget exhaustion freezes new admissions for the
@@ -136,18 +138,18 @@ replace mask retrieval.
   postings.  Its work no longer multiplies by the total admitted-feature
   count.  Roots whose last feature is demoted trigger no later traversal.
 
-Factor 16 is intentionally not the new default.  On the exact 1,500-given
-gate it took 210.38 seconds versus 210.57 seconds for factor 64, which is
-measurement parity.  Factor 16 admitted 43 position features and spent 73.5
-million census/backfill credits; factor 64 admitted 2 and spent 53.0 million.
-With no endpoint CPU benefit, factor 64 preserves the stronger construction
-bound for unseen long-running workloads.
+Factor 32 was selected only after an exact endpoint crossover.  At 1,500
+given, factors 16 and 64 took 210.38 and 210.57 seconds, which is measurement
+parity.  At 2,000 given, factor 32 took 340.70 seconds, versus 344.53 for
+factor 16 and 357.15 for factor 64.  Factor 32 therefore avoids factor 64's
+late admission deficit without paying factor 16's excess maintenance; its
+1/32 construction bound remains independent of run length.
 
 At the supplied later `out51` state, the old route-observed work totals about
 8.128 billion units.  Applying the new default ledger to the same amount of
-work permits at most about 127.0 million active census/backfill visits, or
-158.8 million physical loop iterations at 25% staleness.  That is a worst-case
-construction bound about 92% below the old 1.823 billion
+work permits at most about 254.0 million active census/backfill visits, or
+317.5 million physical loop iterations at 25% staleness.  That is a worst-case
+construction bound about 84% below the old 1.823 billion
 position-record-examinations plus 164.5 million backfill visits.  It is not a
 measured 7,689-given runtime result; it is the implemented accounting bound
 that the external run must verify.
@@ -159,7 +161,7 @@ explicitly for reproducibility:
 
 ```text
 assign(compact_back_position_budget_kb,16384).
-assign(compact_back_position_build_factor,64).
+assign(compact_back_position_build_factor,32).
 ```
 
 Use them with the previously recommended compact OTTER configuration:
@@ -192,7 +194,7 @@ assign(compact_passive_cache,0).
 assign(compact_index_stale_pct,25).
 assign(compact_term_reclaim_kb,8192).
 assign(compact_back_position_budget_kb,16384).
-assign(compact_back_position_build_factor,64).
+assign(compact_back_position_build_factor,32).
 ```
 
 `passive_selector_store,heap` remains useful for a controlled comparison; the
@@ -211,8 +213,11 @@ with release binary SHA-256
 The post-completion-audit 600- and 1,000-given pairs used release binary
 SHA-256
 `dd308c0d7a95e35d776c184a8e5b8042b108b12d2374435c7537e6be88348bc2`.
-The forward-rewrite and exact 1,500-given gates used release binary SHA-256
+The forward-rewrite and initial exact 1,500-given gates used release binary
+SHA-256
 `fc674b7ba3c75092732ab91a86e5d969d3f2cccd17d59a7dddb745927f440463`.
+The same-time factor-32 pairs used release binary SHA-256
+`70c484539801d9debce67a01e7240a681ef6f5366db5188def7ebc8cb90fbb36`.
 Mask8 and adaptive cases ran with the same generated input on dedicated CPUs.
 
 | Gate | mask8 | adaptive | Result |
@@ -240,7 +245,8 @@ the new binary averaged 44.54 seconds, an 8.5% reduction.  Every run ended at
 601 given clauses with an identical generated/kept trajectory, and peak RSS
 remained about 90 MiB.
 
-The exact mature-prefix comparison is:
+The first exact mature-prefix comparison, retained because it directly
+isolates the forward-rewrite change against its predecessor, is:
 
 | 1,500-given gate | User CPU | Peak RSS | Generated / kept | Demod attempts / rewrites |
 |:---|---:|---:|---:|---:|
@@ -248,12 +254,11 @@ The exact mature-prefix comparison is:
 | compact before `4ddf9ed` | 222.65 s | 90,420 KiB | 2,947,136 / 66,933 | 83,176,656 / 10,001,165 |
 | compact at `4ddf9ed` | 210.38 s | 90,428 KiB | 2,947,136 / 66,933 | 83,176,656 / 10,001,165 |
 
-Thus current compact is 5.0% slower than normal P9 at this endpoint and 5.5%
-faster than the preceding compact binary.  It removes 55% of the former
-compact CPU penalty while preserving the compact trajectory exactly.  Peak
-RSS is 67.2% below normal P9 here.  This prefix has not yet accumulated the
-passive population of the supplied multi-hour/day outputs, so this is a CPU
-competitiveness result, not an 80--90% endpoint-RAM claim.
+In that load window, current compact was 5.0% slower than normal P9 and 5.5%
+faster than the preceding compact binary.  It removed 55% of the former
+compact CPU penalty while preserving the compact trajectory exactly.  Because
+the normal and compact absolute runs were not simultaneous, the authoritative
+old-versus-new endpoint is the paired measurement below.
 
 The component clocks explain why the proof endpoint remains open: current
 compact forward demodulation takes 61.96 seconds versus 50.60 seconds for
@@ -262,21 +267,41 @@ seconds.  Other compact-path savings nearly offset those gaps at 1,500 given,
 but their mature slopes still require the supplied 7,365-given and full-proof
 comparisons.
 
-The next exact bounded endpoint did not show an early runaway:
+The authoritative same-time pair pinned normal P9 to CPU 2 and compact to CPU
+0.  It used separately generated but byte-equivalent bounded inputs and
+started the two processes together:
+
+| Paired gate | User CPU | Peak RSS | Generated / kept | Demod attempts / rewrites |
+|:---|---:|---:|---:|---:|
+| normal P9, 1,500 | 183.44 s | 275,584 KiB | 2,947,138 / 66,935 | 83,176,695 / 10,001,163 |
+| compact factor 32, 1,500 | 183.54 s | 90,420 KiB | 2,947,136 / 66,933 | 83,176,656 / 10,001,165 |
+| normal P9, 2,000 | 305.93 s | 358,144 KiB | 4,497,692 / 144,514 | 124,676,012 / 16,116,393 |
+| compact factor 32, 2,000 | 332.67 s | 119,800 KiB | 4,497,690 / 144,512 | 124,675,973 / 16,116,395 |
+
+At 1,500 given, compact differs by only 0.05% in user CPU and reduces peak
+RSS by 67.2%.  At 2,000 given it is 8.7% slower and reduces peak RSS by 66.5%.
+More importantly for longevity, normal P9 uses 122.49 seconds for the
+1,500-to-2,000 interval while compact uses 149.13 seconds, a 21.7% interval
+penalty.  This still passes the present 1.25x bounded acceptance guard, but it
+does not close the long-run CPU-slope goal.
+
+The separate factor-search endpoints were:
 
 | 2,000-given gate | User CPU | Peak RSS | Generated / kept | Demod attempts / rewrites |
 |:---|---:|---:|---:|---:|
 | normal P9 | 335.92 s | 358,144 KiB | 4,497,692 / 144,514 | 124,676,012 / 16,116,393 |
-| compact at `4ddf9ed` | 357.15 s | 117,308 KiB | 4,497,690 / 144,512 | 124,675,973 / 16,116,395 |
+| compact, factor 64 | 357.15 s | 117,308 KiB | 4,497,690 / 144,512 | 124,675,973 / 16,116,395 |
+| compact, factor 16 | 344.53 s | 117,784 KiB | 4,497,690 / 144,512 | 124,675,973 / 16,116,395 |
+| compact, factor 32 (new default) | 340.70 s | 119,824 KiB | 4,497,690 / 144,512 | 124,675,973 / 16,116,395 |
 
-Compact is 6.3% slower and uses 67.2% less RSS at 2,000 given.  From the
-1,500 endpoint, normal P9 consumed another 135.60 seconds and default-factor
-compact another 146.58 seconds, an 8.1% interval penalty.  This is far below
-the supplied larger-run regression but is not a substitute for that gate.  At 2,000 given,
-compact position maintenance is 11.84 seconds (3.3% of user CPU), below the
-5% acceptance limit.  Forward/back-demod clocks are 101.12/60.75 seconds for
-compact versus 86.07/26.82 seconds for normal P9, so backward retrieval is
-still the principal unclosed slope risk.
+These three factor cases establish an internal crossover, not an
+old-versus-new percentage: they ran in a different load window from the
+normal-P9 row.  Factor 32 saves 16.45 seconds over factor 64 and 3.83 seconds
+over factor 16.  Its position maintenance is 11.61 seconds (3.4% of user CPU),
+below the 5% acceptance limit.  In the authoritative paired 2,000-given run,
+compact forward/back-demod clocks are 96.35/54.71 seconds versus 80.20/23.90
+seconds for normal P9.  Backward retrieval is therefore the principal
+unclosed slope risk.
 
 At 1,000 givens all 27,764 adaptive lookups had been observed by the pre-tree
 frequency sketch and 370 were post-threshold observations, but the separate

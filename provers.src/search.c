@@ -2135,7 +2135,7 @@ Prover_options init_prover_options(void)
   p->compact_back_position_budget_kb =
     init_parm("compact_back_position_budget_kb", 16384, 0, INT_MAX);
   p->compact_back_position_build_factor =
-    init_parm("compact_back_position_build_factor", 64, 1, INT_MAX);
+    init_parm("compact_back_position_build_factor", 32, 1, INT_MAX);
   p->fpa_depth =        init_parm("fpa_depth",            10,      1,    100);
   p->candidate_warn_limit = init_parm("candidate_warn_limit", -1,   -1,INT_MAX);
   p->candidate_hard_limit = init_parm("candidate_hard_limit", -1,   -1,INT_MAX);
