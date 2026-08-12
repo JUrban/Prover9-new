@@ -499,10 +499,12 @@ int main(void)
   }
 
   {
-    enum { ROOT_SIBLINGS = 24 };
+    enum { ROOT_SIBLINGS = 24, ROOT_EXTENSIONS = 64 };
     Compact_back_demod_index roots;
-    struct compact_back_demod_stats before_root, after_first, after_second;
+    struct compact_back_demod_stats before_insert, before_root, after_first,
+      after_second;
     Topform clauses[ROOT_SIBLINGS], rule;
+    Topform extensions[ROOT_EXTENSIONS];
     char text[96];
     int j;
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_CODE_TREE);
@@ -535,10 +537,26 @@ int main(void)
           after_second.tree_child_cache_hits >
             after_first.tree_child_cache_hits,
           "route work counts cold root siblings and cached dispatch removes them");
+    before_insert = after_second;
+    for (j = 0; j < ROOT_EXTENSIONS; j++) {
+      (void) snprintf(text, sizeof(text),
+                      "w(root_sibling_23(root_branch_%d)).", j);
+      extensions[j] = indexed_clause(text);
+      CHECK(compact_back_demod_add(roots, extensions[j]),
+            "extend one mature tree root through cached insertion dispatch");
+    }
+    compact_back_demod_get_stats(roots, &after_second);
+    CHECK(after_second.tree_insert_cache_hits -
+            before_insert.tree_insert_cache_hits >= ROOT_EXTENSIONS - 1 &&
+          after_second.tree_insert_cache_lookups >
+            before_insert.tree_insert_cache_lookups,
+          "mature tree insertion reuses query-trained child dispatch");
     compact_back_demod_free(roots);
     delete_clause(rule);
     for (j = 0; j < ROOT_SIBLINGS; j++)
       delete_clause(clauses[j]);
+    for (j = 0; j < ROOT_EXTENSIONS; j++)
+      delete_clause(extensions[j]);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
   }
 
@@ -1500,7 +1518,7 @@ int main(void)
     enum { POSITION_ROOT_FAMILY = 64, POSITION_DEMOTION_LIMIT = 32768 };
     Compact_back_demod_index bounded_position;
     struct compact_back_demod_stats before_s, after_s, bounded_stats;
-    Topform clauses[POSITION_ROOT_FAMILY * 2 + POSITION_DEMOTION_LIMIT];
+    Topform clauses[POSITION_ROOT_FAMILY * 2 + POSITION_DEMOTION_LIMIT + 1];
     Topform f_rule, s_rule;
     char text[160];
     int added = POSITION_ROOT_FAMILY * 2, j, rounds;
@@ -1550,12 +1568,24 @@ int main(void)
     }
     CHECK(bounded_stats.position_demotions == 1 &&
           bounded_stats.position_features == 1 &&
+          bounded_stats.position_active_roots == 1 &&
           bounded_stats.position_physical_features == 2 &&
           bounded_stats.position_budget_exhaustions == 1 &&
           bounded_stats.position_admission_frozen &&
           bounded_stats.position_admission_freezes == 1 &&
           bounded_stats.position_complete,
           "position growth demotes only its affected feature");
+    before_s = bounded_stats;
+    clauses[added] = indexed_clause("w(f(a,g(h(j(fc31))))).");
+    CHECK(compact_back_demod_add(bounded_position, clauses[added]),
+          "append another record under a fully demoted position root");
+    added++;
+    compact_back_demod_get_stats(bounded_position, &after_s);
+    CHECK(after_s.position_append_records ==
+            before_s.position_append_records + 1 &&
+          after_s.position_append_root_scans ==
+            before_s.position_append_root_scans,
+          "inactive position roots trigger no incremental subtree traversal");
     compact_back_demod_get_stats(bounded_position, &before_s);
     ids = compact_back_demod_candidate_ids(
       bounded_position, s_rule, ORIENTED, &count);
@@ -1578,6 +1608,7 @@ int main(void)
     compact_back_demod_get_stats(bounded_position, &bounded_stats);
     CHECK(bounded_stats.position_features == 1 &&
           bounded_stats.position_physical_features == 1 &&
+          bounded_stats.position_active_roots == 1 &&
           bounded_stats.position_complete,
           "forced compaction reclaims the demoted feature metadata");
     compact_back_demod_get_stats(bounded_position, &before_s);

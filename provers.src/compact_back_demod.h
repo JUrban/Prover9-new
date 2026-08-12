@@ -42,6 +42,10 @@ struct compact_back_demod_stats {
   unsigned long long tree_child_cache_growth_denials;
   unsigned long long tree_child_cache_parents;
   unsigned long long tree_child_cache_bytes;
+  unsigned long long tree_insert_sibling_checks;
+  unsigned long long tree_insert_cache_lookups;
+  unsigned long long tree_insert_cache_hits;
+  unsigned long long tree_insert_cache_misses;
   unsigned long long tree_posting_groups;
   unsigned long long tree_budget_bytes;
   unsigned long long tree_estimated_bytes;
@@ -61,6 +65,7 @@ struct compact_back_demod_stats {
   BOOL tree_complete;
   unsigned long long position_features;
   unsigned long long position_physical_features;
+  unsigned long long position_active_roots;
   unsigned long long position_postings;
   unsigned long long position_queries;
   unsigned long long position_intersection_queries;

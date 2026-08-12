@@ -651,6 +651,9 @@ void fprint_compact_back_demod(FILE *fp)
           "tree_child_misses=%llu, tree_child_replacements=%llu, "
           "tree_child_growth_denials=%llu, tree_child_parents=%llu, "
           "tree_child_bytes=%llu, "
+          "tree_insert_sibling_checks=%llu, "
+          "tree_insert_cache_lookups=%llu, tree_insert_cache_hits=%llu, "
+          "tree_insert_cache_misses=%llu, "
           "tree_posting_groups=%llu, tree_min_tokens=%u, "
           "tree_complete=%s, tree_budget=%llu, tree_estimated=%llu, "
           "tree_budget_exhaustions=%llu, "
@@ -661,6 +664,7 @@ void fprint_compact_back_demod(FILE *fp)
           "tree_backfill_groups=%llu, "
           "tree_backfill_occurrences=%llu, tree_fallback_work=%llu, "
           "position_features=%llu, position_physical_features=%llu, "
+          "position_active_roots=%llu, "
           "position_postings=%llu, "
           "position_queries=%llu, position_intersection_queries=%llu, "
           "position_dense_intersection_queries=%llu, "
@@ -721,6 +725,10 @@ void fprint_compact_back_demod(FILE *fp)
           stats.tree_child_cache_growth_denials,
           stats.tree_child_cache_parents,
           stats.tree_child_cache_bytes,
+          stats.tree_insert_sibling_checks,
+          stats.tree_insert_cache_lookups,
+          stats.tree_insert_cache_hits,
+          stats.tree_insert_cache_misses,
           stats.tree_posting_groups, stats.tree_min_tokens,
           stats.tree_complete ? "yes" : "no",
           stats.tree_budget_bytes, stats.tree_estimated_bytes,
@@ -732,6 +740,7 @@ void fprint_compact_back_demod(FILE *fp)
           stats.tree_root_backfill_groups,
           stats.tree_root_backfill_occurrences, stats.tree_fallback_work,
           stats.position_features, stats.position_physical_features,
+          stats.position_active_roots,
           stats.position_postings,
           stats.position_queries, stats.position_intersection_queries,
           stats.position_dense_intersection_queries,
