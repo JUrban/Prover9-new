@@ -632,6 +632,10 @@ void fprint_compact_back_demod(FILE *fp)
           "path_buckets=%llu, tree_nodes=%llu, tree_terminals=%llu, "
           "tree_queries=%llu, tree_nodes_examined=%llu, "
           "tree_sibling_checks=%llu, "
+          "tree_child_lookups=%llu, tree_child_hits=%llu, "
+          "tree_child_misses=%llu, tree_child_replacements=%llu, "
+          "tree_child_growth_denials=%llu, tree_child_parents=%llu, "
+          "tree_child_bytes=%llu, "
           "tree_posting_groups=%llu, tree_min_tokens=%u, "
           "tree_complete=%s, tree_budget=%llu, tree_estimated=%llu, "
           "tree_budget_exhaustions=%llu, "
@@ -686,6 +690,13 @@ void fprint_compact_back_demod(FILE *fp)
           stats.tree_nodes, stats.tree_terminals, stats.tree_queries,
           stats.tree_nodes_examined,
           stats.tree_sibling_checks,
+          stats.tree_child_cache_lookups,
+          stats.tree_child_cache_hits,
+          stats.tree_child_cache_misses,
+          stats.tree_child_cache_replacements,
+          stats.tree_child_cache_growth_denials,
+          stats.tree_child_cache_parents,
+          stats.tree_child_cache_bytes,
           stats.tree_posting_groups, stats.tree_min_tokens,
           stats.tree_complete ? "yes" : "no",
           stats.tree_budget_bytes, stats.tree_estimated_bytes,

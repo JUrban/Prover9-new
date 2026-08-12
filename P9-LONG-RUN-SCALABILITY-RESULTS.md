@@ -383,6 +383,56 @@ only if mature-prefix counters show that sibling checks become material; the
 8,800-given `out41` replacement and multi-million-passive IO gates remain
 open.
 
+### Cost-gated rigid-child dispatch
+
+A bounded 300-second continuation confirmed that the sibling risk was already
+material before the old 8,800-given endpoint.  At the 240-user-second report,
+stable `mask8` had reached 1,570 givens while pruned adaptive mode reached
+1,616 (2.9% more).  Adaptive retained the same logical trajectory and reduced
+69.3 million posting groups to 15.1 million, but had already performed 60.9
+million tree-node visits and 87.0 million sibling comparisons.  Peak RSS was
+96.9 MiB versus 90.5 MiB.  Thus recursive sibling pruning improved current
+CPU, but an ordered linked child list remained an independent long-run slope.
+
+The tree now has a bounded positive child-dispatch cache.  It is deliberately
+not an authoritative directory: a miss or direct-mapped collision scans the
+original ordered siblings, so completeness and candidate order do not depend
+on cache retention.  A parent is enabled only after one real rigid lookup has
+scanned at least eight children.  Narrow parents therefore retain their cheap
+list lookup, variable queries still traverse every semantically possible
+branch, and only observed broad rigid parents pay for hashing.  Cache growth is
+geometric, is included in the existing tree budget, is limited to the smaller
+of 8 MiB and one eighth of that budget, and is rebuilt rather than persisted
+through stale compaction.
+
+Two simultaneous 1,000-given A/B pairs used the exact same executable and
+swapped CPU affinities.  Both retained 1,268,285 generated and 33,909 kept
+clauses, 12,598,143 tree-node visits, and identical candidates:
+
+| Pair | Selective dispatch CPU (s) | List-only CPU (s) | Change |
+|---:|---:|---:|---:|
+| 1 | 106.80 | 108.72 | -1.8% |
+| 2, affinities swapped | 103.17 | 105.45 | -2.2% |
+
+The cache enabled 720 parents, made 152,293 lookups with 136,410 hits (89.6%),
+and replaced 846,941 sibling comparisons.  It used 402,784 bytes and changed
+peak RSS by at most 128 KiB in these samples.  An initially tested policy
+which hashed every rigid parent was rejected: it made 2.14 million probes to
+save only 2.30 million sibling checks and had no defensible integrated CPU
+benefit.
+
+A new broad-fanout longevity gate places 10,000 distinct rigid symbols below
+one parent.  Its cold lookup scans 10,000 siblings once; every subsequent
+lookup uses two direct hits and zero sibling scans with a 100,808-byte cache.
+At 100,000 records the corresponding values are 100,000 cold scans, two hits
+and zero scans per hot query, and 811,440 cache bytes inside a 7.42 MiB tree.
+The variable-prefix counterexample remains intentionally unaccelerated by this
+cache and continues to require the adaptive position index.  Forced collision,
+growth, deletion/compaction, exactness, checkpoint, full audit, and
+ASan/UBSan tests pass.  The mature `out41` replacement remains the promotion
+gate; these results remove one demonstrated local linear factor, not the late
+inference/preprocessing burst.
+
 ## Selective structural retrieval for nonunit back subsumption
 
 The accelerated `same_feature_leaf` gate formerly retained 10,000 numerical

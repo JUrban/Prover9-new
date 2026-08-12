@@ -114,7 +114,7 @@ static void back_demod_longevity(size_t population, size_t queries)
   size_t mask_count, hot_count, i, q, warmup_queries = 0;
   unsigned long long mask_steady_work, hot_steady_work;
   unsigned long long hot_steady_nodes, hot_combined_work;
-  unsigned long long hot_steady_siblings;
+  unsigned long long hot_steady_siblings, hot_steady_child_lookups;
   double mask_work_per_query, hot_work_per_query, hot_nodes_per_query;
   const char *gate;
 
@@ -192,12 +192,17 @@ static void back_demod_longevity(size_t population, size_t queries)
                      hot_before.tree_nodes_examined;
   hot_steady_siblings = hot_final.tree_sibling_checks -
                         hot_before.tree_sibling_checks;
+  hot_steady_child_lookups = hot_final.tree_child_cache_lookups -
+                             hot_before.tree_child_cache_lookups;
   hot_combined_work = hot_steady_work >
       ULLONG_MAX - hot_steady_nodes ? ULLONG_MAX :
     hot_steady_work + hot_steady_nodes;
   hot_combined_work = hot_combined_work >
       ULLONG_MAX - hot_steady_siblings ? ULLONG_MAX :
     hot_combined_work + hot_steady_siblings;
+  hot_combined_work = hot_combined_work >
+      ULLONG_MAX - hot_steady_child_lookups ? ULLONG_MAX :
+    hot_combined_work + hot_steady_child_lookups;
   mask_work_per_query = (double) mask_steady_work / queries;
   hot_work_per_query = (double) hot_steady_work / queries;
   hot_nodes_per_query = (double) hot_steady_nodes / queries;
@@ -216,6 +221,7 @@ static void back_demod_longevity(size_t population, size_t queries)
          "\"hot_work_per_query\":%.3f,"
          "\"hot_nodes_per_query\":%.3f,"
          "\"hot_sibling_checks_per_query\":%.3f,"
+         "\"hot_child_lookups_per_query\":%.3f,"
          "\"hot_combined_work_per_query\":%.3f,"
          "\"mask_bytes\":%llu,\"hot_bytes\":%llu,"
          "\"hot_admissions\":%llu,\"hot_rejections\":%llu,"
@@ -228,6 +234,7 @@ static void back_demod_longevity(size_t population, size_t queries)
          (unsigned long long) warmup_queries + 1, mask_work_per_query,
          hot_work_per_query, hot_nodes_per_query,
          (double) hot_steady_siblings / queries,
+         (double) hot_steady_child_lookups / queries,
          (double) hot_combined_work / queries,
          mask_final.total_bytes, hot_final.total_bytes,
          hot_final.tree_root_admissions, hot_final.tree_root_rejections,
@@ -260,9 +267,9 @@ static void back_demod_variable_prefix_probe(size_t population,
   char subject[1200], marker[512], text[1300];
   unsigned long long *mask_ids, *hot_ids, *position_ids;
   unsigned long long mask_work, hot_groups, hot_nodes, hot_combined;
-  unsigned long long hot_siblings;
+  unsigned long long hot_siblings, hot_child_lookups;
   unsigned long long adaptive_groups, adaptive_nodes, adaptive_combined;
-  unsigned long long adaptive_siblings;
+  unsigned long long adaptive_siblings, adaptive_child_lookups;
   size_t mask_count, hot_count, position_count, i, q;
   size_t admission_queries = 1;
   const char *hot_gate, *adaptive_gate;
@@ -365,20 +372,29 @@ static void back_demod_variable_prefix_probe(size_t population,
               hot_before.tree_nodes_examined;
   hot_siblings = hot_final.tree_sibling_checks -
                  hot_before.tree_sibling_checks;
+  hot_child_lookups = hot_final.tree_child_cache_lookups -
+                      hot_before.tree_child_cache_lookups;
   hot_combined = hot_groups > ULLONG_MAX - hot_nodes ?
     ULLONG_MAX : hot_groups + hot_nodes;
   hot_combined = hot_combined > ULLONG_MAX - hot_siblings ?
     ULLONG_MAX : hot_combined + hot_siblings;
+  hot_combined = hot_combined > ULLONG_MAX - hot_child_lookups ?
+    ULLONG_MAX : hot_combined + hot_child_lookups;
   adaptive_groups = position_final.query_profile.work -
                     position_before.query_profile.work;
   adaptive_nodes = position_final.tree_nodes_examined -
                    position_before.tree_nodes_examined;
   adaptive_siblings = position_final.tree_sibling_checks -
                       position_before.tree_sibling_checks;
+  adaptive_child_lookups = position_final.tree_child_cache_lookups -
+                           position_before.tree_child_cache_lookups;
   adaptive_combined = adaptive_groups > ULLONG_MAX - adaptive_nodes ?
     ULLONG_MAX : adaptive_groups + adaptive_nodes;
   adaptive_combined = adaptive_combined > ULLONG_MAX - adaptive_siblings ?
     ULLONG_MAX : adaptive_combined + adaptive_siblings;
+  adaptive_combined = adaptive_combined >
+      ULLONG_MAX - adaptive_child_lookups ? ULLONG_MAX :
+    adaptive_combined + adaptive_child_lookups;
   hot_gate = hot_final.tree_root_admissions > 0 &&
          hot_combined <= ULLONG_MAX / 2 && hot_combined * 2 < mask_work ?
     "pass" : "fail";
@@ -394,10 +410,12 @@ static void back_demod_variable_prefix_probe(size_t population,
          "\"hot_groups_per_query\":%.3f,"
          "\"hot_nodes_per_query\":%.3f,"
          "\"hot_sibling_checks_per_query\":%.3f,"
+         "\"hot_child_lookups_per_query\":%.3f,"
          "\"hot_combined_work_per_query\":%.3f,"
          "\"adaptive_groups_per_query\":%.3f,"
          "\"adaptive_nodes_per_query\":%.3f,"
          "\"adaptive_sibling_checks_per_query\":%.3f,"
+         "\"adaptive_child_lookups_per_query\":%.3f,"
          "\"adaptive_combined_work_per_query\":%.3f,"
          "\"mask_bytes\":%llu,\"hot_bytes\":%llu,"
          "\"adaptive_bytes\":%llu,\"position_admissions\":%llu,"
@@ -407,10 +425,12 @@ static void back_demod_variable_prefix_probe(size_t population,
          (unsigned long long) admission_queries,
          (double) mask_work / queries, (double) hot_groups / queries,
          (double) hot_nodes / queries, (double) hot_siblings / queries,
+         (double) hot_child_lookups / queries,
          (double) hot_combined / queries,
          (double) adaptive_groups / queries,
          (double) adaptive_nodes / queries,
          (double) adaptive_siblings / queries,
+         (double) adaptive_child_lookups / queries,
          (double) adaptive_combined / queries,
          mask_final.total_bytes, hot_final.total_bytes,
          position_final.total_bytes, position_final.position_admissions,
@@ -419,6 +439,83 @@ static void back_demod_variable_prefix_probe(size_t population,
   compact_back_demod_free(mask);
   compact_back_demod_free(hot);
   compact_back_demod_free(position);
+  delete_clause(demod);
+  for (i = 0; i < population; i++)
+    delete_clause(clauses[i]);
+  safe_free(clauses);
+}
+
+/* A rigid lookup beneath one very broad parent used to scan a linked sibling
+   chain on every query.  The first cold query supplies the evidence which
+   enables bounded direct dispatch; the steady phase must then stay flat. */
+static void back_demod_broad_fanout_probe(size_t population, size_t queries)
+{
+  Compact_back_demod_index index;
+  struct compact_back_demod_stats built, cold, hot;
+  Topform *clauses = safe_malloc(population * sizeof(*clauses));
+  Topform demod;
+  unsigned long long *ids;
+  unsigned long long cold_siblings, hot_siblings, hot_lookups, hot_hits;
+  size_t count, i, q;
+  char text[128];
+  const char *gate;
+
+  compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_CODE_TREE);
+  compact_back_demod_set_tree_budget_kb(64U * 1024U);
+  index = compact_back_demod_init();
+  for (i = 0; i < population; i++) {
+    /* Reuse the mN symbols interned by the preceding variable-prefix probe. */
+    (void) snprintf(text, sizeof(text), "p(fan(m%llu)).",
+                    (unsigned long long) i);
+    clauses[i] = indexed_clause(text);
+    CHECK(compact_back_demod_add(index, clauses[i]),
+          "add broad-fanout tree subject");
+  }
+  (void) snprintf(text, sizeof(text), "fan(m%llu) = z.",
+                  (unsigned long long) population - 1);
+  demod = indexed_clause(text);
+  mark_oriented_eq(demod->literals->atom);
+  compact_back_demod_get_stats(index, &built);
+  ids = compact_back_demod_candidate_ids(index, demod, ORIENTED, &count);
+  CHECK(count == 1 && ids[0] == clauses[population - 1]->id,
+        "cold broad-fanout query preserves exact answer");
+  safe_free(ids);
+  compact_back_demod_get_stats(index, &cold);
+  for (q = 0; q < queries; q++) {
+    ids = compact_back_demod_candidate_ids(index, demod, ORIENTED, &count);
+    CHECK(count == 1 && ids[0] == clauses[population - 1]->id,
+          "hot broad-fanout query preserves exact answer");
+    safe_free(ids);
+  }
+  compact_back_demod_get_stats(index, &hot);
+  cold_siblings = cold.tree_sibling_checks - built.tree_sibling_checks;
+  hot_siblings = hot.tree_sibling_checks - cold.tree_sibling_checks;
+  hot_lookups = hot.tree_child_cache_lookups -
+                cold.tree_child_cache_lookups;
+  hot_hits = hot.tree_child_cache_hits - cold.tree_child_cache_hits;
+  gate = cold_siblings >= population && hot_siblings == 0 &&
+         hot_lookups >= queries && hot_lookups <= queries * 2 &&
+         hot_hits == hot_lookups &&
+         hot.tree_child_cache_bytes <= hot.tree_budget_bytes ?
+    "pass" : "fail";
+  if (strcmp(gate, "pass") != 0)
+    Failures++;
+  printf("{\"component\":\"back_demod\","
+         "\"phase\":\"broad_fanout\",\"population\":%llu,"
+         "\"queries\":%llu,\"answers\":%llu,"
+         "\"cold_sibling_checks\":%llu,"
+         "\"hot_sibling_checks_per_query\":%.3f,"
+         "\"hot_child_lookups_per_query\":%.3f,"
+         "\"hot_child_hits_per_query\":%.3f,"
+         "\"cache_parents\":%llu,\"cache_bytes\":%llu,"
+         "\"tree_bytes\":%llu,\"gate\":\"%s\"}\n",
+         (unsigned long long) population, (unsigned long long) queries,
+         (unsigned long long) count, cold_siblings,
+         (double) hot_siblings / queries,
+         (double) hot_lookups / queries, (double) hot_hits / queries,
+         hot.tree_child_cache_parents, hot.tree_child_cache_bytes,
+         hot.tree_estimated_bytes, gate);
+  compact_back_demod_free(index);
   delete_clause(demod);
   for (i = 0; i < population; i++)
     delete_clause(clauses[i]);
@@ -496,6 +593,7 @@ int main(int argc, char **argv)
   set_clause_id_count(0);
   back_demod_longevity(population, queries);
   back_demod_variable_prefix_probe(population, queries);
+  back_demod_broad_fanout_probe(population, queries);
   nonunit_same_leaf_probe(population);
   clear_clause_id_tab();
   set_clause_id_count(0);

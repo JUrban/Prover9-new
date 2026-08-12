@@ -35,6 +35,13 @@ struct compact_back_demod_stats {
   unsigned long long tree_queries;
   unsigned long long tree_nodes_examined;
   unsigned long long tree_sibling_checks;
+  unsigned long long tree_child_cache_lookups;
+  unsigned long long tree_child_cache_hits;
+  unsigned long long tree_child_cache_misses;
+  unsigned long long tree_child_cache_replacements;
+  unsigned long long tree_child_cache_growth_denials;
+  unsigned long long tree_child_cache_parents;
+  unsigned long long tree_child_cache_bytes;
   unsigned long long tree_posting_groups;
   unsigned long long tree_budget_bytes;
   unsigned long long tree_estimated_bytes;

@@ -206,9 +206,13 @@ collisions or scheduling.  Rigid tree queries prune nonmatching sibling
 subtrees, while explicit sibling-check counters keep the CPU gate honest.  A
 fresh 1,000-given `chat_test.in` sample is 6.0% faster than the stable `mask8`
 control with the same search trajectory.  This closes the bounded-prefix
-correctness and crossover gate only.  Ordered sibling scans, filled budgets,
-deletion-heavy rebuilds, and the 684,719-active-record `out41` scale still need
-mature-run evidence before promotion.
+correctness and crossover gate only.  A cost-gated, byte-bounded positive child
+cache now removes repeated broad rigid sibling scans without affecting the
+complete list fallback; 10,000- and 100,000-child longevity probes plateau at
+zero hot sibling scans, and two affinity-swapped 1,000-given A/B pairs show a
+1.8--2.2% CPU improvement.  Filled budgets, deletion-heavy mature rebuilds,
+and the 684,719-active-record `out41` scale still need evidence before
+promotion.
 
 ### E2. Unit and rewrite indexes
 

@@ -204,7 +204,7 @@ int main(void)
     struct compact_back_demod_stats mask_stats, signature_stats, tree_stats,
       hybrid_stats;
     Topform deep_clauses[DEEP_FAMILY];
-    Topform deep_demod;
+    Topform deep_demod, cache_demod;
     unsigned long long *mask_ids, *signature_ids, *tree_ids, *hybrid_ids;
     size_t mask_count, signature_count, tree_count, hybrid_count;
     char text[128];
@@ -280,6 +280,40 @@ int main(void)
           tree_stats.occurrences_examined == 1 &&
           tree_stats.occurrence_stream_bytes == 0,
           "code tree matches one terminal without occurrence storage");
+    for (j = 0; j < DEEP_FAMILY; j++) {
+      unsigned long long *cache_ids;
+      size_t cache_count;
+      (void) snprintf(text, sizeof(text),
+                      "f(a,g(h(j(c%d)))) = a.", j);
+      cache_demod = indexed_clause(text);
+      cache_ids = compact_back_demod_candidate_ids(
+        tree_index, cache_demod, ORIENTED, &cache_count);
+      CHECK(cache_count == 1 && cache_ids[0] == deep_clauses[j]->id,
+            "child-cache collision fill preserves exact candidate");
+      safe_free(cache_ids);
+      delete_clause(cache_demod);
+    }
+    for (j = DEEP_FAMILY - 1; j >= 0; j--) {
+      unsigned long long *cache_ids;
+      size_t cache_count;
+      (void) snprintf(text, sizeof(text),
+                      "f(a,g(h(j(c%d)))) = a.", j);
+      cache_demod = indexed_clause(text);
+      cache_ids = compact_back_demod_candidate_ids(
+        tree_index, cache_demod, ORIENTED, &cache_count);
+      CHECK(cache_count == 1 && cache_ids[0] == deep_clauses[j]->id,
+            "child-cache collision hit preserves exact candidate");
+      safe_free(cache_ids);
+      delete_clause(cache_demod);
+    }
+    compact_back_demod_get_stats(tree_index, &tree_stats);
+    CHECK(tree_stats.tree_child_cache_parents > 0 &&
+          tree_stats.tree_child_cache_lookups > 0 &&
+          tree_stats.tree_child_cache_hits > 0 &&
+          tree_stats.tree_child_cache_misses > 0 &&
+          tree_stats.tree_child_cache_replacements > 0 &&
+          tree_stats.tree_child_cache_bytes <= 8 * 1024 * 1024,
+          "broad-parent cache is bounded and exercises hits and collisions");
     CHECK(compact_back_demod_remove(
             signature_index, deep_clauses[DEEP_TARGET]->id),
           "remove deep signature answer");

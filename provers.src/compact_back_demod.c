@@ -14,6 +14,8 @@
 #define CBD_TREE_INDEX_MASK UINT32_C(0x7fffffff)
 #define CBD_TREE_DIRECT_RECORD UINT32_C(0x80000000)
 #define CBD_POSITION_BLOCK_PAYLOAD 24
+#define CBD_TREE_CHILD_CACHE_MAX_BYTES (UINT64_C(8) * 1024 * 1024)
+#define CBD_TREE_CHILD_CACHE_MIN_SCAN 8
 
 static unsigned Compaction_stale_pct = 25;
 static Compact_back_demod_strategy Back_demod_strategy =
@@ -75,6 +77,14 @@ struct cbd_tree_posting_list {
   uint32_t posting_tail;
   uint32_t inline_record;
   uint32_t term_offset;
+};
+
+/* This is a bounded positive cache, not an authoritative tree directory.
+   A missing or collided entry falls back to the ordered sibling chain. */
+struct cbd_tree_child_cache_entry {
+  uint32_t parent;
+  int32_t code;
+  uint32_t child;
 };
 
 struct cbd_local_occurrence {
@@ -171,6 +181,12 @@ struct compact_back_demod_index {
   struct cbd_tree_posting_list *tree_posting_lists;
   size_t tree_posting_list_count;
   size_t tree_posting_list_capacity;
+  struct cbd_tree_child_cache_entry *tree_child_cache;
+  size_t tree_child_cache_capacity;
+  uint64_t *tree_child_cache_parents;
+  size_t tree_child_cache_parent_words;
+  size_t tree_child_cache_parent_count;
+  BOOL tree_child_cache_growth_blocked;
   struct cbd_tree_root_state *tree_roots;
   size_t tree_root_capacity;
   struct cbd_position_bucket *position_buckets;
@@ -219,6 +235,11 @@ struct compact_back_demod_index {
   unsigned long long tree_queries;
   unsigned long long tree_nodes_examined;
   unsigned long long tree_sibling_checks;
+  unsigned long long tree_child_cache_lookups;
+  unsigned long long tree_child_cache_hits;
+  unsigned long long tree_child_cache_misses;
+  unsigned long long tree_child_cache_replacements;
+  unsigned long long tree_child_cache_growth_denials;
   unsigned long long tree_posting_count;
   unsigned long long tree_posting_blocks;
   unsigned long long tree_posting_stream_used;
@@ -405,6 +426,10 @@ static unsigned long long tree_estimated_bytes(
   return index->tree_node_capacity * sizeof(*index->tree_nodes) +
     index->tree_posting_list_capacity *
       sizeof(*index->tree_posting_lists) + blocks +
+    index->tree_child_cache_capacity *
+      sizeof(*index->tree_child_cache) +
+    index->tree_child_cache_parent_words *
+      sizeof(*index->tree_child_cache_parents) +
     index->tree_root_capacity * sizeof(*index->tree_roots) +
     index->query_capacity * sizeof(*index->query);
 }
@@ -424,6 +449,10 @@ static unsigned long long index_bytes(Compact_back_demod_index index)
     index->tree_node_capacity * sizeof(*index->tree_nodes) +
     index->tree_posting_list_capacity *
       sizeof(*index->tree_posting_lists) +
+    index->tree_child_cache_capacity *
+      sizeof(*index->tree_child_cache) +
+    index->tree_child_cache_parent_words *
+      sizeof(*index->tree_child_cache_parents) +
     index->tree_root_capacity * sizeof(*index->tree_roots) +
     index->position_bucket_capacity * sizeof(*index->position_buckets) +
     index->position_bucket_hash_capacity *
@@ -1100,6 +1129,180 @@ static int tree_code_compare(int32_t a, int32_t b)
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
+static int32_t tree_first_code(Compact_back_demod_index index,
+                               uint32_t node);
+
+static size_t tree_child_cache_slot(Compact_back_demod_index index,
+                                    uint32_t parent, int32_t code,
+                                    size_t capacity)
+{
+  uint64_t symbol = code < 0 ?
+    hash_id(UINT64_C(0x243f6a8885a308d3) ^ (uint32_t) code) :
+    stable_symbol_hash(index, (uint32_t) code);
+  return (size_t) hash_id(symbol ^
+    ((uint64_t) parent * UINT64_C(0x9e3779b97f4a7c15))) &
+    (capacity - 1);
+}
+
+static BOOL tree_child_cache_parent_enabled(
+  Compact_back_demod_index index, uint32_t parent)
+{
+  size_t word = (size_t) parent / 64;
+  return word < index->tree_child_cache_parent_words &&
+    (index->tree_child_cache_parents[word] &
+     (UINT64_C(1) << (parent % 64))) != 0;
+}
+
+static unsigned long long tree_child_cache_max_bytes(
+  Compact_back_demod_index index)
+{
+  unsigned long long max_bytes = CBD_TREE_CHILD_CACHE_MAX_BYTES;
+  if (index->tree_budget_bytes != 0 &&
+      index->tree_budget_bytes / 8 < max_bytes)
+    max_bytes = index->tree_budget_bytes / 8;
+  return max_bytes;
+}
+
+static BOOL tree_child_cache_enable_parent(Compact_back_demod_index index,
+                                           uint32_t parent)
+{
+  size_t word = (size_t) parent / 64;
+  if (word >= index->tree_child_cache_parent_words) {
+    size_t old_words = index->tree_child_cache_parent_words;
+    size_t new_words = ((size_t) index->tree_node_count + 63) / 64;
+    unsigned long long estimated = tree_estimated_bytes(index);
+    unsigned long long cache_bytes, delta;
+    if (new_words <= word)
+      new_words = word + 1;
+    if (new_words > SIZE_MAX / sizeof(*index->tree_child_cache_parents))
+      fatal_error("compact_back_demod: tree child parent map overflow");
+    delta = (new_words - old_words) *
+      sizeof(*index->tree_child_cache_parents);
+    cache_bytes = index->tree_child_cache_capacity *
+        sizeof(*index->tree_child_cache) +
+      old_words * sizeof(*index->tree_child_cache_parents);
+    if (cache_bytes > tree_child_cache_max_bytes(index) ||
+        delta > tree_child_cache_max_bytes(index) - cache_bytes ||
+        (index->tree_budget_bytes != 0 &&
+        (estimated > index->tree_budget_bytes ||
+         delta > index->tree_budget_bytes - estimated))) {
+      index->tree_child_cache_growth_denials++;
+      return FALSE;
+    }
+    index->tree_child_cache_parents = safe_realloc(
+      index->tree_child_cache_parents,
+      new_words * sizeof(*index->tree_child_cache_parents));
+    memset(index->tree_child_cache_parents + old_words, 0,
+           (new_words - old_words) *
+             sizeof(*index->tree_child_cache_parents));
+    index->tree_child_cache_parent_words = new_words;
+  }
+  if (!tree_child_cache_parent_enabled(index, parent)) {
+    index->tree_child_cache_parents[word] |=
+      UINT64_C(1) << (parent % 64);
+    index->tree_child_cache_parent_count++;
+  }
+  return TRUE;
+}
+
+static void tree_child_cache_put(Compact_back_demod_index index,
+                                 uint32_t parent, int32_t code,
+                                 uint32_t child, BOOL count_replacement)
+{
+  struct cbd_tree_child_cache_entry *entry;
+  size_t slot;
+  if (index->tree_child_cache_capacity == 0 ||
+      !tree_child_cache_parent_enabled(index, parent))
+    return;
+  slot = tree_child_cache_slot(
+    index, parent, code, index->tree_child_cache_capacity);
+  entry = &index->tree_child_cache[slot];
+  if (count_replacement && entry->child != CBD_NONE &&
+      (entry->parent != parent || entry->code != code))
+    index->tree_child_cache_replacements++;
+  entry->parent = parent;
+  entry->code = code;
+  entry->child = child;
+}
+
+static void maybe_grow_tree_child_cache(Compact_back_demod_index index)
+{
+  struct cbd_tree_child_cache_entry *old, *replacement;
+  size_t old_capacity, desired = 64, max_entries, i;
+  unsigned long long max_bytes = tree_child_cache_max_bytes(index);
+  unsigned long long estimated, delta;
+  if (index->tree_child_cache_growth_blocked)
+    return;
+  if (index->tree_child_cache_parent_words >
+      max_bytes / sizeof(*index->tree_child_cache_parents))
+    max_bytes = 0;
+  else
+    max_bytes -= index->tree_child_cache_parent_words *
+      sizeof(*index->tree_child_cache_parents);
+  max_entries = (size_t) (max_bytes / sizeof(*index->tree_child_cache));
+  while (desired <= SIZE_MAX / 2 && desired <= index->tree_node_count / 4)
+    desired *= 2;
+  while (desired > max_entries && desired > 1)
+    desired /= 2;
+  old_capacity = index->tree_child_cache_capacity;
+  if (desired <= old_capacity || desired < 64) {
+    if (desired <= old_capacity)
+      return;
+    index->tree_child_cache_growth_blocked = TRUE;
+    index->tree_child_cache_growth_denials++;
+    return;
+  }
+  estimated = tree_estimated_bytes(index);
+  while (desired > old_capacity) {
+    delta = (desired - old_capacity) *
+      sizeof(*index->tree_child_cache);
+    if (index->tree_budget_bytes == 0 ||
+        (estimated <= index->tree_budget_bytes &&
+         delta <= index->tree_budget_bytes - estimated))
+      break;
+    desired /= 2;
+  }
+  if (desired <= old_capacity) {
+    index->tree_child_cache_growth_blocked = TRUE;
+    index->tree_child_cache_growth_denials++;
+    return;
+  }
+  replacement = safe_calloc(desired, sizeof(*replacement));
+  old = index->tree_child_cache;
+  index->tree_child_cache = replacement;
+  index->tree_child_cache_capacity = desired;
+  for (i = 0; i < old_capacity; i++)
+    if (old[i].child != CBD_NONE)
+      tree_child_cache_put(index, old[i].parent, old[i].code,
+                           old[i].child, FALSE);
+  safe_free(old);
+}
+
+static uint32_t tree_child_cache_get(Compact_back_demod_index index,
+                                     uint32_t parent, int32_t code)
+{
+  struct cbd_tree_child_cache_entry *entry;
+  size_t slot;
+  index->tree_child_cache_lookups++;
+  if (index->tree_child_cache_capacity == 0) {
+    index->tree_child_cache_misses++;
+    return CBD_NONE;
+  }
+  slot = tree_child_cache_slot(
+    index, parent, code, index->tree_child_cache_capacity);
+  entry = &index->tree_child_cache[slot];
+  if (entry->child != CBD_NONE && entry->parent == parent &&
+      entry->code == code) {
+    if (entry->child >= index->tree_node_count ||
+        tree_first_code(index, entry->child) != code)
+      fatal_error("compact_back_demod: stale tree child cache");
+    index->tree_child_cache_hits++;
+    return entry->child;
+  }
+  index->tree_child_cache_misses++;
+  return CBD_NONE;
+}
+
 static uint32_t new_tree_node(Compact_back_demod_index index,
                               uint32_t token_offset,
                               uint32_t token_length)
@@ -1195,6 +1398,7 @@ static uint32_t insert_tree_path(Compact_back_demod_index index,
           index->tree_nodes[previous].next_sibling;
         index->tree_nodes[previous].next_sibling = added;
       }
+      tree_child_cache_put(index, parent, wanted, added, TRUE);
       return added;
     }
     else {
@@ -1223,10 +1427,13 @@ static uint32_t insert_tree_path(Compact_back_demod_index index,
           tree_set_first_child(index, parent, split);
         else
           index->tree_nodes[previous].next_sibling = split;
+        tree_child_cache_put(index, parent, wanted, split, TRUE);
         index->tree_nodes[current].token_offset += common;
         index->tree_nodes[current].token_length -= common;
         index->tree_nodes[current].next_sibling = CBD_NONE;
         tree_set_first_child(index, split, current);
+        tree_child_cache_put(index, split,
+                             tree_first_code(index, current), current, TRUE);
         position += common;
         if (position == length)
           fatal_error("compact_back_demod: serialized term prefixes tree term");
@@ -1238,6 +1445,8 @@ static uint32_t insert_tree_path(Compact_back_demod_index index,
         }
         else
           index->tree_nodes[current].next_sibling = added;
+        tree_child_cache_put(index, split,
+                             tree_first_code(index, added), added, TRUE);
         return added;
       }
     }
@@ -2703,22 +2912,35 @@ static void collect_tree_candidates(Compact_back_demod_index index,
   if (pending == 0 && query_position < query_end &&
       !VARIABLE(index->query[query_position].term)) {
     int32_t wanted = SYMNUM(index->query[query_position].term);
+    uint32_t cached = tree_child_cache_parent_enabled(index, node) ?
+      tree_child_cache_get(index, node, wanted) : CBD_NONE;
+    unsigned scanned = 0;
     /* Sibling edges are ordered by their first token and radix insertion
        gives them distinct first tokens.  A rigid query token can therefore
-       enter only the equal-code edge; earlier and later siblings would fail
-       at the first comparison inside collect_tree_candidates. */
-    while (child != CBD_NONE) {
-      int32_t actual = tree_first_code(index, child);
-      index->tree_sibling_checks++;
-      if (tree_code_compare(actual, wanted) < 0)
-        child = index->tree_nodes[child].next_sibling;
-      else {
-        if (actual == wanted)
-          collect_tree_candidates(index, child, query_position, query_end,
-                                  pending, exclude_id, count);
-        break;
+       enter only the equal-code edge; the bounded positive cache avoids the
+       chain on a hit, while a miss retains this complete fallback. */
+    if (cached != CBD_NONE)
+      collect_tree_candidates(index, cached, query_position, query_end,
+                              pending, exclude_id, count);
+    else
+      while (child != CBD_NONE) {
+        int32_t actual = tree_first_code(index, child);
+        scanned++;
+        index->tree_sibling_checks++;
+        if (tree_code_compare(actual, wanted) < 0)
+          child = index->tree_nodes[child].next_sibling;
+        else {
+          if (actual == wanted) {
+            if (scanned >= CBD_TREE_CHILD_CACHE_MIN_SCAN &&
+                tree_child_cache_enable_parent(index, node))
+              maybe_grow_tree_child_cache(index);
+            tree_child_cache_put(index, node, wanted, child, TRUE);
+            collect_tree_candidates(index, child, query_position, query_end,
+                                    pending, exclude_id, count);
+          }
+          break;
+        }
       }
-    }
   }
   else
     for (; child != CBD_NONE;
@@ -2742,15 +2964,30 @@ static void collect_tree(Compact_back_demod_index index, Term pattern,
   symbol = SYMNUM(pattern);
   flatten_tree_query(index, pattern, &query_count);
   index->tree_queries++;
-  for (child = tree_first_child(index, CBD_NONE);
-       child != CBD_NONE; child = index->tree_nodes[child].next_sibling) {
-    int32_t root = tree_first_code(index, child);
-    if (root < symbol)
-      continue;
-    if (root > symbol)
-      break;
+  child = tree_child_cache_parent_enabled(index, CBD_NONE) ?
+    tree_child_cache_get(index, CBD_NONE, symbol) : CBD_NONE;
+  if (child != CBD_NONE) {
     collect_tree_candidates(index, child, 0, (uint32_t) query_count,
                             0, exclude_id, count);
+    return;
+  }
+  {
+    unsigned scanned = 0;
+    for (child = tree_first_child(index, CBD_NONE);
+       child != CBD_NONE; child = index->tree_nodes[child].next_sibling) {
+      int32_t root = tree_first_code(index, child);
+      scanned++;
+      if (root < symbol)
+        continue;
+      if (root > symbol)
+        break;
+      if (scanned >= CBD_TREE_CHILD_CACHE_MIN_SCAN &&
+          tree_child_cache_enable_parent(index, CBD_NONE))
+        maybe_grow_tree_child_cache(index);
+      tree_child_cache_put(index, CBD_NONE, symbol, child, TRUE);
+      collect_tree_candidates(index, child, 0, (uint32_t) query_count,
+                              0, exclude_id, count);
+    }
   }
 }
 
@@ -3876,6 +4113,8 @@ static void compact_back_demod_compact_internal(
   safe_free(old.path_bucket_hash);
   safe_free(old.tree_nodes);
   safe_free(old.tree_posting_lists);
+  safe_free(old.tree_child_cache);
+  safe_free(old.tree_child_cache_parents);
   safe_free(old.tree_roots);
   free_position_buckets(old.position_buckets, old.position_bucket_count);
   safe_free(old.position_bucket_hash);
@@ -3902,6 +4141,13 @@ static void compact_back_demod_compact_internal(
   index->tree_queries = old.tree_queries;
   index->tree_nodes_examined = old.tree_nodes_examined;
   index->tree_sibling_checks = old.tree_sibling_checks;
+  index->tree_child_cache_lookups = old.tree_child_cache_lookups;
+  index->tree_child_cache_hits = old.tree_child_cache_hits;
+  index->tree_child_cache_misses = old.tree_child_cache_misses;
+  index->tree_child_cache_replacements =
+    old.tree_child_cache_replacements;
+  index->tree_child_cache_growth_denials =
+    old.tree_child_cache_growth_denials;
   index->tree_budget_exhaustions += old.tree_budget_exhaustions;
   index->tree_root_admissions = old.tree_root_admissions;
   index->tree_root_rejections = old.tree_root_rejections;
@@ -4046,6 +4292,8 @@ void compact_back_demod_compact_materialized(
   safe_free(old.path_bucket_hash);
   safe_free(old.tree_nodes);
   safe_free(old.tree_posting_lists);
+  safe_free(old.tree_child_cache);
+  safe_free(old.tree_child_cache_parents);
   safe_free(old.occurrences);
   safe_free(old.records);
   compact_id_map_free(old.id_map);
@@ -4112,6 +4360,13 @@ void compact_back_demod_compact_materialized(
   index->tree_queries = old.tree_queries;
   index->tree_nodes_examined = old.tree_nodes_examined;
   index->tree_sibling_checks = old.tree_sibling_checks;
+  index->tree_child_cache_lookups = old.tree_child_cache_lookups;
+  index->tree_child_cache_hits = old.tree_child_cache_hits;
+  index->tree_child_cache_misses = old.tree_child_cache_misses;
+  index->tree_child_cache_replacements =
+    old.tree_child_cache_replacements;
+  index->tree_child_cache_growth_denials =
+    old.tree_child_cache_growth_denials;
   index->tree_budget_exhaustions += old.tree_budget_exhaustions;
   index->tree_root_admissions = old.tree_root_admissions;
   index->tree_root_rejections = old.tree_root_rejections;
@@ -4247,6 +4502,18 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->tree_queries = index->tree_queries;
   stats->tree_nodes_examined = index->tree_nodes_examined;
   stats->tree_sibling_checks = index->tree_sibling_checks;
+  stats->tree_child_cache_lookups = index->tree_child_cache_lookups;
+  stats->tree_child_cache_hits = index->tree_child_cache_hits;
+  stats->tree_child_cache_misses = index->tree_child_cache_misses;
+  stats->tree_child_cache_replacements =
+    index->tree_child_cache_replacements;
+  stats->tree_child_cache_growth_denials =
+    index->tree_child_cache_growth_denials;
+  stats->tree_child_cache_parents = index->tree_child_cache_parent_count;
+  stats->tree_child_cache_bytes = index->tree_child_cache_capacity *
+      sizeof(*index->tree_child_cache) +
+    index->tree_child_cache_parent_words *
+      sizeof(*index->tree_child_cache_parents);
   stats->tree_posting_groups = index->tree_posting_count;
   stats->tree_budget_bytes = index->tree_budget_bytes;
   stats->tree_estimated_bytes = tree_estimated_bytes(index);
@@ -4345,6 +4612,10 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
     index->tree_node_capacity * sizeof(*index->tree_nodes) +
     index->tree_posting_list_capacity *
       sizeof(*index->tree_posting_lists) +
+    index->tree_child_cache_capacity *
+      sizeof(*index->tree_child_cache) +
+    index->tree_child_cache_parent_words *
+      sizeof(*index->tree_child_cache_parents) +
     index->tree_root_capacity * sizeof(*index->tree_roots) +
     index->position_bucket_capacity * sizeof(*index->position_buckets) +
     index->position_bucket_hash_capacity *
@@ -4372,6 +4643,8 @@ void compact_back_demod_free(Compact_back_demod_index index)
   safe_free(index->path_bucket_hash);
   safe_free(index->tree_nodes);
   safe_free(index->tree_posting_lists);
+  safe_free(index->tree_child_cache);
+  safe_free(index->tree_child_cache_parents);
   safe_free(index->tree_roots);
   free_position_buckets(index->position_buckets,
                         index->position_bucket_count);

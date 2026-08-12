@@ -321,7 +321,7 @@ grep -Eq 'forward_path_rejects=[1-9][0-9]*,' \
   "$test_tmp/nonunit-audit.out"
 grep -Eq 'Compact_nonunit_index: mode=authoritative, failures=0, active=[1-9][0-9]*,' \
   "$test_tmp/nonunit-compact.out"
-grep -Eq 'Dense_passive: backing=ancestor-mmap, records=[1-9][0-9]*,' \
+grep -Eq 'Dense_passive: backing=ancestor-mmap, .*records=[1-9][0-9]*,' \
   "$test_tmp/nonunit-archive.out"
 grep -Eq 'Ancestor_store: records=[1-9][0-9]*, .*validation_failures=0,' \
   "$test_tmp/nonunit-archive.out"
