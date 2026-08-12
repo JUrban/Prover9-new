@@ -289,6 +289,49 @@ streaming large-SOS checkpoint remains required.  Compact inference-index
 offsets listed above still require segmentation/64-bit audits; this phase is
 not globally complete.
 
+#### E3.1 Packed wide shared-term slices
+
+The next boundary is the shared compact term pool, not an inference-record
+count.  `chat_test.new.out41` retained 18,843,410 logical tokens after 4,008
+wall seconds.  Its measured net rate is about 4,701 tokens/second, which would
+reach the current `UINT32_MAX` token offset after only about another 10.5 days;
+a constant-rate 30-day projection is about 12.2 billion tokens and needs 34
+address bits.  This line has fewer than 32 formatter arguments, so the older
+long-statistics ring-buffer defect does not affect these particular values.
+
+Migrate term references before widening unrelated hot arrays:
+
+1. Define an architecture-neutral 64-bit `Compact_term_slice` with a 40-bit
+   logical token offset and 24-bit length.  Encoding, decoding, checked
+   addition, and sub-slicing are centralized; zero remains a valid empty slice
+   only where the owning structure already permits it.  The 40-bit space holds
+   four TiB of 32-bit tokens, over seven years at the observed net rate, while
+   the 24-bit length permits more than 16 million tokens in one term.
+2. Replace every stored `(uint32_t offset, uint32_t length)` pair with one
+   slice.  This leaves rewrite/unit radix nodes, rewrite rules, unit records,
+   back-demod records/tree edges, term-directory values, and rebase entries at
+   their current byte sizes.  Add compile-time size assertions for these hot
+   layouts; a reference-width fix must not silently consume the RAM saving.
+3. Give the term pool a logical base and resolve a slice to a checked local
+   span once per operation.  Production begins at base zero; a focused test
+   uses a base above `UINT32_MAX` while allocating only a small token array.
+   This exercises serialization, lookup, radix splitting, matching, copying,
+   retained compaction, and rebasing through the real wide-reference paths
+   without allocating billions of tokens.
+4. Keep record, posting, node, and occurrence identifiers 32-bit in this
+   tranche.  They have different growth rates and must be segmented or widened
+   independently; conflating them with term offsets would double several hot
+   arrays unnecessarily.
+5. Re-run exact-order, exact-answer, compaction/rebase, sanitizer, checkpoint,
+   proof, `chat_test.in`, and mature CPU-slope gates.  Resolve spans outside
+   inner token loops so the representational fix does not introduce a
+   per-token abstraction penalty.
+
+Gate: the high-base test crosses `UINT32_MAX` in every term consumer, all
+listed hot layouts retain their previous sizes, before/after candidate and
+proof trajectories are identical, and mature lookup CPU stays within the
+existing 25% hard limit.  Passing the numerical test alone is not promotion.
+
 ## 7. Validation ladder
 
 Run gates in this order and retain failures as evidence:

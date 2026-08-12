@@ -826,3 +826,22 @@ can already survive a month at that growth rate.  In particular, format-3
 checkpoint restore still rebuilds through signed-int `Clist` positions.  A
 checkpoint request above that count now fails explicitly instead of silently
 truncating its SOS metadata; scalable checkpoint streaming is still open.
+
+### The next numerical boundary: shared compact tokens
+
+The final `chat_test.new.out41` sample reports 18,843,410 logical compact-term
+tokens at 4,008 wall seconds.  That is a net 4,701 tokens/second.  Holding that
+rate constant, the remaining 32-bit offset space lasts about 10.5 days, while
+30 days projects to approximately 12.2 billion tokens.  Compaction is already
+active (seven term-pool compactions and 30,426,416 reclaimed bytes), so this is
+the retained live-pool trajectory rather than merely an unreclaimed append
+log.  It is therefore the next offset migration ahead of unit, back-demod, or
+nonunit record counts.
+
+The implementation plan uses a packed 40-bit offset plus 24-bit length in the
+same eight bytes currently occupied by two 32-bit words.  This avoids doubling
+the hottest node and record fields.  A logical-base test will drive real pool,
+index, copy, and rebase paths above `UINT32_MAX` with a bounded physical array;
+the existing short and mature CPU gates remain mandatory because a wider type
+is unacceptable if it adds inner-loop overhead that compounds during long
+runs.
