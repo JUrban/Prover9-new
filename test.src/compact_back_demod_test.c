@@ -1250,8 +1250,8 @@ int main(void)
   {
     enum { EAGER_POSITION_FAMILY = 128, EAGER_POSITION_TARGET = 73 };
     Compact_back_demod_index eager, restored;
-    struct compact_back_demod_stats eager_stats;
-    Topform clauses[EAGER_POSITION_FAMILY], rule, later, multi;
+    struct compact_back_demod_stats eager_stats, before_empty;
+    Topform clauses[EAGER_POSITION_FAMILY], rule, missing, later, multi;
     unsigned long long *current_ids, *restored_ids;
     size_t current_count, restored_count;
     char text[160], state_dir[128], state_path[192];
@@ -1283,6 +1283,18 @@ int main(void)
           eager_stats.position_queries == 1 &&
           eager_stats.position_bitmap_bytes == 0,
           "eager sparse paths need no demand census or record bitmap");
+    before_empty = eager_stats;
+    missing = indexed_clause(
+      "eager_root(x,eager_branch(eager_missing)) = eager_done.");
+    ids = compact_back_demod_candidate_ids(eager, missing, ORIENTED, &count);
+    CHECK(count == 0 && ids == NULL,
+          "an absent complete eager path is an authoritative empty answer");
+    compact_back_demod_get_stats(eager, &eager_stats);
+    CHECK(eager_stats.position_empty_queries ==
+            before_empty.position_empty_queries + 1 &&
+          eager_stats.posting_groups_examined ==
+            before_empty.posting_groups_examined,
+          "authoritative eager empty avoids all posting scans");
     later = indexed_clause(
       "w(eager_root(later,eager_branch(m73))).");
     CHECK(compact_back_demod_add(eager, later),
@@ -1339,9 +1351,55 @@ int main(void)
           "remove eager-position checkpoint artifacts");
     compact_back_demod_free(eager);
     delete_clause(rule);
+    delete_clause(missing);
     delete_clause(later);
     delete_clause(multi);
     for (j = 0; j < EAGER_POSITION_FAMILY; j++)
+      delete_clause(clauses[j]);
+    compact_back_demod_set_eager_position_depth(0);
+    compact_back_demod_set_position_options(
+      4096, 4, 8, 65536, 20, TRUE, FALSE);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
+  }
+
+  {
+    enum { SPARSE_POSITION_SIDE = 8, SPARSE_POSITION_FAMILY = 64 };
+    Compact_back_demod_index sparse_intersection;
+    struct compact_back_demod_stats sparse_stats;
+    Topform clauses[SPARSE_POSITION_FAMILY], rule;
+    char text[160];
+    int j;
+    compact_back_demod_set_position_options(1, 4, 1, 0, 50, TRUE, TRUE);
+    compact_back_demod_set_eager_position_depth(2);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_POSITION);
+    sparse_intersection = compact_back_demod_init();
+    for (j = 0; j < SPARSE_POSITION_FAMILY; j++) {
+      (void) snprintf(text, sizeof(text),
+                      "w(sparse_root(left(sl%d),right(sr%d))).",
+                      j % SPARSE_POSITION_SIDE,
+                      j / SPARSE_POSITION_SIDE);
+      clauses[j] = indexed_clause(text);
+      CHECK(compact_back_demod_add(sparse_intersection, clauses[j]),
+            "add sparse eager-position cross-product clause");
+    }
+    rule = indexed_clause(
+      "sparse_root(left(sl3),right(sr5)) = sparse_done.");
+    ids = compact_back_demod_candidate_ids(
+      sparse_intersection, rule, ORIENTED, &count);
+    CHECK(count == 1 && ids[0] == clauses[43]->id,
+          "sparse posting merge preserves the cross-product intersection");
+    safe_free(ids);
+    compact_back_demod_get_stats(sparse_intersection, &sparse_stats);
+    CHECK(sparse_stats.position_sparse_intersection_queries == 1 &&
+          sparse_stats.position_dense_intersection_queries == 0 &&
+          sparse_stats.position_intersection_records == 1 &&
+          sparse_stats.position_intersection_scans <
+            SPARSE_POSITION_FAMILY / 2 &&
+          sparse_stats.position_bitmap_bytes == 0,
+          "sparse merge intersects two selective paths without broad scans");
+    compact_back_demod_free(sparse_intersection);
+    delete_clause(rule);
+    for (j = 0; j < SPARSE_POSITION_FAMILY; j++)
       delete_clause(clauses[j]);
     compact_back_demod_set_eager_position_depth(0);
     compact_back_demod_set_position_options(

@@ -686,7 +686,9 @@ void fprint_compact_back_demod(FILE *fp)
           "position_features=%llu, position_physical_features=%llu, "
           "position_active_roots=%llu, "
           "position_postings=%llu, "
-          "position_queries=%llu, position_intersection_queries=%llu, "
+          "position_queries=%llu, position_empty_queries=%llu, "
+          "position_intersection_queries=%llu, "
+          "position_sparse_intersection_queries=%llu, "
           "position_dense_intersection_queries=%llu, "
           "position_intersection_scans=%llu, "
           "position_intersection_bit_checks=%llu, "
@@ -771,7 +773,9 @@ void fprint_compact_back_demod(FILE *fp)
           stats.position_features, stats.position_physical_features,
           stats.position_active_roots,
           stats.position_postings,
-          stats.position_queries, stats.position_intersection_queries,
+          stats.position_queries, stats.position_empty_queries,
+          stats.position_intersection_queries,
+          stats.position_sparse_intersection_queries,
           stats.position_dense_intersection_queries,
           stats.position_intersection_scans,
           stats.position_intersection_bit_checks,

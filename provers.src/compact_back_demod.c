@@ -18,6 +18,7 @@
 #define CBD_EDGE_INTERSECTION_LIMIT 4
 #define CBD_EDGE_ROOT_MARKER UINT32_MAX
 #define CBD_MASK_DIRECTORY_BUCKETS 64
+#define CBD_POSITION_SPARSE_INTERSECTION_MAX 4
 #define CBD_TREE_CHILD_CACHE_MAX_BYTES (UINT64_C(8) * 1024 * 1024)
 #define CBD_TREE_CHILD_CACHE_MIN_SCAN 8
 #define CBD_ROUTE_PROFILE_CAPACITY 4096
@@ -427,7 +428,9 @@ struct compact_back_demod_index {
   BOOL tree_complete;
   unsigned long long position_posting_count;
   unsigned long long position_queries;
+  unsigned long long position_empty_queries;
   unsigned long long position_intersection_queries;
+  unsigned long long position_sparse_intersection_queries;
   unsigned long long position_dense_intersection_queries;
   unsigned long long position_intersection_scans;
   unsigned long long position_intersection_bit_checks;
@@ -4524,6 +4527,125 @@ static void collect_position_intersection(
 static void collect_position_bucket(Compact_back_demod_index index,
                                     uint32_t bucket_index, Term pattern,
                                     unsigned long long exclude_id,
+                                    size_t *count);
+
+/* Select at most a fixed number of the shortest complete sparse postings.
+   Bounding this set prevents a large rigid pattern from multiplying lookup
+   work, while two or more independent paths can still eliminate the broad
+   mature-run false positives left by any one shallow path. */
+static size_t select_sparse_position_buckets(
+  Compact_back_demod_index index, size_t feature_count,
+  uint32_t selected[CBD_POSITION_SPARSE_INTERSECTION_MAX])
+{
+  size_t count = 0, i;
+  for (i = 0; i < feature_count; i++) {
+    uint32_t bucket = index->position_query[i].bucket;
+    size_t at;
+    if (bucket == CBD_NONE || !index->position_buckets[bucket].active)
+      continue;
+    for (at = 0; at < count; at++)
+      if (selected[at] == bucket)
+        break;
+    if (at != count)
+      continue;
+    at = count;
+    while (at != 0 &&
+           index->position_buckets[selected[at - 1]].posting_count >
+             index->position_buckets[bucket].posting_count) {
+      if (at < CBD_POSITION_SPARSE_INTERSECTION_MAX)
+        selected[at] = selected[at - 1];
+      at--;
+    }
+    if (at < CBD_POSITION_SPARSE_INTERSECTION_MAX) {
+      selected[at] = bucket;
+      if (count < CBD_POSITION_SPARSE_INTERSECTION_MAX)
+        count++;
+    }
+  }
+  if (count > 1) {
+    uint32_t shortest = index->position_buckets[selected[0]].posting_count;
+    uint32_t limit = shortest > UINT32_MAX / 4 ? UINT32_MAX : shortest * 4;
+    while (count > 1 &&
+           index->position_buckets[selected[count - 1]].posting_count >
+             limit)
+      count--;
+  }
+  return count;
+}
+
+/* Sparse eager positions are monotonically encoded record streams.  Merge a
+   bounded set directly instead of allocating one record bitmap per feature.
+   The first (rarest) stream also supplies the occurrence offsets used by the
+   final exact matcher. */
+static void collect_sparse_position_intersection(
+  Compact_back_demod_index index, size_t feature_count, Term pattern,
+  unsigned long long exclude_id, size_t *count)
+{
+  struct cbd_position_merge_cursor {
+    struct cbd_position_iterator iterator;
+    uint32_t record;
+    uint32_t occurrence;
+    uint32_t length;
+    BOOL have;
+  } cursor[CBD_POSITION_SPARSE_INTERSECTION_MAX];
+  uint32_t buckets[CBD_POSITION_SPARSE_INTERSECTION_MAX];
+  size_t selected = select_sparse_position_buckets(
+    index, feature_count, buckets);
+  size_t i;
+  if (selected == 0)
+    return;
+  if (selected == 1) {
+    collect_position_bucket(index, buckets[0], pattern, exclude_id, count);
+    return;
+  }
+  index->position_queries++;
+  index->position_intersection_queries++;
+  index->position_sparse_intersection_queries++;
+  for (i = 0; i < selected; i++) {
+    init_position_iterator(index, buckets[i], &cursor[i].iterator);
+    cursor[i].have = next_position_record(
+      &cursor[i].iterator, &cursor[i].record, &cursor[i].occurrence,
+      &cursor[i].length);
+    if (!cursor[i].have)
+      return;
+  }
+  while (cursor[0].have) {
+    uint32_t target = cursor[0].record;
+    BOOL restart = FALSE;
+    for (i = 1; i < selected; i++) {
+      while (cursor[i].have && cursor[i].record < target)
+        cursor[i].have = next_position_record(
+          &cursor[i].iterator, &cursor[i].record, &cursor[i].occurrence,
+          &cursor[i].length);
+      if (!cursor[i].have)
+        return;
+      if (cursor[i].record > target) {
+        target = cursor[i].record;
+        restart = TRUE;
+      }
+    }
+    while (cursor[0].have && cursor[0].record < target)
+      cursor[0].have = next_position_record(
+        &cursor[0].iterator, &cursor[0].record, &cursor[0].occurrence,
+        &cursor[0].length);
+    if (!cursor[0].have)
+      return;
+    if (restart || cursor[0].record != target)
+      continue;
+    index->position_intersection_records++;
+    collect_position_intersection_record(
+      index, cursor[0].record, cursor[0].occurrence, cursor[0].length,
+      pattern, (int32_t) index->position_buckets[buckets[0]].root_symbol,
+      exclude_id, count);
+    cursor[0].have = next_position_record(
+      &cursor[0].iterator, &cursor[0].record, &cursor[0].occurrence,
+      &cursor[0].length);
+  }
+}
+
+static void collect_position_bucket(Compact_back_demod_index index,
+                                    uint32_t bucket_index, Term pattern,
+                                    unsigned long long exclude_id,
                                     size_t *count)
 {
   struct cbd_position_bucket *bucket =
@@ -5080,15 +5202,18 @@ static void maybe_admit_position_feature(Compact_back_demod_index index,
 
 static uint32_t best_position_bucket(Compact_back_demod_index index,
                                      Term pattern, size_t *selected,
-                                     size_t *feature_count)
+                                     size_t *feature_count,
+                                     BOOL *authoritative_empty)
 {
   size_t count, i;
   uint32_t root, best = CBD_NONE;
   *selected = 0;
   *feature_count = 0;
+  *authoritative_empty = FALSE;
   if (!strategy_uses_position(index->strategy) ||
-      !index->position_complete || index->position_bucket_count <= 1 ||
-      VARIABLE(pattern))
+      !index->position_complete || VARIABLE(pattern) ||
+      (index->position_bucket_count <= 1 &&
+       index->position_eager_depth == 0))
     return CBD_NONE;
   count = collect_pattern_position_features(index, pattern);
   *feature_count = count;
@@ -5098,6 +5223,14 @@ static uint32_t best_position_bucket(Compact_back_demod_index index,
       index, root, index->position_query[i].path,
       index->position_query[i].symbol);
     index->position_query[i].bucket = bucket;
+    if (index->position_eager_depth != 0 &&
+        index->position_query[i].depth <= index->position_eager_depth &&
+        bucket == CBD_NONE) {
+      /* Eager paths are updated for every retained record.  Therefore a
+         path/symbol key which has never acquired a bucket is an exact empty
+         answer, not merely an absent optional refinement. */
+      *authoritative_empty = TRUE;
+    }
     if (bucket != CBD_NONE && index->position_buckets[bucket].active) {
       (*selected)++;
       if (best == CBD_NONE ||
@@ -5106,8 +5239,10 @@ static uint32_t best_position_bucket(Compact_back_demod_index index,
         best = bucket;
     }
   }
-  if (index->position_sparse && best != CBD_NONE)
-    *selected = 1;
+  if (index->position_sparse && best != CBD_NONE) {
+    uint32_t buckets[CBD_POSITION_SPARSE_INTERSECTION_MAX];
+    *selected = select_sparse_position_buckets(index, count, buckets);
+  }
   return best;
 }
 
@@ -5567,6 +5702,17 @@ static unsigned long long route_position_population(
   unsigned long long postings;
   if (first_bucket == CBD_NONE)
     return 0;
+  if (index->position_sparse && selected_positions > 1) {
+    uint32_t buckets[CBD_POSITION_SPARSE_INTERSECTION_MAX];
+    size_t count = select_sparse_position_buckets(
+      index, feature_count, buckets);
+    size_t i;
+    postings = 0;
+    for (i = 0; i < count; i++)
+      postings = saturating_add(
+        postings, index->position_buckets[buckets[i]].posting_count);
+    return postings;
+  }
   postings = index->position_buckets[first_bucket].posting_count;
   if (selected_positions > 1 && use_dense_position_intersection(
         index, first_bucket, feature_count)) {
@@ -5877,6 +6023,7 @@ static void collect_pattern(Compact_back_demod_index index, Term pattern,
   uint32_t position_bucket;
   unsigned long long mask_population = 0;
   BOOL mask_population_known = FALSE;
+  BOOL position_authoritative_empty;
   enum cbd_edge_query_status edge_status = prepare_edge_query(
     index, pattern, &selected_edges);
   if (edge_status == CBD_EDGE_EMPTY) {
@@ -5884,7 +6031,13 @@ static void collect_pattern(Compact_back_demod_index index, Term pattern,
     return;
   }
   position_bucket = best_position_bucket(
-    index, pattern, &selected_positions, &position_feature_count);
+    index, pattern, &selected_positions, &position_feature_count,
+    &position_authoritative_empty);
+  if (position_authoritative_empty) {
+    index->position_queries++;
+    index->position_empty_queries++;
+    return;
+  }
   if (edge_status == CBD_EDGE_AVAILABLE) {
     unsigned long long edge_work = 0;
     unsigned long long fallback_population;
@@ -5955,7 +6108,10 @@ static void collect_pattern(Compact_back_demod_index index, Term pattern,
             population[CBD_ROUTE_MASK] / 4)
         goto adaptive_nonposition;
       work_before = route_work_snapshot(index);
-      if (selected_positions > 1 && use_dense_position_intersection(
+      if (selected_positions > 1 && index->position_sparse)
+        collect_sparse_position_intersection(
+          index, position_feature_count, pattern, exclude_id, count);
+      else if (selected_positions > 1 && use_dense_position_intersection(
             index, position_bucket, position_feature_count))
         collect_position_bitmap_intersection(
           index, position_bucket, position_feature_count, pattern,
@@ -6097,7 +6253,10 @@ adaptive_nonposition:
     return;
   }
   if (position_bucket != CBD_NONE) {
-    if (selected_positions > 1 && use_dense_position_intersection(
+    if (selected_positions > 1 && index->position_sparse)
+      collect_sparse_position_intersection(
+        index, position_feature_count, pattern, exclude_id, count);
+    else if (selected_positions > 1 && use_dense_position_intersection(
           index, position_bucket, position_feature_count))
       collect_position_bitmap_intersection(
         index, position_bucket, position_feature_count, pattern,
@@ -6698,8 +6857,11 @@ static void compact_back_demod_compact_internal(
     old.tree_root_backfill_occurrences;
   index->tree_fallback_work = old.tree_fallback_work;
   index->position_queries = old.position_queries;
+  index->position_empty_queries = old.position_empty_queries;
   index->position_intersection_queries =
     old.position_intersection_queries;
+  index->position_sparse_intersection_queries =
+    old.position_sparse_intersection_queries;
   index->position_dense_intersection_queries =
     old.position_dense_intersection_queries;
   index->position_intersection_scans = old.position_intersection_scans;
@@ -6941,8 +7103,11 @@ void compact_back_demod_compact_materialized(
     old.tree_root_backfill_occurrences;
   index->tree_fallback_work = old.tree_fallback_work;
   index->position_queries = old.position_queries;
+  index->position_empty_queries = old.position_empty_queries;
   index->position_intersection_queries =
     old.position_intersection_queries;
+  index->position_sparse_intersection_queries =
+    old.position_sparse_intersection_queries;
   index->position_dense_intersection_queries =
     old.position_dense_intersection_queries;
   index->position_intersection_scans = old.position_intersection_scans;
@@ -7459,8 +7624,11 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
       stats->position_features++;
   stats->position_postings = index->position_posting_count;
   stats->position_queries = index->position_queries;
+  stats->position_empty_queries = index->position_empty_queries;
   stats->position_intersection_queries =
     index->position_intersection_queries;
+  stats->position_sparse_intersection_queries =
+    index->position_sparse_intersection_queries;
   stats->position_dense_intersection_queries =
     index->position_dense_intersection_queries;
   stats->position_intersection_scans = index->position_intersection_scans;
