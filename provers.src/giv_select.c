@@ -78,6 +78,7 @@ struct giv_select {
   unsigned dense_bit;
   struct dense_selector_entry *dense_buffer;
   size_t dense_buffer_size;
+  size_t dense_buffer_capacity;
   struct dense_selector_run dense_runs[DENSE_SELECTOR_RUN_LEVELS];
   unsigned long long dense_peak_runs;
   unsigned long long dense_flushes;
@@ -1029,9 +1030,18 @@ static void dense_selector_file_push(Giv_select gs, uint32_t record)
   struct dense_passive_record *r = &Dense_records[record];
   struct dense_selector_entry entry;
   size_t i;
-  if (gs->dense_buffer == NULL)
-    gs->dense_buffer = safe_malloc(
-      Dense_selector_buffer_limit * sizeof(*gs->dense_buffer));
+  if (gs->dense_buffer_size == gs->dense_buffer_capacity) {
+    size_t capacity = dense_grow_capacity(
+      gs->dense_buffer_capacity, sizeof(*gs->dense_buffer),
+      "dense_selector_file_push: capacity overflow");
+    if (capacity > Dense_selector_buffer_limit)
+      capacity = Dense_selector_buffer_limit;
+    if (capacity <= gs->dense_buffer_capacity)
+      fatal_error("dense_selector_file_push: buffer limit overflow");
+    gs->dense_buffer = safe_realloc(
+      gs->dense_buffer, capacity * sizeof(*gs->dense_buffer));
+    gs->dense_buffer_capacity = capacity;
+  }
   entry.id = r->id;
   if (gs->order == GS_ORDER_WEIGHT)
     entry.key.weight = r->weight;
@@ -1100,6 +1110,7 @@ static void dense_selector_file_reset(Giv_select gs)
   safe_free(gs->dense_buffer);
   gs->dense_buffer = NULL;
   gs->dense_buffer_size = 0;
+  gs->dense_buffer_capacity = 0;
   for (level = 0; level < DENSE_SELECTOR_RUN_LEVELS; level++)
     dense_selector_run_close(&gs->dense_runs[level]);
 }
@@ -1113,6 +1124,7 @@ static void dense_selector_initialize(Giv_select gs)
   gs->dense_active = 0;
   gs->dense_buffer = NULL;
   gs->dense_buffer_size = 0;
+  gs->dense_buffer_capacity = 0;
   for (level = 0; level < DENSE_SELECTOR_RUN_LEVELS; level++)
     dense_selector_run_init(&gs->dense_runs[level]);
   gs->dense_peak_runs = 0;
@@ -1135,7 +1147,7 @@ static void dense_selector_add_stats(
   stats->buffered_entries += gs->dense_buffer_size;
   if (gs->dense_buffer != NULL)
     stats->buffer_bytes +=
-      (unsigned long long) Dense_selector_buffer_limit *
+      (unsigned long long) gs->dense_buffer_capacity *
         sizeof(*gs->dense_buffer);
   for (level = 0; level < DENSE_SELECTOR_RUN_LEVELS; level++) {
     struct dense_selector_run *run = &gs->dense_runs[level];

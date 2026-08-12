@@ -451,6 +451,13 @@ was still one.  Compared with the preceding directory-only probe, anonymous
 memory fell from about 8.70 MiB to 2.46 MiB; the selector runs introduce real
 write amplification and are therefore opt-in rather than the default.
 
+Insertion buffers now grow geometrically on demand up to the configured hard
+cap rather than reserving the whole cap on first use.  At the 1,000-given chat
+prefix this reduced file-selector resident capacity from 7.50 MiB to 1.17 MiB
+while retaining the same 37,130 buffered logical entries.  It deliberately
+remains larger than the 0.20 MiB compact index heap at this small population;
+the file mode is intended for queues which grow far beyond the fixed cap.
+
 An integrated 300-given `chat_test.in` differential used a deliberately small
 1,024-entry buffer to force six flushes and three merges.  All 300 printed
 given clauses and all 120,793 candidate trace outcomes were byte-identical to
@@ -460,6 +467,14 @@ resident selector buffers.  Single timing samples (18.5 versus 21.6 user
 seconds) reversed earlier repetitions and are treated as noise, not as a speed
 claim.  The required 1,000-given and multi-million-passive IO/CPU gates remain
 open.
+
+A subsequent default-65,536-buffer pair reached the same 1,000-given
+trajectory (1,268,285 generated and 33,909 kept).  Concurrent samples were
+88.29 user seconds for heap and 89.56 for file; the demand-grown file rerun was
+86.83 seconds.  The spread is too small and unstable for a speed claim, but it
+shows no material CPU regression at this prefix.  No individual selector had
+yet filled 65,536 entries, so this closes the resident-buffer and queue-policy
+gate, not the mature-run IO gate.
 
 At the observed 65.9-million-passive scale, file directory plus file selectors
 remove the roughly 4.22 GB directory and approximately 0.42 GB selector heaps
