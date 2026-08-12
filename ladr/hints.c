@@ -705,8 +705,9 @@ static void packed_finish_candidates(BOOL include_anyconst,
       }
     }
   }
-  qsort(Packed_candidates, Packed_candidates_count, sizeof(unsigned),
-        packed_id_decreasing);
+  if (Packed_candidates_count > 1)
+    qsort(Packed_candidates, Packed_candidates_count, sizeof(unsigned),
+          packed_id_decreasing);
 }
 
 static unsigned long long better_feature_key(unsigned kind, unsigned path,
