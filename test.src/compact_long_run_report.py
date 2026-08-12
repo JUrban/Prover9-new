@@ -94,6 +94,13 @@ CUMULATIVE_KEYS = (
     "back_route_tree_candidates", "back_route_position_candidates",
     "back_position_admissions", "back_position_rejections",
     "back_position_demotions", "back_position_retry_deferrals",
+    "back_position_queries", "back_position_empty_queries",
+    "back_position_intersection_queries",
+    "back_position_sparse_intersection_queries",
+    "back_position_dense_intersection_queries",
+    "back_position_intersection_scans",
+    "back_position_intersection_records",
+    "back_position_records_examined",
     "back_position_census_records", "back_position_backfill_records",
     "back_position_append_records", "back_position_append_root_scans",
     "back_position_append_token_visits",
@@ -397,6 +404,25 @@ def derive_intervals(samples):
             row.get("delta_back_edge_candidate_records"))
         if row["back_edge_exact_reject_pct"] is not None:
             row["back_edge_exact_reject_pct"] *= 100.0
+        delta_position_queries = row.get("delta_back_position_queries")
+        row["back_position_query_pct"] = safe_ratio(
+            delta_position_queries, delta_queries)
+        row["back_position_empty_pct"] = safe_ratio(
+            row.get("delta_back_position_empty_queries"),
+            delta_position_queries)
+        row["back_position_intersection_pct"] = safe_ratio(
+            row.get("delta_back_position_intersection_queries"),
+            delta_position_queries)
+        for key in ("back_position_query_pct", "back_position_empty_pct",
+                    "back_position_intersection_pct"):
+            if row[key] is not None:
+                row[key] *= 100.0
+        row["back_position_records_per_query"] = safe_ratio(
+            row.get("delta_back_position_records_examined"),
+            delta_position_queries)
+        row["back_position_scans_per_intersection"] = safe_ratio(
+            row.get("delta_back_position_intersection_scans"),
+            row.get("delta_back_position_intersection_queries"))
         row["back_lookup_cpu_pct"] = (None if delta_cpu is None else
             safe_ratio(row.get("delta_back_timing_lookup_seconds"), delta_cpu))
         if row["back_lookup_cpu_pct"] is not None:
@@ -705,6 +731,13 @@ def run_summary(label, rows):
         "last_back_route_frequency_decays": last.get(
             "back_route_frequency_decays"),
         "last_back_position_features": last.get("back_position_features"),
+        "last_back_position_queries": last.get("back_position_queries"),
+        "last_back_position_empty_queries": last.get(
+            "back_position_empty_queries"),
+        "last_back_position_sparse_intersection_queries": last.get(
+            "back_position_sparse_intersection_queries"),
+        "last_back_query_input": last.get("back_query_input"),
+        "last_back_query_answers": last.get("back_query_answers"),
         "last_back_position_census_records": last.get(
             "back_position_census_records"),
         "last_back_position_backfill_records": last.get(
@@ -951,6 +984,19 @@ def markdown(label, rows, summary, total_samples=None):
                 fmt(row.get("back_edge_candidates_per_query"), 1),
                 fmt(row.get("back_edge_exact_reject_pct"), 1)))
         print()
+    if any(number(row, "back_position_queries", 0) > 0 for row in rows):
+        print("| CPU s | Position query % | Exact-empty % | Intersection % | "
+              "Records/position query | Scans/intersection |")
+        print("|---:|---:|---:|---:|---:|---:|")
+        for row in rows:
+            print("| {} | {} | {} | {} | {} | {} |".format(
+                fmt(row.get("user_cpu")),
+                fmt(row.get("back_position_query_pct"), 1),
+                fmt(row.get("back_position_empty_pct"), 1),
+                fmt(row.get("back_position_intersection_pct"), 1),
+                fmt(row.get("back_position_records_per_query"), 1),
+                fmt(row.get("back_position_scans_per_intersection"), 1)))
+        print()
     if any(number(row, "rewrite_subject_atoms", 0) > 0 for row in rows):
         print("| CPU s | Rewrite atoms | Initial nodes/atom | Attempts/atom | "
               "Target nodes/attempt | Legacy/new prep nodes |")
@@ -991,6 +1037,10 @@ def markdown_summary(summary):
                   fmt(summary.get("last_back_route_mask_choice_pct"), 1),
                   fmt(summary.get("last_back_route_tree_choice_pct"), 1),
                   fmt(summary.get("last_back_route_position_choice_pct"), 1)))
+    if summary.get("last_back_query_answers") is not None:
+        print("Final back-query semantic fingerprint={} (input={}).".format(
+            summary.get("last_back_query_answers"),
+            summary.get("last_back_query_input")))
     print("First-to-last interval ratios: counted back work/query={}, "
           "back lookup CPU/query={}, answer-normalized back CPU={}, "
           "given/CPU={}.".format(
@@ -1125,6 +1175,17 @@ TSV_COLUMNS = (
     "delta_back_route_hysteresis_holds",
     "back_tree_child_parents", "back_tree_child_bytes", "back_bytes",
     "back_position_features", "back_position_active_roots",
+    "delta_back_position_queries", "back_position_query_pct",
+    "delta_back_position_empty_queries", "back_position_empty_pct",
+    "delta_back_position_intersection_queries",
+    "delta_back_position_sparse_intersection_queries",
+    "delta_back_position_dense_intersection_queries",
+    "back_position_intersection_pct",
+    "delta_back_position_intersection_scans",
+    "delta_back_position_intersection_records",
+    "delta_back_position_records_examined",
+    "back_position_records_per_query",
+    "back_position_scans_per_intersection",
     "delta_back_position_admissions",
     "delta_back_position_rejections", "delta_back_position_demotions",
     "delta_back_position_retry_deferrals",
@@ -1140,6 +1201,7 @@ TSV_COLUMNS = (
     "delta_back_position_credit_reservations",
     "delta_back_position_admission_freezes",
     "back_position_admission_frozen", "back_position_estimated",
+    "back_query_input", "back_query_answers",
     "back_edge_enabled", "back_edge_features", "back_edge_postings",
     "back_edge_bytes", "delta_back_edge_queries",
     "delta_back_edge_empty_queries", "delta_back_edge_bypass_queries",
