@@ -1440,6 +1440,63 @@ int main(void)
   }
 
   {
+    enum { ANSWER_FINGERPRINT_FAMILY = 64 };
+    Compact_back_demod_index mask, rooted;
+    struct compact_back_demod_stats mask_stats, rooted_stats;
+    Topform clauses[ANSWER_FINGERPRINT_FAMILY], rule;
+    unsigned long long *mask_ids, *rooted_ids;
+    size_t mask_count, rooted_count;
+    char text[160];
+    int j;
+
+    compact_back_demod_set_position_options(1, 4, 1, 0, 50, TRUE, TRUE);
+    compact_back_demod_set_eager_position_depth(0);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
+    mask = compact_back_demod_init();
+    compact_back_demod_set_eager_position_depth(2);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_POSITION);
+    rooted = compact_back_demod_init();
+    for (j = 0; j < ANSWER_FINGERPRINT_FAMILY; j++) {
+      (void) snprintf(text, sizeof(text),
+                      "w(answer_root(answer_left(al%d),answer_right(ar%d))).",
+                      j % 8, j / 8);
+      clauses[j] = indexed_clause(text);
+      CHECK(compact_back_demod_add(mask, clauses[j]) &&
+            compact_back_demod_add(rooted, clauses[j]),
+            "add shared semantic-fingerprint clause");
+    }
+    rule = indexed_clause(
+      "answer_root(answer_left(al3),answer_right(ar5)) = answer_done.");
+    mask_ids = compact_back_demod_candidate_ids(
+      mask, rule, ORIENTED, &mask_count);
+    rooted_ids = compact_back_demod_candidate_ids(
+      rooted, rule, ORIENTED, &rooted_count);
+    compact_back_demod_get_stats(mask, &mask_stats);
+    compact_back_demod_get_stats(rooted, &rooted_stats);
+    CHECK(mask_count == 1 && mask_count == rooted_count &&
+          memcmp(mask_ids, rooted_ids,
+                 mask_count * sizeof(*mask_ids)) == 0,
+          "mask and rooted routes return identical ordered answers");
+    CHECK(mask_stats.query_input_fingerprint ==
+            rooted_stats.query_input_fingerprint &&
+          mask_stats.query_answer_fingerprint ==
+            rooted_stats.query_answer_fingerprint &&
+          mask_stats.query_answer_fingerprint != 0,
+          "semantic answer fingerprint is independent of retrieval route");
+    safe_free(mask_ids);
+    safe_free(rooted_ids);
+    compact_back_demod_free(mask);
+    compact_back_demod_free(rooted);
+    delete_clause(rule);
+    for (j = 0; j < ANSWER_FINGERPRINT_FAMILY; j++)
+      delete_clause(clauses[j]);
+    compact_back_demod_set_eager_position_depth(0);
+    compact_back_demod_set_position_options(
+      4096, 4, 8, 65536, 20, TRUE, FALSE);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
+  }
+
+  {
     enum { POSITION_FAMILY = 128, POSITION_TARGET = 73 };
     Compact_back_demod_index position;
     struct compact_back_demod_stats position_stats;
