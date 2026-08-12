@@ -17,6 +17,9 @@
 #define CBD_TREE_CHILD_CACHE_MAX_BYTES (UINT64_C(8) * 1024 * 1024)
 #define CBD_TREE_CHILD_CACHE_MIN_SCAN 8
 #define CBD_ROUTE_PROFILE_CAPACITY 4096
+#define CBD_ROUTE_FREQUENCY_CAPACITY 65536
+#define CBD_ROUTE_ADMIT_HITS 32
+#define CBD_ROUTE_STALE_QUANTUM 4096
 
 enum cbd_route {
   CBD_ROUTE_MASK,
@@ -125,6 +128,7 @@ struct cbd_route_profile {
   unsigned long long population[CBD_ROUTE_COUNT];
   unsigned long long last_sample[CBD_ROUTE_COUNT];
   unsigned long long queries;
+  unsigned long long last_seen;
   uint32_t samples[CBD_ROUTE_COUNT];
   unsigned char preferred;
   unsigned char occupied;
@@ -189,8 +193,8 @@ typedef char compact_back_demod_tree_list_must_remain_16_bytes[
   sizeof(struct cbd_tree_posting_list) == 16 ? 1 : -1];
 typedef char compact_back_demod_record_must_remain_24_bytes[
   sizeof(struct cbd_record) == 24 ? 1 : -1];
-typedef char compact_back_demod_route_profile_must_remain_104_bytes[
-  sizeof(struct cbd_route_profile) == 104 ? 1 : -1];
+typedef char compact_back_demod_route_profile_must_remain_112_bytes[
+  sizeof(struct cbd_route_profile) == 112 ? 1 : -1];
 
 struct compact_back_demod_index {
   Compact_back_demod_strategy strategy;
@@ -237,7 +241,16 @@ struct compact_back_demod_index {
   size_t position_probation_capacity;
   struct cbd_route_profile *route_profiles;
   size_t route_profile_capacity;
+  uint16_t *route_frequency;
+  size_t route_frequency_capacity;
+  unsigned long long route_sequence;
   unsigned long long route_profile_occupied;
+  unsigned long long route_profile_hits;
+  unsigned long long route_profile_misses;
+  unsigned long long route_cold_fallbacks;
+  unsigned long long route_admission_attempts;
+  unsigned long long route_admission_rejections;
+  unsigned long long route_aged_replacements;
   unsigned long long route_profile_collisions;
   unsigned long long route_profile_replacements;
   unsigned long long route_choices[CBD_ROUTE_COUNT];
@@ -505,6 +518,7 @@ static unsigned long long index_bytes(Compact_back_demod_index index)
     index->position_block_capacity * sizeof(*index->position_blocks) +
     index->position_probation_capacity * sizeof(*index->position_probation) +
     index->route_profile_capacity * sizeof(*index->route_profiles) +
+    index->route_frequency_capacity * 2 * sizeof(*index->route_frequency) +
     index->position_bitmap_bytes +
     index->occurrence_capacity * sizeof(*index->occurrences) +
     index->record_capacity * sizeof(*index->records) +
@@ -1948,6 +1962,10 @@ static Compact_back_demod_index compact_back_demod_init_with_pool_strategy(
     index->route_profile_capacity = CBD_ROUTE_PROFILE_CAPACITY;
     index->route_profiles = safe_calloc(
       index->route_profile_capacity, sizeof(*index->route_profiles));
+    index->route_frequency_capacity = CBD_ROUTE_FREQUENCY_CAPACITY;
+    index->route_frequency = safe_calloc(
+      index->route_frequency_capacity * 2,
+      sizeof(*index->route_frequency));
   }
   index->id_map = compact_id_map_init(1);
   index->maintenance_clock = clock_init("compact_back_demod_maintenance");
@@ -3828,6 +3846,43 @@ static uint64_t route_pattern_fingerprint(
   return key == 0 ? 1 : key;
 }
 
+/* Count-min admission keeps one-off structural/population classes out of the
+   much smaller calibrated-route table.  Conservative updates avoid inflating
+   both counters when just one row collided with a hotter class. */
+static unsigned route_frequency_note(Compact_back_demod_index index,
+                                     uint64_t key)
+{
+  size_t mask, first, second;
+  uint16_t *a, *b;
+  unsigned minimum;
+  if (index->route_frequency_capacity == 0)
+    return CBD_ROUTE_ADMIT_HITS;
+  mask = index->route_frequency_capacity - 1;
+  first = (size_t) key & mask;
+  second = index->route_frequency_capacity +
+    ((size_t) hash_id(key ^ UINT64_C(0x9e3779b97f4a7c15)) & mask);
+  a = &index->route_frequency[first];
+  b = &index->route_frequency[second];
+  minimum = *a < *b ? *a : *b;
+  if (*a == minimum && *a != UINT16_MAX)
+    (*a)++;
+  if (*b == minimum && *b != UINT16_MAX)
+    (*b)++;
+  return *a < *b ? *a : *b;
+}
+
+static unsigned long long route_profile_residency_score(
+  const struct cbd_route_profile *profile, unsigned long long sequence)
+{
+  unsigned long long age = sequence > profile->last_seen ?
+    sequence - profile->last_seen : 0;
+  unsigned shifts = (unsigned) (age / CBD_ROUTE_STALE_QUANTUM);
+  unsigned long long score = profile->queries;
+  if (score > UINT16_MAX)
+    score = UINT16_MAX;
+  return shifts >= 16 ? 0 : score >> shifts;
+}
+
 static struct cbd_route_profile *route_profile_for_pattern(
   Compact_back_demod_index index, Term pattern,
   unsigned long long mask_population)
@@ -3835,29 +3890,62 @@ static struct cbd_route_profile *route_profile_for_pattern(
   uint64_t key;
   size_t sets, first;
   struct cbd_route_profile *a, *b, *entry;
+  unsigned frequency;
+  unsigned long long victim_score;
   if (index->route_profile_capacity < 2)
     return NULL;
   key = route_pattern_fingerprint(index, pattern, mask_population);
+  if (index->route_sequence != ULLONG_MAX)
+    index->route_sequence++;
   sets = index->route_profile_capacity / 2;
   first = ((size_t) key & (sets - 1)) * 2;
   a = &index->route_profiles[first];
   b = a + 1;
-  if (a->occupied && a->key == key)
+  if (a->occupied && a->key == key) {
+    (void) route_frequency_note(index, key);
+    a->last_seen = index->route_sequence;
+    index->route_profile_hits++;
     return a;
-  if (b->occupied && b->key == key)
+  }
+  if (b->occupied && b->key == key) {
+    (void) route_frequency_note(index, key);
+    b->last_seen = index->route_sequence;
+    index->route_profile_hits++;
     return b;
+  }
+  index->route_profile_misses++;
+  frequency = route_frequency_note(index, key);
+  if (frequency < CBD_ROUTE_ADMIT_HITS) {
+    index->route_cold_fallbacks++;
+    return NULL;
+  }
+  index->route_admission_attempts++;
   if (!a->occupied)
     entry = a;
   else if (!b->occupied)
     entry = b;
   else {
     index->route_profile_collisions++;
-    if (a->queries < b->queries)
+    unsigned long long a_score = route_profile_residency_score(
+      a, index->route_sequence);
+    unsigned long long b_score = route_profile_residency_score(
+      b, index->route_sequence);
+    if (a_score < b_score)
       entry = a;
-    else if (b->queries < a->queries)
+    else if (b_score < a_score)
       entry = b;
     else
       entry = a->key > b->key ? a : b;
+    victim_score = route_profile_residency_score(
+      entry, index->route_sequence);
+    if ((unsigned long long) frequency <= victim_score) {
+      index->route_admission_rejections++;
+      return NULL;
+    }
+    if (index->route_sequence > entry->last_seen &&
+        index->route_sequence - entry->last_seen >
+          CBD_ROUTE_STALE_QUANTUM)
+      index->route_aged_replacements++;
     index->route_profile_replacements++;
   }
   if (!entry->occupied)
@@ -3866,6 +3954,8 @@ static struct cbd_route_profile *route_profile_for_pattern(
   entry->occupied = TRUE;
   entry->key = key;
   entry->preferred = CBD_ROUTE_MASK;
+  entry->queries = frequency;
+  entry->last_seen = index->route_sequence;
   return entry;
 }
 
@@ -3905,6 +3995,15 @@ static BOOL route_materially_better(unsigned long long alternative,
   unsigned long long threshold = current / 5 * 4 +
     (current % 5) * 4 / 5;
   return alternative < current && alternative <= threshold;
+}
+
+static BOOL route_tree_promotion_better(unsigned long long tree,
+                                        unsigned long long mask)
+{
+  /* Tree lookup carries pointer chasing and cache-miss costs which the
+     abstract work counter understates.  Demand a twofold measured margin to
+     enter it; the ordinary 20% hysteresis remains enough to leave it. */
+  return tree < mask && tree <= mask / 2;
 }
 
 static unsigned long long route_mask_population(
@@ -4041,7 +4140,9 @@ static void route_update_preference(
     return;
   current_cost = route_estimate(profile, current, population[current]);
   best_cost = route_estimate(profile, best, population[best]);
-  if (route_materially_better(best_cost, current_cost)) {
+  if ((current == CBD_ROUTE_MASK && best == CBD_ROUTE_TREE ?
+       route_tree_promotion_better(best_cost, current_cost) :
+       route_materially_better(best_cost, current_cost))) {
     profile->preferred = (unsigned char) best;
     index->route_switches++;
     if (best == CBD_ROUTE_MASK)
@@ -4264,8 +4365,25 @@ static void collect_pattern(Compact_back_demod_index index, Term pattern,
 
     profile = route_profile_for_pattern(
       index, pattern, population[CBD_ROUTE_MASK]);
-    if (profile == NULL)
-      fatal_error("compact_back_demod: missing adaptive route table");
+    if (profile == NULL) {
+      /* A class must demonstrate repeated demand before it can consume a
+         profile slot or a tree calibration probe. */
+      work_before = route_work_snapshot(index);
+      collect_symbol(index, pattern, exclude_id, count);
+      work_after = route_work_snapshot(index);
+      observed = route_observed_work(&work_before, &work_after);
+      index->route_choices[CBD_ROUTE_MASK]++;
+      index->route_observed_cost[CBD_ROUTE_MASK] = saturating_add(
+        index->route_observed_cost[CBD_ROUTE_MASK], observed);
+      index->route_estimated_cost[CBD_ROUTE_MASK] = saturating_add(
+        index->route_estimated_cost[CBD_ROUTE_MASK],
+        population[CBD_ROUTE_MASK]);
+      index->route_candidates[CBD_ROUTE_MASK] = saturating_add(
+        index->route_candidates[CBD_ROUTE_MASK], *count - count_before);
+      maybe_admit_hot_root(index, pattern, index->query_work - before);
+      maybe_admit_position_feature(index, pattern, observed);
+      return;
+    }
     route = choose_adaptive_route(
       index, profile, available, population, &probe);
     work_before = route_work_snapshot(index);
@@ -4504,7 +4622,23 @@ static void copy_route_profiles(Compact_back_demod_index destination,
     fatal_error("compact_back_demod: route-profile capacity mismatch");
   memcpy(destination->route_profiles, source->route_profiles,
          source->route_profile_capacity * sizeof(*source->route_profiles));
+  if (destination->route_frequency_capacity !=
+      source->route_frequency_capacity)
+    fatal_error("compact_back_demod: route-frequency capacity mismatch");
+  memcpy(destination->route_frequency, source->route_frequency,
+         source->route_frequency_capacity * 2 *
+           sizeof(*source->route_frequency));
+  destination->route_sequence = source->route_sequence;
   destination->route_profile_occupied = source->route_profile_occupied;
+  destination->route_profile_hits = source->route_profile_hits;
+  destination->route_profile_misses = source->route_profile_misses;
+  destination->route_cold_fallbacks = source->route_cold_fallbacks;
+  destination->route_admission_attempts =
+    source->route_admission_attempts;
+  destination->route_admission_rejections =
+    source->route_admission_rejections;
+  destination->route_aged_replacements =
+    source->route_aged_replacements;
   destination->route_profile_collisions = source->route_profile_collisions;
   destination->route_profile_replacements =
     source->route_profile_replacements;
@@ -4753,6 +4887,7 @@ static void compact_back_demod_compact_internal(
   safe_free(old.position_query);
   safe_free(old.position_probation);
   safe_free(old.route_profiles);
+  safe_free(old.route_frequency);
   safe_free(old.occurrences);
   safe_free(old.records);
   compact_id_map_free(old.id_map);
@@ -4944,6 +5079,7 @@ void compact_back_demod_compact_materialized(
   safe_free(old.position_query);
   safe_free(old.position_probation);
   safe_free(old.route_profiles);
+  safe_free(old.route_frequency);
   replacement->owns_term_pool = old.owns_term_pool;
   while (rebuilt < count) {
     unsigned long long *batch;
@@ -5117,6 +5253,7 @@ BOOL compact_back_demod_write_adaptive_state(
   char path[1024];
   FILE *fp;
   size_t i, roots = 0, positions = 0, probation = 0, routes = 0;
+  size_t frequencies = 0;
   BOOL ok;
   if (index == NULL || index->strategy != COMPACT_BACK_DEMOD_ADAPTIVE)
     return TRUE;
@@ -5140,9 +5277,13 @@ BOOL compact_back_demod_write_adaptive_state(
   for (i = 0; i < index->route_profile_capacity; i++)
     if (index->route_profiles[i].occupied)
       routes++;
-  fprintf(fp, "P9_COMPACT_BACK_ADAPTIVE 1\n");
+  for (i = 0; i < index->route_frequency_capacity * 2; i++)
+    if (index->route_frequency[i] != 0)
+      frequencies++;
+  fprintf(fp, "P9_COMPACT_BACK_ADAPTIVE 2\n");
   fprintf(fp, "GENERATION %llu %llu\n",
           index->position_generation, index->position_budget_high_water);
+  fprintf(fp, "SEQUENCE %llu\n", index->route_sequence);
   fprintf(fp, "ROOTS %lu\n", (unsigned long) roots);
   for (i = 0; i < index->tree_root_capacity; i++) {
     struct cbd_tree_root_state *state = &index->tree_roots[i];
@@ -5179,7 +5320,7 @@ BOOL compact_back_demod_write_adaptive_state(
       fprintf(fp,
               "Q %lu %016llx %u %llu "
               "%llu %llu %llu %llu %llu %llu "
-              "%llu %llu %llu %u %u %u\n",
+              "%llu %llu %llu %u %u %u %llu\n",
               (unsigned long) i, (unsigned long long) entry->key,
               (unsigned) entry->preferred, entry->queries,
               entry->cost[CBD_ROUTE_MASK], entry->cost[CBD_ROUTE_TREE],
@@ -5192,8 +5333,15 @@ BOOL compact_back_demod_write_adaptive_state(
               entry->last_sample[CBD_ROUTE_POSITION],
               entry->samples[CBD_ROUTE_MASK],
               entry->samples[CBD_ROUTE_TREE],
-              entry->samples[CBD_ROUTE_POSITION]);
+              entry->samples[CBD_ROUTE_POSITION], entry->last_seen);
   }
+  fprintf(fp, "FREQUENCY %lu %lu\n",
+          (unsigned long) index->route_frequency_capacity,
+          (unsigned long) frequencies);
+  for (i = 0; i < index->route_frequency_capacity * 2; i++)
+    if (index->route_frequency[i] != 0)
+      fprintf(fp, "F %lu %u\n", (unsigned long) i,
+              (unsigned) index->route_frequency[i]);
   fprintf(fp, "END\n");
   ok = fflush(fp) == 0 && !ferror(fp);
   if (fclose(fp) != 0)
@@ -5210,6 +5358,7 @@ BOOL compact_back_demod_read_adaptive_state(
   unsigned long roots, positions, probation_capacity, probation_count;
   unsigned long route_capacity, route_count, at, i;
   unsigned long long generation, budget_high_water;
+  unsigned long long route_sequence = 0;
   if (index == NULL || index->strategy != COMPACT_BACK_DEMOD_ADAPTIVE)
     return TRUE;
   if (!adaptive_state_path(path, sizeof(path), directory))
@@ -5218,10 +5367,20 @@ BOOL compact_back_demod_read_adaptive_state(
   if (fp == NULL)
     return TRUE;  /* An older checkpoint starts with safe cold calibration. */
   if (fscanf(fp, " %31s %u", label, &version) != 2 ||
-      strcmp(label, "P9_COMPACT_BACK_ADAPTIVE") != 0 || version != 1 ||
+      strcmp(label, "P9_COMPACT_BACK_ADAPTIVE") != 0 ||
+      (version != 1 && version != 2) ||
       fscanf(fp, " %31s %llu %llu", label, &generation,
-             &budget_high_water) != 3 || strcmp(label, "GENERATION") != 0 ||
-      fscanf(fp, " %31s %lu", label, &roots) != 2 ||
+             &budget_high_water) != 3 || strcmp(label, "GENERATION") != 0) {
+    fclose(fp);
+    return FALSE;
+  }
+  if (version >= 2 &&
+      (fscanf(fp, " %31s %llu", label, &route_sequence) != 2 ||
+       strcmp(label, "SEQUENCE") != 0)) {
+    fclose(fp);
+    return FALSE;
+  }
+  if (fscanf(fp, " %31s %lu", label, &roots) != 2 ||
       strcmp(label, "ROOTS") != 0) {
     fclose(fp);
     return FALSE;
@@ -5318,17 +5477,23 @@ BOOL compact_back_demod_read_adaptive_state(
     unsigned long long key, queries;
     unsigned long long cost_mask, cost_tree, cost_position;
     unsigned long long population_mask, population_tree, population_position;
-    unsigned long long last_mask, last_tree, last_position;
+    unsigned long long last_mask, last_tree, last_position, last_seen = 0;
     struct cbd_route_profile *entry;
-    if (fscanf(fp,
-               " %31s %lu %llx %u %llu "
-               "%llu %llu %llu %llu %llu %llu "
-               "%llu %llu %llu %u %u %u",
-               label, &at, &key, &preferred, &queries,
-               &cost_mask, &cost_tree, &cost_position,
-               &population_mask, &population_tree, &population_position,
-               &last_mask, &last_tree, &last_position,
-               &sample_mask, &sample_tree, &sample_position) != 17 ||
+    int fields = fscanf(fp,
+                        version >= 2 ?
+                        " %31s %lu %llx %u %llu "
+                        "%llu %llu %llu %llu %llu %llu "
+                        "%llu %llu %llu %u %u %u %llu" :
+                        " %31s %lu %llx %u %llu "
+                        "%llu %llu %llu %llu %llu %llu "
+                        "%llu %llu %llu %u %u %u",
+                        label, &at, &key, &preferred, &queries,
+                        &cost_mask, &cost_tree, &cost_position,
+                        &population_mask, &population_tree,
+                        &population_position, &last_mask, &last_tree,
+                        &last_position, &sample_mask, &sample_tree,
+                        &sample_position, &last_seen);
+    if (fields != (version >= 2 ? 18 : 17) ||
         strcmp(label, "Q") != 0 || at >= route_capacity ||
         preferred >= CBD_ROUTE_COUNT || index->route_profiles[at].occupied) {
       fclose(fp);
@@ -5351,7 +5516,33 @@ BOOL compact_back_demod_read_adaptive_state(
     entry->samples[CBD_ROUTE_MASK] = sample_mask;
     entry->samples[CBD_ROUTE_TREE] = sample_tree;
     entry->samples[CBD_ROUTE_POSITION] = sample_position;
+    entry->last_seen = last_seen;
     index->route_profile_occupied++;
+  }
+  if (version >= 2) {
+    unsigned long frequency_capacity, frequency_count;
+    if (fscanf(fp, " %31s %lu %lu", label, &frequency_capacity,
+               &frequency_count) != 3 || strcmp(label, "FREQUENCY") != 0 ||
+        frequency_capacity != index->route_frequency_capacity ||
+        frequency_count > frequency_capacity * 2) {
+      fclose(fp);
+      return FALSE;
+    }
+    memset(index->route_frequency, 0,
+           index->route_frequency_capacity * 2 *
+             sizeof(*index->route_frequency));
+    for (i = 0; i < frequency_count; i++) {
+      unsigned value;
+      if (fscanf(fp, " %31s %lu %u", label, &at, &value) != 3 ||
+          strcmp(label, "F") != 0 ||
+          at >= index->route_frequency_capacity * 2 ||
+          value == 0 || value > UINT16_MAX ||
+          index->route_frequency[at] != 0) {
+        fclose(fp);
+        return FALSE;
+      }
+      index->route_frequency[at] = (uint16_t) value;
+    }
   }
   if (fscanf(fp, " %31s", label) != 1 || strcmp(label, "END") != 0) {
     fclose(fp);
@@ -5360,6 +5551,7 @@ BOOL compact_back_demod_read_adaptive_state(
   if (fclose(fp) != 0)
     return FALSE;
   index->position_generation = generation;
+  index->route_sequence = route_sequence;
   update_peak(index);
   return TRUE;
 }
@@ -5471,6 +5663,15 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
     sizeof(*index->route_profiles);
   stats->route_profile_collisions = index->route_profile_collisions;
   stats->route_profile_replacements = index->route_profile_replacements;
+  stats->route_frequency_capacity = index->route_frequency_capacity;
+  stats->route_frequency_bytes = index->route_frequency_capacity * 2 *
+    sizeof(*index->route_frequency);
+  stats->route_profile_hits = index->route_profile_hits;
+  stats->route_profile_misses = index->route_profile_misses;
+  stats->route_cold_fallbacks = index->route_cold_fallbacks;
+  stats->route_admission_attempts = index->route_admission_attempts;
+  stats->route_admission_rejections = index->route_admission_rejections;
+  stats->route_aged_replacements = index->route_aged_replacements;
   stats->route_mask_choices = index->route_choices[CBD_ROUTE_MASK];
   stats->route_tree_choices = index->route_choices[CBD_ROUTE_TREE];
   stats->route_position_choices = index->route_choices[CBD_ROUTE_POSITION];
@@ -5550,6 +5751,8 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
     sizeof(*index->position_probation);
   stats->root_bytes += index->route_profile_capacity *
     sizeof(*index->route_profiles);
+  stats->root_bytes += index->route_frequency_capacity * 2 *
+    sizeof(*index->route_frequency);
   stats->token_bytes = index->owns_term_pool ? terms.token_bytes : 0;
   stats->hash_bytes = compact_id_map_bytes(index->id_map);
   stats->scratch_bytes = index->result_capacity * sizeof(*index->results) +
@@ -5581,6 +5784,7 @@ void compact_back_demod_free(Compact_back_demod_index index)
   safe_free(index->position_query);
   safe_free(index->position_probation);
   safe_free(index->route_profiles);
+  safe_free(index->route_frequency);
   safe_free(index->occurrences);
   safe_free(index->records);
   if (index->owns_term_pool)

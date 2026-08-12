@@ -549,7 +549,7 @@ int main(void)
     enum { ROUTE_FAMILY = 128, ROUTE_TARGET = 73 };
     Compact_back_demod_index adaptive;
     Compact_back_demod_index restored;
-    struct compact_back_demod_stats selective_stats, broad_stats,
+    struct compact_back_demod_stats cold_stats, selective_stats, broad_stats,
       renamed_stats, growth_stats, growth_probe_stats,
       stable_growth_stats, compacted_stats;
     Topform clauses[ROUTE_FAMILY], growth[ROUTE_FAMILY];
@@ -576,11 +576,24 @@ int main(void)
     (void) snprintf(text, sizeof(text), "route(a,g(h(j(c%d)))) = a.",
                     ROUTE_TARGET);
     selective = indexed_clause(text);
-    for (j = 0; j < 4; j++) {
+    for (j = 0; j < 16; j++) {
       ids = compact_back_demod_candidate_ids(
         adaptive, selective, ORIENTED, &count);
       CHECK(count == 1 && ids[0] == clauses[ROUTE_TARGET]->id,
             "selective adaptive route preserves the sole answer");
+      safe_free(ids);
+    }
+    compact_back_demod_get_stats(adaptive, &cold_stats);
+    CHECK(cold_stats.route_profile_occupied == 0 &&
+          cold_stats.route_tree_choices == 0 &&
+          cold_stats.route_tree_probes == 0 &&
+          cold_stats.route_cold_fallbacks >= 15,
+          "cold route class allocates no profile and pays no tree probe");
+    for (; j < 35; j++) {
+      ids = compact_back_demod_candidate_ids(
+        adaptive, selective, ORIENTED, &count);
+      CHECK(count == 1 && ids[0] == clauses[ROUTE_TARGET]->id,
+            "hot selective adaptive route preserves the sole answer");
       safe_free(ids);
     }
     compact_back_demod_get_stats(adaptive, &selective_stats);
@@ -589,12 +602,14 @@ int main(void)
           selective_stats.route_tree_observed_cost <
             selective_stats.route_mask_observed_cost &&
           selective_stats.route_profile_capacity == 4096 &&
-          selective_stats.route_profile_bytes <= 512 * 1024,
+          selective_stats.route_profile_bytes <= 512 * 1024 &&
+          selective_stats.route_frequency_capacity == 65536 &&
+          selective_stats.route_frequency_bytes == 256 * 1024,
           "selective shape promotes a bounded tree route");
 
     broad = indexed_clause("route(x,y) = a.");
     tree_before_broad = selective_stats.route_tree_choices;
-    for (j = 0; j < 8; j++) {
+    for (j = 0; j < 40; j++) {
       ids = compact_back_demod_candidate_ids(
         adaptive, broad, ORIENTED, &count);
       CHECK(count == ROUTE_FAMILY && ids[0] == clauses[ROUTE_FAMILY - 1]->id &&
@@ -605,7 +620,7 @@ int main(void)
     compact_back_demod_get_stats(adaptive, &broad_stats);
     CHECK(broad_stats.route_tree_choices == tree_before_broad + 1 &&
           broad_stats.route_mask_choices >=
-            selective_stats.route_mask_choices + 7,
+            selective_stats.route_mask_choices + 39,
           "broad shape under the same root rejects tree promotion");
 
     renamed = indexed_clause("route(y,x) = a.");
@@ -628,30 +643,24 @@ int main(void)
       CHECK(compact_back_demod_add(adaptive, growth[j]),
             "double adaptive-route physical population");
     }
-    ids = compact_back_demod_candidate_ids(
-      adaptive, broad, ORIENTED, &count);
-    CHECK(count == ROUTE_FAMILY * 2,
-          "population-crossover probe preserves every answer");
-    safe_free(ids);
+    for (j = 0; j < 33; j++) {
+      ids = compact_back_demod_candidate_ids(
+        adaptive, broad, ORIENTED, &count);
+      CHECK(count == ROUTE_FAMILY * 2,
+            "population-crossover training preserves every answer");
+      safe_free(ids);
+    }
     compact_back_demod_get_stats(adaptive, &growth_stats);
     CHECK(growth_stats.route_profile_occupied ==
             renamed_stats.route_profile_occupied + 1 &&
           growth_stats.route_mask_choices ==
-            renamed_stats.route_mask_choices + 1 &&
+            renamed_stats.route_mask_choices + 32 &&
           growth_stats.route_tree_choices ==
-            renamed_stats.route_tree_choices,
-          "doubling population opens one scale-class mask baseline");
-    ids = compact_back_demod_candidate_ids(
-      adaptive, broad, ORIENTED, &count);
-    CHECK(count == ROUTE_FAMILY * 2,
-          "post-crossover mask route preserves every answer");
-    safe_free(ids);
-    compact_back_demod_get_stats(adaptive, &growth_probe_stats);
-    CHECK(growth_probe_stats.route_tree_choices ==
-            growth_stats.route_tree_choices + 1 &&
-          growth_probe_stats.route_tree_probes ==
-            growth_stats.route_tree_probes + 1,
-          "new population scale samples its tree exactly once");
+            renamed_stats.route_tree_choices + 1 &&
+          growth_stats.route_tree_probes ==
+            renamed_stats.route_tree_probes + 1,
+          "doubling population admits a hot class and samples tree once");
+    growth_probe_stats = growth_stats;
     ids = compact_back_demod_candidate_ids(
       adaptive, broad, ORIENTED, &count);
     CHECK(count == ROUTE_FAMILY * 2,

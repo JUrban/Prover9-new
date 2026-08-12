@@ -763,6 +763,10 @@ void fprint_compact_back_demod(FILE *fp)
   fprintf(fp,
           "Compact_back_route: capacity=%llu, occupied=%llu, bytes=%llu, "
           "collisions=%llu, replacements=%llu, mask_choices=%llu, "
+          "frequency_capacity=%llu, frequency_bytes=%llu, "
+          "profile_hits=%llu, profile_misses=%llu, cold_fallbacks=%llu, "
+          "admission_attempts=%llu, admission_rejections=%llu, "
+          "aged_replacements=%llu, "
           "tree_choices=%llu, position_choices=%llu, mask_probes=%llu, "
           "tree_probes=%llu, position_probes=%llu, switches=%llu, "
           "reversions=%llu, hysteresis_holds=%llu, "
@@ -774,6 +778,10 @@ void fprint_compact_back_demod(FILE *fp)
           stats.route_profile_capacity, stats.route_profile_occupied,
           stats.route_profile_bytes, stats.route_profile_collisions,
           stats.route_profile_replacements, stats.route_mask_choices,
+          stats.route_frequency_capacity, stats.route_frequency_bytes,
+          stats.route_profile_hits, stats.route_profile_misses,
+          stats.route_cold_fallbacks, stats.route_admission_attempts,
+          stats.route_admission_rejections, stats.route_aged_replacements,
           stats.route_tree_choices, stats.route_position_choices,
           stats.route_mask_probes, stats.route_tree_probes,
           stats.route_position_probes, stats.route_switches,
