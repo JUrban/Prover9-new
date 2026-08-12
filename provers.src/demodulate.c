@@ -722,7 +722,8 @@ void fprint_compact_back_demod(FILE *fp)
           "symbol_occurrences=%llu, groups_examined=%llu, "
           "occurrences_examined=%llu, path_checks=%llu, "
           "path_rejects=%llu, query_input=%016llx, "
-          "query_output=%016llx, file_snapshots=%llu, snapshot_ids=%llu, "
+          "query_output=%016llx, query_answers=%016llx, "
+          "file_snapshots=%llu, snapshot_ids=%llu, "
           "posting_stream_used=%llu, "
           "posting_stream=%llu, occurrence_stream_used=%llu, "
           "occurrence_stream=%llu, postings=%llu, records=%llu, roots=%llu, "
@@ -818,6 +819,7 @@ void fprint_compact_back_demod(FILE *fp)
           stats.path_filter_checks, stats.path_filter_rejects,
           stats.query_input_fingerprint,
           stats.query_output_fingerprint,
+          stats.query_answer_fingerprint,
           stats.materialized_file_snapshots,
           stats.materialized_snapshot_ids,
           stats.posting_stream_used, stats.posting_stream_bytes,

@@ -192,6 +192,7 @@ struct compact_back_demod_stats {
   unsigned long long worst_query_candidates;
   unsigned long long query_input_fingerprint;
   unsigned long long query_output_fingerprint;
+  unsigned long long query_answer_fingerprint;
   struct compact_query_profile query_profile;
   double lookup_seconds;
   unsigned long long lookup_timing_eligible;

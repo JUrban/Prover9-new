@@ -502,6 +502,7 @@ struct compact_back_demod_index {
   unsigned long long worst_query_candidates;
   unsigned long long query_input_fingerprint;
   unsigned long long query_output_fingerprint;
+  unsigned long long query_answer_fingerprint;
   struct compact_query_profile query_profile;
   struct compact_query_timer lookup_timer;
   Clock maintenance_clock;
@@ -5998,6 +5999,26 @@ static uint64_t note_query_output_fingerprint(Compact_back_demod_index index,
   return value;
 }
 
+/* Keep semantic answers separate from the historical output/work checksum.
+   Routes are expected to change query_work and decoded bytes, so only this
+   fingerprint can be compared directly when validating candidate identity
+   across index implementations. */
+static uint64_t note_query_answer_fingerprint(Compact_back_demod_index index,
+                                              size_t count)
+{
+  size_t i;
+  uint64_t value = hash_id((uint64_t) count ^
+    UINT64_C(0x6a09e667f3bcc909));
+  for (i = 0; i < count; i++)
+    value = hash_id(value ^ index->results[i] ^
+                    (UINT64_C(0xbb67ae8584caa73b) *
+                     ((uint64_t) i + 1)));
+  index->query_answer_fingerprint = hash_id(
+    index->query_answer_fingerprint ^ value ^
+    (index->queries + UINT64_C(0x3c6ef372fe94f82b)));
+  return value;
+}
+
 static size_t pattern_min_tokens(Term term)
 {
   size_t count = 1;
@@ -6310,7 +6331,7 @@ unsigned long long *compact_back_demod_candidate_ids(
   Compact_back_demod_index index, Topform demod, int type, size_t *count)
 {
   Term atom, alpha, beta;
-  uint64_t input_fingerprint, output_fingerprint;
+  uint64_t input_fingerprint, output_fingerprint, answer_fingerprint;
   unsigned long long *answer;
   unsigned long long occurrences_before;
   *count = 0;
@@ -6335,16 +6356,18 @@ unsigned long long *compact_back_demod_candidate_ids(
     collect_pattern(index, beta, demod->id, count);
   if (*count > 1)
     qsort(index->results, *count, sizeof(*index->results), decreasing_id);
+  answer_fingerprint = note_query_answer_fingerprint(index, *count);
   output_fingerprint = note_query_output_fingerprint(index, *count);
   if (query_event_trace_enabled())
     fprintf(stderr,
             "CBD_QUERY sequence=%llu demod=%llu type=%d input=%016llx "
             "active=%llu physical=%llu work=%llu candidates=%llu "
-            "output=%016llx.\n",
+            "answers=%016llx output=%016llx.\n",
             index->queries + 1, demod->id, type,
             (unsigned long long) input_fingerprint, index->active,
             (unsigned long long) (index->record_count - 1),
             index->query_work, (unsigned long long) *count,
+            (unsigned long long) answer_fingerprint,
             (unsigned long long) output_fingerprint);
   answer = *count == 0 ? NULL : safe_malloc(*count * sizeof(*answer));
   if (*count != 0)
@@ -6901,6 +6924,7 @@ static void compact_back_demod_compact_internal(
   index->worst_query_candidates = old.worst_query_candidates;
   index->query_input_fingerprint = old.query_input_fingerprint;
   index->query_output_fingerprint = old.query_output_fingerprint;
+  index->query_answer_fingerprint = old.query_answer_fingerprint;
   index->query_profile = old.query_profile;
   if (old_peak > index->peak_bytes)
     index->peak_bytes = old_peak;
@@ -7147,6 +7171,7 @@ void compact_back_demod_compact_materialized(
   index->worst_query_candidates = old.worst_query_candidates;
   index->query_input_fingerprint = old.query_input_fingerprint;
   index->query_output_fingerprint = old.query_output_fingerprint;
+  index->query_answer_fingerprint = old.query_answer_fingerprint;
   index->query_profile = old.query_profile;
   index->materialized_file_snapshots =
     file_snapshots + (file_snapshot ? 1 : 0);
@@ -7809,6 +7834,7 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->worst_query_candidates = index->worst_query_candidates;
   stats->query_input_fingerprint = index->query_input_fingerprint;
   stats->query_output_fingerprint = index->query_output_fingerprint;
+  stats->query_answer_fingerprint = index->query_answer_fingerprint;
   stats->query_profile = index->query_profile;
   stats->lookup_seconds = index->lookup_timer.estimated_seconds;
   stats->lookup_timing_eligible = index->lookup_timer.eligible;
