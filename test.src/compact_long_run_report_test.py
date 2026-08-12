@@ -24,7 +24,7 @@ Compact_back_demod: mode=authoritative, strategy=adaptive, failures=0, active=50
 Compact_index_timing: component=back_demod, lookup_seconds=2.0, exact_seconds=0.1, materialize_seconds=0.2, maintenance_seconds=0.3.
 Compact_query_profile: component=back_demod, op=candidate_lookup, queries=20, candidates=4, exact_tests=4, exact_successes=3.
 Dense_passive: backing=ancestor-file, directory=file, records=20, directory_logical=1280.
-Dense_passive_selector: store=file, buffer_bytes=240, run_logical=480, reads=3 (72 bytes), writes=4 (96 bytes), read_evictions=2 (48 bytes), read_eviction_failures=0, min_calls=10, buffer_checks=8, run_checks=20.
+Dense_passive_selector: store=file, record_bits=64, entry_bytes=24, buffer_bytes=240, run_logical=480, reads=3 (72 bytes), writes=4 (96 bytes), read_evictions=2 (48 bytes), read_eviction_failures=0, min_calls=10, buffer_checks=8, run_checks=20.
 Dense_passive_gc: validation_failures=0.
 Ancestor_store: validation_failures=0, file_reads=10 (1000 bytes), file_writes=5 (500 bytes).
 Process_residency_kb: pss=10240, anonymous=8192, swap=0.
@@ -77,6 +77,8 @@ class ReportTest(unittest.TestCase):
                                100.0 * 48 / 72)
         self.assertAlmostEqual(rows[0]["selector_min_calls_per_given"], 0.1)
         self.assertAlmostEqual(rows[0]["selector_run_checks_per_given"], 0.2)
+        self.assertEqual(rows[0]["selector_record_bits"], 64)
+        self.assertEqual(rows[0]["selector_entry_bytes"], 24)
         self.assertAlmostEqual(rows[1]["pss_mib"], 12.0)
         self.assertEqual(rows[1]["statistics_format_comma_num_buffers"], 32)
         self.assertAlmostEqual(rows[0]["ancestor_io_mib_per_cpu"],
@@ -225,6 +227,8 @@ User_CPU=2.0, System_CPU=0.0, Wall_clock=2.
             "last_selector_read_bytes": 1000,
             "last_selector_read_eviction_pct": 98.0,
             "last_selector_read_eviction_failures": 0,
+            "last_selector_record_bits": 64,
+            "last_selector_entry_bytes": 24,
         })
         cache_failure = REPORT.compare_summaries(reference, candidate)
         self.assertEqual(cache_failure["selector_read_cache_gate"], "fail")
@@ -233,6 +237,12 @@ User_CPU=2.0, System_CPU=0.0, Wall_clock=2.
         cache_pass = REPORT.compare_summaries(reference, candidate)
         self.assertEqual(cache_pass["selector_read_cache_gate"], "pass")
         self.assertEqual(cache_pass["result"], "eligible")
+        candidate["last_selector_record_bits"] = 32
+        width_failure = REPORT.compare_summaries(reference, candidate)
+        self.assertEqual(
+            width_failure["selector_reference_width_gate"], "fail")
+        self.assertEqual(width_failure["result"], "reject")
+        candidate["last_selector_record_bits"] = 64
         candidate["last_selector_store"] = "heap"
 
         candidate["peak_rss_kb"] = 100000
@@ -265,6 +275,7 @@ User_CPU=2.0, System_CPU=0.0, Wall_clock=2.
             "candidate_back_normalized_cpu_slope_ratio": 1.1,
             "slope_gate": "pass",
             "selector_read_cache_gate": "pass",
+            "selector_reference_width_gate": "pass",
             "max_cpu_ratio": 1.25, "min_ram_saving_pct": 80.0,
             "max_back_slope_ratio": 1.25,
             "required_slope_samples": 7,

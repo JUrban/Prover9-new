@@ -129,7 +129,9 @@ cgroup-v2 peak memory, including charged file cache, and refuses with exit 77
 when the current scope is not delegated.  File-selector candidates must also
 exercise reads and successfully advise at least 99% of consumed bytes out of
 cache.  Interval output also reports selector minimum calls and run-head checks
-per given, so file-queue CPU growth is visible.  See
+per given, so file-queue CPU growth is visible.  It also requires the
+month-scale file representation to report a 64-bit record reference in the
+unchanged 24-byte entry.  See
 `P9-LONG-RUN-SCALABILITY-RESULTS.md` for exact mature-run commands,
 measurement caveats, and acceptance criteria.
 

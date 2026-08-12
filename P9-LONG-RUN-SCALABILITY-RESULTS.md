@@ -794,3 +794,35 @@ and bounds run checks by the fixed 64-level table.  In the integrated
 discarded stale entry.  It retained the established 120,793 generated and
 5,737 kept trajectory.  This removes a deterministic approximately twofold
 minimum-search overhead; mature end-to-end CPU remains the acceptance gate.
+
+### File-selector references beyond the month-scale boundary
+
+The first dense selector representation used a 32-bit physical record index.
+At 65.9 million live passives after nine hours—about 7.32 million/hour—the
+4.29-billion reference ceiling projects to roughly 24 days.  Worse, signed
+32-bit `Sos_size` and total selector-membership counters projected to overflow
+after roughly 12 days.  These are concrete month-run failures, not theoretical
+limits at unreachable populations.
+
+File-run entries now store a checked 64-bit physical record reference.  The old
+layout already had four padding bytes after its 32-bit reference, so the entry
+remains exactly 24 bytes: file size, insertion-buffer RAM, read-buffer RAM, and
+merge I/O do not increase.  Production encode/decode functions round-trip
+`UINT32_MAX + 123` in the focused test, while the 200,000- and 2.2-million-entry
+probes exercise actual sorting, merging, serialization, readback, and selection
+with `record_bits=64, entry_bytes=24`.  SOS size, total selector memberships,
+selected counts, and local deletion/displacement totals are now unsigned
+64-bit as well.  The public dense population accessor and ordinary statistics
+now preserve the full count; the legacy integer progress-callback ABI receives
+a saturated value rather than a wrapped negative one.
+
+The heap selector intentionally keeps four-byte physical indices to preserve
+its RAM advantage on small/medium jobs and fails explicitly at its boundary.
+Therefore a run intended to cross 32-bit physical populations must use
+`assign(passive_selector_store,file).` on a 64-bit build.  Other compact
+inference-index offset spaces remain separately audited; this change removes
+the earliest passive-control-plane limit and is not a claim that every index
+can already survive a month at that growth rate.  In particular, format-3
+checkpoint restore still rebuilds through signed-int `Clist` positions.  A
+checkpoint request above that count now fails explicitly instead of silently
+truncating its SOS metadata; scalable checkpoint streaming is still open.

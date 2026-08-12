@@ -60,6 +60,8 @@ struct dense_passive_directory_stats {
 struct dense_passive_selector_stats {
   Dense_passive_selector_mode mode;
   unsigned long long buffer_limit;
+  unsigned record_reference_bits;
+  unsigned entry_bytes;
   unsigned long long buffered_entries;
   unsigned long long buffer_bytes;
   unsigned long long run_entries;
@@ -123,9 +125,16 @@ void configure_dense_passive_selectors(Dense_passive_selector_mode mode,
 
 struct dense_passive_selector_stats dense_passive_selector_stats(void);
 
+/* Checked conversion used by immutable file-selector entries.  Exposed so
+   numerical-limit tests can cross 32-bit boundaries without allocating
+   billions of passive records. */
+unsigned long long dense_passive_file_record_reference(size_t record);
+BOOL dense_passive_file_record_index(unsigned long long reference,
+                                     size_t *record);
+
 BOOL dense_passive_enabled(void);
 
-int dense_passive_size(void);
+unsigned long long dense_passive_size(void);
 
 BOOL dense_passive_contains_id(unsigned long long id);
 

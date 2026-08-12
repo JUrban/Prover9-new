@@ -125,6 +125,13 @@ static void compact_otter_advise_rebuild_batch(
 /* Progress callback for shared-memory IPC (set by -cores scheduler) */
 static Search_progress_fn Progress_callback = NULL;
 
+/* The public progress callback predates 64-bit search counters.  Keep its ABI
+   stable, but never let a long run wrap a displayed population negative. */
+static int progress_count(unsigned long long count)
+{
+  return count > INT_MAX ? INT_MAX : (int) count;
+}
+
 #ifdef __EMSCRIPTEN__
 static double Wasm_deadline_ms = 0;
 #endif
@@ -2644,6 +2651,9 @@ void update_memory_stats(void)
   Stats.dense_passive_selector_buffered_entries =
     selectors.buffered_entries;
   Stats.dense_passive_selector_buffer_bytes = selectors.buffer_bytes;
+  Stats.dense_passive_selector_record_reference_bits =
+    selectors.record_reference_bits;
+  Stats.dense_passive_selector_entry_bytes = selectors.entry_bytes;
   Stats.dense_passive_selector_run_entries = selectors.run_entries;
   Stats.dense_passive_selector_run_logical_bytes =
     selectors.run_logical_bytes;
@@ -2876,7 +2886,7 @@ void update_stats(void)
   Stats.limbo_size = Glob.limbo ? Glob.limbo->length : 0;
   Stats.disabled_size = clause_store_current_length(Glob.disabled);
   if (compact_otter_passive_mode()) {
-    size_t passive = dense_passive_size();
+    size_t passive = (size_t) dense_passive_size();
     if (Stats.disabled_size < passive)
       fatal_error("update_stats: archived passive count exceeds archive size");
     Stats.disabled_size -= passive;
@@ -3476,6 +3486,7 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
   if (dense_passive_mode())
     fprintf(fp,
             "Dense_passive_selector: store=%s, buffer_limit=%d, "
+            "record_bits=%llu, entry_bytes=%llu, "
             "buffered=%s, buffer_bytes=%s, run_entries=%s, "
             "run_logical=%s, run_physical=%s, runs=%s, peak_runs=%s, "
             "flushes=%s, merges=%s, reads=%s (%s bytes), "
@@ -3486,6 +3497,8 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             str_ident(stringparm1(Opt->passive_selector_store), "file") ?
               "file" : "heap",
             parm(Opt->passive_selector_buffer),
+            s.dense_passive_selector_record_reference_bits,
+            s.dense_passive_selector_entry_bytes,
             comma_num(s.dense_passive_selector_buffered_entries),
             comma_num(s.dense_passive_selector_buffer_bytes),
             comma_num(s.dense_passive_selector_run_entries),
@@ -11737,8 +11750,8 @@ void write_checkpoint_hashes(const char *dir)
   fprintf(fp, "sos_hints %llu\n",     dense_passive_mode() ?
           hash_dense_hint_matches() : hash_clist_hint_matches(Glob.sos));
   fprintf(fp, "usable_hints %llu\n",  hash_clist_hint_matches(Glob.usable));
-  fprintf(fp, "sos_count %d\n",       dense_passive_mode() ?
-          dense_passive_size() : Glob.sos->length);
+  fprintf(fp, "sos_count %llu\n",     dense_passive_mode() ?
+          dense_passive_size() : (unsigned long long) Glob.sos->length);
   fprintf(fp, "usable_count %d\n",    Glob.usable->length);
   fprintf(fp, "demods_count %d\n",    Glob.demods->length);
   fprintf(fp, "rewrite_only_count %llu\n",
@@ -13418,6 +13431,14 @@ void write_checkpoint(void)
   char tmpdir[520], finaldir[512];
   FILE *fp;
   int n;
+
+  /* Format 3 rebuilds the SOS through legacy Clists and uses signed-int list
+     positions.  Refuse explicitly at that independent boundary instead of
+     silently truncating a now-64-bit dense population.  Normal file-backed
+     search and reporting remain valid beyond it; scalable checkpoint
+     streaming is tracked separately in the long-run plan. */
+  if (dense_passive_mode() && dense_passive_size() > INT_MAX)
+    fatal_error("write_checkpoint: format-3 SOS count exceeds INT_MAX");
 
   /* Compact rewrite attempts happen in the hot demodulation callback, so
      synchronize its private counters before serializing Stats. */
@@ -16299,8 +16320,10 @@ Prover_results search(Prover_input p)
       // Predicate elimination (may add to sos and move clauses to disabled)
 
       if (Progress_callback)
-        Progress_callback(STAGE_PRED_ELIM, (int) Stats.given, (int) Stats.kept,
-                          (int) Stats.sos_size, (int) Stats.usable_size,
+        Progress_callback(STAGE_PRED_ELIM, progress_count(Stats.given),
+                          progress_count(Stats.kept),
+                          progress_count(Stats.sos_size),
+                          progress_count(Stats.usable_size),
                           (int) megs_malloced());
 
       if (flag(p->options->predicate_elim) && clist_empty(Glob.usable)) {
@@ -16315,8 +16338,10 @@ Prover_results search(Prover_input p)
       }
 
       if (Progress_callback)
-        Progress_callback(STAGE_BASIC_PROPS, (int) Stats.given, (int) Stats.kept,
-                          (int) Stats.sos_size, (int) Stats.usable_size,
+        Progress_callback(STAGE_BASIC_PROPS, progress_count(Stats.given),
+                          progress_count(Stats.kept),
+                          progress_count(Stats.sos_size),
+                          progress_count(Stats.usable_size),
                           (int) megs_malloced());
 
       basic_clause_properties(Glob.sos, Glob.usable);
@@ -16327,15 +16352,19 @@ Prover_results search(Prover_input p)
         auto_denials(Glob.sos, Glob.usable, Opt);
 
       if (Progress_callback)
-        Progress_callback(STAGE_INIT_SEARCH, (int) Stats.given, (int) Stats.kept,
-                          (int) Stats.sos_size, (int) Stats.usable_size,
+        Progress_callback(STAGE_INIT_SEARCH, progress_count(Stats.given),
+                          progress_count(Stats.kept),
+                          progress_count(Stats.sos_size),
+                          progress_count(Stats.usable_size),
                           (int) megs_malloced());
 
       init_search();  // init clocks, ordering, auto-mode, init packages
 
       if (Progress_callback)
-        Progress_callback(STAGE_INDEX_INITIAL, (int) Stats.given, (int) Stats.kept,
-                          (int) Stats.sos_size, (int) Stats.usable_size,
+        Progress_callback(STAGE_INDEX_INITIAL, progress_count(Stats.given),
+                          progress_count(Stats.kept),
+                          progress_count(Stats.sos_size),
+                          progress_count(Stats.usable_size),
                           (int) megs_malloced());
 
       index_and_process_initial_clauses();
@@ -16354,8 +16383,9 @@ Prover_results search(Prover_input p)
 
     /* Signal that preprocessing is complete and search is starting. */
     if (Progress_callback)
-      Progress_callback(STAGE_SEARCHING, 0, (int) Stats.kept,
-                        (int) Stats.sos_size, (int) Stats.usable_size,
+      Progress_callback(STAGE_SEARCHING, 0, progress_count(Stats.kept),
+                        progress_count(Stats.sos_size),
+                        progress_count(Stats.usable_size),
                         (int) megs_malloced());
 
     if (parm(Opt->checkpoint_minutes) > 0) {
@@ -16509,8 +16539,10 @@ Prover_results search(Prover_input p)
 
       if (Progress_callback && Stats.given != given_before_iteration &&
 	  Stats.given % 100 == 0)
-        Progress_callback(STAGE_SEARCHING, (int) Stats.given, (int) Stats.kept,
-                          (int) Stats.sos_size, (int) Stats.usable_size,
+        Progress_callback(STAGE_SEARCHING, progress_count(Stats.given),
+                          progress_count(Stats.kept),
+                          progress_count(Stats.sos_size),
+                          progress_count(Stats.usable_size),
                           (int) megs_malloced());
 
       /* Periodic hint expiry sweep */
@@ -16536,8 +16568,10 @@ Prover_results search(Prover_input p)
     }  // ************************ end of main loop ************************
 
     if (Progress_callback)
-      Progress_callback(STAGE_DONE, (int) Stats.given, (int) Stats.kept,
-                        (int) Stats.sos_size, (int) Stats.usable_size,
+      Progress_callback(STAGE_DONE, progress_count(Stats.given),
+                        progress_count(Stats.kept),
+                        progress_count(Stats.sos_size),
+                        progress_count(Stats.usable_size),
                         (int) megs_malloced());
 
     fprint_all_stats(stdout, Opt ? stringparm1(Opt->stats) : "lots");

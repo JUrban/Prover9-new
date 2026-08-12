@@ -275,6 +275,20 @@ Gate: tests cross segment boundaries at small configured segment sizes and
 exercise the same code paths as production without allocating billions of
 objects.
 
+Implementation status: the file-backed passive control plane no longer has its
+earliest 32-bit boundary.  Immutable selector-run references are now checked
+64-bit physical record indices, using the former padding so entries remain 24
+bytes; SOS size, selector-membership totals, and selected/deleted report totals
+are also 64-bit.  A production encode/decode boundary test crosses
+`UINT32_MAX`.  The in-memory heap selector deliberately retains compact 32-bit
+indices and an explicit overflow failure, so month-scale runs must use file
+selectors on a 64-bit host.  The legacy format-3 checkpoint reconstruction
+still depends on signed-int `Clist` positions and now refuses explicitly above
+that independent boundary rather than writing a truncated checkpoint.  A
+streaming large-SOS checkpoint remains required.  Compact inference-index
+offsets listed above still require segmentation/64-bit audits; this phase is
+not globally complete.
+
 ## 7. Validation ladder
 
 Run gates in this order and retain failures as evidence:

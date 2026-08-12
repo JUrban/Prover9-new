@@ -53,9 +53,15 @@ struct dense_selector_entry {
     unsigned long long hint_id;
     double weight;
   } key;
-  uint32_t record;
-  uint32_t padding;
+  uint64_t record;
 };
+
+/* Widening the physical record reference must consume the old padding rather
+   than enlarge every external selector entry. */
+typedef char dense_selector_entry_must_remain_24_bytes[
+  sizeof(struct dense_selector_entry) == 24 ? 1 : -1];
+typedef char dense_file_record_reference_must_hold_size_t[
+  sizeof(size_t) <= sizeof(uint64_t) ? 1 : -1];
 
 struct dense_selector_run {
   int fd;
@@ -73,7 +79,7 @@ struct giv_select {
   int          order;
   Clause_eval  property;
   int          part;
-  int          selected;
+  unsigned long long selected;
   Ordertype (*compare) (void *, void *);  /* function for ordering idx */
   Avl_node idx;          /* index of clauses (binary search (AVL) tree) */
   uint32_t *dense_heap;  /* record indexes; lazy deletion */
@@ -133,18 +139,18 @@ typedef struct select_state *Select_state;
 
 static struct select_state {
   Plist selectors;    /* list of Giv_select */
-  int occurrences;    /* occurrences of clauses in selectors */
+  unsigned long long occurrences;  /* memberships across selectors */
   Plist current;      /* for ratio state */
   int  count;         /* for ratio state */
   int  cycle_size;
 } High, Low; /* The two lists of selectors and their positions */
 
 static BOOL Rule_needs_semantics = FALSE;
-static int Sos_size = 0;
+static unsigned long long Sos_size = 0;
 static double Low_water_keep = INT_MAX;
 static double Low_water_displace = INT_MAX;
-static int Sos_deleted = 0;
-static int Sos_displaced = 0;
+static unsigned long long Sos_deleted = 0;
+static unsigned long long Sos_displaced = 0;
 
 static BOOL Debug = FALSE;
 
@@ -464,9 +470,9 @@ BOOL dense_passive_enabled(void)
 }
 
 /* PUBLIC */
-int dense_passive_size(void)
+unsigned long long dense_passive_size(void)
 {
-  return Dense_active_count > INT_MAX ? INT_MAX : (int) Dense_active_count;
+  return (unsigned long long) Dense_active_count;
 }
 
 /* PUBLIC */
@@ -775,6 +781,23 @@ static int dense_entry_compare(int order,
 
 static int Dense_entry_sort_order = GS_ORDER_AGE;
 
+/* PUBLIC */
+unsigned long long dense_passive_file_record_reference(size_t record)
+{
+  return (uint64_t) record;
+}
+
+/* PUBLIC */
+BOOL dense_passive_file_record_index(unsigned long long reference,
+                                     size_t *record)
+{
+  size_t decoded = (size_t) reference;
+  if (record == NULL || (unsigned long long) decoded != reference)
+    return FALSE;
+  *record = decoded;
+  return TRUE;
+}
+
 static int dense_entry_qsort_compare(const void *va, const void *vb)
 {
   return dense_entry_compare(
@@ -1051,7 +1074,7 @@ static void dense_selector_buffer_remove_root(Giv_select gs)
     gs->dense_buffer[i] = last;
 }
 
-static void dense_selector_file_push(Giv_select gs, uint32_t record)
+static void dense_selector_file_push(Giv_select gs, size_t record)
 {
   struct dense_passive_record *r = &Dense_records[record];
   struct dense_selector_entry entry;
@@ -1075,8 +1098,7 @@ static void dense_selector_file_push(Giv_select gs, uint32_t record)
     entry.key.hint_id = r->hint_id;
   else
     entry.key.hint_id = 0;
-  entry.record = record;
-  entry.padding = 0;
+  entry.record = dense_passive_file_record_reference(record);
   i = gs->dense_buffer_size++;
   while (i > 0) {
     size_t parent = (i - 1) / 2;
@@ -1231,6 +1253,12 @@ struct dense_passive_selector_stats dense_passive_selector_stats(void)
   memset(&stats, 0, sizeof(stats));
   stats.mode = Dense_selector_mode;
   stats.buffer_limit = Dense_selector_buffer_limit;
+  stats.record_reference_bits = (unsigned)
+    ((sizeof(size_t) <
+      sizeof(((struct dense_selector_entry *) 0)->record) ?
+      sizeof(size_t) :
+      sizeof(((struct dense_selector_entry *) 0)->record)) * CHAR_BIT);
+  stats.entry_bytes = (unsigned) sizeof(struct dense_selector_entry);
   for (p = High.selectors; p != NULL; p = p->next)
     dense_selector_add_stats(p->v, &stats);
   for (p = Low.selectors; p != NULL; p = p->next)
@@ -1260,12 +1288,15 @@ static void dense_heap_push(Giv_select gs, uint32_t record)
   gs->dense_heap[i] = record;
 }
 
-static void dense_selector_push(Giv_select gs, uint32_t record)
+static void dense_selector_push(Giv_select gs, size_t record)
 {
   if (Dense_selector_mode == DENSE_SELECTOR_FILE)
     dense_selector_file_push(gs, record);
-  else
-    dense_heap_push(gs, record);
+  else {
+    if (record > UINT32_MAX)
+      fatal_error("dense_selector_push: heap record index overflow");
+    dense_heap_push(gs, (uint32_t) record);
+  }
   gs->dense_active++;
 }
 
@@ -1291,19 +1322,21 @@ static void dense_heap_remove_root(Giv_select gs)
     gs->dense_heap[i] = last;
 }
 
-static BOOL dense_selector_peek(Giv_select gs, uint32_t *record)
+static BOOL dense_selector_peek(Giv_select gs, size_t *record)
 {
   unsigned long long bit = 1ULL << gs->dense_bit;
   if (Dense_selector_mode == DENSE_SELECTOR_FILE) {
     struct dense_selector_entry entry;
     int source = -1;
     while (dense_selector_file_min(gs, &entry, &source)) {
-      if (entry.record < Dense_record_count) {
-        struct dense_passive_record *r = &Dense_records[entry.record];
+      size_t at;
+      if (dense_passive_file_record_index(entry.record, &at) &&
+          at < Dense_record_count) {
+        struct dense_passive_record *r = &Dense_records[at];
         if (r->id == entry.id &&
             (r->flags & DENSE_PASSIVE_ACTIVE) != 0 &&
             (r->selector_mask & bit) != 0) {
-          *record = entry.record;
+          *record = at;
           return TRUE;
         }
       }
@@ -1404,14 +1437,14 @@ void dense_passive_compact(Dense_passive_relocate_fn relocate,
     for (p = High.selectors; p != NULL; p = p->next) {
       Giv_select gs = p->v;
       if ((r->selector_mask & (1ULL << gs->dense_bit)) != 0) {
-        dense_selector_push(gs, (uint32_t) i);
+        dense_selector_push(gs, i);
         High.occurrences++;
       }
     }
     for (p = Low.selectors; p != NULL; p = p->next) {
       Giv_select gs = p->v;
       if ((r->selector_mask & (1ULL << gs->dense_bit)) != 0) {
-        dense_selector_push(gs, (uint32_t) i);
+        dense_selector_push(gs, i);
         Low.occurrences++;
       }
     }
@@ -1703,12 +1736,13 @@ void given_selection_preview(Topform c,
 static void dense_insert_passive(Topform c)
 {
   struct dense_passive_record r;
-  uint32_t record;
+  size_t record;
   Plist p;
   if (c->id == 0)
     fatal_error("dense_insert_passive: clause has no ID");
-  if (Dense_record_count >= UINT32_MAX)
-    fatal_error("dense_insert_passive: record index overflow");
+  if (Dense_selector_mode == DENSE_SELECTOR_HEAP &&
+      Dense_record_count > UINT32_MAX)
+    fatal_error("dense_insert_passive: heap record index overflow");
   if (Dense_record_count != 0 &&
       Dense_records[Dense_record_count-1].id >= c->id)
     fatal_error("dense_insert_passive: clause IDs are not increasing");
@@ -1737,7 +1771,7 @@ static void dense_insert_passive(Topform c)
       "dense_insert_passive: capacity overflow");
     dense_resize_directory(capacity);
   }
-  record = (uint32_t) Dense_record_count;
+  record = Dense_record_count;
   Dense_records[Dense_record_count++] = r;
   dense_evict_directory_pages();
   Dense_active_count++;
@@ -1768,7 +1802,7 @@ static void dense_insert_passive(Topform c)
   Sos_size++;
 }
 
-static void dense_deactivate_record(uint32_t record)
+static void dense_deactivate_record(size_t record)
 {
   struct dense_passive_record *r = &Dense_records[record];
   Plist p;
@@ -1803,7 +1837,7 @@ static void dense_deactivate_record(uint32_t record)
   Sos_size--;
 }
 
-static void dense_reactivate_record(uint32_t record)
+static void dense_reactivate_record(size_t record)
 {
   struct dense_passive_record *r = &Dense_records[record];
   Plist p;
@@ -1858,7 +1892,7 @@ BOOL dense_passive_deactivate_id(unsigned long long id,
   if (view != NULL) {
     dense_record_view(r, view);
   }
-  dense_deactivate_record((uint32_t) at);
+  dense_deactivate_record(at);
   return TRUE;
 }
 
@@ -1885,7 +1919,7 @@ BOOL dense_passive_reactivate_id(unsigned long long id,
     r->flags |= DENSE_PASSIVE_RULE_DIRTY;
   else
     r->flags &= ~DENSE_PASSIVE_RULE_DIRTY;
-  dense_reactivate_record((uint32_t) at);
+  dense_reactivate_record(at);
   return TRUE;
 }
 
@@ -2135,7 +2169,7 @@ Topform get_given_clause2(Clist sos, int num_given,
     return NULL;  /* no clauses are available */
 
   if (Dense_passive) {
-    uint32_t record;
+    size_t record;
     if (!dense_selector_peek(gs, &record))
       fatal_error("get_given_clause2: selected dense queue is empty");
     struct dense_passive_record r = Dense_records[record];
@@ -2180,7 +2214,8 @@ Topform get_given_clause2(Clist sos, int num_given,
 
 static
 double iterations_to_selection(int part, int n,
-			       int cycle_size, int occurrences, int sos_size)
+			       int cycle_size, unsigned long long occurrences,
+                               unsigned long long sos_size)
 {
   /* This approximates the number of iterations (of given selection) until
      the n-th clause in the selector is selected.  Simplyfying assumptions:
@@ -2509,7 +2544,7 @@ void fprint_selector_report(FILE *fp)
 {
   Plist p;
   print_separator(fp, "SELECTOR REPORT", TRUE);
-  fprintf(fp, "Sos_deleted=%d, Sos_displaced=%d, Sos_size=%d\n",
+  fprintf(fp, "Sos_deleted=%llu, Sos_displaced=%llu, Sos_size=%llu\n",
 	  Sos_deleted, Sos_displaced, Sos_size);
   fprintf(fp, "%10s %10s %10s %10s %10s %10s\n",
 	  "SELECTOR", "PART", "PRIORITY", "ORDER", "SIZE", "SELECTED");
@@ -2524,8 +2559,9 @@ void fprint_selector_report(FILE *fp)
     case GS_ORDER_RANDOM: s2 = "random"; break;
     default: s2 = "???"; break;
     }
-    fprintf(fp, "%10s %10d %10s %10s %10d %10d\n",
-	    gs->name, gs->part, s1, s2, (int) selector_size(gs), gs->selected);
+    fprintf(fp, "%10s %10d %10s %10s %10llu %10llu\n",
+	    gs->name, gs->part, s1, s2,
+            (unsigned long long) selector_size(gs), gs->selected);
   }
   for (p = Low.selectors; p; p = p->next) {
     Giv_select gs = p->v;
@@ -2538,8 +2574,9 @@ void fprint_selector_report(FILE *fp)
     case GS_ORDER_RANDOM: s2 = "random"; break;
     default: s2 = "???"; break;
     }
-    fprintf(fp, "%10s %10d %10s %10s %10d %10d\n",
-	    gs->name, gs->part, s1, s2, (int) selector_size(gs), gs->selected);
+    fprintf(fp, "%10s %10d %10s %10s %10llu %10llu\n",
+	    gs->name, gs->part, s1, s2,
+            (unsigned long long) selector_size(gs), gs->selected);
   }
   print_separator(fp, "end of selector report", FALSE);
   fflush(fp);

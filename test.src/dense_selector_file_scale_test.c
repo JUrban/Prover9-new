@@ -52,7 +52,22 @@ int main(int argc, char **argv)
   struct dense_passive_selector_stats after_select;
   struct memory_process_stats process;
   unsigned long long record_bytes, heap_bytes, records;
+  unsigned expected_reference_bits = (unsigned)
+    ((sizeof(size_t) < sizeof(uint64_t) ? sizeof(size_t) : sizeof(uint64_t)) *
+     CHAR_BIT);
   size_t i;
+  {
+    unsigned long long wide = (unsigned long long) UINT32_MAX + 123ULL;
+    size_t decoded = 0;
+    BOOL fits = dense_passive_file_record_index(wide, &decoded);
+    if (sizeof(size_t) >= 8) {
+      if (!fits || (unsigned long long) decoded != wide ||
+          dense_passive_file_record_reference(decoded) != wide)
+        fatal_error("dense_selector_file_scale_test: 64-bit reference loss");
+    }
+    else if (fits)
+      fatal_error("dense_selector_file_scale_test: oversized reference fit");
+  }
   if (argc > 2) {
     fprintf(stderr, "usage: %s [records]\n", argv[0]);
     return 2;
@@ -81,6 +96,8 @@ int main(int argc, char **argv)
        directory.file_eviction_passes == 0) ||
       selectors.mode != DENSE_SELECTOR_FILE || selectors.flushes == 0 ||
       selectors.merges == 0 ||
+      selectors.record_reference_bits != expected_reference_bits ||
+      selectors.entry_bytes != 24 ||
       selectors.run_entries + selectors.buffered_entries != count ||
       heap_bytes > 4ULL * 1024ULL * 1024ULL)
     fatal_error("dense_selector_file_scale_test: accounting failure");
@@ -105,6 +122,7 @@ int main(int argc, char **argv)
   printf("{\"records\":%llu,\"directory_logical\":%llu,"
          "\"directory_allocated\":%llu,\"heap_bytes\":%llu,"
          "\"selector_runs\":%llu,\"selector_run_bytes\":%llu,"
+         "\"selector_record_bits\":%u,\"selector_entry_bytes\":%u,"
          "\"selector_reads\":%llu,\"selector_read_bytes\":%llu,"
          "\"selector_read_evictions\":%llu,"
          "\"selector_read_eviction_bytes\":%llu,"
@@ -116,6 +134,7 @@ int main(int argc, char **argv)
          (unsigned long long) count, directory.logical_bytes,
          directory.allocated_bytes, heap_bytes,
          selectors.runs, selectors.run_logical_bytes,
+         selectors.record_reference_bits, selectors.entry_bytes,
          after_select.file_reads, after_select.file_read_bytes,
          after_select.file_read_evictions,
          after_select.file_read_eviction_bytes,

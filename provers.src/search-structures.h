@@ -558,6 +558,8 @@ struct prover_stats {
     dense_passive_directory_file_eviction_failures,
     dense_passive_selector_buffered_entries,
     dense_passive_selector_buffer_bytes,
+    dense_passive_selector_record_reference_bits,
+    dense_passive_selector_entry_bytes,
     dense_passive_selector_run_entries,
     dense_passive_selector_run_logical_bytes,
     dense_passive_selector_run_physical_bytes,

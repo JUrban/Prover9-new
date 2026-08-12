@@ -454,6 +454,12 @@ def run_summary(label, rows):
             "bytes out of cache")
     if number(last, "selector_read_eviction_failures", 0) != 0:
         signals.append("file selector reports consumed-read eviction failures")
+    if (last.get("selector_store") == "file" and
+            (number(last, "selector_record_bits", 0) < 64 or
+             number(last, "selector_entry_bytes", 0) > 24)):
+        signals.append(
+            "file selector lacks a 64-bit record reference in a 24-byte "
+            "entry")
     formatting_buffers = number(
         last, "statistics_format_comma_num_buffers", 0)
     if formatting_buffers < SAFE_COMMA_NUM_BUFFERS:
@@ -559,6 +565,8 @@ def run_summary(label, rows):
         "last_passive_directory_bytes": last.get("passive_directory_logical"),
         "last_selector_run_bytes": last.get("selector_run_logical"),
         "last_selector_store": last.get("selector_store"),
+        "last_selector_record_bits": last.get("selector_record_bits"),
+        "last_selector_entry_bytes": last.get("selector_entry_bytes"),
         "last_selector_read_bytes": last.get("selector_reads_bytes"),
         "last_selector_read_eviction_pct": selector_read_eviction_pct,
         "last_selector_read_eviction_failures": last.get(
@@ -631,9 +639,20 @@ def compare_summaries(reference, candidate, max_cpu_ratio=1.25,
             isinstance(selector_failures, (int, float)) else None)
     else:
         selector_cache_gate = None
+    if selector_store == "heap":
+        selector_width_gate = True
+    elif selector_store == "file":
+        selector_bits = candidate.get("last_selector_record_bits")
+        selector_entry_bytes = candidate.get("last_selector_entry_bytes")
+        selector_width_gate = (
+            selector_bits >= 64 and selector_entry_bytes <= 24
+            if isinstance(selector_bits, (int, float)) and
+            isinstance(selector_entry_bytes, (int, float)) else None)
+    else:
+        selector_width_gate = None
 
     checks = (trajectory_match, cpu_gate, ram_gate, interval_gate, slope_gate,
-              selector_cache_gate)
+              selector_cache_gate, selector_width_gate)
     if any(value is False for value in checks):
         result = "reject"
     elif any(value is None for value in checks):
@@ -663,6 +682,8 @@ def compare_summaries(reference, candidate, max_cpu_ratio=1.25,
         "candidate_back_normalized_cpu_slope_ratio": slope_ratio,
         "slope_gate": threshold_state(slope_gate),
         "selector_read_cache_gate": threshold_state(selector_cache_gate),
+        "selector_reference_width_gate": threshold_state(
+            selector_width_gate),
     }
 
 
@@ -762,14 +783,16 @@ def markdown_summary(summary):
     if summary.get("last_selector_store") == "file":
         print("File-selector consumed-read cache advice: coverage={}%, "
               "failures={}; last interval min calls/given={}, run "
-              "checks/given={}.".format(
+              "checks/given={}; record reference={} bits in {} bytes.".format(
                   fmt(summary.get("last_selector_read_eviction_pct"), 1),
                   fmt(summary.get(
                       "last_selector_read_eviction_failures")),
                   fmt(summary.get(
                       "last_selector_min_calls_per_given"), 2),
                   fmt(summary.get(
-                      "last_selector_run_checks_per_given"), 2)))
+                      "last_selector_run_checks_per_given"), 2),
+                  fmt(summary.get("last_selector_record_bits")),
+                  fmt(summary.get("last_selector_entry_bytes"))))
     if summary["signals"]:
         print("Signals:")
         for signal in summary["signals"]:
@@ -799,10 +822,10 @@ def markdown_comparisons(comparisons):
     print("| Candidate | Trajectory | CPU ratio | CPU | Reference peak MiB | "
           "Candidate peak MiB | RAM saved % | RAM | Samples | Periodic | "
           "Normalized samples | Steady back CPU ratio | Slope | Read cache | "
-          "Result |")
-    print("|:---|:---:|---:|:---:|---:|---:|---:|:---:|---:|:---:|---:|---:|:---:|:---:|:---:|")
+          "Reference width | Result |")
+    print("|:---|:---:|---:|:---:|---:|---:|---:|:---:|---:|:---:|---:|---:|:---:|:---:|:---:|:---:|")
     for comparison in comparisons:
-        print("| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |".format(
+        print("| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |".format(
             comparison["candidate"], comparison["trajectory_gate"],
             fmt(comparison["cpu_ratio"], 2), comparison["cpu_gate"],
             fmt(comparison["reference_peak_rss_mib"], 1),
@@ -813,7 +836,9 @@ def markdown_comparisons(comparisons):
             fmt(comparison["candidate_normalized_samples"]),
             fmt(comparison["candidate_back_normalized_cpu_slope_ratio"], 2),
             comparison["slope_gate"],
-            comparison["selector_read_cache_gate"], comparison["result"]))
+            comparison["selector_read_cache_gate"],
+            comparison["selector_reference_width_gate"],
+            comparison["result"]))
     print()
 
 
@@ -837,6 +862,7 @@ TSV_COLUMNS = (
     "selector_io_mib_per_cpu", "statistics_format_comma_num_buffers",
     "selector_read_evictions", "selector_read_evictions_bytes",
     "selector_read_eviction_failures", "selector_read_eviction_pct",
+    "selector_record_bits", "selector_entry_bytes",
     "delta_selector_min_calls", "selector_min_calls_per_given",
     "delta_selector_buffer_checks", "delta_selector_run_checks",
     "selector_run_checks_per_given",
