@@ -30,6 +30,12 @@ tags:
 
 apps: $(PROGRAMS)
 
+# Focused tests deliberately use debug/sanitizer CFLAGS.  Keep their copies
+# of prover implementation objects local so a test build cannot silently
+# replace an optimized production object that a later prover9 link reuses.
+provers_%.o: ../provers.src/%.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
 avltest: avltest.o
 	$(CC) $(CFLAGS) -o avltest avltest.o ../ladr/libladr.a -lm
 
@@ -51,20 +57,20 @@ ancestor_store_test: ancestor_store_test.o ../ladr/libladr.a
 ancestor_store_scale_test: ancestor_store_scale_test.o ../ladr/libladr.a
 	$(CC) $(CFLAGS) -o ancestor_store_scale_test ancestor_store_scale_test.o ../ladr/libladr.a -lm
 
-checkpoint_selector_test: checkpoint_selector_test.o ../provers.src/giv_select.o ../provers.src/semantics.o ../ladr/libladr.a
-	$(CC) $(CFLAGS) -o checkpoint_selector_test checkpoint_selector_test.o ../provers.src/giv_select.o ../provers.src/semantics.o ../ladr/libladr.a -lm
+checkpoint_selector_test: checkpoint_selector_test.o provers_giv_select.o provers_semantics.o ../ladr/libladr.a
+	$(CC) $(CFLAGS) -o checkpoint_selector_test checkpoint_selector_test.o provers_giv_select.o provers_semantics.o ../ladr/libladr.a -lm
 
-dense_selector_compaction_test: dense_selector_compaction_test.o ../provers.src/giv_select.o ../provers.src/semantics.o ../ladr/libladr.a
-	$(CC) $(CFLAGS) -o dense_selector_compaction_test dense_selector_compaction_test.o ../provers.src/giv_select.o ../provers.src/semantics.o ../ladr/libladr.a -lm
+dense_selector_compaction_test: dense_selector_compaction_test.o provers_giv_select.o provers_semantics.o ../ladr/libladr.a
+	$(CC) $(CFLAGS) -o dense_selector_compaction_test dense_selector_compaction_test.o provers_giv_select.o provers_semantics.o ../ladr/libladr.a -lm
 
-dense_selector_file_scale_test: dense_selector_file_scale_test.o ../provers.src/giv_select.o ../provers.src/semantics.o ../ladr/libladr.a
-	$(CC) $(CFLAGS) -o dense_selector_file_scale_test dense_selector_file_scale_test.o ../provers.src/giv_select.o ../provers.src/semantics.o ../ladr/libladr.a -lm
+dense_selector_file_scale_test: dense_selector_file_scale_test.o provers_giv_select.o provers_semantics.o ../ladr/libladr.a
+	$(CC) $(CFLAGS) -o dense_selector_file_scale_test dense_selector_file_scale_test.o provers_giv_select.o provers_semantics.o ../ladr/libladr.a -lm
 
-dense_selector_file_order_test: dense_selector_file_order_test.o ../provers.src/giv_select.o ../provers.src/semantics.o ../ladr/libladr.a
-	$(CC) $(CFLAGS) -o dense_selector_file_order_test dense_selector_file_order_test.o ../provers.src/giv_select.o ../provers.src/semantics.o ../ladr/libladr.a -lm
+dense_selector_file_order_test: dense_selector_file_order_test.o provers_giv_select.o provers_semantics.o ../ladr/libladr.a
+	$(CC) $(CFLAGS) -o dense_selector_file_order_test dense_selector_file_order_test.o provers_giv_select.o provers_semantics.o ../ladr/libladr.a -lm
 
-cold_passive_store_test: cold_passive_store_test.o ../provers.src/cold_passive_store.o ../ladr/libladr.a
-	$(CC) $(CFLAGS) -o cold_passive_store_test cold_passive_store_test.o ../provers.src/cold_passive_store.o ../ladr/libladr.a -lm
+cold_passive_store_test: cold_passive_store_test.o provers_cold_passive_store.o ../ladr/libladr.a
+	$(CC) $(CFLAGS) -o cold_passive_store_test cold_passive_store_test.o provers_cold_passive_store.o ../ladr/libladr.a -lm
 
 hint_postings_test: hint_postings_test.o ../ladr/libladr.a
 	$(CC) $(CFLAGS) -o hint_postings_test hint_postings_test.o ../ladr/libladr.a -lm
@@ -81,31 +87,31 @@ paramod_iterator_test: paramod_iterator_test.o ../ladr/libladr.a
 hyper_iterator_test: hyper_iterator_test.o ../ladr/libladr.a
 	$(CC) $(CFLAGS) -o hyper_iterator_test hyper_iterator_test.o ../ladr/libladr.a -lm
 
-rewrite_only_store_test: rewrite_only_store_test.o ../provers.src/rewrite_only_store.o ../ladr/libladr.a
-	$(CC) $(CFLAGS) -o rewrite_only_store_test rewrite_only_store_test.o ../provers.src/rewrite_only_store.o ../ladr/libladr.a -lm
+rewrite_only_store_test: rewrite_only_store_test.o provers_rewrite_only_store.o ../ladr/libladr.a
+	$(CC) $(CFLAGS) -o rewrite_only_store_test rewrite_only_store_test.o provers_rewrite_only_store.o ../ladr/libladr.a -lm
 
-compact_term_pool_test: compact_term_pool_test.o ../provers.src/compact_term_pool.o ../provers.src/compact_id_map.o ../ladr/libladr.a
-	$(CC) $(CFLAGS) -o compact_term_pool_test compact_term_pool_test.o ../provers.src/compact_term_pool.o ../provers.src/compact_id_map.o ../ladr/libladr.a -lm
+compact_term_pool_test: compact_term_pool_test.o provers_compact_term_pool.o provers_compact_id_map.o ../ladr/libladr.a
+	$(CC) $(CFLAGS) -o compact_term_pool_test compact_term_pool_test.o provers_compact_term_pool.o provers_compact_id_map.o ../ladr/libladr.a -lm
 
-compact_id_map_test: compact_id_map_test.o ../provers.src/compact_id_map.o ../ladr/libladr.a
-	$(CC) $(CFLAGS) -o compact_id_map_test compact_id_map_test.o ../provers.src/compact_id_map.o ../ladr/libladr.a -lm
+compact_id_map_test: compact_id_map_test.o provers_compact_id_map.o ../ladr/libladr.a
+	$(CC) $(CFLAGS) -o compact_id_map_test compact_id_map_test.o provers_compact_id_map.o ../ladr/libladr.a -lm
 
-compact_rewrite_test: compact_rewrite_test.o ../provers.src/compact_rewrite.o ../provers.src/compact_term_pool.o ../provers.src/compact_id_map.o ../provers.src/compact_back_demod.o ../provers.src/demodulate.o ../ladr/libladr.a
-	$(CC) $(CFLAGS) -o compact_rewrite_test compact_rewrite_test.o ../provers.src/compact_rewrite.o ../provers.src/compact_term_pool.o ../provers.src/compact_id_map.o ../provers.src/compact_back_demod.o ../provers.src/demodulate.o ../ladr/libladr.a -lm
+compact_rewrite_test: compact_rewrite_test.o provers_compact_rewrite.o provers_compact_term_pool.o provers_compact_id_map.o provers_compact_back_demod.o provers_demodulate.o ../ladr/libladr.a
+	$(CC) $(CFLAGS) -o compact_rewrite_test compact_rewrite_test.o provers_compact_rewrite.o provers_compact_term_pool.o provers_compact_id_map.o provers_compact_back_demod.o provers_demodulate.o ../ladr/libladr.a -lm
 
-compact_unit_index_test: compact_unit_index_test.o ../provers.src/compact_unit_index.o ../provers.src/compact_term_pool.o ../provers.src/compact_id_map.o ../ladr/libladr.a
-	$(CC) $(CFLAGS) -o compact_unit_index_test compact_unit_index_test.o ../provers.src/compact_unit_index.o ../provers.src/compact_term_pool.o ../provers.src/compact_id_map.o ../ladr/libladr.a -lm
+compact_unit_index_test: compact_unit_index_test.o provers_compact_unit_index.o provers_compact_term_pool.o provers_compact_id_map.o ../ladr/libladr.a
+	$(CC) $(CFLAGS) -o compact_unit_index_test compact_unit_index_test.o provers_compact_unit_index.o provers_compact_term_pool.o provers_compact_id_map.o ../ladr/libladr.a -lm
 
-compact_back_demod_test: compact_back_demod_test.o ../provers.src/compact_back_demod.o ../provers.src/compact_term_pool.o ../provers.src/compact_id_map.o ../ladr/libladr.a
-	$(CC) $(CFLAGS) -o compact_back_demod_test compact_back_demod_test.o ../provers.src/compact_back_demod.o ../provers.src/compact_term_pool.o ../provers.src/compact_id_map.o ../ladr/libladr.a -lm
+compact_back_demod_test: compact_back_demod_test.o provers_compact_back_demod.o provers_compact_term_pool.o provers_compact_id_map.o ../ladr/libladr.a
+	$(CC) $(CFLAGS) -o compact_back_demod_test compact_back_demod_test.o provers_compact_back_demod.o provers_compact_term_pool.o provers_compact_id_map.o ../ladr/libladr.a -lm
 
 compact_back_demod_test.o: ../provers.src/compact_back_demod.h
 
-compact_feature_index_test: compact_feature_index_test.o ../provers.src/compact_feature_index.o ../ladr/libladr.a
-	$(CC) $(CFLAGS) -o compact_feature_index_test compact_feature_index_test.o ../provers.src/compact_feature_index.o ../ladr/libladr.a -lm
+compact_feature_index_test: compact_feature_index_test.o provers_compact_feature_index.o ../ladr/libladr.a
+	$(CC) $(CFLAGS) -o compact_feature_index_test compact_feature_index_test.o provers_compact_feature_index.o ../ladr/libladr.a -lm
 
-compact_long_run_test: compact_long_run_test.o ../provers.src/compact_feature_index.o ../provers.src/compact_back_demod.o ../provers.src/compact_term_pool.o ../provers.src/compact_id_map.o ../ladr/libladr.a
-	$(CC) $(CFLAGS) -o compact_long_run_test compact_long_run_test.o ../provers.src/compact_feature_index.o ../provers.src/compact_back_demod.o ../provers.src/compact_term_pool.o ../provers.src/compact_id_map.o ../ladr/libladr.a -lm
+compact_long_run_test: compact_long_run_test.o provers_compact_feature_index.o provers_compact_back_demod.o provers_compact_term_pool.o provers_compact_id_map.o ../ladr/libladr.a
+	$(CC) $(CFLAGS) -o compact_long_run_test compact_long_run_test.o provers_compact_feature_index.o provers_compact_back_demod.o provers_compact_term_pool.o provers_compact_id_map.o ../ladr/libladr.a -lm
 
 compact_long_run_test.o: ../provers.src/compact_back_demod.h ../provers.src/compact_feature_index.h
 
