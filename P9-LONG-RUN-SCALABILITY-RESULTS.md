@@ -143,7 +143,7 @@ interval also generates about 156,801 clauses/given.  These are two simultaneous
 problems; the adaptive index work targets the former and cannot remove the
 latter.
 
-### Full-proof audit of `chat_test.new.out1--3`
+### Full-proof audit of `chat_test.new.out1--4`
 
 The mechanical audit also quantifies why the two already uploaded compact
 full-proof runs cannot support the original optimistic report.  It uses the
@@ -155,20 +155,33 @@ statistics block, so their interval and back-slope evidence remains unknown.
 | `chat_test.new.out1.gz` (old P9 reference) | 11,368 / 253,338,893 / 2,216,836 | 5,110.38 | 3,519.3 | 1.00 | 0% | reference |
 | `chat_test.new.out2.gz` | 11,369 / 253,302,129 / 2,207,014 | 15,144.10 | 1,457.7 | 2.96 | 58.6% | reject |
 | `chat_test.new.out3.gz` | 11,369 / 253,302,129 / 2,207,014 | 12,201.61 | 815.2 | 2.39 | 76.8% | reject |
+| `chat_test.new.out4` | 11,369 / 253,302,129 / 2,207,014 | 9,573.63 | 921.8 | 1.87 | 73.8% | reject |
 
-Both candidates miss the agreed CPU gate, the 80% peak-RSS target, and exact
-trajectory equality.  `out3` comes close to the RAM target but is still 3.2
-percentage points short and takes 2.39 times the old-P9 CPU.  These files
-predate the current adaptive semantic hashing, position intersections, rigid
-sibling pruning, and bounded child dispatch, so they reject the earlier
-compact configurations; they do not yet decide the current branch.
+All three compact candidates miss the agreed CPU gate, the 80% peak-RSS
+target, and exact trajectory equality with old P9.  `out3` comes closest to
+the RAM target but is still 3.2 percentage points short and takes 2.39 times
+the old-P9 user CPU.  `out4` improves that to 1.87 times but gives back memory,
+ending 6.2 percentage points short of the RAM target.  Counting system CPU as
+well, `out4` used 10,721.31 process CPU seconds versus 5,128.41 for old P9, a
+2.09-fold ratio; its 1,147.68 system seconds are unexpectedly high and must
+not be hidden by reporting user CPU alone.
 
-## `chat_test.new.out41`: mask8 backward-demodulation collapse
+`out4` does prove the theorem and exactly reproduces the final compact search
+counters from `out2` and `out3`; this is evidence for semantic stability of
+that compact trajectory, not performance acceptance.  These files predate at
+least some of the current adaptive semantic hashing, position intersections,
+rigid sibling pruning, bounded child dispatch, and wide-slice work.  They
+reject the measured compact configurations; they do not yet decide the
+current adaptive branch.
 
-Source: user-supplied `bob/chat_test.new.out41`, inspected 2026-08-12.  The run
-used the frozen compact OTTER candidate with `compact_back_demod_strategy` left
-at `mask8`.  It stopped at the 3,600-user-second limit after 8,800 given
-clauses.
+## `chat_test.new.out4`: complete mask8 backward-demodulation collapse
+
+Sources: user-supplied `bob/chat_test.new.out41` and
+`bob/chat_test.new.out4`, inspected 2026-08-12.  `out41` is an exact byte
+prefix of `out4`, not a separate run.  The complete run used the frozen compact
+OTTER candidate with `compact_back_demod_strategy=mask8`; it proved the theorem
+after 11,369 given clauses.  The earlier 3,600-user-second conclusion therefore
+extends cleanly to a complete proof.
 
 | User CPU (s) | Given | Active back index | Queries | Cumulative groups | Groups/query | Back lookup CPU (s) | Given/user-s |
 |---:|---:|---:|---:|---:|---:|---:|---:|
@@ -210,6 +223,30 @@ The run still demonstrated the intended RAM direction: process RSS was about
 503 MB rather than the multi-gigabyte legacy result.  But the 83.6 MB compact
 back index bought that RAM reduction by allowing near-linear retrieval work.
 It therefore fails the product gate despite its memory result.
+
+The complete extension makes the defect substantially larger:
+
+| User CPU (s) | Given | Active back index | Queries | Interval groups/query | Interval lookup us/query | Cumulative lookup CPU (s) | PSS (MiB) |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 3,600 | 8,800 | 684,719 | 937,830 | 10,101 | 1,419 | 1,094.691 | 488.1 |
+| 6,300 | 10,423 | 1,165,821 | 1,366,745 | 13,398 | 2,449 | 2,096.730 | 723.8 |
+| 9,300 | 11,366 | 1,550,024 | 1,916,037 | 20,217 | 3,692 | 3,504.900 | 893.5 |
+| 9,573.63 | 11,369 | 1,529,207 | 1,941,156 | 22,608 | 4,672 | 3,607.118 | 919.0 |
+
+From the first 300-second interval to the final interval, work/query rises
+19.13-fold and measured lookup CPU/query rises 31.77-fold.  The complete run
+examines 20,764,898,738 posting groups for 695,309 candidates; its worst query
+alone examines 1,518,854 groups.  Back lookup consumes 37.7% of all user CPU,
+whereas exact testing takes 1.004 seconds and candidate materialization 6.987
+seconds.  This localizes the dominant compact-index loss to broad candidate
+enumeration, not clause decoding or exact matching.
+
+The other new authoritative indexes are not comparable hogs in this run.
+Unit code-tree generalization takes 38.021 seconds and unification 173.981
+seconds; compact nonunit forward lookup takes 23.255 seconds.  The ordinary
+demodulation clock is independently large at 3,230.41 seconds.  That and the
+late inference bursts explain why eliminating mask scans alone cannot restore
+all old-P9 throughput, but they do not weaken the measured mask-index failure.
 
 The dramatic *given-clause* rate at the end has a second cause which should
 not be attributed to the index.  Between the 3,300- and 3,600-second reports,
