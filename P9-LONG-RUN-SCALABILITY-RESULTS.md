@@ -85,3 +85,31 @@ Acceptance requires:
 5. candidate equality and deterministic ordering against `mask8`; and
 6. no greater than 25% integrated CPU regression at longer `chat_test` and
    Osborn prefixes, with a plateauing work/query slope as the decisive gate.
+
+### First cost-aware hot-root result
+
+The accelerated probe after implementing cost-aware admission produced:
+
+| Population | Admission query | mask8 steady work/query | hot-root steady work/query | Deferrals | Censuses | Hot bytes |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1,000 | 8 | 1,000 | 1 | 1 | 2 | 460,429 |
+| 10,000 | 8 | 10,000 | 1 | 1 | 2 | 3,496,624 |
+| 100,000 | 8 | 100,000 | 1 | 1 | 2 | 33,971,543 |
+
+The default build factor is eight: a root with `N` current occurrences is not
+constructed until it has accumulated at least `8*N` fallback work.  The first
+census defers construction; the eighth broad query recenses the current root
+and admits it.  The reported steady phase begins after admission.  Candidate
+IDs and their deterministic order were checked against `mask8` on every
+admission and steady query.
+
+This is an accelerated algorithmic result, not yet an integrated acceptance
+result.  The 100,000-population process peak was about 163 MB because the
+harness deliberately retained the mask index, hot-root index, and every source
+`Topform` at once.  It must not be interpreted as expected prover RSS.
+
+A separate focused budget test admits two independent roots, grows one until
+the 16 KiB structural budget is exhausted, and verifies that only that root is
+demoted.  The other root continues to issue code-tree queries before and after
+a forced stale compaction; the demoted root returns the same complete fallback
+answer.  This closes the former global-disable failure mode.

@@ -39,11 +39,16 @@ struct compact_back_demod_stats {
   unsigned long long tree_budget_exhaustions;
   unsigned long long tree_root_admissions;
   unsigned long long tree_root_rejections;
+  unsigned long long tree_root_cost_deferrals;
+  unsigned long long tree_root_censuses;
+  unsigned long long tree_root_census_occurrences;
+  unsigned long long tree_root_demotions;
   unsigned long long tree_root_backfill_groups;
   unsigned long long tree_root_backfill_occurrences;
   unsigned long long tree_fallback_work;
   unsigned tree_min_tokens;
   unsigned tree_admit_work;
+  unsigned tree_build_factor;
   BOOL tree_complete;
   unsigned long long position_features;
   unsigned long long position_postings;
@@ -110,6 +115,8 @@ void compact_back_demod_set_tree_min_tokens(unsigned tokens);
 void compact_back_demod_set_tree_budget_kb(unsigned kilobytes);
 
 void compact_back_demod_set_tree_admit_work(unsigned groups);
+
+void compact_back_demod_set_tree_build_factor(unsigned factor);
 
 void compact_back_demod_set_position_options(unsigned admit_work,
                                              unsigned min_gain,

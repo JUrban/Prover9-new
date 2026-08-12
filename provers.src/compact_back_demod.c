@@ -20,6 +20,7 @@ static Compact_back_demod_strategy Back_demod_strategy =
   COMPACT_BACK_DEMOD_MASK8;
 static unsigned Back_demod_tree_min_tokens = 8;
 static unsigned Back_demod_tree_admit_work = 4096;
+static unsigned Back_demod_tree_build_factor = 8;
 static unsigned Back_demod_position_admit_work = 4096;
 static unsigned Back_demod_position_min_gain = 4;
 static unsigned Back_demod_position_build_factor = 8;
@@ -90,6 +91,7 @@ struct cbd_query_term {
 
 struct cbd_tree_root_state {
   unsigned long long fallback_work;
+  unsigned long long next_check_work;
   unsigned char admitted;
   unsigned char rejected;
 };
@@ -217,11 +219,16 @@ struct compact_back_demod_index {
   unsigned long long tree_budget_exhaustions;
   unsigned long long tree_root_admissions;
   unsigned long long tree_root_rejections;
+  unsigned long long tree_root_cost_deferrals;
+  unsigned long long tree_root_censuses;
+  unsigned long long tree_root_census_occurrences;
+  unsigned long long tree_root_demotions;
   unsigned long long tree_root_backfill_groups;
   unsigned long long tree_root_backfill_occurrences;
   unsigned long long tree_fallback_work;
   unsigned tree_min_tokens;
   unsigned tree_admit_work;
+  unsigned tree_build_factor;
   unsigned long long tree_budget_bytes;
   BOOL tree_complete;
   unsigned long long position_posting_count;
@@ -1487,6 +1494,7 @@ static Compact_back_demod_index compact_back_demod_init_with_pool_strategy(
   index->strategy = strategy;
   index->tree_min_tokens = Back_demod_tree_min_tokens;
   index->tree_admit_work = Back_demod_tree_admit_work;
+  index->tree_build_factor = Back_demod_tree_build_factor;
   index->tree_budget_bytes = Back_demod_tree_budget_bytes;
   index->tree_complete = TRUE;
   index->position_admit_work = Back_demod_position_admit_work;
@@ -1579,6 +1587,13 @@ void compact_back_demod_set_tree_admit_work(unsigned groups)
   if (groups == 0)
     fatal_error("compact_back_demod: tree admission work must be positive");
   Back_demod_tree_admit_work = groups;
+}
+
+void compact_back_demod_set_tree_build_factor(unsigned factor)
+{
+  if (factor == 0)
+    fatal_error("compact_back_demod: tree build factor must be positive");
+  Back_demod_tree_build_factor = factor;
 }
 
 void compact_back_demod_set_position_options(unsigned admit_work,
@@ -1682,7 +1697,9 @@ BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
 
   append_admitted_position_features(index, record_index);
 
-  if (strategy_uses_tree(index->strategy) && index->tree_complete) {
+  if (strategy_uses_tree(index->strategy) &&
+      (index->tree_complete ||
+       index->strategy == COMPACT_BACK_DEMOD_HOT_ROOT_TREE)) {
     size_t i = 0;
     size_t eligible = 0;
     if (index->strategy == COMPACT_BACK_DEMOD_HOT_ROOT_TREE) {
@@ -1721,12 +1738,25 @@ BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
           (tree_estimated_bytes(index) > index->tree_budget_bytes ||
            worst > index->tree_budget_bytes -
              tree_estimated_bytes(index))) {
-        index->tree_complete = FALSE;
+        /* A hot-root tree is only an optimization over the complete path
+           index.  If later growth will not fit, demote the affected roots;
+           do not globally disable unrelated trees and retain their bytes. */
+        for (i = 0; i < symbols.occurrence_count; i++) {
+          unsigned symbol = symbols.occurrence_values[i].symbol;
+          if ((size_t) symbol < index->tree_root_capacity &&
+              index->tree_roots[symbol].admitted) {
+            index->tree_roots[symbol].admitted = FALSE;
+            index->tree_roots[symbol].rejected = TRUE;
+            index->tree_root_demotions++;
+          }
+        }
         index->tree_budget_exhaustions++;
       }
     }
     i = 0;
-    while (index->tree_complete && i < symbols.occurrence_count) {
+    while ((index->tree_complete ||
+            index->strategy == COMPACT_BACK_DEMOD_HOT_ROOT_TREE) &&
+           i < symbols.occurrence_count) {
       size_t j = i;
       uint32_t relative = symbols.occurrence_values[i].offset;
       uint32_t length = symbols.occurrence_values[i].length;
@@ -2378,7 +2408,7 @@ static void maybe_admit_hot_root(Compact_back_demod_index index,
 {
   unsigned symbol;
   struct cbd_tree_root_state *state;
-  unsigned long long occurrences, worst, estimated;
+  unsigned long long occurrences, worst, estimated, required_work;
   if (index->strategy != COMPACT_BACK_DEMOD_HOT_ROOT_TREE ||
       VARIABLE(pattern))
     return;
@@ -2394,11 +2424,31 @@ static void maybe_admit_hot_root(Compact_back_demod_index index,
     index->tree_fallback_work = ULLONG_MAX;
   else
     index->tree_fallback_work += query_work;
-  if (!index->tree_complete || state->admitted || state->rejected ||
-      state->fallback_work < index->tree_admit_work)
+  if (state->admitted || state->rejected ||
+      state->fallback_work <
+        (state->next_check_work == 0 ? index->tree_admit_work :
+         state->next_check_work))
     return;
   clock_start(index->maintenance_clock);
   occurrences = process_root_postings(index, symbol, FALSE);
+  index->tree_root_censuses++;
+  if (ULLONG_MAX - index->tree_root_census_occurrences < occurrences)
+    index->tree_root_census_occurrences = ULLONG_MAX;
+  else
+    index->tree_root_census_occurrences += occurrences;
+  required_work = occurrences > ULLONG_MAX / index->tree_build_factor ?
+    ULLONG_MAX : occurrences * index->tree_build_factor;
+  if (required_work < index->tree_admit_work)
+    required_work = index->tree_admit_work;
+  if (state->fallback_work < required_work) {
+    /* Count the current root before committing memory, then wait until the
+       measured fallback cost can amortize that root's present construction
+       cost.  A later census accounts for growth since this observation. */
+    state->next_check_work = required_work;
+    index->tree_root_cost_deferrals++;
+    clock_stop(index->maintenance_clock);
+    return;
+  }
   worst = occurrences > (ULLONG_MAX - 4096) / 96 ? ULLONG_MAX :
     4096 + occurrences * 96;
   estimated = tree_estimated_bytes(index);
@@ -2411,6 +2461,7 @@ static void maybe_admit_hot_root(Compact_back_demod_index index,
   else {
     (void) process_root_postings(index, symbol, TRUE);
     state->admitted = TRUE;
+    state->next_check_work = 0;
     index->tree_root_admissions++;
     update_peak(index);
   }
@@ -2878,7 +2929,7 @@ static BOOL use_tree_for_pattern(Compact_back_demod_index index,
      index->tree_complete &&
      pattern_min_tokens(pattern) >= index->tree_min_tokens) ||
     (index->strategy == COMPACT_BACK_DEMOD_HOT_ROOT_TREE &&
-     index->tree_complete && !VARIABLE(pattern) &&
+     !VARIABLE(pattern) &&
      (size_t) SYMNUM(pattern) < index->tree_root_capacity &&
      index->tree_roots[SYMNUM(pattern)].admitted);
 }
@@ -3128,6 +3179,15 @@ static void compact_back_demod_compact_internal(
         &index->tree_posting_lists[i];
       uint32_t block;
       uint32_t record_index = list->inline_record;
+      if (index->strategy == COMPACT_BACK_DEMOD_HOT_ROOT_TREE) {
+        unsigned symbol;
+        if (list->term_offset >= index->token_limit)
+          fatal_error("compact_back_demod: corrupt hot-root tree term");
+        symbol = (unsigned) index->tokens[list->term_offset];
+        if ((size_t) symbol >= index->tree_root_capacity ||
+            !index->tree_roots[symbol].admitted)
+          continue;
+      }
       if (record_index == CBD_NONE || list->term_offset >= index->token_limit)
         fatal_error("compact_back_demod: corrupt compacted tree inline posting");
       copy_live_tree_record(index, replacement, record_map, record_index,
@@ -3263,6 +3323,11 @@ static void compact_back_demod_compact_internal(
   index->tree_budget_exhaustions += old.tree_budget_exhaustions;
   index->tree_root_admissions = old.tree_root_admissions;
   index->tree_root_rejections = old.tree_root_rejections;
+  index->tree_root_cost_deferrals = old.tree_root_cost_deferrals;
+  index->tree_root_censuses = old.tree_root_censuses;
+  index->tree_root_census_occurrences =
+    old.tree_root_census_occurrences;
+  index->tree_root_demotions = old.tree_root_demotions;
   index->tree_root_backfill_groups = old.tree_root_backfill_groups;
   index->tree_root_backfill_occurrences =
     old.tree_root_backfill_occurrences;
@@ -3454,6 +3519,11 @@ void compact_back_demod_compact_materialized(
   index->tree_budget_exhaustions += old.tree_budget_exhaustions;
   index->tree_root_admissions = old.tree_root_admissions;
   index->tree_root_rejections = old.tree_root_rejections;
+  index->tree_root_cost_deferrals = old.tree_root_cost_deferrals;
+  index->tree_root_censuses = old.tree_root_censuses;
+  index->tree_root_census_occurrences =
+    old.tree_root_census_occurrences;
+  index->tree_root_demotions = old.tree_root_demotions;
   index->tree_root_backfill_groups = old.tree_root_backfill_groups;
   index->tree_root_backfill_occurrences =
     old.tree_root_backfill_occurrences;
@@ -3573,12 +3643,18 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->tree_budget_exhaustions = index->tree_budget_exhaustions;
   stats->tree_root_admissions = index->tree_root_admissions;
   stats->tree_root_rejections = index->tree_root_rejections;
+  stats->tree_root_cost_deferrals = index->tree_root_cost_deferrals;
+  stats->tree_root_censuses = index->tree_root_censuses;
+  stats->tree_root_census_occurrences =
+    index->tree_root_census_occurrences;
+  stats->tree_root_demotions = index->tree_root_demotions;
   stats->tree_root_backfill_groups = index->tree_root_backfill_groups;
   stats->tree_root_backfill_occurrences =
     index->tree_root_backfill_occurrences;
   stats->tree_fallback_work = index->tree_fallback_work;
   stats->tree_min_tokens = index->tree_min_tokens;
   stats->tree_admit_work = index->tree_admit_work;
+  stats->tree_build_factor = index->tree_build_factor;
   stats->tree_complete = index->tree_complete;
   stats->position_features = index->position_bucket_count == 0 ? 0 :
     index->position_bucket_count - 1;

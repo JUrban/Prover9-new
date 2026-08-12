@@ -349,15 +349,17 @@ int main(void)
     int j;
     compact_back_demod_set_tree_budget_kb(65536);
     compact_back_demod_set_tree_admit_work(1);
+    compact_back_demod_set_tree_build_factor(1);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_HOT_ROOT_TREE);
     hot = compact_back_demod_init();
     for (j = 0; j < HOT_FAMILY; j++) {
-      (void) snprintf(text, sizeof(text), "w(f(a,g(c%d))).", j);
+      (void) snprintf(text, sizeof(text), "w(f(a,g(h(j(c%d))))).", j);
       clauses[j] = indexed_clause(text);
       CHECK(compact_back_demod_add(hot, clauses[j]),
             "add hot-root backfill family");
     }
-    (void) snprintf(text, sizeof(text), "f(a,g(c%d)) = a.", HOT_TARGET);
+    (void) snprintf(text, sizeof(text),
+                    "f(a,g(h(j(c%d)))) = a.", HOT_TARGET);
     rule = indexed_clause(text);
     ids = compact_back_demod_candidate_ids(hot, rule, ORIENTED, &count);
     CHECK(count == 1 && ids[0] == clauses[HOT_TARGET]->id,
@@ -371,7 +373,7 @@ int main(void)
     CHECK(count == 1 && ids[0] == clauses[HOT_TARGET]->id,
           "admitted root uses the same exact tree answer");
     safe_free(ids);
-    later = indexed_clause("w(f(a,g(c31))).");
+    later = indexed_clause("w(f(a,g(h(j(c31))))).");
     CHECK(compact_back_demod_add(hot, later),
           "index later occurrence for an admitted root");
     ids = compact_back_demod_candidate_ids(hot, rule, ORIENTED, &count);
@@ -392,6 +394,129 @@ int main(void)
     for (j = 0; j < HOT_FAMILY; j++)
       delete_clause(clauses[j]);
     compact_back_demod_set_tree_admit_work(4096);
+    compact_back_demod_set_tree_build_factor(8);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
+  }
+
+  {
+    enum { COST_FAMILY = 64 };
+    Compact_back_demod_index cost_aware;
+    struct compact_back_demod_stats cost_stats;
+    Topform clauses[COST_FAMILY], rule;
+    char text[128];
+    int j;
+    compact_back_demod_set_tree_budget_kb(65536);
+    compact_back_demod_set_tree_admit_work(1);
+    compact_back_demod_set_tree_build_factor(8);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_HOT_ROOT_TREE);
+    cost_aware = compact_back_demod_init();
+    for (j = 0; j < COST_FAMILY; j++) {
+      (void) snprintf(text, sizeof(text), "w(f(a,g(h(j(d%d))))).", j);
+      clauses[j] = indexed_clause(text);
+      CHECK(compact_back_demod_add(cost_aware, clauses[j]),
+            "add cost-aware hot-root family");
+    }
+    rule = indexed_clause("f(a,g(h(j(d31)))) = a.");
+    ids = compact_back_demod_candidate_ids(
+      cost_aware, rule, ORIENTED, &count);
+    safe_free(ids);
+    compact_back_demod_get_stats(cost_aware, &cost_stats);
+    CHECK(cost_stats.tree_root_admissions == 0 &&
+          cost_stats.tree_root_cost_deferrals == 1 &&
+          cost_stats.tree_root_censuses == 1,
+          "hot root waits until fallback work repays construction");
+    for (j = 1; j < 8; j++) {
+      ids = compact_back_demod_candidate_ids(
+        cost_aware, rule, ORIENTED, &count);
+      safe_free(ids);
+    }
+    compact_back_demod_get_stats(cost_aware, &cost_stats);
+    CHECK(cost_stats.tree_root_admissions == 1 &&
+          cost_stats.tree_root_cost_deferrals == 1 &&
+          cost_stats.tree_root_censuses == 2 &&
+          cost_stats.tree_root_census_occurrences >= COST_FAMILY * 2,
+          "accumulated fallback work deterministically admits hot root");
+    compact_back_demod_free(cost_aware);
+    delete_clause(rule);
+    for (j = 0; j < COST_FAMILY; j++)
+      delete_clause(clauses[j]);
+    compact_back_demod_set_tree_admit_work(4096);
+    compact_back_demod_set_tree_build_factor(8);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
+  }
+
+  {
+    enum { DEMOTION_LIMIT = 512 };
+    Compact_back_demod_index bounded_hot;
+    struct compact_back_demod_stats before_s, after_s, bounded_stats;
+    Topform clauses[DEMOTION_LIMIT + 2], r_rule, s_rule;
+    char text[128];
+    int added = 2, j;
+    compact_back_demod_set_tree_budget_kb(16);
+    compact_back_demod_set_tree_admit_work(1);
+    compact_back_demod_set_tree_build_factor(1);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_HOT_ROOT_TREE);
+    bounded_hot = compact_back_demod_init();
+    clauses[0] = indexed_clause("w(r(a)).");
+    clauses[1] = indexed_clause("w(s(a)).");
+    CHECK(compact_back_demod_add(bounded_hot, clauses[0]) &&
+          compact_back_demod_add(bounded_hot, clauses[1]),
+          "add independent roots before budget demotion");
+    r_rule = indexed_clause("r(a) = a.");
+    s_rule = indexed_clause("s(a) = a.");
+    ids = compact_back_demod_candidate_ids(
+      bounded_hot, r_rule, ORIENTED, &count);
+    safe_free(ids);
+    ids = compact_back_demod_candidate_ids(
+      bounded_hot, s_rule, ORIENTED, &count);
+    safe_free(ids);
+    for (j = 0; j < DEMOTION_LIMIT; j++) {
+      (void) snprintf(text, sizeof(text), "w(r(q%d)).", j);
+      clauses[added] = indexed_clause(text);
+      CHECK(compact_back_demod_add(bounded_hot, clauses[added]),
+            "grow one admitted root toward its tree budget");
+      added++;
+      compact_back_demod_get_stats(bounded_hot, &bounded_stats);
+      if (bounded_stats.tree_root_demotions != 0)
+        break;
+    }
+    CHECK(bounded_stats.tree_root_admissions == 2 &&
+          bounded_stats.tree_root_demotions == 1 &&
+          bounded_stats.tree_budget_exhaustions == 1 &&
+          bounded_stats.tree_complete,
+          "budget growth demotes only the affected hot root");
+    compact_back_demod_get_stats(bounded_hot, &before_s);
+    ids = compact_back_demod_candidate_ids(
+      bounded_hot, s_rule, ORIENTED, &count);
+    CHECK(count == 1 && ids[0] == clauses[1]->id,
+          "unrelated admitted root remains complete after demotion");
+    safe_free(ids);
+    compact_back_demod_get_stats(bounded_hot, &after_s);
+    CHECK(after_s.tree_queries == before_s.tree_queries + 1,
+          "unrelated admitted root still uses its code tree");
+    ids = compact_back_demod_candidate_ids(
+      bounded_hot, r_rule, ORIENTED, &count);
+    CHECK(count == 1 && ids[0] == clauses[0]->id,
+          "demoted root falls back without losing its answer");
+    safe_free(ids);
+    CHECK(compact_back_demod_remove(bounded_hot, clauses[added - 1]->id),
+          "retire one record before rebuilding demoted-root metadata");
+    compact_back_demod_compact_all_stale(bounded_hot);
+    compact_back_demod_get_stats(bounded_hot, &before_s);
+    ids = compact_back_demod_candidate_ids(
+      bounded_hot, s_rule, ORIENTED, &count);
+    safe_free(ids);
+    compact_back_demod_get_stats(bounded_hot, &after_s);
+    CHECK(after_s.tree_queries == before_s.tree_queries + 1,
+          "forced compaction retains only still-admitted root trees");
+    compact_back_demod_free(bounded_hot);
+    delete_clause(r_rule);
+    delete_clause(s_rule);
+    for (j = 0; j < added; j++)
+      delete_clause(clauses[j]);
+    compact_back_demod_set_tree_budget_kb(65536);
+    compact_back_demod_set_tree_admit_work(4096);
+    compact_back_demod_set_tree_build_factor(8);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
   }
 

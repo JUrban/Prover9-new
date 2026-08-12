@@ -73,13 +73,14 @@ static Topform indexed_clause(const char *text)
 static void back_demod_longevity(size_t population, size_t queries)
 {
   Compact_back_demod_index mask, hot;
-  struct compact_back_demod_stats mask_first, hot_first, mask_final, hot_final;
+  struct compact_back_demod_stats mask_before, hot_before;
+  struct compact_back_demod_stats hot_progress, mask_final, hot_final;
   Topform *clauses = safe_malloc(population * sizeof(*clauses));
   Topform demod;
   char subject[512], text[600];
   unsigned long long *mask_ids, *hot_ids;
-  size_t mask_count, hot_count, i, q;
-  unsigned long long mask_warm_work, hot_warm_work;
+  size_t mask_count, hot_count, i, q, warmup_queries = 0;
+  unsigned long long mask_steady_work, hot_steady_work;
   double mask_work_per_query, hot_work_per_query;
   const char *gate;
 
@@ -88,6 +89,7 @@ static void back_demod_longevity(size_t population, size_t queries)
   compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_HOT_ROOT_TREE);
   compact_back_demod_set_tree_budget_kb(64U * 1024U);
   compact_back_demod_set_tree_admit_work(4096);
+  compact_back_demod_set_tree_build_factor(8);
   hot = compact_back_demod_init();
 
   for (i = 0; i < population; i++) {
@@ -115,10 +117,10 @@ static void back_demod_longevity(size_t population, size_t queries)
         "hot-root first query preserves mask8 answer order");
   safe_free(mask_ids);
   safe_free(hot_ids);
-  compact_back_demod_get_stats(mask, &mask_first);
-  compact_back_demod_get_stats(hot, &hot_first);
-
-  for (q = 1; q < queries; q++) {
+  compact_back_demod_get_stats(hot, &hot_progress);
+  while (hot_progress.tree_root_admissions == 0 &&
+         hot_progress.tree_root_rejections == 0 &&
+         warmup_queries < 128) {
     mask_ids = compact_back_demod_candidate_ids(mask, demod, ORIENTED,
                                                  &mask_count);
     hot_ids = compact_back_demod_candidate_ids(hot, demod, ORIENTED,
@@ -126,37 +128,58 @@ static void back_demod_longevity(size_t population, size_t queries)
     CHECK(mask_count == hot_count &&
           (mask_count == 0 ||
            memcmp(mask_ids, hot_ids, mask_count * sizeof(*mask_ids)) == 0),
-          "hot-root warm query preserves mask8 answer order");
+          "hot-root admission query preserves mask8 answer order");
+    safe_free(mask_ids);
+    safe_free(hot_ids);
+    warmup_queries++;
+    compact_back_demod_get_stats(hot, &hot_progress);
+  }
+  compact_back_demod_get_stats(mask, &mask_before);
+  compact_back_demod_get_stats(hot, &hot_before);
+  for (q = 0; q < queries; q++) {
+    mask_ids = compact_back_demod_candidate_ids(mask, demod, ORIENTED,
+                                                 &mask_count);
+    hot_ids = compact_back_demod_candidate_ids(hot, demod, ORIENTED,
+                                                &hot_count);
+    CHECK(mask_count == hot_count &&
+          (mask_count == 0 ||
+           memcmp(mask_ids, hot_ids, mask_count * sizeof(*mask_ids)) == 0),
+          "hot-root steady query preserves mask8 answer order");
     safe_free(mask_ids);
     safe_free(hot_ids);
   }
   compact_back_demod_get_stats(mask, &mask_final);
   compact_back_demod_get_stats(hot, &hot_final);
-  mask_warm_work = mask_final.query_profile.work -
-                   mask_first.query_profile.work;
-  hot_warm_work = hot_final.query_profile.work - hot_first.query_profile.work;
-  mask_work_per_query = queries <= 1 ? 0.0 :
-    (double) mask_warm_work / (queries - 1);
-  hot_work_per_query = queries <= 1 ? 0.0 :
-    (double) hot_warm_work / (queries - 1);
+  mask_steady_work = mask_final.query_profile.work -
+                     mask_before.query_profile.work;
+  hot_steady_work = hot_final.query_profile.work -
+                    hot_before.query_profile.work;
+  mask_work_per_query = (double) mask_steady_work / queries;
+  hot_work_per_query = (double) hot_steady_work / queries;
   gate = hot_final.tree_root_admissions > 0 &&
-         (mask_warm_work == 0 || hot_warm_work * 10 < mask_warm_work) ?
+         (mask_steady_work == 0 || hot_steady_work * 10 < mask_steady_work) ?
     "pass" : "fail";
   if (strcmp(gate, "pass") != 0)
     Failures++;
 
   printf("{\"component\":\"back_demod\",\"phase\":\"warm\","
          "\"population\":%llu,\"queries\":%llu,\"answers\":%llu,"
+         "\"admission_queries\":%llu,"
          "\"mask_work_per_query\":%.3f,"
          "\"hot_work_per_query\":%.3f,"
          "\"mask_bytes\":%llu,\"hot_bytes\":%llu,"
          "\"hot_admissions\":%llu,\"hot_rejections\":%llu,"
+         "\"hot_cost_deferrals\":%llu,\"hot_censuses\":%llu,"
+         "\"hot_census_occurrences\":%llu,"
          "\"mask_lookup_cpu\":%.6f,\"hot_lookup_cpu\":%.6f,"
          "\"hot_maintenance_cpu\":%.6f,\"gate\":\"%s\"}\n",
          (unsigned long long) population, (unsigned long long) queries,
-         (unsigned long long) hot_count, mask_work_per_query,
+         (unsigned long long) hot_count,
+         (unsigned long long) warmup_queries + 1, mask_work_per_query,
          hot_work_per_query, mask_final.total_bytes, hot_final.total_bytes,
          hot_final.tree_root_admissions, hot_final.tree_root_rejections,
+         hot_final.tree_root_cost_deferrals, hot_final.tree_root_censuses,
+         hot_final.tree_root_census_occurrences,
          mask_final.lookup_seconds, hot_final.lookup_seconds,
          hot_final.maintenance_seconds, gate);
 

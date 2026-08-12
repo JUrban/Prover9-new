@@ -83,11 +83,13 @@ void configure_compact_back_demod_strategy(
 
 void configure_compact_back_demod_tree(unsigned min_tokens,
                                        unsigned budget_kb,
-                                       unsigned admit_work)
+                                       unsigned admit_work,
+                                       unsigned build_factor)
 {
   compact_back_demod_set_tree_min_tokens(min_tokens);
   compact_back_demod_set_tree_budget_kb(budget_kb);
   compact_back_demod_set_tree_admit_work(admit_work);
+  compact_back_demod_set_tree_build_factor(build_factor);
 }
 
 void configure_compact_back_demod_position(unsigned admit_work,
@@ -633,7 +635,10 @@ void fprint_compact_back_demod(FILE *fp)
           "tree_complete=%s, tree_budget=%llu, tree_estimated=%llu, "
           "tree_budget_exhaustions=%llu, "
           "tree_admit_work=%u, tree_root_admissions=%llu, "
-          "tree_root_rejections=%llu, tree_backfill_groups=%llu, "
+          "tree_build_factor=%u, tree_root_rejections=%llu, "
+          "tree_cost_deferrals=%llu, tree_censuses=%llu, "
+          "tree_census_occurrences=%llu, tree_root_demotions=%llu, "
+          "tree_backfill_groups=%llu, "
           "tree_backfill_occurrences=%llu, tree_fallback_work=%llu, "
           "position_features=%llu, position_postings=%llu, "
           "position_queries=%llu, position_records_examined=%llu, "
@@ -672,7 +677,10 @@ void fprint_compact_back_demod(FILE *fp)
           stats.tree_budget_bytes, stats.tree_estimated_bytes,
           stats.tree_budget_exhaustions,
           stats.tree_admit_work, stats.tree_root_admissions,
-          stats.tree_root_rejections, stats.tree_root_backfill_groups,
+          stats.tree_build_factor, stats.tree_root_rejections,
+          stats.tree_root_cost_deferrals, stats.tree_root_censuses,
+          stats.tree_root_census_occurrences, stats.tree_root_demotions,
+          stats.tree_root_backfill_groups,
           stats.tree_root_backfill_occurrences, stats.tree_fallback_work,
           stats.position_features, stats.position_postings,
           stats.position_queries, stats.position_records_examined,

@@ -44,7 +44,8 @@ void configure_compact_back_demod_strategy(
 
 void configure_compact_back_demod_tree(unsigned min_tokens,
                                        unsigned budget_kb,
-                                       unsigned admit_work);
+                                       unsigned admit_work,
+                                       unsigned build_factor);
 
 void configure_compact_back_demod_position(unsigned admit_work,
                                            unsigned min_gain,
