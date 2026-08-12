@@ -18,12 +18,12 @@ struct compact_term_pool {
   size_t token_count;
   size_t token_capacity;
   size_t token_mapping_bytes;
+  unsigned long long logical_base;
   BOOL tokens_mapped;
   Compact_id_map directory;
   size_t directory_count;
   unsigned long long cached_proof_id;
-  uint32_t cached_clause_offset;
-  uint32_t cached_clause_length;
+  Compact_term_slice cached_clause;
   unsigned long long serializations;
   unsigned long long lookups;
   unsigned long long hits;
@@ -39,8 +39,7 @@ struct compact_term_pool {
   unsigned long long bytes_reclaimed;
   BOOL sharing_profile_enabled;
   uint64_t *profile_hashes;
-  uint32_t *profile_offsets;
-  uint32_t *profile_lengths;
+  Compact_term_slice *profile_slices;
   size_t profile_capacity;
   size_t profile_count;
   unsigned long long profile_term_occurrences;
@@ -51,11 +50,13 @@ struct compact_term_pool {
 struct compact_term_rebase_entry {
   union {
     unsigned long long proof_id;
-    unsigned long long new_offset;
+    Compact_term_slice new_slice;
   } destination;
-  uint32_t old_offset;
-  uint32_t length;
+  Compact_term_slice old_slice;
 };
+
+typedef char compact_term_rebase_entry_must_remain_16_bytes[
+  sizeof(struct compact_term_rebase_entry) == 16 ? 1 : -1];
 
 struct compact_term_rebase_map {
   struct compact_term_rebase_entry *entries;
@@ -79,6 +80,88 @@ enum compact_term_rebase_mode {
   REBASE_MODE_COPY = 1,
   REBASE_MODE_RETAINED = 2
 };
+
+/* PUBLIC */
+BOOL compact_term_slice_encode(unsigned long long offset, uint32_t length,
+                               Compact_term_slice *slice)
+{
+  if (slice == NULL || offset > COMPACT_TERM_SLICE_OFFSET_MAX ||
+      length > COMPACT_TERM_SLICE_LENGTH_MAX)
+    return FALSE;
+  *slice = (Compact_term_slice) offset |
+    ((Compact_term_slice) length << COMPACT_TERM_SLICE_OFFSET_BITS);
+  return TRUE;
+}
+
+/* PUBLIC */
+unsigned long long compact_term_slice_offset(Compact_term_slice slice)
+{
+  return slice & COMPACT_TERM_SLICE_OFFSET_MAX;
+}
+
+/* PUBLIC */
+uint32_t compact_term_slice_length(Compact_term_slice slice)
+{
+  return (uint32_t) (slice >> COMPACT_TERM_SLICE_OFFSET_BITS);
+}
+
+/* PUBLIC */
+BOOL compact_term_slice_subslice(Compact_term_slice slice, uint32_t start,
+                                 uint32_t length,
+                                 Compact_term_slice *subslice)
+{
+  unsigned long long offset = compact_term_slice_offset(slice);
+  uint32_t available = compact_term_slice_length(slice);
+  if (start > available || length > available - start ||
+      offset > COMPACT_TERM_SLICE_OFFSET_MAX - start)
+    return FALSE;
+  return compact_term_slice_encode(offset + start, length, subslice);
+}
+
+static BOOL resolve_slice(Compact_term_pool pool, Compact_term_slice slice,
+                          size_t *position)
+{
+  unsigned long long offset;
+  unsigned long long local;
+  uint32_t length;
+  if (pool == NULL)
+    return FALSE;
+  offset = compact_term_slice_offset(slice);
+  length = compact_term_slice_length(slice);
+  if (offset < pool->logical_base)
+    return FALSE;
+  local = offset - pool->logical_base;
+  if (local > SIZE_MAX || (size_t) local > pool->token_count ||
+      length > pool->token_count - (size_t) local)
+    return FALSE;
+  if (position != NULL)
+    *position = (size_t) local;
+  return TRUE;
+}
+
+/* PUBLIC */
+const int32_t *compact_term_pool_slice_tokens(Compact_term_pool pool,
+                                             Compact_term_slice slice)
+{
+  size_t position;
+  if (!resolve_slice(pool, slice, &position))
+    fatal_error("compact_term_pool: term slice is outside pool");
+  if (pool->tokens == NULL)
+    return NULL;
+  return pool->tokens + position;
+}
+
+/* PUBLIC */
+void compact_term_pool_set_logical_base(Compact_term_pool pool,
+                                        unsigned long long logical_base)
+{
+  if (pool == NULL || pool->token_count != 0 || pool->directory_count != 0 ||
+      logical_base > COMPACT_TERM_SLICE_OFFSET_MAX)
+    fatal_error("compact_term_pool: invalid logical base");
+  pool->logical_base = logical_base;
+  pool->cached_proof_id = 0;
+  pool->cached_clause = 0;
+}
 
 static size_t grow_token_capacity(size_t current)
 {
@@ -183,16 +266,13 @@ static uint64_t hash_id(uint64_t x)
 static void profile_rehash(Compact_term_pool pool, size_t capacity)
 {
   uint64_t *old_hashes = pool->profile_hashes;
-  uint32_t *old_offsets = pool->profile_offsets;
-  uint32_t *old_lengths = pool->profile_lengths;
+  Compact_term_slice *old_slices = pool->profile_slices;
   size_t old_capacity = pool->profile_capacity;
   size_t i;
   pool->profile_hashes = safe_calloc(capacity,
                                      sizeof(*pool->profile_hashes));
-  pool->profile_offsets = safe_calloc(capacity,
-                                      sizeof(*pool->profile_offsets));
-  pool->profile_lengths = safe_calloc(capacity,
-                                      sizeof(*pool->profile_lengths));
+  pool->profile_slices = safe_calloc(capacity,
+                                     sizeof(*pool->profile_slices));
   pool->profile_capacity = capacity;
   for (i = 0; i < old_capacity; i++)
     if (old_hashes[i] != 0) {
@@ -200,12 +280,10 @@ static void profile_rehash(Compact_term_pool pool, size_t capacity)
       while (pool->profile_hashes[at] != 0)
         at = (at + 1) & (capacity - 1);
       pool->profile_hashes[at] = old_hashes[i];
-      pool->profile_offsets[at] = old_offsets[i];
-      pool->profile_lengths[at] = old_lengths[i];
+      pool->profile_slices[at] = old_slices[i];
     }
   safe_free(old_hashes);
-  safe_free(old_offsets);
-  safe_free(old_lengths);
+  safe_free(old_slices);
 }
 
 static void ensure_profile_directory(Compact_term_pool pool)
@@ -221,11 +299,12 @@ static void ensure_profile_directory(Compact_term_pool pool)
 }
 
 static uint64_t profile_term(Compact_term_pool pool, Term term,
-                             uint32_t *position)
+                             size_t *position)
 {
-  uint32_t start = *position;
+  size_t start = *position;
   uint64_t hash;
   uint32_t length;
+  Compact_term_slice slice;
   size_t at;
   int i;
   int32_t code;
@@ -240,23 +319,27 @@ static uint64_t profile_term(Compact_term_pool pool, Term term,
     hash = hash_id(hash ^ child ^
                    (UINT64_C(0x517cc1b727220a95) + (uint64_t) i));
   }
-  length = *position - start;
+  if (*position - start > COMPACT_TERM_SLICE_LENGTH_MAX)
+    fatal_error("compact_term_pool: sharing profile term too large");
+  length = (uint32_t) (*position - start);
+  if (!compact_term_slice_encode(pool->logical_base + start, length, &slice))
+    fatal_error("compact_term_pool: sharing profile slice overflow");
   if (hash == 0)
     hash = 1;
   ensure_profile_directory(pool);
   at = (size_t) hash & (pool->profile_capacity - 1);
   while (pool->profile_hashes[at] != 0) {
     if (pool->profile_hashes[at] == hash &&
-        pool->profile_lengths[at] == length &&
-        memcmp(pool->tokens + pool->profile_offsets[at],
+        compact_term_slice_length(pool->profile_slices[at]) == length &&
+        memcmp(compact_term_pool_slice_tokens(
+                 pool, pool->profile_slices[at]),
                pool->tokens + start,
                (size_t) length * sizeof(*pool->tokens)) == 0)
       return hash;
     at = (at + 1) & (pool->profile_capacity - 1);
   }
   pool->profile_hashes[at] = hash;
-  pool->profile_offsets[at] = start;
-  pool->profile_lengths[at] = length;
+  pool->profile_slices[at] = slice;
   pool->profile_count++;
   pool->profile_child_references += (unsigned) ARITY(term);
   return hash;
@@ -270,8 +353,7 @@ static unsigned long long pool_bytes(Compact_term_pool pool)
     pool->token_capacity * sizeof(*pool->tokens) +
     compact_id_map_bytes(pool->directory) +
     pool->profile_capacity *
-      (sizeof(*pool->profile_hashes) + sizeof(*pool->profile_offsets) +
-       sizeof(*pool->profile_lengths));
+      (sizeof(*pool->profile_hashes) + sizeof(*pool->profile_slices));
 }
 
 static void update_peak(Compact_term_pool pool)
@@ -281,45 +363,57 @@ static void update_peak(Compact_term_pool pool)
     pool->peak_bytes = bytes;
 }
 
+static Compact_term_slice values_to_slice(const uint32_t values[2])
+{
+  return (Compact_term_slice) values[1] |
+    ((Compact_term_slice) values[0] << 32);
+}
+
+static void slice_to_values(Compact_term_slice slice, uint32_t values[2])
+{
+  /* The map reserves word zero == 0 as its absent sentinel.  Put the packed
+     length/high-offset word first; serialized clauses are never empty. */
+  values[0] = (uint32_t) (slice >> 32);
+  values[1] = (uint32_t) slice;
+}
+
 static BOOL directory_get(Compact_term_pool pool,
                           unsigned long long proof_id,
-                          uint32_t *offset, uint32_t *length)
+                          Compact_term_slice *slice)
 {
   uint32_t values[2];
+  Compact_term_slice found;
   if (pool->cached_proof_id == proof_id) {
-    values[0] = pool->cached_clause_offset + 1;
-    values[1] = pool->cached_clause_length;
+    found = pool->cached_clause;
   }
   else {
     if (!compact_id_map_get(pool->directory, proof_id, values))
       return FALSE;
-    if (values[0] == 0)
-      fatal_error("compact_term_pool: invalid directory offset sentinel");
+    found = values_to_slice(values);
+    if (!resolve_slice(pool, found, NULL))
+      fatal_error("compact_term_pool: invalid directory slice");
     pool->cached_proof_id = proof_id;
-    pool->cached_clause_offset = values[0] - 1;
-    pool->cached_clause_length = values[1];
+    pool->cached_clause = found;
   }
-  if (offset != NULL)
-    *offset = values[0] - 1;
-  if (length != NULL)
-    *length = values[1];
+  if (slice != NULL)
+    *slice = found;
   return TRUE;
 }
 
 static BOOL directory_put(Compact_term_pool pool,
                           unsigned long long proof_id,
-                          uint32_t offset, uint32_t length)
+                          Compact_term_slice slice)
 {
   uint32_t values[2];
   BOOL inserted;
-  if (offset == UINT32_MAX)
-    fatal_error("compact_term_pool: directory offset exceeds sentinel");
-  values[0] = offset + 1;
-  values[1] = length;
+  if (!resolve_slice(pool, slice, NULL))
+    fatal_error("compact_term_pool: directory slice outside pool");
+  if (compact_term_slice_length(slice) == 0)
+    fatal_error("compact_term_pool: empty directory slice");
+  slice_to_values(slice, values);
   inserted = compact_id_map_put(pool->directory, proof_id, values);
   pool->cached_proof_id = proof_id;
-  pool->cached_clause_offset = offset;
-  pool->cached_clause_length = length;
+  pool->cached_clause = slice;
   return inserted;
 }
 
@@ -329,8 +423,10 @@ static void ensure_tokens(Compact_term_pool pool, size_t extra)
   if (extra > SIZE_MAX - pool->token_count)
     fatal_error("compact_term_pool: token overflow");
   needed = pool->token_count + extra;
-  if (needed > UINT32_MAX)
-    fatal_error("compact_term_pool: token offsets exceed 32 bits");
+  if (needed != 0 &&
+      (pool->logical_base > COMPACT_TERM_SLICE_OFFSET_MAX ||
+       needed - 1 > COMPACT_TERM_SLICE_OFFSET_MAX - pool->logical_base))
+    fatal_error("compact_term_pool: token offsets exceed packed slice");
   while (needed > pool->token_capacity) {
     size_t old_capacity = pool->token_capacity;
     size_t next_capacity = grow_token_capacity(pool->token_capacity);
@@ -372,7 +468,7 @@ static void append_term(Compact_term_pool pool, Term term)
 }
 
 static BOOL term_equals_tokens(Compact_term_pool pool, Term term,
-                               uint32_t *position, uint32_t end)
+                               size_t *position, size_t end)
 {
   int32_t code;
   int i;
@@ -389,44 +485,52 @@ static BOOL term_equals_tokens(Compact_term_pool pool, Term term,
   return TRUE;
 }
 
-static uint32_t find_term(Compact_term_pool pool, uint32_t offset,
-                          uint32_t length, Term target,
-                          uint32_t *target_length)
+static size_t find_term(Compact_term_pool pool, Compact_term_slice clause,
+                        Term target, uint32_t *target_length)
 {
-  uint32_t at;
-  uint32_t end = offset + length;
+  size_t offset, at, end;
   int32_t root = VARIABLE(target) ?
     -(int32_t) VARNUM(target) - 1 : (int32_t) SYMNUM(target);
+  if (!resolve_slice(pool, clause, &offset))
+    fatal_error("compact_term_pool: invalid clause slice");
+  end = offset + compact_term_slice_length(clause);
   for (at = offset; at < end; at++)
     if (pool->tokens[at] == root) {
-      uint32_t after = at;
+      size_t after = at;
       if (term_equals_tokens(pool, target, &after, end)) {
+        if (after - at > COMPACT_TERM_SLICE_LENGTH_MAX)
+          fatal_error("compact_term_pool: target term too large");
         *target_length = after - at;
         return at;
       }
     }
-  return UINT32_MAX;
+  return SIZE_MAX;
 }
 
 static void serialize_clause(Compact_term_pool pool,
                              unsigned long long proof_id,
                              Literals literals)
 {
-  uint32_t offset = (uint32_t) pool->token_count;
+  size_t offset = pool->token_count;
+  Compact_term_slice clause;
   Literals literal;
   for (literal = literals; literal != NULL; literal = literal->next) {
-    uint32_t atom_offset = (uint32_t) pool->token_count;
+    size_t atom_offset = pool->token_count;
     append_term(pool, literal->atom);
     if (pool->sharing_profile_enabled) {
-      uint32_t position = atom_offset;
+      size_t position = atom_offset;
       (void) profile_term(pool, literal->atom, &position);
       if (position != pool->token_count)
         fatal_error("compact_term_pool: sharing profile atom mismatch");
       pool->profile_atom_roots++;
     }
   }
-  if (directory_put(pool, proof_id, offset,
-                    (uint32_t) pool->token_count - offset))
+  if (pool->token_count - offset > COMPACT_TERM_SLICE_LENGTH_MAX ||
+      !compact_term_slice_encode(pool->logical_base + offset,
+                                 (uint32_t) (pool->token_count - offset),
+                                 &clause))
+    fatal_error("compact_term_pool: serialized clause slice overflow");
+  if (directory_put(pool, proof_id, clause))
     pool->directory_count++;
   pool->serializations++;
   update_peak(pool);
@@ -504,27 +608,34 @@ BOOL compact_term_pool_copy_clause(Compact_term_pool destination,
                                    Compact_term_rebase_map map,
                                    unsigned long long proof_id)
 {
-  uint32_t old_offset, new_offset, length;
+  Compact_term_slice old_slice, new_slice;
+  size_t old_position;
+  uint32_t length;
   struct compact_term_rebase_entry *entry;
   if (destination == NULL || source == NULL || map == NULL ||
       proof_id == 0 || map->finalized || source->directory_count == 0 ||
       map->mode == REBASE_MODE_RETAINED)
     return FALSE;
-  map->mode = REBASE_MODE_COPY;
-  if (!directory_get(source, proof_id, &old_offset, &length))
+  if (destination->token_count == 0 && destination->directory_count == 0)
+    destination->logical_base = source->logical_base;
+  else if (destination->logical_base != source->logical_base)
     return FALSE;
-  if (directory_get(destination, proof_id, NULL, NULL))
+  map->mode = REBASE_MODE_COPY;
+  if (!directory_get(source, proof_id, &old_slice) ||
+      !resolve_slice(source, old_slice, &old_position))
+    return FALSE;
+  if (directory_get(destination, proof_id, NULL))
     return TRUE;
-  new_offset = compact_term_pool_append(
-    destination, source->tokens + old_offset, length);
-  if (!directory_put(destination, proof_id, new_offset, length))
+  length = compact_term_slice_length(old_slice);
+  new_slice = compact_term_pool_append_slice(
+    destination, source->tokens + old_position, length);
+  if (!directory_put(destination, proof_id, new_slice))
     fatal_error("compact_term_pool: duplicate copied clause");
   destination->directory_count++;
   destination->serializations++;
   entry = append_rebase_entry(map);
-  entry->destination.new_offset = new_offset;
-  entry->old_offset = old_offset;
-  entry->length = length;
+  entry->destination.new_slice = new_slice;
+  entry->old_slice = old_slice;
   update_peak(destination);
   return TRUE;
 }
@@ -543,7 +654,7 @@ BOOL compact_term_rebase_map_retain_clause(Compact_term_rebase_map map,
   }
   else if (map->retained_source != source)
     return FALSE;
-  if (!directory_get(source, proof_id, NULL, NULL))
+  if (!directory_get(source, proof_id, NULL))
     return FALSE;
   if (!compact_id_set_add(map->retained_ids, proof_id))
     return TRUE;
@@ -559,8 +670,9 @@ static int increasing_old_offset(const void *left, const void *right)
 {
   const struct compact_term_rebase_entry *a = left;
   const struct compact_term_rebase_entry *b = right;
-  return a->old_offset < b->old_offset ? -1 :
-         a->old_offset > b->old_offset ? 1 : 0;
+  unsigned long long ao = compact_term_slice_offset(a->old_slice);
+  unsigned long long bo = compact_term_slice_offset(b->old_slice);
+  return ao < bo ? -1 : ao > bo ? 1 : 0;
 }
 
 void compact_term_rebase_map_finalize(Compact_term_rebase_map map)
@@ -573,8 +685,9 @@ void compact_term_rebase_map_finalize(Compact_term_rebase_map map)
   qsort(map->entries, map->count, sizeof(*map->entries),
         increasing_old_offset);
   for (i = 1; i < map->count; i++)
-    if ((uint64_t) map->entries[i-1].old_offset +
-          map->entries[i-1].length > map->entries[i].old_offset)
+    if (compact_term_slice_offset(map->entries[i-1].old_slice) +
+          compact_term_slice_length(map->entries[i-1].old_slice) >
+        compact_term_slice_offset(map->entries[i].old_slice))
       fatal_error("compact_term_pool: overlapping rebase intervals");
   map->finalized = TRUE;
 }
@@ -597,8 +710,11 @@ static void measure_retained_clause(unsigned long long proof_id,
                                     void *context)
 {
   struct retained_measure_context *measure = context;
+  Compact_term_slice slice;
   uint32_t length;
-  if (!directory_get(measure->pool, proof_id, NULL, &length) ||
+  if (!directory_get(measure->pool, proof_id, &slice) ||
+      (length = compact_term_slice_length(slice)) >
+        COMPACT_TERM_SLICE_LENGTH_MAX ||
       length > SIZE_MAX - measure->token_count)
     fatal_error("compact_term_pool: corrupt retained size prediction");
   measure->token_count += length;
@@ -616,14 +732,13 @@ static void materialize_retained_clause(unsigned long long proof_id,
 {
   struct retained_materialize_context *materialize = context;
   struct compact_term_rebase_entry *entry;
-  uint32_t offset, length;
+  Compact_term_slice slice;
   if (materialize->count >= materialize->map->count ||
-      !directory_get(materialize->pool, proof_id, &offset, &length))
+      !directory_get(materialize->pool, proof_id, &slice))
     fatal_error("compact_term_pool: corrupt retained ID set");
   entry = &materialize->map->entries[materialize->count++];
   entry->destination.proof_id = proof_id;
-  entry->old_offset = offset;
-  entry->length = length;
+  entry->old_slice = slice;
 }
 
 #if defined(__linux__) && !defined(__EMSCRIPTEN__)
@@ -649,22 +764,28 @@ static void stream_retained_clause(unsigned long long proof_id,
 {
   struct retained_stream_context *stream = context;
   struct compact_term_rebase_entry entry;
-  uint32_t offset, length;
-  if (!directory_get(stream->pool, proof_id, &offset, &length) ||
-      (uint64_t) offset + length > stream->pool->token_count)
+  Compact_term_slice slice;
+  size_t local;
+  unsigned long long offset;
+  uint32_t length;
+  if (!directory_get(stream->pool, proof_id, &slice) ||
+      !resolve_slice(stream->pool, slice, &local))
     fatal_error("compact_term_pool: corrupt streamed retained interval");
+  offset = compact_term_slice_offset(slice);
+  length = compact_term_slice_length(slice);
   if (stream->count != 0 && offset < stream->previous_end)
     stream->monotone = FALSE;
-  if (stream->token_count > UINT32_MAX ||
-      length > UINT32_MAX - stream->token_count)
-    fatal_error("compact_term_pool: compacted offsets exceed 32 bits");
+  if (length > SIZE_MAX - stream->token_count ||
+      (stream->token_count + length != 0 &&
+       stream->token_count + length - 1 >
+         COMPACT_TERM_SLICE_OFFSET_MAX - stream->pool->logical_base))
+    fatal_error("compact_term_pool: compacted slice overflow");
   entry.destination.proof_id = proof_id;
-  entry.old_offset = offset;
-  entry.length = length;
+  entry.old_slice = slice;
   if (!stream->write_failed &&
       fwrite(&entry, sizeof(entry), 1, stream->file) != 1)
     stream->write_failed = TRUE;
-  stream->previous_end = (uint64_t) offset + length;
+  stream->previous_end = offset + length;
   stream->token_count += length;
   stream->count++;
 }
@@ -709,10 +830,10 @@ static BOOL write_rebase_entry(int fd,
   return TRUE;
 }
 
-/* Four stable byte-wise counting passes sort arbitrary 32-bit token offsets
+/* Six stable byte-wise counting passes sort the packed 40-bit token offsets
    while retaining only one 4-KiB entry buffer and two 256-counter arrays.
-   Four is even, so the final order is back in SOURCE and SCRATCH remains
-   available for the transformed old-to-new map. */
+   The sixth byte is zero but keeps the pass count even, so the final order is
+   back in SOURCE and SCRATCH remains available for the transformed map. */
 static BOOL radix_sort_rebase_file(FILE *source, FILE *scratch, size_t count)
 {
   enum { REBASE_RADIX = 256, REBASE_IO_ENTRIES = 256 };
@@ -720,7 +841,7 @@ static BOOL radix_sort_rebase_file(FILE *source, FILE *scratch, size_t count)
   size_t counts[REBASE_RADIX], cursors[REBASE_RADIX];
   int source_fd = fileno(source), scratch_fd = fileno(scratch);
   unsigned pass;
-  for (pass = 0; pass < 4; pass++) {
+  for (pass = 0; pass < 6; pass++) {
     int input_fd = (pass & 1) == 0 ? source_fd : scratch_fd;
     int output_fd = (pass & 1) == 0 ? scratch_fd : source_fd;
     unsigned shift = pass * 8;
@@ -732,8 +853,11 @@ static BOOL radix_sort_rebase_file(FILE *source, FILE *scratch, size_t count)
         count - first : REBASE_IO_ENTRIES;
       if (!read_rebase_entries(input_fd, buffer, first, amount))
         return FALSE;
-      for (i = 0; i < amount; i++)
-        counts[(buffer[i].old_offset >> shift) & 0xffU]++;
+      for (i = 0; i < amount; i++) {
+        unsigned long long offset =
+          compact_term_slice_offset(buffer[i].old_slice);
+        counts[(offset >> shift) & 0xffU]++;
+      }
     }
     for (radix = 0; radix < REBASE_RADIX; radix++) {
       cursors[radix] = total;
@@ -748,7 +872,9 @@ static BOOL radix_sort_rebase_file(FILE *source, FILE *scratch, size_t count)
       if (!read_rebase_entries(input_fd, buffer, first, amount))
         return FALSE;
       for (i = 0; i < amount; i++) {
-        unsigned radix = (buffer[i].old_offset >> shift) & 0xffU;
+        unsigned long long offset =
+          compact_term_slice_offset(buffer[i].old_slice);
+        unsigned radix = (offset >> shift) & 0xffU;
         if (!write_rebase_entry(output_fd, &buffer[i], cursors[radix]++))
           return FALSE;
       }
@@ -819,16 +945,22 @@ static BOOL compact_retained_streamed(Compact_term_pool pool,
     for (i = 0; i < count; i++) {
       struct compact_term_rebase_entry *entry = &buffer[i];
       unsigned long long proof_id = entry->destination.proof_id;
-      if (entry->old_offset != token_count)
+      Compact_term_slice new_slice;
+      size_t old_position;
+      uint32_t length = compact_term_slice_length(entry->old_slice);
+      if (!resolve_slice(pool, entry->old_slice, &old_position))
+        fatal_error("compact_term_pool: bad streamed source slice");
+      if (old_position != token_count)
         memmove(pool->tokens + token_count,
-                pool->tokens + entry->old_offset,
-                (size_t) entry->length * sizeof(*pool->tokens));
-      if (!directory_put(pool, proof_id, (uint32_t) token_count,
-                         entry->length))
+                pool->tokens + old_position,
+                (size_t) length * sizeof(*pool->tokens));
+      if (!compact_term_slice_encode(pool->logical_base + token_count,
+                                     length, &new_slice) ||
+          !directory_put(pool, proof_id, new_slice))
         fatal_error("compact_term_pool: duplicate streamed proof ID");
       pool->directory_count++;
-      entry->destination.new_offset = token_count;
-      token_count += entry->length;
+      entry->destination.new_slice = new_slice;
+      token_count += length;
     }
     if (fwrite(buffer, sizeof(*buffer), count, destination_file) != count)
       fatal_error("compact_term_pool: cannot write streamed rebase map");
@@ -894,8 +1026,7 @@ unsigned long long compact_term_pool_retained_reclaimable_bytes(
     (unsigned long long) token_capacity * sizeof(*pool->tokens) +
     compact_id_set_projected_map_bytes(map->retained_ids, 2) +
     (unsigned long long) pool->profile_capacity *
-      (sizeof(*pool->profile_hashes) + sizeof(*pool->profile_offsets) +
-       sizeof(*pool->profile_lengths));
+      (sizeof(*pool->profile_hashes) + sizeof(*pool->profile_slices));
   return current > compacted ? current - compacted : 0;
 }
 
@@ -928,15 +1059,21 @@ void compact_term_pool_compact_retained(Compact_term_pool pool,
         increasing_old_offset);
   for (i = 0; i < map->count; i++) {
     struct compact_term_rebase_entry *entry = &map->entries[i];
-    if ((uint64_t) entry->old_offset + entry->length > pool->token_count)
+    size_t old_position;
+    uint32_t length = compact_term_slice_length(entry->old_slice);
+    if (!resolve_slice(pool, entry->old_slice, &old_position))
       fatal_error("compact_term_pool: retained interval exceeds pool");
     if (i != 0 &&
-        (uint64_t) map->entries[i-1].old_offset +
-          map->entries[i-1].length > entry->old_offset)
+        compact_term_slice_offset(map->entries[i-1].old_slice) +
+          compact_term_slice_length(map->entries[i-1].old_slice) >
+        compact_term_slice_offset(entry->old_slice))
       fatal_error("compact_term_pool: overlapping retained intervals");
-    if (entry->length > UINT32_MAX - token_count)
-      fatal_error("compact_term_pool: compacted offsets exceed 32 bits");
-    token_count += entry->length;
+    if (length > SIZE_MAX - token_count ||
+        (token_count + length != 0 &&
+         token_count + length - 1 >
+           COMPACT_TERM_SLICE_OFFSET_MAX - pool->logical_base))
+      fatal_error("compact_term_pool: compacted slice overflow");
+    token_count += length;
   }
 
   old_bytes = pool_bytes(pool);
@@ -949,16 +1086,22 @@ void compact_term_pool_compact_retained(Compact_term_pool pool,
   for (i = 0; i < map->count; i++) {
     struct compact_term_rebase_entry *entry = &map->entries[i];
     unsigned long long proof_id = entry->destination.proof_id;
-    if (entry->old_offset != token_count)
+    Compact_term_slice new_slice;
+    size_t old_position;
+    uint32_t length = compact_term_slice_length(entry->old_slice);
+    if (!resolve_slice(pool, entry->old_slice, &old_position))
+      fatal_error("compact_term_pool: bad retained source slice");
+    if (old_position != token_count)
       memmove(pool->tokens + token_count,
-              pool->tokens + entry->old_offset,
-              (size_t) entry->length * sizeof(*pool->tokens));
-    if (!directory_put(pool, proof_id, (uint32_t) token_count,
-                       entry->length))
+              pool->tokens + old_position,
+              (size_t) length * sizeof(*pool->tokens));
+    if (!compact_term_slice_encode(pool->logical_base + token_count,
+                                   length, &new_slice) ||
+        !directory_put(pool, proof_id, new_slice))
       fatal_error("compact_term_pool: duplicate retained proof ID");
     pool->directory_count++;
-    entry->destination.new_offset = token_count;
-    token_count += entry->length;
+    entry->destination.new_slice = new_slice;
+    token_count += length;
   }
   pool->token_count = token_count;
   token_capacity = compacted_token_capacity(token_count);
@@ -973,17 +1116,21 @@ void compact_term_pool_compact_retained(Compact_term_pool pool,
   map->finalized = TRUE;
 }
 
-uint32_t compact_term_rebase_offset(Compact_term_rebase_map map,
-                                    uint32_t old_offset)
+Compact_term_slice compact_term_rebase_slice(Compact_term_rebase_map map,
+                                             Compact_term_slice old_slice)
 {
   size_t low = 0, high;
   struct compact_term_rebase_entry *entry;
+  unsigned long long old_offset = compact_term_slice_offset(old_slice);
+  uint32_t length = compact_term_slice_length(old_slice);
+  Compact_term_slice rebased;
   if (map == NULL || !map->finalized || map->count == 0)
     fatal_error("compact_term_pool: unfinished or empty rebase map");
   high = map->count;
   while (low < high) {
     size_t middle = low + (high - low) / 2;
-    if (map->entries[middle].old_offset <= old_offset)
+    if (compact_term_slice_offset(map->entries[middle].old_slice) <=
+        old_offset)
       low = middle + 1;
     else
       high = middle;
@@ -991,11 +1138,31 @@ uint32_t compact_term_rebase_offset(Compact_term_rebase_map map,
   if (low == 0)
     fatal_error("compact_term_pool: token offset precedes rebase map");
   entry = &map->entries[low - 1];
-  if ((uint64_t) old_offset >=
-      (uint64_t) entry->old_offset + entry->length)
+  if (old_offset < compact_term_slice_offset(entry->old_slice) ||
+      length > compact_term_slice_length(entry->old_slice) ||
+      old_offset - compact_term_slice_offset(entry->old_slice) >
+        compact_term_slice_length(entry->old_slice) - length)
     fatal_error("compact_term_pool: token offset is not retained");
-  return (uint32_t) entry->destination.new_offset +
-    (old_offset - entry->old_offset);
+  if (!compact_term_slice_encode(
+        compact_term_slice_offset(entry->destination.new_slice) +
+          (old_offset - compact_term_slice_offset(entry->old_slice)),
+        length, &rebased))
+    fatal_error("compact_term_pool: rebased slice overflow");
+  return rebased;
+}
+
+uint32_t compact_term_rebase_offset(Compact_term_rebase_map map,
+                                    uint32_t old_offset)
+{
+  Compact_term_slice old_slice, rebased;
+  unsigned long long offset;
+  if (!compact_term_slice_encode(old_offset, 1, &old_slice))
+    fatal_error("compact_term_pool: legacy rebase input overflow");
+  rebased = compact_term_rebase_slice(map, old_slice);
+  offset = compact_term_slice_offset(rebased);
+  if (offset > UINT32_MAX)
+    fatal_error("compact_term_pool: legacy rebase output exceeds 32 bits");
+  return (uint32_t) offset;
 }
 
 void compact_term_rebase_map_free(Compact_term_rebase_map map)
@@ -1031,6 +1198,7 @@ void compact_term_pool_finish_compaction(Compact_term_pool destination,
   destination->lookups = source->lookups;
   destination->hits = source->hits;
   destination->reused_tokens = source->reused_tokens;
+  destination->logical_base = source->logical_base;
   destination->token_growths += source->token_growths;
   destination->token_copy_bytes += source->token_copy_bytes;
   destination->rebase_growths += source->rebase_growths;
@@ -1055,47 +1223,85 @@ void compact_term_pool_enable_sharing_profile(Compact_term_pool pool)
   update_peak(pool);
 }
 
+Compact_term_slice compact_term_pool_intern_slice(Compact_term_pool pool,
+                                                  unsigned long long proof_id,
+                                                  Literals literals,
+                                                  Term target)
+{
+  Compact_term_slice clause, slice;
+  size_t offset;
+  uint32_t length;
+  if (pool == NULL || proof_id == 0 || literals == NULL || target == NULL ||
+      pool->logical_base > COMPACT_TERM_SLICE_OFFSET_MAX)
+    fatal_error("compact_term_pool_intern: invalid request");
+  pool->lookups++;
+  if (directory_get(pool, proof_id, &clause)) {
+    offset = find_term(pool, clause, target, &length);
+    if (offset != SIZE_MAX) {
+      pool->hits++;
+      pool->reused_tokens += length;
+      if (!compact_term_slice_encode(pool->logical_base + offset, length,
+                                     &slice))
+        fatal_error("compact_term_pool_intern: target slice overflow");
+      return slice;
+    }
+  }
+  serialize_clause(pool, proof_id, literals);
+  if (!directory_get(pool, proof_id, &clause))
+    fatal_error("compact_term_pool_intern: missing serialized clause");
+  offset = find_term(pool, clause, target, &length);
+  if (offset == SIZE_MAX ||
+      !compact_term_slice_encode(pool->logical_base + offset, length, &slice))
+    fatal_error("compact_term_pool_intern: target is not a clause subterm");
+  return slice;
+}
+
 uint32_t compact_term_pool_intern(Compact_term_pool pool,
                                   unsigned long long proof_id,
                                   Literals literals, Term target,
                                   uint32_t *length)
 {
-  uint32_t offset, clause_offset, clause_length;
-  if (pool == NULL || proof_id == 0 || literals == NULL || target == NULL ||
-      length == NULL)
-    fatal_error("compact_term_pool_intern: invalid request");
-  pool->lookups++;
-  if (directory_get(pool, proof_id, &clause_offset, &clause_length)) {
-    offset = find_term(pool, clause_offset, clause_length, target, length);
-    if (offset != UINT32_MAX) {
-      pool->hits++;
-      pool->reused_tokens += *length;
-      return offset;
-    }
-  }
-  serialize_clause(pool, proof_id, literals);
-  if (!directory_get(pool, proof_id, &clause_offset, &clause_length))
-    fatal_error("compact_term_pool_intern: missing serialized clause");
-  offset = find_term(pool, clause_offset, clause_length, target, length);
-  if (offset == UINT32_MAX)
-    fatal_error("compact_term_pool_intern: target is not a clause subterm");
-  return offset;
+  Compact_term_slice slice;
+  unsigned long long offset;
+  if (length == NULL)
+    fatal_error("compact_term_pool_intern: missing length");
+  slice = compact_term_pool_intern_slice(pool, proof_id, literals, target);
+  offset = compact_term_slice_offset(slice);
+  *length = compact_term_slice_length(slice);
+  if (offset > UINT32_MAX)
+    fatal_error("compact_term_pool_intern: legacy offset exceeds 32 bits");
+  return (uint32_t) offset;
 }
 
-uint32_t compact_term_pool_append(Compact_term_pool pool,
-                                  const int32_t *tokens, uint32_t length)
+Compact_term_slice compact_term_pool_append_slice(Compact_term_pool pool,
+                                                  const int32_t *tokens,
+                                                  uint32_t length)
 {
-  uint32_t offset;
+  Compact_term_slice slice;
+  unsigned long long offset;
   if (pool == NULL || (tokens == NULL && length != 0))
     fatal_error("compact_term_pool_append: invalid request");
-  offset = (uint32_t) pool->token_count;
+  offset = pool->logical_base + pool->token_count;
   ensure_tokens(pool, length);
   if (length != 0)
     memcpy(pool->tokens + pool->token_count, tokens,
            (size_t) length * sizeof(*pool->tokens));
   pool->token_count += length;
   update_peak(pool);
-  return offset;
+  if (!compact_term_slice_encode(offset, length, &slice))
+    fatal_error("compact_term_pool_append: slice overflow");
+  return slice;
+}
+
+uint32_t compact_term_pool_append(Compact_term_pool pool,
+                                  const int32_t *tokens, uint32_t length)
+{
+  Compact_term_slice slice = compact_term_pool_append_slice(
+    pool, tokens, length);
+  unsigned long long offset = compact_term_slice_offset(slice);
+  if (offset > UINT32_MAX)
+    fatal_error("compact_term_pool_append: legacy offset exceeds 32 bits");
+  return (uint32_t) offset;
 }
 
 const int32_t *compact_term_pool_tokens(Compact_term_pool pool)
@@ -1143,8 +1349,7 @@ void compact_term_pool_get_stats(Compact_term_pool pool,
     (pool->profile_count + pool->profile_child_references +
      pool->profile_atom_roots) * sizeof(uint32_t);
   stats->profile_table_bytes = pool->profile_capacity *
-    (sizeof(*pool->profile_hashes) + sizeof(*pool->profile_offsets) +
-     sizeof(*pool->profile_lengths));
+    (sizeof(*pool->profile_hashes) + sizeof(*pool->profile_slices));
 }
 
 void compact_term_pool_free(Compact_term_pool pool)
@@ -1154,7 +1359,6 @@ void compact_term_pool_free(Compact_term_pool pool)
   release_tokens(pool);
   compact_id_map_free(pool->directory);
   safe_free(pool->profile_hashes);
-  safe_free(pool->profile_offsets);
-  safe_free(pool->profile_lengths);
+  safe_free(pool->profile_slices);
   safe_free(pool);
 }

@@ -7,6 +7,15 @@
 
 typedef struct compact_term_pool * Compact_term_pool;
 typedef struct compact_term_rebase_map * Compact_term_rebase_map;
+typedef uint64_t Compact_term_slice;
+
+/* One hot term reference must remain the same eight bytes as the historical
+   (uint32_t offset, uint32_t length) pair.  Forty offset bits cover four TiB
+   of 32-bit tokens; twenty-four length bits cover a single 16M-token term. */
+#define COMPACT_TERM_SLICE_OFFSET_BITS 40
+#define COMPACT_TERM_SLICE_LENGTH_BITS 24
+#define COMPACT_TERM_SLICE_OFFSET_MAX UINT64_C(0xffffffffff)
+#define COMPACT_TERM_SLICE_LENGTH_MAX UINT32_C(0x00ffffff)
 
 struct compact_term_pool_stats {
   unsigned long long clause_entries;
@@ -66,6 +75,9 @@ void compact_term_pool_compact_retained(Compact_term_pool pool,
 
 void compact_term_rebase_map_finalize(Compact_term_rebase_map map);
 
+Compact_term_slice compact_term_rebase_slice(Compact_term_rebase_map map,
+                                             Compact_term_slice old_slice);
+
 uint32_t compact_term_rebase_offset(Compact_term_rebase_map map,
                                     uint32_t old_offset);
 
@@ -86,10 +98,36 @@ uint32_t compact_term_pool_intern(Compact_term_pool pool,
                                   Literals literals, Term target,
                                   uint32_t *length);
 
+Compact_term_slice compact_term_pool_intern_slice(Compact_term_pool pool,
+                                                  unsigned long long proof_id,
+                                                  Literals literals,
+                                                  Term target);
+
 /* Append an already validated prefix-token sequence.  This is used when an
    owning compact index rebuilds into a fresh private pool. */
 uint32_t compact_term_pool_append(Compact_term_pool pool,
                                   const int32_t *tokens, uint32_t length);
+
+Compact_term_slice compact_term_pool_append_slice(Compact_term_pool pool,
+                                                  const int32_t *tokens,
+                                                  uint32_t length);
+
+BOOL compact_term_slice_encode(unsigned long long offset, uint32_t length,
+                               Compact_term_slice *slice);
+unsigned long long compact_term_slice_offset(Compact_term_slice slice);
+uint32_t compact_term_slice_length(Compact_term_slice slice);
+BOOL compact_term_slice_subslice(Compact_term_slice slice, uint32_t start,
+                                 uint32_t length,
+                                 Compact_term_slice *subslice);
+
+/* Resolve one packed logical slice to a contiguous local span. */
+const int32_t *compact_term_pool_slice_tokens(Compact_term_pool pool,
+                                             Compact_term_slice slice);
+
+/* Assign the logical base of an unused pool.  Production pools use zero;
+   accelerated numerical-limit tests use a high base with bounded storage. */
+void compact_term_pool_set_logical_base(Compact_term_pool pool,
+                                        unsigned long long logical_base);
 
 const int32_t *compact_term_pool_tokens(Compact_term_pool pool);
 

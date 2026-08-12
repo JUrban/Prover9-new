@@ -217,6 +217,78 @@ int main(void)
     delete_clause(later);
   }
 
+  {
+    const unsigned long long high_base =
+      (unsigned long long) UINT32_MAX + 123ULL;
+    Compact_term_pool source = compact_term_pool_init();
+    Compact_term_pool destination = compact_term_pool_init();
+    Compact_term_rebase_map copy_map = compact_term_rebase_map_init();
+    Compact_term_rebase_map retained_map = compact_term_rebase_map_init();
+    Topform first = parse_clause_from_string("u(f(k)).");
+    Topform stale = parse_clause_from_string("v(g(l)).");
+    Topform last = parse_clause_from_string("w(h(m)).");
+    Compact_term_slice first_slice, stale_slice, last_slice;
+    Compact_term_slice interior, translated_interior;
+    Compact_term_slice translated_first, translated_last;
+    int32_t first_root, last_root;
+    first->id = 1001;
+    stale->id = 1002;
+    last->id = 1003;
+    compact_term_pool_set_logical_base(source, high_base);
+    first_slice = compact_term_pool_intern_slice(
+      source, first->id, first->literals, first->literals->atom);
+    stale_slice = compact_term_pool_intern_slice(
+      source, stale->id, stale->literals, stale->literals->atom);
+    last_slice = compact_term_pool_intern_slice(
+      source, last->id, last->literals, last->literals->atom);
+    CHECK(compact_term_slice_offset(first_slice) == high_base &&
+          compact_term_slice_offset(stale_slice) > UINT32_MAX &&
+          compact_term_slice_offset(last_slice) >
+            compact_term_slice_offset(stale_slice) &&
+          compact_term_slice_length(first_slice) == 3,
+          "packed slices address bounded storage above UINT32_MAX");
+    first_root = compact_term_pool_slice_tokens(source, first_slice)[0];
+    last_root = compact_term_pool_slice_tokens(source, last_slice)[0];
+    CHECK(compact_term_pool_copy_clause(
+            destination, source, copy_map, last->id) &&
+          compact_term_pool_copy_clause(
+            destination, source, copy_map, first->id),
+          "high-base clause copying uses packed term slices");
+    compact_term_rebase_map_finalize(copy_map);
+    CHECK(compact_term_slice_subslice(first_slice, 1, 1, &interior),
+          "high-base interior subslice is representable");
+    translated_interior = compact_term_rebase_slice(copy_map, interior);
+    CHECK(compact_term_slice_offset(translated_interior) > UINT32_MAX &&
+          compact_term_pool_slice_tokens(
+            destination, translated_interior)[0] ==
+          compact_term_pool_slice_tokens(source, interior)[0],
+          "copy rebase translates an interior token above UINT32_MAX");
+
+    CHECK(compact_term_rebase_map_retain_clause(
+            retained_map, source, last->id) &&
+          compact_term_rebase_map_retain_clause(
+            retained_map, source, first->id),
+          "high-base retained compaction accepts packed directory slices");
+    compact_term_pool_compact_retained(source, retained_map);
+    translated_first = compact_term_rebase_slice(retained_map, first_slice);
+    translated_last = compact_term_rebase_slice(retained_map, last_slice);
+    CHECK(compact_term_slice_offset(translated_first) == high_base &&
+          compact_term_slice_offset(translated_last) ==
+            high_base + compact_term_slice_length(first_slice) &&
+          compact_term_pool_slice_tokens(source, translated_first)[0] ==
+            first_root &&
+          compact_term_pool_slice_tokens(source, translated_last)[0] ==
+            last_root,
+          "retained compaction preserves high-base slices and token order");
+    compact_term_rebase_map_free(copy_map);
+    compact_term_rebase_map_free(retained_map);
+    compact_term_pool_free(destination);
+    compact_term_pool_free(source);
+    delete_clause(first);
+    delete_clause(stale);
+    delete_clause(last);
+  }
+
   if (Failures != 0) {
     fprintf(stderr, "compact_term_pool_test: %d failure(s)\n", Failures);
     return 1;

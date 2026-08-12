@@ -845,3 +845,13 @@ index, copy, and rebase paths above `UINT32_MAX` with a bounded physical array;
 the existing short and mature CPU gates remain mandatory because a wider type
 is unacceptable if it adds inner-loop overhead that compounds during long
 runs.
+
+The pool foundation now passes a bounded high-base test.  With logical base
+`UINT32_MAX + 123`, it serializes three clauses, finds packed subterm slices,
+copies retained clauses in arbitrary order, translates an interior token,
+drops a stale interval through the streamed retained-compaction path, and
+rebases both retained roots above the 32-bit boundary.  Its proof-ID directory
+still consumes two 32-bit words and its temporary rebase record remains 16
+bytes.  This evidence covers the pool only: the inference indexes still call
+the checked legacy API and will fail explicitly above 32 bits until their term
+fields are migrated.

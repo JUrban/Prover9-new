@@ -332,6 +332,16 @@ listed hot layouts retain their previous sizes, before/after candidate and
 proof trajectories are identical, and mature lookup CPU stays within the
 existing 25% hard limit.  Passing the numerical test alone is not promotion.
 
+Implementation status: the pool-level foundation is implemented.  Packed
+slice encoding/sub-slicing, the two-word proof-ID directory, clause
+serialization and lookup, arbitrary-order copy compaction, both in-memory and
+file-sorted retained compaction, and binary-search rebasing operate above
+`UINT32_MAX` in a bounded high-logical-base test.  The rebase entry remains 16
+bytes and the sharing-profile table remains 16 bytes per slot.  Rewrite, unit,
+and back-demod consumers still use the compatibility 32-bit pool API and are
+the next tranche; production is therefore still capped until those fields and
+inner loops migrate and pass the CPU gates.
+
 ## 7. Validation ladder
 
 Run gates in this order and retain failures as evidence:
