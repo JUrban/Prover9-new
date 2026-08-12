@@ -110,6 +110,7 @@ struct compact_back_demod_stats {
   unsigned long long route_admission_attempts;
   unsigned long long route_admission_rejections;
   unsigned long long route_aged_replacements;
+  unsigned long long route_frequency_decays;
   unsigned long long route_mask_choices;
   unsigned long long route_tree_choices;
   unsigned long long route_position_choices;

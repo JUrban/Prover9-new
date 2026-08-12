@@ -898,6 +898,77 @@ int main(void)
   }
 
   {
+    enum {
+      AGED_COLD_ROUTE_CLASSES = 128,
+      AGED_COLD_HITS_PER_WINDOW = 20,
+      ROUTE_FREQUENCY_DECAY_WINDOW = 65536 * 4,
+      ROUTE_FREQUENCY_WINDOWS = 2
+    };
+    Compact_back_demod_index aged_churn;
+    struct compact_back_demod_stats aged_stats;
+    Topform clauses[AGED_COLD_ROUTE_CLASSES + 1];
+    Topform rules[AGED_COLD_ROUTE_CLASSES + 1];
+    char text[96];
+    int cycle, j, round;
+    compact_back_demod_set_tree_budget_kb(65536);
+    compact_back_demod_set_tree_admit_work(1);
+    compact_back_demod_set_tree_build_factor(1);
+    compact_back_demod_set_position_options(4096, 4, 64, 16384, 20, FALSE);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_ADAPTIVE);
+    aged_churn = compact_back_demod_init();
+    for (j = 0; j <= AGED_COLD_ROUTE_CLASSES; j++) {
+      (void) snprintf(text, sizeof(text), "w(aged_route_%d(a)).", j);
+      clauses[j] = indexed_clause(text);
+      CHECK(compact_back_demod_add(aged_churn, clauses[j]),
+            "add multi-window route-aging subject");
+      (void) snprintf(text, sizeof(text), "aged_route_%d(a) = a.", j);
+      rules[j] = indexed_clause(text);
+      ids = compact_back_demod_candidate_ids(
+        aged_churn, rules[j], ORIENTED, &count);
+      CHECK(count == 1 && ids[0] == clauses[j]->id,
+            "initialize complete tree before route-aging traffic");
+      safe_free(ids);
+    }
+    for (cycle = 0; cycle < ROUTE_FREQUENCY_WINDOWS; cycle++) {
+      for (round = 0; round < AGED_COLD_HITS_PER_WINDOW; round++)
+        for (j = 0; j < AGED_COLD_ROUTE_CLASSES; j++) {
+          ids = compact_back_demod_candidate_ids(
+            aged_churn, rules[j], ORIENTED, &count);
+          CHECK(count == 1 && ids[0] == clauses[j]->id,
+                "multi-window cold route preserves its sole answer");
+          safe_free(ids);
+        }
+      /* The final class is intentionally hot clock traffic.  Advancing a
+         complete decay window after each cold burst proves that 40 lifetime
+         hits do not masquerade as 32 recent hits across a long run. */
+      for (round = 0; round < ROUTE_FREQUENCY_DECAY_WINDOW; round++) {
+        ids = compact_back_demod_candidate_ids(
+          aged_churn, rules[AGED_COLD_ROUTE_CLASSES], ORIENTED, &count);
+        CHECK(count == 1 &&
+              ids[0] == clauses[AGED_COLD_ROUTE_CLASSES]->id,
+              "route-aging clock lookup preserves its sole answer");
+        safe_free(ids);
+      }
+    }
+    compact_back_demod_get_stats(aged_churn, &aged_stats);
+    CHECK(aged_stats.route_frequency_decays >= ROUTE_FREQUENCY_WINDOWS &&
+          aged_stats.route_profile_occupied == 1 &&
+          aged_stats.route_profile_replacements == 0 &&
+          aged_stats.route_tree_probes == 1,
+          "decay retains one genuinely hot class without cumulative cold churn");
+    compact_back_demod_free(aged_churn);
+    for (j = 0; j <= AGED_COLD_ROUTE_CLASSES; j++) {
+      delete_clause(clauses[j]);
+      delete_clause(rules[j]);
+    }
+    compact_back_demod_set_tree_admit_work(4096);
+    compact_back_demod_set_tree_build_factor(8);
+    compact_back_demod_set_position_options(
+      4096, 4, 64, 16384, 20, TRUE);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
+  }
+
+  {
     enum { POSITION_FAMILY = 128, POSITION_TARGET = 73 };
     Compact_back_demod_index position;
     struct compact_back_demod_stats position_stats;

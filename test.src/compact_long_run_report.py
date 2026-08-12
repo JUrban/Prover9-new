@@ -64,6 +64,7 @@ CUMULATIVE_KEYS = (
     "back_route_profile_hits", "back_route_profile_misses",
     "back_route_cold_fallbacks", "back_route_admission_attempts",
     "back_route_admission_rejections", "back_route_aged_replacements",
+    "back_route_frequency_decays",
     "back_route_mask_choices", "back_route_tree_choices",
     "back_route_position_choices", "back_route_mask_probes",
     "back_route_tree_probes", "back_route_position_probes",
@@ -627,6 +628,8 @@ def run_summary(label, rows):
             "back_route_cold_fallbacks"),
         "last_back_route_admission_rejections": last.get(
             "back_route_admission_rejections"),
+        "last_back_route_frequency_decays": last.get(
+            "back_route_frequency_decays"),
         "last_back_position_features": last.get("back_position_features"),
         "last_back_position_census_records": last.get(
             "back_position_census_records"),
@@ -978,6 +981,7 @@ TSV_COLUMNS = (
     "delta_back_route_admission_attempts",
     "delta_back_route_admission_rejections",
     "delta_back_route_aged_replacements",
+    "delta_back_route_frequency_decays",
     "delta_back_route_mask_choices", "delta_back_route_tree_choices",
     "delta_back_route_position_choices", "back_route_mask_choice_pct",
     "back_route_tree_choice_pct", "back_route_position_choice_pct",

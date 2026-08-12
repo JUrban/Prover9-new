@@ -20,6 +20,8 @@
 #define CBD_ROUTE_FREQUENCY_CAPACITY 65536
 #define CBD_ROUTE_ADMIT_HITS 32
 #define CBD_ROUTE_STALE_QUANTUM 4096
+#define CBD_ROUTE_FREQUENCY_DECAY_INTERVAL \
+  (CBD_ROUTE_FREQUENCY_CAPACITY * 4)
 
 enum cbd_route {
   CBD_ROUTE_MASK,
@@ -253,6 +255,7 @@ struct compact_back_demod_index {
   unsigned long long route_admission_attempts;
   unsigned long long route_admission_rejections;
   unsigned long long route_aged_replacements;
+  unsigned long long route_frequency_decays;
   unsigned long long route_profile_collisions;
   unsigned long long route_profile_replacements;
   unsigned long long route_choices[CBD_ROUTE_COUNT];
@@ -3945,11 +3948,23 @@ static uint64_t route_pattern_fingerprint(
 static unsigned route_frequency_note(Compact_back_demod_index index,
                                      uint64_t key)
 {
-  size_t mask, first, second;
+  size_t i, mask, first, second;
   uint16_t *a, *b;
   unsigned minimum;
   if (index->route_frequency_capacity == 0)
     return CBD_ROUTE_ADMIT_HITS;
+  /* A fixed-size count-min sketch must forget old traffic.  Without decay,
+     millions of unrelated singleton classes eventually saturate both rows,
+     make every new class appear hot, and restore the route-table churn this
+     sketch is intended to prevent.  Halving two 64K rows every 256K routed
+     lookups costs one counter visit per two lookups amortized and keeps the
+     admission threshold about recent repeated demand rather than run age. */
+  if (index->route_sequence != 0 &&
+      index->route_sequence % CBD_ROUTE_FREQUENCY_DECAY_INTERVAL == 0) {
+    for (i = 0; i < index->route_frequency_capacity * 2; i++)
+      index->route_frequency[i] >>= 1;
+    index->route_frequency_decays++;
+  }
   mask = index->route_frequency_capacity - 1;
   first = (size_t) key & mask;
   second = index->route_frequency_capacity +
@@ -4750,6 +4765,7 @@ static void copy_route_profiles(Compact_back_demod_index destination,
     source->route_admission_rejections;
   destination->route_aged_replacements =
     source->route_aged_replacements;
+  destination->route_frequency_decays = source->route_frequency_decays;
   destination->route_profile_collisions = source->route_profile_collisions;
   destination->route_profile_replacements =
     source->route_profile_replacements;
@@ -5834,6 +5850,7 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->route_admission_attempts = index->route_admission_attempts;
   stats->route_admission_rejections = index->route_admission_rejections;
   stats->route_aged_replacements = index->route_aged_replacements;
+  stats->route_frequency_decays = index->route_frequency_decays;
   stats->route_mask_choices = index->route_choices[CBD_ROUTE_MASK];
   stats->route_tree_choices = index->route_choices[CBD_ROUTE_TREE];
   stats->route_position_choices = index->route_choices[CBD_ROUTE_POSITION];
