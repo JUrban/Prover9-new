@@ -1,0 +1,227 @@
+# Prover9 long-run scalability implementation plan
+
+Status: active implementation on branch `long-run-scalability`.
+
+This plan follows the frozen cross-problem compact-index candidate.  The
+300/1,000-given results establish useful correctness and short-prefix
+selectivity evidence, but they do not establish bounded behavior after days of
+insert/delete churn or with tens of millions of live passive clauses.  This
+branch treats logical generality and asymptotic longevity as separate gates.
+
+## 1. Product invariants
+
+The work must preserve all of the following.
+
+1. The authoritative compact indexes return the same possible answers, in the
+   same deterministic order, as before a maintenance operation.  Exact
+   matching, subsumption, unification, and rewriting remain final authorities.
+2. A maintenance decision depends only on logical counters, never elapsed time
+   or allocator addresses.  Checkpoint/resume therefore cannot change the
+   search trajectory.
+3. Except for the proof archive on disk and explicitly documented live-state
+   structures, resident storage is bounded by the active population plus a
+   configured stale fraction and fixed scratch budgets.  It must not grow with
+   the number of clauses ever inserted.
+4. A rebuild must publish a complete replacement atomically.  Failure before
+   publication leaves the old authority valid.
+5. Temporary RAM during maintenance is bounded and reported.  Reclaiming stale
+   state must not require an unreported second full copy of a large index.
+6. Archive lookup by a known proof ID/offset is constant or logarithmic time;
+   checkpoint work is proportional to the state it writes, not every obsolete
+   archive version.
+7. Internal offset limits are checked before mutation.  Projected day/week/
+   month workloads must not encounter a hidden 32-bit wrap or an unexplained
+   fatal exit.
+8. Process RSS is not used as a synonym for total job RAM.  Long-run reports
+   separate anonymous RSS, mapped/file RSS, and cgroup file cache where the
+   host exposes those counters.
+
+## 2. Phase A: close known cumulative-growth defects
+
+### A1. Compact nonunit feature index
+
+The current nonunit index marks deleted records inactive but never reclaims its
+records, postings, radix nodes, or labels.  Queries consequently scan dead
+posting chains forever.
+
+Implement a deterministic stale threshold shared with
+`compact_index_stale_pct`, with a 1,024-record noise floor.  Rebuild live
+records in original insertion order so forward-first and backward candidate
+orders remain unchanged.  Release predecessor secondary arrays before growing
+the replacement where the retained record recipe makes that possible.  Add:
+
+- compaction count, reclaimed bytes, maintenance time, dead postings, and
+  physical/live ratio to statistics;
+- forced-compaction and threshold APIs for focused tests;
+- fixed-live-set aging tests covering at least 100 generations;
+- answer/order equality before and after every rebuild; and
+- a scale mode that can exercise millions of add/remove operations without
+  allocating full clauses.
+
+Gate: after warm-up, both allocated bytes and posting work plateau within the
+configured stale bound for a fixed live population.
+
+### A2. Integrate structural selectivity into retrieval
+
+The path summary currently rejects candidates only after their numerical
+feature leaf posting has been scanned.  Introduce exact-necessary structural
+posting keys or a compact multi-feature intersection so selective queries do
+not enumerate the broad leaf first.  Keep a complete fallback for variable-rich
+queries.  Select a strategy by measured posting counts and byte budgets, not a
+problem-name constant.
+
+Gate: on same-vector adversarial families, false posting work and exact
+materializations grow with the selective answer set rather than total bucket
+size; no real answer or candidate order changes.
+
+## 3. Phase B: make the archive directory scale with current state
+
+The append-only record file is allowed to grow on disk, but the in-memory
+`refs` vector and several by-ID operations currently scan cumulative archive
+positions.
+
+1. Add offset-native record access: once the ID table supplies an archive
+   offset, validate and read that record directly without searching `refs`.
+2. Separate stable archive offsets from the current-position iteration needed
+   by passive activation and checkpoints.
+3. Reclaim or segment obsolete handle entries while preserving dense passive
+   positions.  Prefer stable logical handles translated through chunk tables so
+   compaction does not rewrite every passive record.
+4. Make checkpoint iteration visit current records directly.  Record scan
+   counts and bytes so cumulative behavior is visible.
+5. In file mode, add a safe batched durability/`posix_fadvise(DONTNEED)` policy
+   and report its calls/bytes.  Validate with cgroup accounting; do not assume
+   page cache is absent because it is absent from process RSS.
+
+Gate: random archived-ID lookup stays constant-time as obsolete versions grow,
+and resident handle bytes are proportional to current records or bounded
+segments rather than cumulative versions.
+
+## 4. Phase C: accelerated longevity and numerical-limit harness
+
+Long theorem searches are final validation, not the first way to discover a
+linear leak.  Add a bounded runner that drives each persistent component at
+powers of ten and in fixed-live aging mode:
+
+- dense passive records and selector heaps;
+- compact rewrite, unit, back-demodulation, and nonunit indexes;
+- shared term-pool reclamation;
+- packed-hint rewrite/rebuild churn; and
+- archive append/activate/rearchive/checkpoint lookup.
+
+Every driver emits machine-readable samples containing active, physical,
+retired, allocated/used/peak bytes, query nodes/postings/exact tests, rebuild
+count/time, scratch high-water, and relevant disk bytes.  The summary computes
+bytes per active object, work per query, dead/live ratio, and the slope between
+successive population sizes.
+
+Required adversarial distributions include identical roots, identical feature
+vectors, variable roots, nonlinear variables, deep terms hidden by shallow
+signatures, repeated rewriting, and broad true-answer sets.
+
+Gate:
+
+- fixed-live resident bytes plateau after each maintenance cycle;
+- physical/live is at most `1 + stale_pct/100`, apart from the documented
+  1,024-record floor;
+- maintenance consumes less than 10% of steady-state CPU;
+- temporary resident bytes stay below 1.25 times pre-maintenance steady state
+  unless an explicitly measured component exception is approved;
+- false-candidate work is no more than twice the corresponding legacy/strong
+  reference index unless the true answer itself is broad; and
+- no configured 30-day projection reaches an internal representation limit.
+
+## 5. Phase D: passive control plane for tens of millions of live clauses
+
+The 64-byte dense record and its selector heaps are deliberately much smaller
+than full `Topform` graphs, but remain linear in the live SOS.  The uploaded
+9-hour clauses-frontier run reached about 65.9 million active passives; merely
+keeping one 64-byte record for each requires about 4.2 GB.
+
+Implement an optional external passive directory and priority queues:
+
+1. Store each immutable selection record once in fixed-size disk segments.
+2. Buffer new selector entries, sort them into immutable runs, and retain only
+   run heads plus a bounded page cache in RAM (an external-memory/LSM priority
+   queue).
+3. Represent deactivation with segmented bitmaps or generation records; merge
+   runs incrementally when stale density or run count crosses deterministic
+   thresholds.
+4. Preserve exact age/weight/hint-age tie breaking and all selector-ratio state.
+5. Keep the current dense in-memory implementation as the small/medium control
+   and allow an explicit strategy choice until old/new event logs and CPU gates
+   pass.
+
+Gate: a synthetic 100-million-passive population stays within a documented
+bounded RAM budget, selection order is byte-identical to the in-memory dense
+reference, and restart/checkpoint reconstruction is deterministic.
+
+## 6. Phase E: remaining indexes and offset spaces
+
+### E1. Backward demodulation
+
+The compact `mask8` strategy remains complete but has demonstrated
+billion-scale posting work.  Develop a byte-bounded adaptive index which admits
+stronger position/code structures only for roots whose observed fallback work
+justifies their construction.  Account for build and backfill work, retain the
+complete fallback, and make admission deterministic and checkpointed.
+
+### E2. Unit and rewrite indexes
+
+Run fixed-live and adversarial scaling gates against code-tree, position, and
+root controls.  Add adaptive selection only if one strategy cannot stay within
+the CPU/candidate gates across distributions.  Preserve the existing in-place
+stale compactions.
+
+### E3. Segmented offsets
+
+Replace global 32-bit physical offsets which can plausibly exhaust in a month
+with segmented `(segment, offset)` references or 64-bit logical references.
+Use 32-bit local offsets inside bounded segments where that materially saves
+RAM.  Cover record, posting, occurrence, node, and shared-token references.
+
+Gate: tests cross segment boundaries at small configured segment sizes and
+exercise the same code paths as production without allocating billions of
+objects.
+
+## 7. Validation ladder
+
+Run gates in this order and retain failures as evidence:
+
+1. focused differential and forced-maintenance tests;
+2. ASan/UBSan focused tests;
+3. `chat_test.in` parallel semantic/debug matrix;
+4. 300-given four-case training and unopened/declared holdout controls;
+5. 1,000-given matrix with component work and byte gates;
+6. accelerated million-operation aging/scale tests;
+7. 2,945- and 11,000-given comparisons on a suitable host;
+8. multi-million-passive Osborn/AIM prefixes with cgroup accounting; and
+9. at least one checkpoint/resume week-scale run and independent proof
+   validation for every success.
+
+Long-run promotion requires all of the existing general-compact correctness
+and CPU gates, at least 80% lower total-job peak RAM than old P9 on every
+passive-dominated case, and no unexplained component accounting gap above 5%.
+
+## 8. Commit sequence
+
+Keep implementation commits independently reviewable:
+
+1. this plan and audit baseline;
+2. nonunit compaction API, statistics, and focused tests;
+3. fixed-live nonunit longevity driver and results;
+4. selective nonunit retrieval;
+5. direct archive-offset lookup and tests;
+6. current-record archive directory/handle reclamation;
+7. file-cache eviction/accounting;
+8. common longevity runner and machine-readable reports;
+9. external passive-directory format;
+10. external selector runs/merge and exact-order differential tests;
+11. adaptive back-demodulation promotion;
+12. segmented offset migration;
+13. integrated short/mid-scale results; and
+14. long-run acceptance report and user documentation.
+
+Each commit message must state the preserved theorem-proving invariant, tests
+run, before/after bytes and work where meaningful, and remaining untested
+scale.  Generated binaries and user-owned `00hist1` remain untracked.
