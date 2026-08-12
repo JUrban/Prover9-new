@@ -852,6 +852,16 @@ copies retained clauses in arbitrary order, translates an interior token,
 drops a stale interval through the streamed retained-compaction path, and
 rebases both retained roots above the 32-bit boundary.  Its proof-ID directory
 still consumes two 32-bit words and its temporary rebase record remains 16
-bytes.  This evidence covers the pool only: the inference indexes still call
-the checked legacy API and will fail explicitly above 32 bits until their term
-fields are migrated.
+bytes.
+
+The compact rewrite consumer now passes the same boundary.  Its radix nodes
+and rule records still occupy 24 bytes, but their term references are packed
+wide slices.  A real rule inserted above `UINT32_MAX` rewrites the expected
+normal form, then remains exact after retained-pool compaction and rebasing.
+The conversion also covers rule copying and overlap matching, and resolves
+each stored slice once outside the inner token loops.  Rule type and active
+state use the high four bits of the existing proof-ID word, leaving a checked
+60-bit proof-ID space instead of enlarging every rule.  Focused debug and
+AddressSanitizer/UndefinedBehaviorSanitizer runs pass.  Unit and back-demod
+indexes remain on the checked legacy API, so production is still capped until
+those consumers are migrated and the mature CPU gate is measured.

@@ -9,14 +9,13 @@ static unsigned Compaction_stale_pct = 25;
 
 #define CR_NONE 0U
 #define CR_OCCURRENCE_BLOCK_PAYLOAD 248
-#define CR_RULE_LENGTH_MASK UINT32_C(0x0fffffff)
-#define CR_RULE_TYPE_SHIFT 28
-#define CR_RULE_TYPE_MASK UINT32_C(0x70000000)
-#define CR_RULE_ACTIVE UINT32_C(0x80000000)
+#define CR_RULE_PROOF_ID_MASK UINT64_C(0x0fffffffffffffff)
+#define CR_RULE_TYPE_SHIFT 60
+#define CR_RULE_TYPE_MASK UINT64_C(0x7000000000000000)
+#define CR_RULE_ACTIVE UINT64_C(0x8000000000000000)
 
 struct cr_node {
-  uint32_t token_offset;
-  uint32_t token_length;
+  Compact_term_slice tokens;
   uint32_t first_child;
   uint32_t next_sibling;
   uint32_t first_posting;
@@ -37,12 +36,15 @@ struct cr_occurrence_block {
 };
 
 struct cr_rule {
-  unsigned long long proof_id;
-  uint32_t left_offset;
-  uint32_t left_length;
-  uint32_t right_offset;
-  uint32_t right_length_flags;
+  unsigned long long proof_id_flags;
+  Compact_term_slice left;
+  Compact_term_slice right;
 };
+
+typedef char compact_rewrite_node_must_remain_24_bytes[
+  sizeof(struct cr_node) == 24 ? 1 : -1];
+typedef char compact_rewrite_rule_must_remain_24_bytes[
+  sizeof(struct cr_rule) == 24 ? 1 : -1];
 
 struct compact_rewrite_bank {
   struct cr_node *nodes;
@@ -64,7 +66,6 @@ struct compact_rewrite_bank {
   size_t rule_count;
   size_t rule_capacity;
   Compact_term_pool term_pool;
-  const int32_t *tokens;
   BOOL owns_term_pool;
   Compact_id_map id_map;
   struct cr_query_term *query;
@@ -91,38 +92,40 @@ struct cr_match_result {
   int direction;
 };
 
-static uint32_t rule_right_length(const struct cr_rule *rule)
+static unsigned long long rule_proof_id(const struct cr_rule *rule)
 {
-  return rule->right_length_flags & CR_RULE_LENGTH_MASK;
+  return rule->proof_id_flags & CR_RULE_PROOF_ID_MASK;
 }
 
 static int rule_type(const struct cr_rule *rule)
 {
-  return (int) ((rule->right_length_flags & CR_RULE_TYPE_MASK) >>
+  return (int) ((rule->proof_id_flags & CR_RULE_TYPE_MASK) >>
                 CR_RULE_TYPE_SHIFT);
 }
 
 static BOOL rule_active(const struct cr_rule *rule)
 {
-  return (rule->right_length_flags & CR_RULE_ACTIVE) != 0;
+  return (rule->proof_id_flags & CR_RULE_ACTIVE) != 0;
 }
 
-static void set_rule_metadata(struct cr_rule *rule, uint32_t right_length,
+static void set_rule_metadata(struct cr_rule *rule,
+                              unsigned long long proof_id,
                               int type, BOOL active)
 {
-  if (right_length > CR_RULE_LENGTH_MASK || type < 0 || type > 7)
+  if (proof_id == 0 || proof_id > CR_RULE_PROOF_ID_MASK ||
+      type < 0 || type > 7)
     fatal_error("compact_rewrite: rule metadata overflow");
-  rule->right_length_flags = right_length |
-    ((uint32_t) type << CR_RULE_TYPE_SHIFT) |
+  rule->proof_id_flags = proof_id |
+    ((unsigned long long) type << CR_RULE_TYPE_SHIFT) |
     (active ? CR_RULE_ACTIVE : 0);
 }
 
 static void set_rule_active(struct cr_rule *rule, BOOL active)
 {
   if (active)
-    rule->right_length_flags |= CR_RULE_ACTIVE;
+    rule->proof_id_flags |= CR_RULE_ACTIVE;
   else
-    rule->right_length_flags &= ~CR_RULE_ACTIVE;
+    rule->proof_id_flags &= ~CR_RULE_ACTIVE;
 }
 
 static size_t grow_capacity(size_t current, size_t item_size,
@@ -296,12 +299,11 @@ static uint32_t lookup_rule(Compact_rewrite_bank bank,
     compact_id_map_get(bank->id_map, proof_id, &value) ? value : CR_NONE;
 }
 
-static uint32_t append_term_tokens(Compact_rewrite_bank bank, Topform clause,
-                                   Term term,
-                                   uint32_t *length)
+static Compact_term_slice append_term_tokens(Compact_rewrite_bank bank,
+                                             Topform clause, Term term)
 {
-  return compact_term_pool_intern(bank->term_pool, clause->id,
-                                  clause->literals, term, length);
+  return compact_term_pool_intern_slice(bank->term_pool, clause->id,
+                                        clause->literals, term);
 }
 
 static int code_compare(int32_t a, int32_t b)
@@ -317,7 +319,7 @@ static int code_compare(int32_t a, int32_t b)
 }
 
 static uint32_t new_node(Compact_rewrite_bank bank,
-                         uint32_t token_offset, uint32_t token_length)
+                         Compact_term_slice tokens)
 {
   uint32_t node;
   ensure_nodes(bank);
@@ -325,17 +327,16 @@ static uint32_t new_node(Compact_rewrite_bank bank,
     fatal_error("compact_rewrite: node offsets exceed 32 bits");
   node = (uint32_t) bank->node_count++;
   memset(&bank->nodes[node], 0, sizeof(bank->nodes[node]));
-  bank->nodes[node].token_offset = token_offset;
-  bank->nodes[node].token_length = token_length;
+  bank->nodes[node].tokens = tokens;
   return node;
 }
 
 static int32_t first_code(Compact_rewrite_bank bank, uint32_t node)
 {
   struct cr_node *n = &bank->nodes[node];
-  if (n->token_length == 0)
+  if (compact_term_slice_length(n->tokens) == 0)
     fatal_error("compact_rewrite: empty nonroot radix edge");
-  return bank->tokens[n->token_offset];
+  return compact_term_pool_slice_tokens(bank->term_pool, n->tokens)[0];
 }
 
 /* Insert an immutable prefix-token slice as a radix path.  Siblings remain
@@ -343,22 +344,29 @@ static int32_t first_code(Compact_rewrite_bank bank, uint32_t node)
    Splitting only changes the representation: terminal posting order is still
    the order in which rewrite sides were admitted. */
 static uint32_t insert_token_path(Compact_rewrite_bank bank, uint32_t root,
-                                  uint32_t offset, uint32_t length)
+                                  Compact_term_slice slice)
 {
   uint32_t parent = root;
   uint32_t position = 0;
+  uint32_t length = compact_term_slice_length(slice);
+  const int32_t *tokens = compact_term_pool_slice_tokens(
+    bank->term_pool, slice);
   while (position < length) {
     uint32_t current = bank->nodes[parent].first_child;
     uint32_t previous = CR_NONE;
-    int32_t wanted = bank->tokens[offset + position];
+    int32_t wanted = tokens[position];
     while (current != CR_NONE &&
            code_compare(first_code(bank, current), wanted) < 0) {
       previous = current;
       current = bank->nodes[current].next_sibling;
     }
     if (current == CR_NONE || first_code(bank, current) != wanted) {
-      uint32_t added = new_node(bank, offset + position,
-                                length - position);
+      Compact_term_slice suffix;
+      uint32_t added;
+      if (!compact_term_slice_subslice(
+            slice, position, length - position, &suffix))
+        fatal_error("compact_rewrite: invalid radix suffix");
+      added = new_node(bank, suffix);
       if (previous == CR_NONE) {
         bank->nodes[added].next_sibling =
           bank->nodes[parent].first_child;
@@ -372,12 +380,13 @@ static uint32_t insert_token_path(Compact_rewrite_bank bank, uint32_t root,
       return added;
     }
     else {
-      uint32_t old_offset = bank->nodes[current].token_offset;
-      uint32_t old_length = bank->nodes[current].token_length;
+      Compact_term_slice old_slice = bank->nodes[current].tokens;
+      const int32_t *old_tokens = compact_term_pool_slice_tokens(
+        bank->term_pool, old_slice);
+      uint32_t old_length = compact_term_slice_length(old_slice);
       uint32_t common = 0;
       while (common < old_length && position + common < length &&
-             bank->tokens[old_offset + common] ==
-             bank->tokens[offset + position + common])
+             old_tokens[common] == tokens[position + common])
         common++;
       if (common == old_length) {
         position += common;
@@ -385,23 +394,34 @@ static uint32_t insert_token_path(Compact_rewrite_bank bank, uint32_t root,
       }
       else {
         uint32_t old_next = bank->nodes[current].next_sibling;
-        uint32_t split = new_node(bank, old_offset, common);
+        Compact_term_slice prefix, old_suffix;
+        uint32_t split;
         uint32_t added;
         if (common == 0)
           fatal_error("compact_rewrite: invalid zero-length radix split");
+        if (!compact_term_slice_subslice(old_slice, 0, common, &prefix) ||
+            !compact_term_slice_subslice(
+              old_slice, common, old_length - common, &old_suffix))
+          fatal_error("compact_rewrite: invalid radix split slices");
+        split = new_node(bank, prefix);
         bank->nodes[split].next_sibling = old_next;
         if (previous == CR_NONE)
           bank->nodes[parent].first_child = split;
         else
           bank->nodes[previous].next_sibling = split;
-        bank->nodes[current].token_offset += common;
-        bank->nodes[current].token_length -= common;
+        bank->nodes[current].tokens = old_suffix;
         bank->nodes[current].next_sibling = CR_NONE;
         bank->nodes[split].first_child = current;
         position += common;
         if (position == length)
           return split;
-        added = new_node(bank, offset + position, length - position);
+        {
+          Compact_term_slice suffix;
+          if (!compact_term_slice_subslice(
+                slice, position, length - position, &suffix))
+            fatal_error("compact_rewrite: invalid added radix suffix");
+          added = new_node(bank, suffix);
+        }
         if (code_compare(first_code(bank, added),
                          first_code(bank, current)) < 0) {
           bank->nodes[added].next_sibling = current;
@@ -417,9 +437,9 @@ static uint32_t insert_token_path(Compact_rewrite_bank bank, uint32_t root,
 }
 
 static void index_side(Compact_rewrite_bank bank, uint32_t rule,
-                       uint32_t offset, uint32_t length, int direction)
+                       Compact_term_slice slice, int direction)
 {
-  uint32_t node = insert_token_path(bank, 0, offset, length);
+  uint32_t node = insert_token_path(bank, 0, slice);
   uint32_t posting;
   ensure_postings(bank);
   if (bank->posting_count > UINT32_MAX)
@@ -436,12 +456,15 @@ static void index_side(Compact_rewrite_bank bank, uint32_t rule,
 }
 
 static void collect_occurrence_symbols(Compact_rewrite_bank bank,
-                                       uint32_t offset, uint32_t length,
+                                       Compact_term_slice slice,
                                        int32_t *symbols, size_t *count)
 {
+  const int32_t *tokens = compact_term_pool_slice_tokens(
+    bank->term_pool, slice);
+  uint32_t length = compact_term_slice_length(slice);
   uint32_t i;
   for (i = 0; i < length; i++) {
-    int32_t symbol = bank->tokens[offset + i];
+    int32_t symbol = tokens[i];
     size_t j;
     if (symbol < 0)
       continue;
@@ -504,18 +527,16 @@ static void append_rule_occurrence(Compact_rewrite_bank bank,
 static void index_rule_occurrences(Compact_rewrite_bank bank, uint32_t index)
 {
   struct cr_rule *rule = &bank->rules[index];
-  uint32_t right_length = rule_right_length(rule);
   int type = rule_type(rule);
-  size_t capacity = (size_t) rule->left_length + right_length;
+  size_t capacity = (size_t) compact_term_slice_length(rule->left) +
+    compact_term_slice_length(rule->right);
   int32_t *symbols = capacity == 0 ? NULL :
     safe_malloc(capacity * sizeof(*symbols));
   size_t count = 0, i;
   if (type == ORIENTED || type == LEX_DEP_LR || type == LEX_DEP_BOTH)
-    collect_occurrence_symbols(bank, rule->left_offset, rule->left_length,
-                               symbols, &count);
+    collect_occurrence_symbols(bank, rule->left, symbols, &count);
   if (type == LEX_DEP_RL || type == LEX_DEP_BOTH)
-    collect_occurrence_symbols(bank, rule->right_offset, right_length,
-                               symbols, &count);
+    collect_occurrence_symbols(bank, rule->right, symbols, &count);
   for (i = 0; i < count; i++) {
     unsigned symbol = (unsigned) symbols[i];
     append_rule_occurrence(bank, symbol, index);
@@ -529,9 +550,8 @@ Compact_rewrite_bank compact_rewrite_init_with_pool(Compact_term_pool pool)
   if (pool == NULL)
     fatal_error("compact_rewrite_init_with_pool: null term pool");
   bank->term_pool = pool;
-  bank->tokens = compact_term_pool_tokens(pool);
   bank->id_map = compact_id_map_init(1);
-  (void) new_node(bank, 0, 0);
+  (void) new_node(bank, 0);
   ensure_postings(bank);
   memset(&bank->postings[0], 0, sizeof(bank->postings[0]));
   bank->posting_count = 1;
@@ -557,7 +577,6 @@ BOOL compact_rewrite_add(Compact_rewrite_bank bank, Topform clause, int type)
 {
   struct cr_rule *rule;
   uint32_t index;
-  uint32_t right_length;
   Term atom;
   if (bank == NULL || clause == NULL || clause->id == 0 ||
       type == NOT_DEMODULATOR || lookup_rule(bank, clause->id) != CR_NONE)
@@ -568,18 +587,14 @@ BOOL compact_rewrite_add(Compact_rewrite_bank bank, Topform clause, int type)
   index = (uint32_t) bank->rule_count++;
   rule = &bank->rules[index];
   memset(rule, 0, sizeof(*rule));
-  rule->proof_id = clause->id;
   atom = clause->literals->atom;
-  rule->left_offset = append_term_tokens(bank, clause, ARG(atom, 0),
-                                          &rule->left_length);
-  rule->right_offset = append_term_tokens(bank, clause, ARG(atom, 1),
-                                           &right_length);
-  set_rule_metadata(rule, right_length, type, TRUE);
-  bank->tokens = compact_term_pool_tokens(bank->term_pool);
+  rule->left = append_term_tokens(bank, clause, ARG(atom, 0));
+  rule->right = append_term_tokens(bank, clause, ARG(atom, 1));
+  set_rule_metadata(rule, clause->id, type, TRUE);
   if (type == ORIENTED || type == LEX_DEP_LR || type == LEX_DEP_BOTH)
-    index_side(bank, index, rule->left_offset, rule->left_length, 1);
+    index_side(bank, index, rule->left, 1);
   if (type == LEX_DEP_RL || type == LEX_DEP_BOTH)
-    index_side(bank, index, rule->right_offset, right_length, 2);
+    index_side(bank, index, rule->right, 2);
   index_rule_occurrences(bank, index);
   if (!compact_id_map_put(bank->id_map, clause->id, &index))
     fatal_error("compact_rewrite: duplicate proof ID");
@@ -595,7 +610,6 @@ static void copy_live_rule(Compact_rewrite_bank destination,
   struct cr_rule saved = *old;
   struct cr_rule *rule;
   uint32_t index;
-  uint32_t right_length = rule_right_length(&saved);
   int type = rule_type(&saved);
   ensure_rules(destination);
   if (destination->rule_count > UINT32_MAX)
@@ -603,28 +617,27 @@ static void copy_live_rule(Compact_rewrite_bank destination,
   index = (uint32_t) destination->rule_count++;
   rule = &destination->rules[index];
   memset(rule, 0, sizeof(*rule));
-  rule->proof_id = saved.proof_id;
-  rule->left_length = saved.left_length;
-  set_rule_metadata(rule, right_length, type, TRUE);
+  set_rule_metadata(rule, rule_proof_id(&saved), type, TRUE);
   if (destination->term_pool == source->term_pool) {
-    rule->left_offset = saved.left_offset;
-    rule->right_offset = saved.right_offset;
+    rule->left = saved.left;
+    rule->right = saved.right;
   }
   else {
-    rule->left_offset = compact_term_pool_append(
-      destination->term_pool, source->tokens + saved.left_offset,
-      saved.left_length);
-    rule->right_offset = compact_term_pool_append(
-      destination->term_pool, source->tokens + saved.right_offset,
-      right_length);
+    rule->left = compact_term_pool_append_slice(
+      destination->term_pool,
+      compact_term_pool_slice_tokens(source->term_pool, saved.left),
+      compact_term_slice_length(saved.left));
+    rule->right = compact_term_pool_append_slice(
+      destination->term_pool,
+      compact_term_pool_slice_tokens(source->term_pool, saved.right),
+      compact_term_slice_length(saved.right));
   }
-  destination->tokens = compact_term_pool_tokens(destination->term_pool);
   if (type == ORIENTED || type == LEX_DEP_LR || type == LEX_DEP_BOTH)
-    index_side(destination, index, rule->left_offset, rule->left_length, 1);
+    index_side(destination, index, rule->left, 1);
   if (type == LEX_DEP_RL || type == LEX_DEP_BOTH)
-    index_side(destination, index, rule->right_offset, right_length, 2);
+    index_side(destination, index, rule->right, 2);
   index_rule_occurrences(destination, index);
-  if (!compact_id_map_put(destination->id_map, rule->proof_id, &index))
+  if (!compact_id_map_put(destination->id_map, rule_proof_id(rule), &index))
     fatal_error("compact_rewrite: duplicate compacted proof ID");
   destination->active_rules++;
   update_peak(destination);
@@ -671,8 +684,6 @@ static void compact_rewrite_compact_internal(Compact_rewrite_bank bank,
   retired = bank->retired_rules;
   compactions = bank->compactions;
   reclaimed = bank->bytes_reclaimed;
-  bank->tokens = compact_term_pool_tokens(bank->term_pool);
-
   /* A rule record plus the shared token pool is a complete rebuild recipe.
      Pack live records in predecessor order, release all search structures,
      shrink and reuse that record array as the replacement, and rebuild its
@@ -780,7 +791,8 @@ void compact_rewrite_copy_live_clauses(Compact_rewrite_bank bank,
     return;
   for (i = 1; i < bank->rule_count; i++)
     if (!compact_term_pool_copy_clause(
-          destination, bank->term_pool, map, bank->rules[i].proof_id))
+          destination, bank->term_pool, map,
+          rule_proof_id(&bank->rules[i])))
       fatal_error("compact_rewrite: cannot copy live clause to compacted pool");
 }
 
@@ -792,7 +804,7 @@ void compact_rewrite_retain_live_clauses(Compact_rewrite_bank bank,
     return;
   for (i = 1; i < bank->rule_count; i++)
     if (!compact_term_rebase_map_retain_clause(
-          map, bank->term_pool, bank->rules[i].proof_id))
+          map, bank->term_pool, rule_proof_id(&bank->rules[i])))
       fatal_error("compact_rewrite: cannot retain live term-pool clause");
 }
 
@@ -804,39 +816,39 @@ void compact_rewrite_rebase_term_pool(Compact_rewrite_bank bank,
   if (bank == NULL)
     return;
   for (i = 1; i < bank->rule_count; i++) {
-    bank->rules[i].left_offset = compact_term_rebase_offset(
-      map, bank->rules[i].left_offset);
-    bank->rules[i].right_offset = compact_term_rebase_offset(
-      map, bank->rules[i].right_offset);
+    bank->rules[i].left = compact_term_rebase_slice(
+      map, bank->rules[i].left);
+    bank->rules[i].right = compact_term_rebase_slice(
+      map, bank->rules[i].right);
   }
   for (i = 1; i < bank->node_count; i++)
-    if (bank->nodes[i].token_length != 0)
-      bank->nodes[i].token_offset = compact_term_rebase_offset(
-        map, bank->nodes[i].token_offset);
+    if (compact_term_slice_length(bank->nodes[i].tokens) != 0)
+      bank->nodes[i].tokens = compact_term_rebase_slice(
+        map, bank->nodes[i].tokens);
   bank->term_pool = pool;
-  bank->tokens = compact_term_pool_tokens(pool);
   update_peak(bank);
 }
 
-static uint32_t token_term_end(Compact_rewrite_bank bank, uint32_t position,
+static uint32_t token_term_end(const int32_t *tokens, uint32_t position,
                                uint32_t end)
 {
   int32_t code;
   int i, arity;
   if (position >= end)
     fatal_error("compact_rewrite: truncated occurrence term");
-  code = bank->tokens[position++];
+  code = tokens[position++];
   if (code < 0)
     return position;
   arity = sn_to_arity(code);
   for (i = 0; i < arity; i++)
-    position = token_term_end(bank, position, end);
+    position = token_term_end(tokens, position, end);
   return position;
 }
 
-static BOOL token_match_rec(Compact_rewrite_bank bank,
+static BOOL token_match_rec(const int32_t *pattern_tokens,
                             uint32_t *pattern_position,
                             uint32_t pattern_end,
+                            const int32_t *subject_tokens,
                             uint32_t *subject_position,
                             uint32_t subject_end,
                             uint32_t *binding_starts,
@@ -846,11 +858,11 @@ static BOOL token_match_rec(Compact_rewrite_bank bank,
   int i, arity;
   if (*pattern_position >= pattern_end || *subject_position >= subject_end)
     return FALSE;
-  pattern_code = bank->tokens[(*pattern_position)++];
+  pattern_code = pattern_tokens[(*pattern_position)++];
   if (pattern_code < 0) {
     unsigned variable = (unsigned) (-pattern_code - 1);
     uint32_t start = *subject_position;
-    uint32_t finish = token_term_end(bank, start, subject_end);
+    uint32_t finish = token_term_end(subject_tokens, start, subject_end);
     if (variable >= MAX_VARS)
       fatal_error("compact_rewrite: occurrence variable exceeds MAX_VARS");
     if (binding_starts[variable] == UINT32_MAX) {
@@ -861,50 +873,52 @@ static BOOL token_match_rec(Compact_rewrite_bank bank,
       size_t old_length = binding_ends[variable] - binding_starts[variable];
       size_t new_length = finish - start;
       if (old_length != new_length ||
-          memcmp(bank->tokens + binding_starts[variable],
-                 bank->tokens + start,
-                 new_length * sizeof(*bank->tokens)) != 0)
+          memcmp(subject_tokens + binding_starts[variable],
+                 subject_tokens + start,
+                 new_length * sizeof(*subject_tokens)) != 0)
         return FALSE;
     }
     *subject_position = finish;
     return TRUE;
   }
-  subject_code = bank->tokens[(*subject_position)++];
+  subject_code = subject_tokens[(*subject_position)++];
   if (subject_code != pattern_code)
     return FALSE;
   arity = sn_to_arity(pattern_code);
   for (i = 0; i < arity; i++)
-    if (!token_match_rec(bank, pattern_position, pattern_end,
-                         subject_position, subject_end,
+    if (!token_match_rec(pattern_tokens, pattern_position, pattern_end,
+                         subject_tokens, subject_position, subject_end,
                          binding_starts, binding_ends))
       return FALSE;
   return TRUE;
 }
 
 static BOOL source_contains_pattern(Compact_rewrite_bank bank,
-                                    uint32_t source_offset,
-                                    uint32_t source_length,
-                                    uint32_t pattern_offset,
-                                    uint32_t pattern_length)
+                                    Compact_term_slice source,
+                                    Compact_term_slice pattern)
 {
-  uint32_t source_end = source_offset + source_length;
+  const int32_t *source_tokens = compact_term_pool_slice_tokens(
+    bank->term_pool, source);
+  const int32_t *pattern_tokens = compact_term_pool_slice_tokens(
+    bank->term_pool, pattern);
+  uint32_t source_end = compact_term_slice_length(source);
+  uint32_t pattern_length = compact_term_slice_length(pattern);
   uint32_t at;
-  int32_t root = bank->tokens[pattern_offset];
-  for (at = source_offset; at < source_end; at++) {
+  int32_t root = pattern_tokens[0];
+  for (at = 0; at < source_end; at++) {
     uint32_t pattern_position, subject_position;
     uint32_t binding_starts[MAX_VARS], binding_ends[MAX_VARS];
     unsigned i;
-    if (bank->tokens[at] != root)
+    if (source_tokens[at] != root)
       continue;
     for (i = 0; i < MAX_VARS; i++)
       binding_starts[i] = UINT32_MAX;
-    pattern_position = pattern_offset;
+    pattern_position = 0;
     subject_position = at;
-    if (token_match_rec(bank, &pattern_position,
-                        pattern_offset + pattern_length,
-                        &subject_position, source_end,
+    if (token_match_rec(pattern_tokens, &pattern_position, pattern_length,
+                        source_tokens, &subject_position, source_end,
                         binding_starts, binding_ends) &&
-        pattern_position == pattern_offset + pattern_length)
+        pattern_position == pattern_length)
       return TRUE;
   }
   return FALSE;
@@ -912,20 +926,15 @@ static BOOL source_contains_pattern(Compact_rewrite_bank bank,
 
 static BOOL rule_contains_pattern(Compact_rewrite_bank bank,
                                   struct cr_rule *candidate,
-                                  uint32_t pattern_offset,
-                                  uint32_t pattern_length)
+                                  Compact_term_slice pattern)
 {
   int type = rule_type(candidate);
   if ((type == ORIENTED || type == LEX_DEP_LR ||
        type == LEX_DEP_BOTH) &&
-      source_contains_pattern(bank, candidate->left_offset,
-                              candidate->left_length,
-                              pattern_offset, pattern_length))
+      source_contains_pattern(bank, candidate->left, pattern))
     return TRUE;
   return (type == LEX_DEP_RL || type == LEX_DEP_BOTH) &&
-    source_contains_pattern(bank, candidate->right_offset,
-                            rule_right_length(candidate),
-                            pattern_offset, pattern_length);
+    source_contains_pattern(bank, candidate->right, pattern);
 }
 
 static uint32_t decode_rule_delta(const struct cr_occurrence_block *block,
@@ -955,26 +964,24 @@ void compact_rewrite_visit_overlaps(Compact_rewrite_bank bank,
 {
   uint32_t new_index = lookup_rule(bank, new_proof_id);
   struct cr_rule *rule;
-  uint32_t pattern_offsets[2], pattern_lengths[2];
+  Compact_term_slice patterns[2];
   unsigned pattern_count = 0, i;
   if (new_index == CR_NONE || visit == NULL)
     return;
-  bank->tokens = compact_term_pool_tokens(bank->term_pool);
   rule = &bank->rules[new_index];
   if (rule_type(rule) == ORIENTED || rule_type(rule) == LEX_DEP_LR ||
       rule_type(rule) == LEX_DEP_BOTH) {
-    pattern_offsets[pattern_count] = rule->left_offset;
-    pattern_lengths[pattern_count++] = rule->left_length;
+    patterns[pattern_count++] = rule->left;
   }
   if (rule_type(rule) == LEX_DEP_RL || rule_type(rule) == LEX_DEP_BOTH) {
-    pattern_offsets[pattern_count] = rule->right_offset;
-    pattern_lengths[pattern_count++] = rule_right_length(rule);
+    patterns[pattern_count++] = rule->right;
   }
   for (i = 0; i < pattern_count; i++) {
     uint32_t block;
     uint32_t rule_index = 0;
     unsigned symbol;
-    int32_t root = bank->tokens[pattern_offsets[i]];
+    int32_t root = compact_term_pool_slice_tokens(
+      bank->term_pool, patterns[i])[0];
     if (root < 0)
       continue;
     symbol = (unsigned) root;
@@ -997,10 +1004,10 @@ void compact_rewrite_visit_overlaps(Compact_rewrite_bank bank,
         if (rule_index == CR_NONE || rule_index >= bank->rule_count)
           fatal_error("compact_rewrite: corrupt occurrence rule");
         candidate = &bank->rules[rule_index];
-        if (rule_active(candidate) && candidate->proof_id != new_proof_id &&
-            rule_contains_pattern(bank, candidate,
-                                  pattern_offsets[i], pattern_lengths[i]))
-          visit(candidate->proof_id, context);
+        if (rule_active(candidate) &&
+            rule_proof_id(candidate) != new_proof_id &&
+            rule_contains_pattern(bank, candidate, patterns[i]))
+          visit(rule_proof_id(candidate), context);
         entries++;
       }
       if (position != current->used || entries != current->count)
@@ -1019,7 +1026,7 @@ unsigned long long compact_rewrite_identity_hash(Compact_rewrite_bank bank)
      identity is the live set of stable proof IDs and rule directions. */
   for (i = 1; i < bank->rule_count; i++)
     if (rule_active(&bank->rules[i]))
-      hash ^= hash_id(bank->rules[i].proof_id ^
+      hash ^= hash_id(rule_proof_id(&bank->rules[i]) ^
                       ((uint64_t) rule_type(&bank->rules[i]) << 56));
   return hash;
 }
@@ -1092,7 +1099,7 @@ static int nonvariable_term_count(Term term)
   return count;
 }
 
-static Term build_contractum(Compact_rewrite_bank bank, uint32_t *position,
+static Term build_contractum(const int32_t *tokens, uint32_t *position,
                              uint32_t end, Term *bindings,
                              int reduced_flag)
 {
@@ -1101,7 +1108,7 @@ static Term build_contractum(Compact_rewrite_bank bank, uint32_t *position,
   int i, arity;
   if (*position >= end)
     fatal_error("compact_rewrite: corrupt RHS token stream");
-  code = bank->tokens[(*position)++];
+  code = tokens[(*position)++];
   if (code < 0) {
     int variable = -code - 1;
     if (variable >= MAX_VARS || bindings[variable] == NULL)
@@ -1111,7 +1118,7 @@ static Term build_contractum(Compact_rewrite_bank bank, uint32_t *position,
   arity = sn_to_arity(code);
   result = get_rigid_term_dangerously(code, arity);
   for (i = 0; i < arity; i++)
-    ARG(result, i) = build_contractum(bank, position, end, bindings,
+    ARG(result, i) = build_contractum(tokens, position, end, bindings,
                                      reduced_flag);
   return result;
 }
@@ -1126,19 +1133,22 @@ static BOOL try_leaf(Compact_rewrite_bank bank, uint32_t node, Term target,
        posting != CR_NONE; posting = bank->postings[posting].next) {
     struct cr_posting *p = &bank->postings[posting];
     struct cr_rule *rule = &bank->rules[p->rule];
-    uint32_t position, end;
+    Compact_term_slice contractum_slice;
+    const int32_t *tokens;
+    uint32_t position = 0, end;
     Term contractum;
     if (!rule_active(rule))
       continue;
     if (p->direction == 1) {
-      position = rule->right_offset;
-      end = position + rule_right_length(rule);
+      contractum_slice = rule->right;
     }
     else {
-      position = rule->left_offset;
-      end = position + rule->left_length;
+      contractum_slice = rule->left;
     }
-    contractum = build_contractum(bank, &position, end, bindings,
+    tokens = compact_term_pool_slice_tokens(bank->term_pool,
+                                            contractum_slice);
+    end = compact_term_slice_length(contractum_slice);
+    contractum = build_contractum(tokens, &position, end, bindings,
                                   reduced_flag);
     if (position != end)
       fatal_error("compact_rewrite: incomplete RHS consumption");
@@ -1146,7 +1156,7 @@ static BOOL try_leaf(Compact_rewrite_bank bank, uint32_t node, Term target,
         term_greater(target, contractum, lex_order_vars)) {
       result->found = TRUE;
       result->contractum = contractum;
-      result->proof_id = rule->proof_id;
+      result->proof_id = rule_proof_id(rule);
       result->direction = p->direction;
       return TRUE;
     }
@@ -1162,9 +1172,12 @@ static BOOL match_rewrite_edge(
   uint32_t *next_position)
 {
   struct cr_node *edge = &bank->nodes[node];
+  const int32_t *tokens = compact_term_pool_slice_tokens(
+    bank->term_pool, edge->tokens);
+  uint32_t length = compact_term_slice_length(edge->tokens);
   uint32_t i;
-  for (i = 0; i < edge->token_length; i++) {
-    int32_t code = bank->tokens[edge->token_offset + i];
+  for (i = 0; i < length; i++) {
+    int32_t code = tokens[i];
     Term query_term;
     if (position >= end)
       return FALSE;
@@ -1315,7 +1328,6 @@ void compact_rewrite_clause(Compact_rewrite_bank bank, Topform clause,
   int reduced_flag;
   if (bank == NULL || bank->active_rules == 0 || clause == NULL)
     return;
-  bank->tokens = compact_term_pool_tokens(bank->term_pool);
   reduced_flag = claim_term_flag();
   step_limit = step_limit == -1 ? INT_MAX : step_limit;
   increase_limit = increase_limit == -1 ? INT_MAX : increase_limit;

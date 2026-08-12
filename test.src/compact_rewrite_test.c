@@ -215,6 +215,43 @@ int main(void)
       delete_clause(block_rules[i]);
     delete_clause(block_root);
   }
+
+  {
+    Compact_term_pool high_pool = compact_term_pool_init();
+    Compact_rewrite_bank high_bank;
+    Compact_term_rebase_map high_map = compact_term_rebase_map_init();
+    Topform high_rule = parse_clause_from_string("hf(x) = x.");
+    Topform high_query = parse_clause_from_string("p(hf(a)).");
+    Topform expected = parse_clause_from_string("p(a).");
+    compact_term_pool_set_logical_base(
+      high_pool, (unsigned long long) UINT32_MAX + 321ULL);
+    high_bank = compact_rewrite_init_with_pool(high_pool);
+    high_rule->id = 30001;
+    mark_oriented_eq(high_rule->literals->atom);
+    CHECK(compact_rewrite_add(high_bank, high_rule, ORIENTED),
+          "rewrite bank admits a rule above the 32-bit token boundary");
+    compact_rewrite_clause(high_bank, high_query, -1, -1, FALSE, TRUE);
+    CHECK(clause_ident(high_query->literals, expected->literals),
+          "high-base radix retrieval and contractum construction are exact");
+    CHECK(compact_term_rebase_map_retain_clause(
+            high_map, high_pool, high_rule->id),
+          "high-base rewrite clause is retained for pool compaction");
+    compact_term_pool_compact_retained(high_pool, high_map);
+    compact_rewrite_rebase_term_pool(high_bank, high_pool, high_map);
+    delete_clause(high_query);
+    high_query = parse_clause_from_string("p(hf(b)).");
+    delete_clause(expected);
+    expected = parse_clause_from_string("p(b).");
+    compact_rewrite_clause(high_bank, high_query, -1, -1, FALSE, TRUE);
+    CHECK(clause_ident(high_query->literals, expected->literals),
+          "high-base rewrite remains exact after retained rebasing");
+    compact_term_rebase_map_free(high_map);
+    compact_rewrite_free(high_bank);
+    compact_term_pool_free(high_pool);
+    delete_clause(high_rule);
+    delete_clause(high_query);
+    delete_clause(expected);
+  }
   free_clock(Index_clock);
 
   if (Failures != 0) {
