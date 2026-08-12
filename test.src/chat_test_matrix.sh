@@ -13,6 +13,8 @@ cpu=${CHAT_CPU:-0}
 trace=${CHAT_TRACE:-0}
 compact_term_reclaim_kb=${CHAT_COMPACT_TERM_RECLAIM_KB:-8192}
 compact_index_stale_pct=${CHAT_COMPACT_INDEX_STALE_PCT:-25}
+compact_back_position_build_factor=${CHAT_COMPACT_BACK_POSITION_BUILD_FACTOR:-64}
+compact_back_position_budget_kb=${CHAT_COMPACT_BACK_POSITION_BUDGET_KB:-16384}
 passive_selector_buffer=${CHAT_PASSIVE_SELECTOR_BUFFER:-65536}
 new_prover=${CHAT_NEW_PROVER:-"$repo_dir/bin/prover9"}
 old_prover=${CHAT_OLD_PROVER:-/project/Prover9-old-LADR-2026-6A/bin/prover9}
@@ -79,6 +81,8 @@ esac
   echo "trace=$trace"
   echo "compact_term_reclaim_kb=$compact_term_reclaim_kb"
   echo "compact_index_stale_pct=$compact_index_stale_pct"
+  echo "compact_back_position_build_factor=$compact_back_position_build_factor"
+  echo "compact_back_position_budget_kb=$compact_back_position_budget_kb"
   echo "passive_selector_buffer=$passive_selector_buffer"
   echo "cases=$selected_cases"
   echo "reference_output=${reference_output:-none}"
@@ -100,6 +104,7 @@ awk '
   /^assign\(passive_selector_buffer,/ { next }
   /^assign\(compact_term_reclaim_kb,/ { next }
   /^assign\(compact_index_stale_pct,/ { next }
+  /^assign\(compact_back_position_(build_factor|budget_kb),/ { next }
   /^assign\((collective_[a-z_]+|rewrite_refresh_[a-z_]+),/ { next }
   /^(set|clear)\(collective_[a-z_]+\)\./ { next }
   /^(set|clear)\(compact_otter_[a-z_]+\)\./ { next }
@@ -140,6 +145,8 @@ write_case()
       new_otter_compact_*)
         echo "assign(compact_term_reclaim_kb,$compact_term_reclaim_kb)."
         echo "assign(compact_index_stale_pct,$compact_index_stale_pct)."
+        echo "assign(compact_back_position_build_factor,$compact_back_position_build_factor)."
+        echo "assign(compact_back_position_budget_kb,$compact_back_position_budget_kb)."
         ;;
     esac
     cat "$base_input"
