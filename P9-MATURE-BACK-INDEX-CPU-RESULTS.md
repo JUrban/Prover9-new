@@ -1,12 +1,13 @@
 # Mature backward-index CPU recovery: implementation and bounded results
 
 Status: implemented and locally validated on branch
-`mature-back-index-cpu`.  A same-time, fixed-core 1,500-given CHAT pair is at
-CPU parity while compact uses 67.2% less peak RSS.  The corresponding
-2,000-given pair is 8.7% slower while using 66.5% less peak RSS, and its last
-500-given interval is 21.7% slower.  The external 7,365-given and
-proof-endpoint gates remain open; these bounded runs are not a claim that a
-week-long run has already been reproduced.
+`mature-back-index-cpu`.  After the packed back-hint fixes, two reversed-core
+1,500-given CHAT pairs average 10.7% faster than normal P9 while compact uses
+64.5% less peak RSS.  Two reversed-core 2,000-given pairs average 6.8% faster
+while using 63.7% less peak RSS, reversing the pre-fix 8.7% endpoint
+regression.  The external 7,365-given run and proof endpoint remain open;
+these bounded runs are not a claim that a week-long run has already been
+reproduced.
 
 ## Why the former adaptive mode failed
 
@@ -41,6 +42,7 @@ The changes are split into reviewable commits:
 | `ccd8f43` | repeated-class qualification before any adaptive root-tree construction |
 | `4ddf9ed` | bounded compact forward-rewrite hot-path acceleration |
 | `b12c84c` | bounded dense intersections for packed-fast hint back-demodulation |
+| `f40023b` | conservative deep fingerprints before back-hint materialization |
 
 Candidate completeness and decreasing-ID order remain authoritative in the
 mask/tree/position paths.  Scheduling, wall time, and cache residency never
@@ -113,6 +115,24 @@ The final dense bank used 7,143,424 bytes of bits and 111,616 bytes of
 summaries; peak RSS changed only from 90,420 to 90,552 KiB.  This is a
 mechanical scan reduction, but the longer paired gate below remains the CPU
 acceptance authority.
+
+Commit `f40023b` then removes the dominant work left after intersection:
+decompressing candidates which share all depth-two posting keys but cannot
+possibly contain the demodulator pattern.  Each `packed_fast` hint-capacity
+slot carries a 256-bit conservative summary of `(occurrence root, path,
+symbol)` facts through depth four.  A query must be contained in that summary
+before the hint body is decompressed.  Variables add no required facts, Bloom
+collisions admit extra work, and any hint or query involving an associative,
+commutative, or AC symbol disables this filter conservatively.  Thus exact
+rewritability remains the authority even on theory terms.
+
+Against `b12c84c` in a same-time 600-given pair, this second filter reduced
+user CPU from 35.18 to 28.11 seconds (20.1%) and materializations from
+2,768,728 to 1,181,396.  It rejected 1,587,332 impossible candidates while
+preserving all 42,741 exact positives, rewrites, and reindexes, as well as the
+entire search trajectory.  Peak RSS changed from 90,292 to 90,548 KiB.  The
+fingerprint array reserves 4 MiB at this input's power-of-two hint capacity;
+its size is linear in hint capacity and independent of elapsed run time.
 
 ### Route calibration
 
@@ -253,6 +273,8 @@ SHA-256
 `fc674b7ba3c75092732ab91a86e5d969d3f2cccd17d59a7dddb745927f440463`.
 The same-time factor-32 pairs used release binary SHA-256
 `70c484539801d9debce67a01e7240a681ef6f5366db5188def7ebc8cb90fbb36`.
+The deep back-hint fingerprint gates used release binary SHA-256
+`ea24b7a1017bed2988f555055a3df5a8b82721bf1a2158d4dc5240b1d6f8a9cc`.
 Mask8 and adaptive cases ran with the same generated input on dedicated CPUs.
 
 | Gate | mask8 | adaptive | Result |
@@ -319,6 +341,54 @@ More importantly for longevity, normal P9 uses 122.49 seconds for the
 1,500-to-2,000 interval while compact uses 149.13 seconds, a 21.7% interval
 penalty.  This still passes the present 1.25x bounded acceptance guard, but it
 does not close the long-run CPU-slope goal.
+
+After the two packed back-hint changes, the 1,500-given pair was repeated in
+both CPU orientations to expose this host's substantial per-core/load
+variation:
+
+| CPU assignment | normal P9 | current compact | Compact change | Compact RSS |
+|:---|---:|---:|---:|---:|
+| old CPU 2 / compact CPU 0 | 153.63 s | 148.69 s | -3.2% | 97,836 KiB |
+| old CPU 0 / compact CPU 2 | 186.42 s | 154.97 s | -16.9% | 97,856 KiB |
+| arithmetic mean | 170.03 s | 151.83 s | -10.7% | 97,846 KiB |
+
+Both orientations favor current compact; the mean reduces peak RSS by 64.5%
+from normal P9's 275,584 KiB.  Every run reached the same semantic endpoint:
+normal P9 generated/kept 2,947,138/66,935 and compact 2,947,136/66,933, the
+established two-clause implementation difference.  Current compact retained
+56,373 back-hint queries, 6,687,804 posting-intersection candidates, 64,435
+exact positives, and 64,435 rewrites/reindexes, but materialized only
+1,841,637 bodies after 4,846,167 fingerprint rejections.
+
+This fixes the 1,500-given total-CPU gate, but it does not eliminate the
+remaining clause-index slope: current compact's ordinary forward/back demod
+clocks are 51.49/17.17 seconds in the first orientation versus normal P9's
+39.74/4.60 seconds.  Packed hint work supplies the offset at this prefix; the
+2,000-given and supplied multi-hour comparisons must still show that the
+ordinary back-demodulation gap does not retake the total.
+
+Two post-fingerprint 2,000-given orientations close that bounded endpoint:
+
+| CPU assignment | normal P9 | current compact | Compact change | Compact RSS |
+|:---|---:|---:|---:|---:|
+| old CPU 2 / compact CPU 0 | 315.92 s | 294.89 s | -6.7% | 129,968 KiB |
+| old CPU 0 / compact CPU 2 | 307.94 s | 286.79 s | -6.9% | 130,000 KiB |
+| arithmetic mean | 311.93 s | 290.84 s | -6.8% | 129,984 KiB |
+
+Both orientations favor current compact, whose mean peak RSS is 63.7% below
+normal P9's 358,144 KiB.  Interval numbers formed by subtracting the separate
+1,500-given runs are noisier: compact is 9.9% faster in one orientation and
+8.5% slower in the other; the arithmetic-mean 1,500-to-2,000 interval is 1.7%
+faster.  Thus the old 21.7% interval regression is not reproduced, but these
+short differences should not be projected as a mature-run slope.
+
+In the first orientation, compact forward/back demod clocks remain slower at
+94.53/56.71 versus 82.15/24.84 seconds, but its hint, general indexing, and
+disable clocks recover more than that difference.  Packed back-hint
+materializations are 2,483,191 after 7,622,948 conservative fingerprint
+rejections; the dense-intersection-only binary would have materialized all
+10,106,139 candidates.  This remains a bounded prefix, so the supplied
+multi-hour comparison is still required.
 
 The separate factor-search endpoints were:
 
