@@ -95,8 +95,9 @@ censuses.  Rejection clears the entry, allowing the cycle to repeat.
 
 Introduce one global position-construction ledger:
 
-- each completed non-position lookup contributes its observed logical work
-  exactly once;
+- each completed lookup contributes its observed logical work exactly once;
+  an already selective position lookup can therefore fund a complementary
+  intersection feature, but only from work it actually performs;
 - a census reserves credit before scanning and debits it permanently;
 - at most one qualified feature is censused per admission attempt;
 - an accepted feature is charged for both its census and backfill scan; and

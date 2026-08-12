@@ -1019,6 +1019,74 @@ int main(void)
   }
 
   {
+    Compact_back_demod_index frozen, restored;
+    struct compact_back_demod_stats frozen_stats, restored_stats;
+    Topform clause, rule;
+    char state_dir[128], state_path[180];
+    int round;
+    compact_back_demod_set_position_options(1, 1, 1, 8, 0, TRUE);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_ADAPTIVE);
+    frozen = compact_back_demod_init();
+    clause = indexed_clause("w(checkpoint_freeze(shared)).");
+    rule = indexed_clause("checkpoint_freeze(shared) = a.");
+    CHECK(compact_back_demod_add(frozen, clause),
+          "add adaptive checkpoint-freeze subject");
+    for (round = 0; round < 2; round++) {
+      ids = compact_back_demod_candidate_ids(
+        frozen, rule, ORIENTED, &count);
+      CHECK(count == 1 && ids[0] == clause->id,
+            "adaptive budget freeze preserves fallback answer");
+      safe_free(ids);
+    }
+    compact_back_demod_get_stats(frozen, &frozen_stats);
+    CHECK(frozen_stats.position_admission_frozen &&
+          frozen_stats.position_credit_reservations == 1,
+          "adaptive position budget freezes after one funded attempt");
+    (void) snprintf(state_dir, sizeof(state_dir),
+                    "/tmp/p9-position-freeze-%ld", (long) getpid());
+    (void) snprintf(state_path, sizeof(state_path),
+                    "%s/compact_back_adaptive.txt", state_dir);
+    CHECK(mkdir(state_dir, 0700) == 0,
+          "create position-freeze checkpoint directory");
+    CHECK(compact_back_demod_write_adaptive_state(frozen, state_dir),
+          "write frozen position ledger checkpoint");
+    restored = compact_back_demod_init();
+    CHECK(compact_back_demod_add(restored, clause),
+          "rebuild position-freeze checkpoint subject");
+    CHECK(compact_back_demod_read_adaptive_state(restored, state_dir),
+          "restore frozen position ledger checkpoint");
+    compact_back_demod_get_stats(restored, &restored_stats);
+    CHECK(restored_stats.position_admission_frozen &&
+          restored_stats.position_credit_balance ==
+            frozen_stats.position_credit_balance &&
+          restored_stats.position_credit_earned ==
+            frozen_stats.position_credit_earned &&
+          restored_stats.position_credit_spent ==
+            frozen_stats.position_credit_spent &&
+          restored_stats.position_credit_reservations ==
+            frozen_stats.position_credit_reservations,
+          "checkpoint preserves position credits, debit, and freeze");
+    ids = compact_back_demod_candidate_ids(
+      restored, rule, ORIENTED, &count);
+    CHECK(count == 1 && ids[0] == clause->id,
+          "restored frozen index preserves fallback answer");
+    safe_free(ids);
+    compact_back_demod_get_stats(restored, &restored_stats);
+    CHECK(restored_stats.position_credit_reservations ==
+            frozen_stats.position_credit_reservations,
+          "restored admission freeze prevents a construction burst");
+    compact_back_demod_free(restored);
+    compact_back_demod_free(frozen);
+    CHECK(remove(state_path) == 0 && rmdir(state_dir) == 0,
+          "remove position-freeze checkpoint artifacts");
+    delete_clause(clause);
+    delete_clause(rule);
+    compact_back_demod_set_position_options(
+      4096, 4, 64, 16384, 20, TRUE);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
+  }
+
+  {
     enum { RETRY_FAMILY = 32 };
     Compact_back_demod_index retry_position;
     struct compact_back_demod_stats rejected, cooled, retried;

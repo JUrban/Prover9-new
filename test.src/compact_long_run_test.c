@@ -281,7 +281,7 @@ static void back_demod_variable_prefix_probe(size_t population,
   compact_back_demod_set_tree_admit_work(4096);
   compact_back_demod_set_tree_build_factor(8);
   hot = compact_back_demod_init();
-  compact_back_demod_set_position_options(4096, 4, 8, 65536, 20, TRUE);
+  compact_back_demod_set_position_options(4096, 4, 64, 16384, 20, TRUE);
   compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_ADAPTIVE);
   position = compact_back_demod_init();
   for (i = 0; i < population; i++) {
