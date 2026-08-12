@@ -253,11 +253,12 @@ reallocated the same block array through which root backfill retained a raw
 pointer.  With only commit `3f0d83d` applied to that commit, the same input
 passed given 523 under a 20-second cap without a fault.
 
-The accelerated 10,000-record longevity test also passes with factor 64 and
-the 16 MiB cap.  Its adversarial variable-prefix query admitted one selective
-position after 58 evidence queries and then reduced steady retrieval work from
-10,000 units/query to 1, with identical answer order.  It completed in 5.84
-seconds at 40,688 KiB peak RSS.  A deliberately capped 100,000-record attempt
+The final-binary accelerated 10,000-record longevity test also passes with
+factor 64 and the 16 MiB cap.  Its adversarial variable-prefix query admitted
+one selective position on evidence query 59 and then reduced steady retrieval
+work from 10,000 units/query to 1, with identical answer order.  The current
+debug test binary completed in 7.16 user seconds at 41,040 KiB peak RSS.  A
+deliberately capped earlier 100,000-record attempt
 reached its 120-second timeout at 392,028 KiB before completing all four
 synthetic phases; it is recorded as an incomplete resource-bound run, not as
 scale evidence and not as a failure hidden by extrapolation.
