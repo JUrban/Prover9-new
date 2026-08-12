@@ -1,0 +1,6 @@
+% Bounded developer smoke prefix for the user-supplied bob/chat_test.in.
+% Load after the compact candidate/hot-root overlay and before chat_test.in.
+
+assign(max_given,300).
+assign(max_seconds,120).
+assign(report,30).

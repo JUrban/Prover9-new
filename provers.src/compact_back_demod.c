@@ -336,11 +336,23 @@ static uint64_t hash_id(uint64_t x)
   return x;
 }
 
+static BOOL strategy_uses_hot_tree(Compact_back_demod_strategy strategy)
+{
+  return strategy == COMPACT_BACK_DEMOD_HOT_ROOT_TREE ||
+    strategy == COMPACT_BACK_DEMOD_ADAPTIVE;
+}
+
+static BOOL strategy_uses_position(Compact_back_demod_strategy strategy)
+{
+  return strategy == COMPACT_BACK_DEMOD_POSITION ||
+    strategy == COMPACT_BACK_DEMOD_ADAPTIVE;
+}
+
 static BOOL strategy_uses_tree(Compact_back_demod_strategy strategy)
 {
   return strategy == COMPACT_BACK_DEMOD_CODE_TREE ||
     strategy == COMPACT_BACK_DEMOD_HYBRID_TREE ||
-    strategy == COMPACT_BACK_DEMOD_HOT_ROOT_TREE;
+    strategy_uses_hot_tree(strategy);
 }
 
 static BOOL strategy_uses_paths(Compact_back_demod_strategy strategy)
@@ -352,8 +364,7 @@ static BOOL strategy_uses_mask8(Compact_back_demod_strategy strategy)
 {
   return strategy == COMPACT_BACK_DEMOD_MASK8 ||
     strategy == COMPACT_BACK_DEMOD_HYBRID_TREE ||
-    strategy == COMPACT_BACK_DEMOD_HOT_ROOT_TREE ||
-    strategy == COMPACT_BACK_DEMOD_POSITION;
+    strategy_uses_hot_tree(strategy) || strategy_uses_position(strategy);
 }
 
 static unsigned long long position_estimated_bytes(
@@ -443,7 +454,7 @@ static void ensure_symbols(Compact_back_demod_index index, unsigned symbol)
   memset(index->symbol_buckets + old_capacity, 0,
          (index->symbol_capacity - old_capacity) *
            sizeof(*index->symbol_buckets));
-  if (index->strategy == COMPACT_BACK_DEMOD_HOT_ROOT_TREE) {
+  if (strategy_uses_hot_tree(index->strategy)) {
     size_t old_roots = index->tree_root_capacity;
     index->tree_root_capacity = index->symbol_capacity;
     index->tree_roots = safe_realloc(
@@ -453,7 +464,7 @@ static void ensure_symbols(Compact_back_demod_index index, unsigned symbol)
            (index->tree_root_capacity - old_roots) *
              sizeof(*index->tree_roots));
   }
-  if (index->strategy == COMPACT_BACK_DEMOD_POSITION) {
+  if (strategy_uses_position(index->strategy)) {
     size_t old_roots = index->position_root_capacity;
     index->position_root_capacity = index->symbol_capacity;
     index->position_root_buckets = safe_realloc(
@@ -1523,7 +1534,7 @@ static Compact_back_demod_index compact_back_demod_init_with_pool_strategy(
     memset(&index->path_buckets[0], 0, sizeof(index->path_buckets[0]));
     index->path_bucket_count = 1;
   }
-  if (strategy == COMPACT_BACK_DEMOD_POSITION) {
+  if (strategy_uses_position(strategy)) {
     ENSURE_ARRAY(index, position_buckets, position_bucket_count,
                  position_bucket_capacity,
                  "compact_back_demod: position bucket overflow");
@@ -1564,7 +1575,8 @@ void compact_back_demod_set_strategy(Compact_back_demod_strategy strategy)
       strategy != COMPACT_BACK_DEMOD_CODE_TREE &&
       strategy != COMPACT_BACK_DEMOD_HYBRID_TREE &&
       strategy != COMPACT_BACK_DEMOD_HOT_ROOT_TREE &&
-      strategy != COMPACT_BACK_DEMOD_POSITION)
+      strategy != COMPACT_BACK_DEMOD_POSITION &&
+      strategy != COMPACT_BACK_DEMOD_ADAPTIVE)
     fatal_error("compact_back_demod: invalid strategy");
   Back_demod_strategy = strategy;
 }
@@ -1699,10 +1711,10 @@ BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
 
   if (strategy_uses_tree(index->strategy) &&
       (index->tree_complete ||
-       index->strategy == COMPACT_BACK_DEMOD_HOT_ROOT_TREE)) {
+       strategy_uses_hot_tree(index->strategy))) {
     size_t i = 0;
     size_t eligible = 0;
-    if (index->strategy == COMPACT_BACK_DEMOD_HOT_ROOT_TREE) {
+    if (strategy_uses_hot_tree(index->strategy)) {
       for (i = 0; i < symbols.occurrence_count; i++) {
         unsigned symbol = symbols.occurrence_values[i].symbol;
         if ((size_t) symbol < index->tree_root_capacity &&
@@ -1730,7 +1742,7 @@ BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
         index->tree_budget_exhaustions++;
       }
     }
-    else if (index->strategy == COMPACT_BACK_DEMOD_HOT_ROOT_TREE) {
+    else if (strategy_uses_hot_tree(index->strategy)) {
       unsigned long long worst;
       worst = eligible > (ULLONG_MAX - 4096) / 96 ? ULLONG_MAX :
         4096 + (unsigned long long) eligible * 96;
@@ -1755,7 +1767,7 @@ BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
     }
     i = 0;
     while ((index->tree_complete ||
-            index->strategy == COMPACT_BACK_DEMOD_HOT_ROOT_TREE) &&
+            strategy_uses_hot_tree(index->strategy)) &&
            i < symbols.occurrence_count) {
       size_t j = i;
       uint32_t relative = symbols.occurrence_values[i].offset;
@@ -1770,7 +1782,7 @@ BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
       if (index->strategy == COMPACT_BACK_DEMOD_CODE_TREE ||
           (index->strategy == COMPACT_BACK_DEMOD_HYBRID_TREE &&
            length >= index->tree_min_tokens) ||
-          (index->strategy == COMPACT_BACK_DEMOD_HOT_ROOT_TREE &&
+          (strategy_uses_hot_tree(index->strategy) &&
            (size_t) symbols.occurrence_values[i].symbol <
              index->tree_root_capacity &&
            index->tree_roots[
@@ -2409,7 +2421,7 @@ static void maybe_admit_hot_root(Compact_back_demod_index index,
   unsigned symbol;
   struct cbd_tree_root_state *state;
   unsigned long long occurrences, worst, estimated, required_work;
-  if (index->strategy != COMPACT_BACK_DEMOD_HOT_ROOT_TREE ||
+  if (!strategy_uses_hot_tree(index->strategy) ||
       VARIABLE(pattern))
     return;
   symbol = (unsigned) SYMNUM(pattern);
@@ -2683,7 +2695,7 @@ static void append_admitted_position_features(
 {
   struct cbd_record *record = &index->records[record_index];
   size_t i, added_blocks = 0;
-  if (index->strategy != COMPACT_BACK_DEMOD_POSITION ||
+  if (!strategy_uses_position(index->strategy) ||
       !index->position_complete || index->position_bucket_count <= 1)
     return;
   for (i = 1; i < index->position_bucket_count; i++) {
@@ -2713,14 +2725,15 @@ static void maybe_admit_position_feature(Compact_back_demod_index index,
   unsigned char *matched;
   uint32_t root;
   unsigned long long matches, blocks, build_floor;
-  if (index->strategy != COMPACT_BACK_DEMOD_POSITION ||
+  if (!strategy_uses_position(index->strategy) ||
       !index->position_complete || !index->position_admission_enabled ||
-      VARIABLE(pattern) ||
-      query_work < index->position_admit_work)
+      VARIABLE(pattern) || query_work == 0)
     return;
   build_floor = index->active >
       ULLONG_MAX / index->position_build_factor ? ULLONG_MAX :
     index->active * index->position_build_factor;
+  if (build_floor < index->position_admit_work)
+    build_floor = index->position_admit_work;
   feature_count = collect_pattern_position_features(index, pattern);
   if (feature_count == 0)
     return;
@@ -2833,7 +2846,7 @@ static uint32_t best_position_bucket(Compact_back_demod_index index,
 {
   size_t count, i;
   uint32_t root, best = CBD_NONE;
-  if (index->strategy != COMPACT_BACK_DEMOD_POSITION ||
+  if (!strategy_uses_position(index->strategy) ||
       !index->position_complete || VARIABLE(pattern))
     return CBD_NONE;
   count = collect_pattern_position_features(index, pattern);
@@ -2928,7 +2941,7 @@ static BOOL use_tree_for_pattern(Compact_back_demod_index index,
     (index->strategy == COMPACT_BACK_DEMOD_HYBRID_TREE &&
      index->tree_complete &&
      pattern_min_tokens(pattern) >= index->tree_min_tokens) ||
-    (index->strategy == COMPACT_BACK_DEMOD_HOT_ROOT_TREE &&
+    (strategy_uses_hot_tree(index->strategy) &&
      !VARIABLE(pattern) &&
      (size_t) SYMNUM(pattern) < index->tree_root_capacity &&
      index->tree_roots[SYMNUM(pattern)].admitted);
@@ -2942,8 +2955,19 @@ static void collect_pattern(Compact_back_demod_index index, Term pattern,
   if (position_bucket != CBD_NONE)
     collect_position_bucket(index, position_bucket, pattern,
                             exclude_id, count);
-  else if (use_tree_for_pattern(index, pattern))
+  else if (use_tree_for_pattern(index, pattern)) {
+    unsigned long long nodes_before = index->tree_nodes_examined;
+    unsigned long long observed;
     collect_tree(index, pattern, exclude_id, count);
+    observed = index->tree_nodes_examined - nodes_before;
+    if (ULLONG_MAX - observed < index->query_work - before)
+      observed = ULLONG_MAX;
+    else
+      observed += index->query_work - before;
+    /* In adaptive mode, a tree which fans out before a selective rigid
+       position supplies the evidence for a complementary position posting. */
+    maybe_admit_position_feature(index, pattern, observed);
+  }
   else {
     collect_symbol(index, pattern, exclude_id, count);
     maybe_admit_hot_root(index, pattern, index->query_work - before);
@@ -3067,7 +3091,7 @@ static void copy_live_tree_record(Compact_back_demod_index source,
 static void copy_hot_root_states(Compact_back_demod_index destination,
                                  Compact_back_demod_index source)
 {
-  if (source->strategy != COMPACT_BACK_DEMOD_HOT_ROOT_TREE ||
+  if (!strategy_uses_hot_tree(source->strategy) ||
       source->tree_root_capacity == 0)
     return;
   if (source->tree_root_capacity - 1 > UINT_MAX)
@@ -3082,7 +3106,7 @@ static void copy_position_definitions(Compact_back_demod_index destination,
                                       Compact_back_demod_index source)
 {
   size_t i;
-  if (source->strategy != COMPACT_BACK_DEMOD_POSITION)
+  if (!strategy_uses_position(source->strategy))
     return;
   destination->position_complete = source->position_complete;
   if (!source->position_complete)
@@ -3106,7 +3130,7 @@ static void copy_position_definitions(Compact_back_demod_index destination,
 
 static void finish_position_rebuild(Compact_back_demod_index index)
 {
-  if (index->strategy != COMPACT_BACK_DEMOD_POSITION)
+  if (!strategy_uses_position(index->strategy))
     return;
   index->position_rebuilding = FALSE;
   if (index->position_complete &&
@@ -3179,7 +3203,7 @@ static void compact_back_demod_compact_internal(
         &index->tree_posting_lists[i];
       uint32_t block;
       uint32_t record_index = list->inline_record;
-      if (index->strategy == COMPACT_BACK_DEMOD_HOT_ROOT_TREE) {
+      if (strategy_uses_hot_tree(index->strategy)) {
         unsigned symbol;
         if (list->term_offset >= index->token_limit)
           fatal_error("compact_back_demod: corrupt hot-root tree term");

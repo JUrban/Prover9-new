@@ -8,6 +8,7 @@
 #include "../provers.src/compact_feature_index.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <stdint.h>
 
 static int Failures;
@@ -61,6 +62,37 @@ static void encoded_subject(char *buffer, size_t size, uint64_t serial)
     fatal_error("compact_long_run_test: encoded term overflow");
 }
 
+static void encoded_component(char *buffer, size_t size, const char *root,
+                              uint64_t serial)
+{
+  size_t used = 0;
+  unsigned i;
+  used += (size_t) snprintf(buffer + used, size - used, "%s(", root);
+  for (i = 0; i < 12; i++)
+    used += (size_t) snprintf(buffer + used, size - used, "g(");
+  for (i = 0; i < 24; i++)
+    used += (size_t) snprintf(buffer + used, size - used,
+                              (serial & (UINT64_C(1) << i)) ? "r(" : "l(");
+  used += (size_t) snprintf(buffer + used, size - used, "z");
+  for (i = 0; i < 37; i++)
+    used += (size_t) snprintf(buffer + used, size - used, ")");
+  if (used >= size)
+    fatal_error("compact_long_run_test: encoded component overflow");
+}
+
+static void encoded_variable_prefix_subject(char *buffer, size_t size,
+                                            uint64_t serial)
+{
+  char first[512], second[512];
+  encoded_component(first, sizeof(first), "u", serial);
+  if ((size_t) snprintf(second, sizeof(second),
+                        "v(g(g(g(g(g(g(g(g(g(g(g(g(m%llu)))))))))))))",
+                        (unsigned long long) serial) >= sizeof(second))
+    fatal_error("compact_long_run_test: marker overflow");
+  if ((size_t) snprintf(buffer, size, "f(%s,%s)", first, second) >= size)
+    fatal_error("compact_long_run_test: variable-prefix subject overflow");
+}
+
 static Topform indexed_clause(const char *text)
 {
   Topform c = parse_clause_from_string((char *) text);
@@ -81,7 +113,8 @@ static void back_demod_longevity(size_t population, size_t queries)
   unsigned long long *mask_ids, *hot_ids;
   size_t mask_count, hot_count, i, q, warmup_queries = 0;
   unsigned long long mask_steady_work, hot_steady_work;
-  double mask_work_per_query, hot_work_per_query;
+  unsigned long long hot_steady_nodes, hot_combined_work;
+  double mask_work_per_query, hot_work_per_query, hot_nodes_per_query;
   const char *gate;
 
   compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
@@ -154,10 +187,17 @@ static void back_demod_longevity(size_t population, size_t queries)
                      mask_before.query_profile.work;
   hot_steady_work = hot_final.query_profile.work -
                     hot_before.query_profile.work;
+  hot_steady_nodes = hot_final.tree_nodes_examined -
+                     hot_before.tree_nodes_examined;
+  hot_combined_work = hot_steady_work > ULLONG_MAX - hot_steady_nodes ?
+    ULLONG_MAX : hot_steady_work + hot_steady_nodes;
   mask_work_per_query = (double) mask_steady_work / queries;
   hot_work_per_query = (double) hot_steady_work / queries;
+  hot_nodes_per_query = (double) hot_steady_nodes / queries;
   gate = hot_final.tree_root_admissions > 0 &&
-         (mask_steady_work == 0 || hot_steady_work * 10 < mask_steady_work) ?
+         (mask_steady_work == 0 ||
+          (hot_combined_work <= ULLONG_MAX / 10 &&
+           hot_combined_work * 10 < mask_steady_work)) ?
     "pass" : "fail";
   if (strcmp(gate, "pass") != 0)
     Failures++;
@@ -167,6 +207,8 @@ static void back_demod_longevity(size_t population, size_t queries)
          "\"admission_queries\":%llu,"
          "\"mask_work_per_query\":%.3f,"
          "\"hot_work_per_query\":%.3f,"
+         "\"hot_nodes_per_query\":%.3f,"
+         "\"hot_combined_work_per_query\":%.3f,"
          "\"mask_bytes\":%llu,\"hot_bytes\":%llu,"
          "\"hot_admissions\":%llu,\"hot_rejections\":%llu,"
          "\"hot_cost_deferrals\":%llu,\"hot_censuses\":%llu,"
@@ -176,7 +218,9 @@ static void back_demod_longevity(size_t population, size_t queries)
          (unsigned long long) population, (unsigned long long) queries,
          (unsigned long long) hot_count,
          (unsigned long long) warmup_queries + 1, mask_work_per_query,
-         hot_work_per_query, mask_final.total_bytes, hot_final.total_bytes,
+         hot_work_per_query, hot_nodes_per_query,
+         (double) hot_combined_work / queries,
+         mask_final.total_bytes, hot_final.total_bytes,
          hot_final.tree_root_admissions, hot_final.tree_root_rejections,
          hot_final.tree_root_cost_deferrals, hot_final.tree_root_censuses,
          hot_final.tree_root_census_occurrences,
@@ -185,6 +229,173 @@ static void back_demod_longevity(size_t population, size_t queries)
 
   compact_back_demod_free(mask);
   compact_back_demod_free(hot);
+  delete_clause(demod);
+  for (i = 0; i < population; i++)
+    delete_clause(clauses[i]);
+  safe_free(clauses);
+}
+
+/* A discrimination tree can still be linear when a variable occurs before a
+   selective rigid suffix.  This distribution prevents a ground-only scale
+   win from being mistaken for a general back-demodulation solution. */
+static void back_demod_variable_prefix_probe(size_t population,
+                                             size_t queries)
+{
+  Compact_back_demod_index mask, hot, position;
+  struct compact_back_demod_stats mask_before, hot_before;
+  struct compact_back_demod_stats position_before, position_progress;
+  struct compact_back_demod_stats hot_progress, mask_final, hot_final;
+  struct compact_back_demod_stats position_final;
+  Topform *clauses = safe_malloc(population * sizeof(*clauses));
+  Topform demod;
+  char subject[1200], marker[512], text[1300];
+  unsigned long long *mask_ids, *hot_ids, *position_ids;
+  unsigned long long mask_work, hot_groups, hot_nodes, hot_combined;
+  unsigned long long adaptive_groups, adaptive_nodes, adaptive_combined;
+  size_t mask_count, hot_count, position_count, i, q;
+  size_t admission_queries = 1;
+  const char *hot_gate, *adaptive_gate;
+
+  compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
+  mask = compact_back_demod_init();
+  compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_HOT_ROOT_TREE);
+  compact_back_demod_set_tree_budget_kb(64U * 1024U);
+  compact_back_demod_set_tree_admit_work(4096);
+  compact_back_demod_set_tree_build_factor(8);
+  hot = compact_back_demod_init();
+  compact_back_demod_set_position_options(4096, 4, 8, 65536, 20, TRUE);
+  compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_ADAPTIVE);
+  position = compact_back_demod_init();
+  for (i = 0; i < population; i++) {
+    encoded_variable_prefix_subject(subject, sizeof(subject), (uint64_t) i);
+    (void) snprintf(text, sizeof(text), "p(%s).", subject);
+    clauses[i] = indexed_clause(text);
+    CHECK(compact_back_demod_add(mask, clauses[i]),
+          "mask8 accepts variable-prefix subject");
+    CHECK(compact_back_demod_add(hot, clauses[i]),
+          "hot-root index accepts variable-prefix subject");
+    CHECK(compact_back_demod_add(position, clauses[i]),
+          "position index accepts variable-prefix subject");
+  }
+  (void) snprintf(marker, sizeof(marker),
+                  "v(g(g(g(g(g(g(g(g(g(g(g(g(m%llu)))))))))))))",
+                  (unsigned long long) population / 2);
+  (void) snprintf(text, sizeof(text), "f(x,%s) = z.", marker);
+  demod = indexed_clause(text);
+  mark_oriented_eq(demod->literals->atom);
+
+  mask_ids = compact_back_demod_candidate_ids(mask, demod, ORIENTED,
+                                               &mask_count);
+  hot_ids = compact_back_demod_candidate_ids(hot, demod, ORIENTED,
+                                              &hot_count);
+  position_ids = compact_back_demod_candidate_ids(
+    position, demod, ORIENTED, &position_count);
+  CHECK(mask_count == 1 && mask_count == hot_count &&
+        mask_count == position_count &&
+        memcmp(mask_ids, hot_ids, mask_count * sizeof(*mask_ids)) == 0 &&
+        memcmp(mask_ids, position_ids,
+               mask_count * sizeof(*mask_ids)) == 0,
+        "variable-prefix first query preserves sole ordered answer");
+  safe_free(mask_ids);
+  safe_free(hot_ids);
+  safe_free(position_ids);
+  compact_back_demod_get_stats(hot, &hot_progress);
+  compact_back_demod_get_stats(position, &position_progress);
+  while (((hot_progress.tree_root_admissions == 0 &&
+           hot_progress.tree_root_rejections == 0) ||
+          (position_progress.position_admissions == 0 &&
+           position_progress.position_rejections == 0)) &&
+         admission_queries < 128) {
+    mask_ids = compact_back_demod_candidate_ids(mask, demod, ORIENTED,
+                                                 &mask_count);
+    hot_ids = compact_back_demod_candidate_ids(hot, demod, ORIENTED,
+                                                &hot_count);
+    position_ids = compact_back_demod_candidate_ids(
+      position, demod, ORIENTED, &position_count);
+    CHECK(mask_count == hot_count && mask_count == position_count &&
+          memcmp(mask_ids, hot_ids, mask_count * sizeof(*mask_ids)) == 0 &&
+          memcmp(mask_ids, position_ids,
+                 mask_count * sizeof(*mask_ids)) == 0,
+          "variable-prefix admission preserves ordered answer");
+    safe_free(mask_ids);
+    safe_free(hot_ids);
+    safe_free(position_ids);
+    admission_queries++;
+    compact_back_demod_get_stats(hot, &hot_progress);
+    compact_back_demod_get_stats(position, &position_progress);
+  }
+  compact_back_demod_get_stats(mask, &mask_before);
+  compact_back_demod_get_stats(hot, &hot_before);
+  compact_back_demod_get_stats(position, &position_before);
+  for (q = 0; q < queries; q++) {
+    mask_ids = compact_back_demod_candidate_ids(mask, demod, ORIENTED,
+                                                 &mask_count);
+    hot_ids = compact_back_demod_candidate_ids(hot, demod, ORIENTED,
+                                                &hot_count);
+    position_ids = compact_back_demod_candidate_ids(
+      position, demod, ORIENTED, &position_count);
+    CHECK(mask_count == hot_count && mask_count == position_count &&
+          memcmp(mask_ids, hot_ids, mask_count * sizeof(*mask_ids)) == 0 &&
+          memcmp(mask_ids, position_ids,
+                 mask_count * sizeof(*mask_ids)) == 0,
+          "variable-prefix steady query preserves ordered answer");
+    safe_free(mask_ids);
+    safe_free(hot_ids);
+    safe_free(position_ids);
+  }
+  compact_back_demod_get_stats(mask, &mask_final);
+  compact_back_demod_get_stats(hot, &hot_final);
+  compact_back_demod_get_stats(position, &position_final);
+  mask_work = mask_final.query_profile.work -
+              mask_before.query_profile.work;
+  hot_groups = hot_final.query_profile.work -
+               hot_before.query_profile.work;
+  hot_nodes = hot_final.tree_nodes_examined -
+              hot_before.tree_nodes_examined;
+  hot_combined = hot_groups > ULLONG_MAX - hot_nodes ?
+    ULLONG_MAX : hot_groups + hot_nodes;
+  adaptive_groups = position_final.query_profile.work -
+                    position_before.query_profile.work;
+  adaptive_nodes = position_final.tree_nodes_examined -
+                   position_before.tree_nodes_examined;
+  adaptive_combined = adaptive_groups > ULLONG_MAX - adaptive_nodes ?
+    ULLONG_MAX : adaptive_groups + adaptive_nodes;
+  hot_gate = hot_final.tree_root_admissions > 0 &&
+         hot_combined <= ULLONG_MAX / 2 && hot_combined * 2 < mask_work ?
+    "pass" : "fail";
+  adaptive_gate = position_final.position_admissions > 0 &&
+    adaptive_combined <= ULLONG_MAX / 10 &&
+    adaptive_combined * 10 < mask_work ?
+    "pass" : "fail";
+  printf("{\"component\":\"back_demod\","
+         "\"phase\":\"variable_prefix\",\"population\":%llu,"
+         "\"queries\":%llu,\"answers\":%llu,"
+         "\"admission_queries\":%llu,"
+         "\"mask_work_per_query\":%.3f,"
+         "\"hot_groups_per_query\":%.3f,"
+         "\"hot_nodes_per_query\":%.3f,"
+         "\"hot_combined_work_per_query\":%.3f,"
+         "\"adaptive_groups_per_query\":%.3f,"
+         "\"adaptive_nodes_per_query\":%.3f,"
+         "\"adaptive_combined_work_per_query\":%.3f,"
+         "\"mask_bytes\":%llu,\"hot_bytes\":%llu,"
+         "\"adaptive_bytes\":%llu,\"position_admissions\":%llu,"
+         "\"hot_gate\":\"%s\",\"adaptive_gate\":\"%s\"}\n",
+         (unsigned long long) population, (unsigned long long) queries,
+         (unsigned long long) hot_count,
+         (unsigned long long) admission_queries,
+         (double) mask_work / queries, (double) hot_groups / queries,
+         (double) hot_nodes / queries, (double) hot_combined / queries,
+         (double) adaptive_groups / queries,
+         (double) adaptive_nodes / queries,
+         (double) adaptive_combined / queries,
+         mask_final.total_bytes, hot_final.total_bytes,
+         position_final.total_bytes, position_final.position_admissions,
+         hot_gate, adaptive_gate);
+
+  compact_back_demod_free(mask);
+  compact_back_demod_free(hot);
+  compact_back_demod_free(position);
   delete_clause(demod);
   for (i = 0; i < population; i++)
     delete_clause(clauses[i]);
@@ -251,6 +462,7 @@ int main(int argc, char **argv)
   clear_clause_id_tab();
   set_clause_id_count(0);
   back_demod_longevity(population, queries);
+  back_demod_variable_prefix_probe(population, queries);
   nonunit_same_leaf_probe(population);
   clear_clause_id_tab();
   set_clause_id_count(0);

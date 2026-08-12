@@ -2211,13 +2211,14 @@ Prover_options init_prover_options(void)
                     "code_tree");
 
   p->compact_back_demod_strategy =
-    init_stringparm("compact_back_demod_strategy", 6,
+    init_stringparm("compact_back_demod_strategy", 7,
                     "mask8",
                     "signature32",
                     "code_tree",
                     "hybrid_tree",
                     "hot_root_tree",
-                    "position");
+                    "position",
+                    "adaptive");
 
   p->discount_demodulation =
     init_stringparm("discount_demodulation", 3,
@@ -10797,7 +10798,9 @@ static void configure_search_indexes(void)
     str_ident(stringparm1(Opt->compact_back_demod_strategy), "hot_root_tree") ?
       COMPACT_BACK_DEMOD_HOT_ROOT_TREE :
     str_ident(stringparm1(Opt->compact_back_demod_strategy), "position") ?
-      COMPACT_BACK_DEMOD_POSITION : COMPACT_BACK_DEMOD_MASK8);
+      COMPACT_BACK_DEMOD_POSITION :
+    str_ident(stringparm1(Opt->compact_back_demod_strategy), "adaptive") ?
+      COMPACT_BACK_DEMOD_ADAPTIVE : COMPACT_BACK_DEMOD_MASK8);
   configure_compact_back_demod_tree(
     (unsigned) parm(Opt->compact_back_tree_min_tokens),
     (unsigned) parm(Opt->compact_back_tree_budget_kb),
@@ -10809,7 +10812,8 @@ static void configure_search_indexes(void)
     8,
     (unsigned) parm(Opt->compact_back_tree_budget_kb),
     20,
-    flag(Opt->compact_back_position_admission));
+    flag(Opt->compact_back_position_admission) ||
+      str_ident(stringparm1(Opt->compact_back_demod_strategy), "adaptive"));
   configure_compact_unit_term_pool(Compact_terms);
   configure_compact_unit_index(
     flag(Opt->compact_unit_subsumption_audit),

@@ -1,0 +1,16 @@
+% Long-run CPU overlay for compact_otter_candidate.in.
+%
+% Load this after the frozen compact candidate and before the problem:
+%   bin/prover9 -f prover9.examples/compact_otter_candidate.in \
+%     prover9.examples/compact_otter_hot_root_overlay.in problem.in
+%
+% Admission is deterministic.  The first census occurs after 4,096 fallback
+% groups for a root; construction waits until observed fallback work is at
+% least eight times the root's current occurrence population.  Structural
+% metadata has a hard 64 MiB cap and the complete mask8 index remains the
+% fallback for roots which are cold, deferred, rejected, or demoted.
+
+assign(compact_back_demod_strategy,hot_root_tree).
+assign(compact_back_tree_admit_work,4096).
+assign(compact_back_tree_build_factor,8).
+assign(compact_back_tree_budget_kb,65536).

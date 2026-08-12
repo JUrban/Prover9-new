@@ -1,0 +1,6 @@
+% Bounded medium developer prefix for the user-supplied bob/chat_test.in.
+% Load after the compact candidate/hot-root overlay and before chat_test.in.
+
+assign(max_given,1000).
+assign(max_seconds,240).
+assign(report,60).

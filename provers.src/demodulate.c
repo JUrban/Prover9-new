@@ -665,6 +665,7 @@ void fprint_compact_back_demod(FILE *fp)
           stats.strategy == COMPACT_BACK_DEMOD_HYBRID_TREE ? "hybrid_tree" :
           stats.strategy == COMPACT_BACK_DEMOD_HOT_ROOT_TREE ? "hot_root_tree" :
           stats.strategy == COMPACT_BACK_DEMOD_POSITION ? "position" :
+          stats.strategy == COMPACT_BACK_DEMOD_ADAPTIVE ? "adaptive" :
             "mask8",
           Compact_back_demod_failures, stats.active, stats.peak,
           stats.retired, stats.physical, stats.compactions,

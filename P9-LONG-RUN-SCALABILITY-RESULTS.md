@@ -113,3 +113,82 @@ the 16 KiB structural budget is exhausted, and verifies that only that root is
 demoted.  The other root continues to issue code-tree queries before and after
 a forced stale compaction; the demoted root returns the same complete fallback
 answer.  This closes the former global-disable failure mode.
+
+## Bounded `chat_test.in` crossover
+
+The frozen candidate (`mask8`) and cost-aware hot-root overlay were run in
+parallel on the user-supplied 70,185-hint `bob/chat_test.in`, first to 300 and
+then to 1,000 given clauses.  Both comparisons used the same executable and
+host.  Search counters and hint matches were identical within each pair.
+
+| Prefix | Strategy | User CPU (s) | Generated | Kept | Hints matched | Back groups | Worst groups | Back bytes | PSS (KiB) |
+|---:|:---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 300 | mask8 | 19.31 | 120,793 | 5,737 | 123 | 353,095 | 5,183 | 561,237 | 54,405 |
+| 300 | hot root | 21.91 | 120,793 | 5,737 | 123 | 243,513 | 2,480 | 813,557 | 54,990 |
+| 1,000 | mask8 | 82.39 | 1,268,285 | 33,909 | 362 | 9,323,859 | 19,236 | 3,079,064 | 67,165 |
+| 1,000 | hot root | 80.89 | 1,268,285 | 33,909 | 362 | 424,566 | 2,480 | 6,773,496 | 69,048 |
+
+At 300 given clauses, construction had not paid back in wall-clock work: hot
+roots reduced posting work by 31.0% but total user CPU was 13.5% higher.  At
+1,000 given clauses, hot roots reduced posting work by 95.4%, total user CPU
+was 1.8% lower, and measured PSS increased by only 1.8 MiB.  Eight roots were
+admitted after 58 cost deferrals and 66 censuses.  No budget exhaustion or
+root demotion occurred.
+
+The modest CPU improvement despite the very large posting reduction exposes
+the next required measurement.  The hot index visited 24,555,359 code-tree
+nodes in 22,044 tree queries at the 1,000-given prefix.  Tree-node traversal is
+reported separately but is not yet included in `query_profile.work`.  A
+general long-run gate must count posting groups *and* structural nodes; fixed
+and variable-rich patterns need separate distributions.  The 1,000-given
+result is encouraging, but cannot by itself project the 684,719-active-clause
+population in `chat_test.new.out41`.
+
+### Variable-prefix counterexample and adaptive combination
+
+A second adversarial distribution uses clauses whose indexed term is
+`f(unique_prefix, unique_deep_suffix)` and queries
+`f(x, unique_deep_suffix)`.  There is one true answer.  The shallow fallback
+cannot see the suffix, while a prefix discrimination tree must enumerate every
+first-argument branch before checking it.  This caught a ground-query
+overgeneralization in the first hot-root result.
+
+| Population | mask8 groups/query | hot groups/query | hot tree nodes/query | hot combined | adaptive combined | Adaptive position admissions |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1,000 | 1,000 | 1 | 1,999 | 2,000 | 1 | 1 |
+| 10,000 | 10,000 | 1 | 19,999 | 20,000 | 1 | 1 |
+
+Hot-root trees alone therefore fail this generality gate even though their
+posting count looks perfect.  The new `adaptive` strategy maintains both
+cost-aware mechanisms: it uses an admitted position posting first, otherwise
+an admitted root tree, otherwise the complete `mask8` fallback.  A fanning-out
+tree query supplies deterministic work evidence for position probation.  The
+position admission floor now uses cumulative work, so repeated sub-4,096-work
+queries can eventually pay for construction instead of being ignored forever.
+
+The position probe uses a unique rigid symbol at the deep suffix to isolate the
+single-position mechanism.  Correlated suffixes made from a small alphabet can
+still require an intersection of multiple admitted positions; that remains an
+explicit adversarial case rather than an assumed win.
+
+### `chat_test.in` adaptive result at 1,000 given
+
+The adaptive overlay completed the same 1,000-given trajectory as both prior
+runs: 1,268,285 generated, 33,909 kept, and 362 matched hints.
+
+| Strategy | User CPU (s) | Back groups | Tree nodes | Worst groups | Back bytes | PSS (KiB) |
+|:---|---:|---:|---:|---:|---:|---:|
+| mask8 | 82.39 | 9,323,859 | 0 | 19,236 | 3,079,064 | 67,165 |
+| hot root | 80.89 | 424,566 | 24,555,359 | 2,480 | 6,773,496 | 69,048 |
+| adaptive | 78.49 | 2,835,834 | 15,249,493 | 2,689 | 6,983,972 | 69,878 |
+
+Adaptive mode admitted eight roots and 28 position features.  Those features
+reduced code-tree traversal by 37.9% relative to hot roots alone.  Total user
+CPU was 4.7% below `mask8` and 3.0% below hot roots, for about 2.7 MiB more PSS
+than `mask8`.  Posting groups and tree nodes are not equal-cost operations, so
+they remain separate counters; their slopes and measured CPU are both gates.
+
+This is still a bounded-prefix result.  It does not establish the behavior at
+the 684,719-active back index in `chat_test.new.out41`, many competing hot
+roots, a filled position/tree budget, or deletion-heavy compaction.  The
+frozen candidate remains unchanged until those gates pass.

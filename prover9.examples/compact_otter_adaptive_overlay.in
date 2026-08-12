@@ -1,0 +1,15 @@
+% General long-run CPU overlay for compact_otter_candidate.in.
+%
+% Load this after the frozen compact candidate and before the problem:
+%   bin/prover9 -f prover9.examples/compact_otter_candidate.in \
+%     prover9.examples/compact_otter_adaptive_overlay.in problem.in
+%
+% This retains the complete mask8 fallback and admits two complementary,
+% byte-bounded structures from measured work: code trees for hot roots and
+% rigid-position postings for patterns whose variables make a prefix tree fan
+% out.  Both use an eight-times-build-cost admission floor.
+
+assign(compact_back_demod_strategy,adaptive).
+assign(compact_back_tree_admit_work,4096).
+assign(compact_back_tree_build_factor,8).
+assign(compact_back_tree_budget_kb,65536).

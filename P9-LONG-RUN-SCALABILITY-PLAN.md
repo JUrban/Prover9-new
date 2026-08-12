@@ -180,6 +180,14 @@ stronger position/code structures only for roots whose observed fallback work
 justifies their construction.  Account for build and backfill work, retain the
 complete fallback, and make admission deterministic and checkpointed.
 
+A single discrimination tree is not sufficient: a variable before a selective
+rigid suffix can force it to traverse the whole root.  The adaptive mode must
+therefore combine cost-aware hot-root trees with cost-aware rigid-position
+postings, choose an already admitted position before a tree, and allow observed
+tree fanout to fund a later position admission.  CPU gates count both posting
+groups and tree nodes.  Position-budget exhaustion must eventually be isolated
+without globally abandoning other useful admitted positions.
+
 ### E2. Unit and rewrite indexes
 
 Run fixed-live and adversarial scaling gates against code-tree, position, and
