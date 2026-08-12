@@ -158,11 +158,15 @@ lines can contain overwritten arguments and are explicitly warned about;
 direct `%llu` compact-index lines and the short process-residency line are not
 affected by that historical formatter defect.  `--compare-to-first` now audits
 the exact final trajectory, total user-CPU ratio, peak-RSS saving, presence of
-periodic evidence, and measured back-lookup CPU normalized by query count plus
-exact successful answers.  This permits the unavoidable cost of a larger true
-answer set without rewarding false candidates or index scans.  A GNU `time`
-sidecar named like `case.time` is preferred for peak RSS; otherwise the
-allocator's process peak is used.  The matrix runners put
+periodic evidence, and post-warm-up back-lookup CPU normalized by query count
+plus exact successful answers.  This permits the unavoidable cost of a larger
+true answer set without rewarding false candidates or index scans.  The
+promotion gate requires seven complete intervals, ignores the startup interval,
+compares the median of intervals 2--4 with the final-three median, and also
+bounds the final-three spread.  Thus warm-up is not mistaken for ongoing growth
+and a short stable tail cannot hide cumulative drift.  A GNU `time` sidecar
+named like `case.time` is preferred for peak RSS; otherwise the allocator's
+process peak is used.  The matrix runners put
 their first selected case in the reference role automatically, or prepend an
 archive supplied by `CHAT_REFERENCE_OUTPUT`/
 `P9_MATRIX_REFERENCE_OUTPUT`.  CPU, RAM, and slope thresholds are explicit

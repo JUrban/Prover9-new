@@ -184,17 +184,21 @@ User_CPU=2.0, System_CPU=0.0, Wall_clock=2.
             "label": "old", "last_given": 100, "last_generated": 1000,
             "last_kept": 200, "last_proofs": 0, "last_user_cpu": 100.0,
             "peak_rss_kb": 100000, "peak_rss_mib": 100000 / 1024,
-            "samples": 2, "combined_slope_ratio": 1.0,
+            "samples": 7, "combined_slope_ratio": 1.0,
             "back_lookup_cpu_slope_ratio": 1.0,
             "back_lookup_normalized_cpu_slope_ratio": 1.0,
+            "back_lookup_normalized_cpu_samples": 7,
+            "back_lookup_normalized_steady_slope_ratio": 1.0,
         }
         candidate = {
             "label": "new", "last_given": 100, "last_generated": 1000,
             "last_kept": 200, "last_proofs": 0, "last_user_cpu": 120.0,
             "peak_rss_kb": 19000, "peak_rss_mib": 19000 / 1024,
-            "samples": 3, "combined_slope_ratio": 4.0,
+            "samples": 8, "combined_slope_ratio": 4.0,
             "back_lookup_cpu_slope_ratio": 4.0,
-            "back_lookup_normalized_cpu_slope_ratio": 1.20,
+            "back_lookup_normalized_cpu_slope_ratio": 4.0,
+            "back_lookup_normalized_cpu_samples": 8,
+            "back_lookup_normalized_steady_slope_ratio": 1.20,
         }
         comparison = REPORT.compare_summaries(reference, candidate)
         self.assertEqual(comparison["result"], "eligible")
@@ -203,11 +207,11 @@ User_CPU=2.0, System_CPU=0.0, Wall_clock=2.
         self.assertEqual(comparison["ram_gate"], "pass")
         self.assertEqual(comparison["slope_gate"], "pass")
 
-        candidate["back_lookup_normalized_cpu_slope_ratio"] = 1.30
+        candidate["back_lookup_normalized_steady_slope_ratio"] = 1.30
         cpu_slope_failure = REPORT.compare_summaries(reference, candidate)
         self.assertEqual(cpu_slope_failure["slope_gate"], "fail")
         self.assertEqual(cpu_slope_failure["result"], "reject")
-        candidate["back_lookup_normalized_cpu_slope_ratio"] = 1.20
+        candidate["back_lookup_normalized_steady_slope_ratio"] = 1.20
 
         candidate["peak_rss_kb"] = 100000
         candidate["peak_rss_mib"] = 100000 / 1024
@@ -233,12 +237,14 @@ User_CPU=2.0, System_CPU=0.0, Wall_clock=2.
             "cpu_ratio": 1.1, "cpu_gate": "pass",
             "reference_peak_rss_mib": 100.0,
             "candidate_peak_rss_mib": 10.0, "ram_savings_pct": 90.0,
-            "ram_gate": "pass", "candidate_periodic_samples": 3,
+            "ram_gate": "pass", "candidate_periodic_samples": 7,
+            "candidate_normalized_samples": 7,
             "interval_gate": "pass",
             "candidate_back_normalized_cpu_slope_ratio": 1.1,
             "slope_gate": "pass",
             "max_cpu_ratio": 1.25, "min_ram_saving_pct": 80.0,
             "max_back_slope_ratio": 1.25,
+            "required_slope_samples": 7,
             "result": "eligible",
         }
         output = io.StringIO()
@@ -246,6 +252,27 @@ User_CPU=2.0, System_CPU=0.0, Wall_clock=2.
             REPORT.markdown_comparisons([comparison])
         self.assertIn("Matched-run threshold audit", output.getvalue())
         self.assertIn("| new | pass | 1.10 | pass |", output.getvalue())
+
+    def test_steady_slope_skips_warmup_and_requires_stable_tail(self):
+        values = (1.0, 10.0, 10.0, 10.0, 11.0, 9.0, 10.0)
+        rows = [
+            {"back_lookup_seconds_per_answer_unit": value,
+             "statistics_format_comma_num_buffers": 32}
+            for value in values
+        ]
+        summary = REPORT.run_summary("steady", rows)
+        self.assertEqual(summary["back_lookup_normalized_cpu_samples"], 7)
+        self.assertEqual(
+            summary["back_lookup_normalized_steady_growth_ratio"], 1.0)
+        self.assertAlmostEqual(
+            summary["back_lookup_normalized_tail_spread_ratio"], 11.0 / 9.0)
+        self.assertAlmostEqual(
+            summary["back_lookup_normalized_steady_slope_ratio"], 11.0 / 9.0)
+
+        rows[-2]["back_lookup_seconds_per_answer_unit"] = 13.0
+        unsettled = REPORT.run_summary("unsettled", rows)
+        self.assertEqual(
+            unsettled["back_lookup_normalized_steady_slope_ratio"], 1.3)
 
 
 if __name__ == "__main__":

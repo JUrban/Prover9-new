@@ -12,6 +12,7 @@ import json
 import math
 import os
 import re
+import statistics
 import sys
 
 
@@ -43,6 +44,10 @@ PREFIXES = (
 
 STATISTICS_FORMAT_MARKER = "Statistics_format:"
 SAFE_COMMA_NUM_BUFFERS = 24
+STEADY_WARMUP_INTERVALS = 1
+STEADY_WINDOW_INTERVALS = 3
+MIN_STEADY_INTERVALS = (
+    STEADY_WARMUP_INTERVALS + 2 * STEADY_WINDOW_INTERVALS)
 
 CUMULATIVE_KEYS = (
     "given", "generated", "kept", "user_cpu", "system_cpu",
@@ -383,10 +388,39 @@ def run_summary(label, rows):
         [row.get("back_lookup_seconds_per_query") for row in rows])
     normalized_back_cpu_costs = finite(
         [row.get("back_lookup_seconds_per_answer_unit") for row in rows])
+    normalized_evidence_complete = (
+        len(normalized_back_cpu_costs) == len(rows))
+    steady_early_median = None
+    steady_tail_median = None
+    steady_growth_ratio = None
+    steady_tail_spread_ratio = None
+    steady_slope_ratio = None
+    if (normalized_evidence_complete and
+            len(normalized_back_cpu_costs) >= STEADY_WINDOW_INTERVALS):
+        tail_window = normalized_back_cpu_costs[-STEADY_WINDOW_INTERVALS:]
+        steady_tail_median = statistics.median(tail_window)
+        steady_tail_spread_ratio = safe_ratio(
+            max(tail_window), min(tail_window))
+    if (normalized_evidence_complete and
+            len(normalized_back_cpu_costs) >= MIN_STEADY_INTERVALS):
+        early_start = STEADY_WARMUP_INTERVALS
+        early_end = early_start + STEADY_WINDOW_INTERVALS
+        early_window = normalized_back_cpu_costs[early_start:early_end]
+        steady_early_median = statistics.median(early_window)
+        steady_growth_ratio = safe_ratio(
+            steady_tail_median, steady_early_median)
+        if (steady_growth_ratio is not None and
+                steady_tail_spread_ratio is not None):
+            steady_slope_ratio = max(
+                steady_growth_ratio, steady_tail_spread_ratio)
     given_rates = finite([row.get("given_per_cpu") for row in rows])
     signals = []
     if len(rows) < 2:
         signals.append("only one periodic sample; interval slope is unproven")
+    if steady_slope_ratio is None:
+        signals.append(
+            "steady back-lookup slope needs at least {} complete periodic "
+            "intervals".format(MIN_STEADY_INTERVALS))
     if number(last, "back_failures", 0) != 0:
         signals.append("compact backward-demodulation reports failures")
     if number(last, "passive_gc_validation_failures", 0) != 0:
@@ -415,6 +449,10 @@ def run_summary(label, rows):
         signals.append(
             "back-demod lookup CPU/(query + exact answer) grew by more "
             "than 25%")
+    if steady_slope_ratio is not None and steady_slope_ratio > 1.25:
+        signals.append(
+            "post-warm-up back-demod CPU is growing or its tail has not "
+            "stabilized within 25%")
     if len(given_rates) >= 2 and given_rates[0] > 0 and given_rates[-1] < given_rates[0] * 0.75:
         signals.append("given/user-CPU rate fell by more than 25%")
     peak_rss_kb = safe_ratio(
@@ -465,6 +503,13 @@ def run_summary(label, rows):
             safe_ratio(normalized_back_cpu_costs[-1],
                        normalized_back_cpu_costs[0])
             if normalized_back_cpu_costs else None),
+        "back_lookup_normalized_cpu_samples": len(normalized_back_cpu_costs),
+        "back_lookup_normalized_early_median_seconds": steady_early_median,
+        "back_lookup_normalized_tail_median_seconds": steady_tail_median,
+        "back_lookup_normalized_steady_growth_ratio": steady_growth_ratio,
+        "back_lookup_normalized_tail_spread_ratio": (
+            steady_tail_spread_ratio),
+        "back_lookup_normalized_steady_slope_ratio": steady_slope_ratio,
         "first_given_per_cpu": given_rates[0] if given_rates else None,
         "last_given_per_cpu": given_rates[-1] if given_rates else None,
         "given_rate_ratio": (safe_ratio(given_rates[-1], given_rates[0])
@@ -524,9 +569,15 @@ def compare_summaries(reference, candidate, max_cpu_ratio=1.25,
                        if rss_ratio is not None else None)
     ram_gate = (ram_savings_pct >= min_ram_saving_pct
                 if ram_savings_pct is not None else None)
-    interval_gate = True if candidate.get("samples", 0) >= 2 else None
-    slope_ratio = (candidate.get("back_lookup_normalized_cpu_slope_ratio")
-                   if candidate.get("samples", 0) >= 2 else None)
+    normalized_samples = candidate.get(
+        "back_lookup_normalized_cpu_samples", 0)
+    slope_ratio = candidate.get(
+        "back_lookup_normalized_steady_slope_ratio")
+    interval_gate = (
+        True if normalized_samples >= MIN_STEADY_INTERVALS and
+        slope_ratio is not None else None)
+    if interval_gate is None:
+        slope_ratio = None
     slope_gate = (slope_ratio <= max_back_slope_ratio
                   if slope_ratio is not None else None)
 
@@ -554,6 +605,8 @@ def compare_summaries(reference, candidate, max_cpu_ratio=1.25,
         "ram_savings_pct": ram_savings_pct,
         "ram_gate": threshold_state(ram_gate),
         "candidate_periodic_samples": candidate.get("samples"),
+        "candidate_normalized_samples": normalized_samples,
+        "required_slope_samples": MIN_STEADY_INTERVALS,
         "interval_gate": threshold_state(interval_gate),
         "candidate_back_normalized_cpu_slope_ratio": slope_ratio,
         "slope_gate": threshold_state(slope_gate),
@@ -633,6 +686,26 @@ def markdown_summary(summary):
               fmt(summary.get("back_lookup_cpu_slope_ratio"), 2),
               fmt(summary.get("back_lookup_normalized_cpu_slope_ratio"), 2),
               fmt(summary.get("given_rate_ratio"), 2)))
+    print("Post-warm-up normalized CPU: early median={} us/unit, tail "
+          "median={} us/unit, growth={}, tail spread={}, gate ratio={}.".format(
+              fmt((summary.get(
+                  "back_lookup_normalized_early_median_seconds") or 0) *
+                  1000000.0, 1)
+              if summary.get(
+                  "back_lookup_normalized_early_median_seconds") is not None
+              else "NA",
+              fmt((summary.get(
+                  "back_lookup_normalized_tail_median_seconds") or 0) *
+                  1000000.0, 1)
+              if summary.get(
+                  "back_lookup_normalized_tail_median_seconds") is not None
+              else "NA",
+              fmt(summary.get(
+                  "back_lookup_normalized_steady_growth_ratio"), 2),
+              fmt(summary.get(
+                  "back_lookup_normalized_tail_spread_ratio"), 2),
+              fmt(summary.get(
+                  "back_lookup_normalized_steady_slope_ratio"), 2)))
     if summary["signals"]:
         print("Signals:")
         for signal in summary["signals"]:
@@ -652,17 +725,19 @@ def markdown_comparisons(comparisons):
     if comparisons:
         first = comparisons[0]
         print("Thresholds: CPU ratio <= {}, RAM saving >= {}%, measured "
-              "back-lookup CPU/(query + exact answer) slope <= {}.".format(
+              "post-warm-up back-lookup CPU/(query + exact answer) gate "
+              "ratio <= {}; at least {} complete intervals.".format(
                   fmt(first["max_cpu_ratio"], 2),
                   fmt(first["min_ram_saving_pct"], 1),
-                  fmt(first["max_back_slope_ratio"], 2)))
+                  fmt(first["max_back_slope_ratio"], 2),
+                  fmt(first["required_slope_samples"])))
     print()
     print("| Candidate | Trajectory | CPU ratio | CPU | Reference peak MiB | "
           "Candidate peak MiB | RAM saved % | RAM | Samples | Periodic | "
-          "Normalized back CPU slope | Slope | Result |")
-    print("|:---|:---:|---:|:---:|---:|---:|---:|:---:|---:|:---:|---:|:---:|:---:|")
+          "Normalized samples | Steady back CPU ratio | Slope | Result |")
+    print("|:---|:---:|---:|:---:|---:|---:|---:|:---:|---:|:---:|---:|---:|:---:|:---:|")
     for comparison in comparisons:
-        print("| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |".format(
+        print("| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |".format(
             comparison["candidate"], comparison["trajectory_gate"],
             fmt(comparison["cpu_ratio"], 2), comparison["cpu_gate"],
             fmt(comparison["reference_peak_rss_mib"], 1),
@@ -670,6 +745,7 @@ def markdown_comparisons(comparisons):
             fmt(comparison["ram_savings_pct"], 1), comparison["ram_gate"],
             fmt(comparison["candidate_periodic_samples"]),
             comparison["interval_gate"],
+            fmt(comparison["candidate_normalized_samples"]),
             fmt(comparison["candidate_back_normalized_cpu_slope_ratio"], 2),
             comparison["slope_gate"], comparison["result"]))
     print()
@@ -736,8 +812,8 @@ def main(argv=None):
         help="comparison peak-RSS saving threshold (default 80)")
     parser.add_argument(
         "--max-back-slope-ratio", type=float, default=1.25,
-        help=("comparison back-lookup CPU/(query + exact answer) slope "
-              "threshold (default 1.25)"))
+        help=("comparison post-warm-up back-lookup CPU/(query + exact answer) "
+              "growth/tail-spread threshold (default 1.25)"))
     args = parser.parse_args(argv)
     if args.tail < 0:
         parser.error("--tail must be nonnegative")
