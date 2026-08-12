@@ -215,6 +215,30 @@ sampled lookup time fell from 21.828 to 6.900 seconds.  This establishes a
 bounded crossover and selects the parameter; it still does not close the
 proof-endpoint gate.
 
+### Forward rewrite subjects are now atom-linear
+
+The retained back indexes do not by themselves bound forward demodulation
+CPU.  The old compact query path flattened every target subtree separately
+during bottom-up normalization, so a deep atom paid the sum of its subtree
+sizes.  The implemented replacement converts each literal atom once to a
+transient flatterm and performs exact radix matching through its `next/end`
+links.  Contracta and substituted already-reduced fragments stay in that
+representation until the atom reaches normal form.  A recyclable bank-owned
+scratch arena bounds retained overhead by maximum concurrent subject size.
+
+Periodic output now includes `Compact_rewrite_subjects`.  The external gate
+must inspect `target_nodes / initial_nodes`: this is the measured former/new
+query-preparation node ratio, not an estimate from term depth.  Normal-form,
+justification, compaction, checkpoint/resume, audit, generalization, and
+ASan/UBSan checks pass.  No new runtime option is required; the change is the
+authoritative compact demodulation implementation.
+
+The clean release 1,500-given gate preserved the exact trajectory and reduced
+user CPU from the previous depth-four build's 165.27 seconds to 154.45
+seconds (6.5%), with peak RSS moving from 107,904 to 109,008 KiB.  Its
+cumulative `target_nodes / initial_nodes` ratio was 4.8x.  This remains a
+bounded gate, not a mature proof-endpoint claim.
+
 The first full CHAT validation should retain the existing compact/file store
 settings and add the following complete strategy block:
 

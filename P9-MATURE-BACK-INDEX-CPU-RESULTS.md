@@ -84,6 +84,14 @@ The changes are split into reviewable commits:
 | `b12c84c` | bounded dense intersections for packed-fast hint back-demodulation |
 | `f40023b` | conservative deep fingerprints before back-hint materialization |
 | `f797729` | sanitizer-found zero-candidate `qsort` contract fix |
+| `950b230` | population-relative retention for useful complete tree and sparse indexes |
+| `1f1643d` | query-order-independent shallow sparse exact-path postings |
+| `edabbe3` | depth-four selection at the measured shallow-path crossover knee |
+| `57bed92` | one transient flatterm conversion per rewritten atom |
+| `32aca1c` | checkpointed linear-preparation telemetry and depth-200 invariant test |
+| `abb0485` | recyclable transient-subject arena and avoided-work counter |
+| `83815b5` | interval reporting for mature rewrite-preparation scaling |
+| `e0d64c9` | isolation of debug/sanitizer objects from production release links |
 
 Candidate completeness and decreasing-ID order remain authoritative in the
 mask/tree/position paths.  Scheduling, wall time, and cache residency never
@@ -122,6 +130,55 @@ The long-lived memory cost is four bytes per physical radix node plus one
 `uint32_t` per allocated P9 symbol slot.  It is independent of query and
 rewrite-attempt counts.  On the 1,500-given CHAT prefix the root map is 1 KiB;
 the parallel first-code array is about 256 KiB at the current capacity.
+
+### One subject conversion per atom
+
+The mature `out61` evidence exposed a second forward-rewrite multiplier that
+the earlier radix changes did not remove.  Compact normalization walked a
+Term bottom-up, but every rigid subterm then called `flatten_query_rec` over
+that subterm's complete subtree.  Preparing all rewrite queries therefore
+touched the sum of all subtree sizes.  A chain-shaped atom is quadratic in its
+depth before discrimination retrieval itself is counted.  LADR's ordinary
+flatterm demodulator instead converts an atom once and skips subtrees with an
+`end` link.
+
+Commit `57bed92` retains the compact persistent rule bank but uses the same
+one-conversion subject representation.  Radix matching advances over
+`next/end` links, variable bindings point directly into the transient subject,
+RHS contracta are built as flatterms, and lex-dependent rules use
+`flat_greater`.  Copied bindings retain LADR's already-reduced marker, and
+predecessor order, sequence numbers, normal forms, and encoded proof
+justifications are unchanged.  Commit `abb0485` recycles transient nodes in
+1,024-node bank-owned blocks, so the structural fix does not replace scanning
+with millions of general allocator calls.  The arena's retained size is
+bounded by the largest simultaneously normalized atom/contractum, not by the
+number of passive clauses or rewrite attempts.
+
+The new `Compact_rewrite_subjects` line reports atoms, initial atom nodes,
+target-subtree nodes, and attempts.  `target_nodes / initial_nodes` is the
+exact node-population ratio between the former per-subterm query preparation
+and the new one-per-atom preparation.  The long-run report exports this ratio
+per interval, which lets the external run verify whether the benefit grows
+with mature term shape.  A depth-200 no-match regression checks 202 initial
+nodes versus 20,503 former target-subtree node visits while preserving all
+202 rigid rewrite probes.
+
+On the exact depth-four 1,500-given CHAT trajectory, the clean release binary
+ended at 2,947,136 generated and 66,933 kept in 154.45 user seconds and
+109,008 KiB peak RSS.  The pre-change depth-four build used 165.27 seconds
+and 107,904 KiB.  This is a 6.5% CPU improvement at 1.0% more peak RSS, and
+both the complete given sequence and hint trace compare byte-for-byte after
+filtering.  The cumulative former/new query-preparation node ratio was 4.8x.
+This validates the mechanism and bounded-prefix crossover; only the external
+mature endpoint can show how much of `out61`'s late demodulation slope it
+removes.
+
+One discarded 193.09-second run is not performance evidence: `test.src` had
+compiled the shared production rewrite object with `-O0`, and the release
+link reused it because its timestamp was newer.  Commit `e0d64c9` makes every
+focused prover implementation object test-local.  A sanitizer test now leaves
+both the optimized object and release binary hashes unchanged, preventing
+that contamination from recurring.
 
 ### Packed-fast hint back-demodulation
 
