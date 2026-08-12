@@ -98,6 +98,7 @@ compact-generalization-smoke: all
 long-run-scalability-tests: all
 	cd test.src && $(MAKE) compact_long_run_test ancestor_store_scale_test
 	./test.src/compact_long_run_test
+	cd test.src && $(MAKE) compact-long-run-report-test
 
 clean:
 	cd ladr             && $(MAKE) realclean
