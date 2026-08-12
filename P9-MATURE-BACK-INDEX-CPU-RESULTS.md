@@ -262,6 +262,22 @@ seconds.  Other compact-path savings nearly offset those gaps at 1,500 given,
 but their mature slopes still require the supplied 7,365-given and full-proof
 comparisons.
 
+The next exact bounded endpoint did not show an early runaway:
+
+| 2,000-given gate | User CPU | Peak RSS | Generated / kept | Demod attempts / rewrites |
+|:---|---:|---:|---:|---:|
+| normal P9 | 335.92 s | 358,144 KiB | 4,497,692 / 144,514 | 124,676,012 / 16,116,393 |
+| compact at `4ddf9ed` | 357.15 s | 117,308 KiB | 4,497,690 / 144,512 | 124,675,973 / 16,116,395 |
+
+Compact is 6.3% slower and uses 67.2% less RSS at 2,000 given.  From the
+1,500 endpoint, normal P9 consumed another 135.60 seconds and default-factor
+compact another 146.58 seconds, an 8.1% interval penalty.  This is far below
+the supplied larger-run regression but is not a substitute for that gate.  At 2,000 given,
+compact position maintenance is 11.84 seconds (3.3% of user CPU), below the
+5% acceptance limit.  Forward/back-demod clocks are 101.12/60.75 seconds for
+compact versus 86.07/26.82 seconds for normal P9, so backward retrieval is
+still the principal unclosed slope risk.
+
 At 1,000 givens all 27,764 adaptive lookups had been observed by the pre-tree
 frequency sketch and 370 were post-threshold observations, but the separate
 factor-8 construction test correctly deferred all six root censuses.  Thus
