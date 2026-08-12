@@ -676,6 +676,10 @@ void fprint_compact_back_demod(FILE *fp)
           "position_probation_replacements=%llu, "
           "position_retry_deferrals=%llu, "
           "position_backfill_records=%llu, position_census_records=%llu, "
+          "position_append_records=%llu, position_append_root_scans=%llu, "
+          "position_append_token_visits=%llu, "
+          "position_append_feature_lookups=%llu, "
+          "position_append_matches=%llu, "
           "position_credit_balance=%llu, position_credit_earned=%llu, "
           "position_credit_spent=%llu, position_credit_reservations=%llu, "
           "position_admission_freezes=%llu, position_complete=%s, "
@@ -744,6 +748,11 @@ void fprint_compact_back_demod(FILE *fp)
           stats.position_retry_deferrals,
           stats.position_backfill_records,
           stats.position_census_records,
+          stats.position_append_records,
+          stats.position_append_root_scans,
+          stats.position_append_token_visits,
+          stats.position_append_feature_lookups,
+          stats.position_append_matches,
           stats.position_credit_balance, stats.position_credit_earned,
           stats.position_credit_spent, stats.position_credit_reservations,
           stats.position_admission_freezes,

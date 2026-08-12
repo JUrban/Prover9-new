@@ -174,6 +174,11 @@ struct cbd_position_query_feature {
   unsigned long long joint_records;
 };
 
+struct cbd_position_append_match {
+  uint32_t bucket;
+  uint32_t root_offset;
+};
+
 struct cbd_position_probation {
   uint64_t path;
   unsigned long long work;
@@ -241,6 +246,8 @@ struct compact_back_demod_index {
   size_t position_block_capacity;
   struct cbd_position_query_feature *position_query;
   size_t position_query_capacity;
+  struct cbd_position_append_match *position_append_matches;
+  size_t position_append_match_capacity;
   struct cbd_position_probation *position_probation;
   size_t position_probation_capacity;
   struct cbd_route_profile *route_profiles;
@@ -338,6 +345,11 @@ struct compact_back_demod_index {
   unsigned long long position_retry_deferrals;
   unsigned long long position_backfill_records;
   unsigned long long position_census_records;
+  unsigned long long position_append_records;
+  unsigned long long position_append_root_scans;
+  unsigned long long position_append_token_visits;
+  unsigned long long position_append_feature_lookups;
+  unsigned long long position_append_matches_count;
   unsigned long long position_credit_balance;
   unsigned long long position_credit_earned;
   unsigned long long position_credit_spent;
@@ -539,7 +551,9 @@ static unsigned long long index_bytes(Compact_back_demod_index index)
     compact_id_map_bytes(index->id_map) +
     index->result_capacity * sizeof(*index->results) +
     index->query_capacity * sizeof(*index->query) +
-    index->position_query_capacity * sizeof(*index->position_query);
+    index->position_query_capacity * sizeof(*index->position_query) +
+    index->position_append_match_capacity *
+      sizeof(*index->position_append_matches);
 }
 
 static void update_peak(Compact_back_demod_index index)
@@ -3189,6 +3203,7 @@ static void collect_tree(Compact_back_demod_index index, Term pattern,
        child != CBD_NONE; child = index->tree_nodes[child].next_sibling) {
       int32_t root = tree_first_code(index, child);
       scanned++;
+      index->tree_sibling_checks++;
       if (root < symbol)
         continue;
       if (root > symbol)
@@ -3545,40 +3560,150 @@ static void collect_position_bucket(Compact_back_demod_index index,
   }
 }
 
-static BOOL record_has_position_bucket(
-  Compact_back_demod_index index, struct cbd_record *record,
-  struct cbd_position_bucket *bucket)
+static void ensure_position_append_matches(Compact_back_demod_index index,
+                                           size_t needed)
 {
-  struct cbd_position_query_feature feature;
-  unsigned char matched = FALSE;
-  memset(&feature, 0, sizeof(feature));
-  feature.path = bucket->path;
-  feature.symbol = bucket->symbol;
-  record_position_features(index, record, bucket->root_symbol,
-                           &feature, 1, &matched);
-  return matched;
+  while (needed > index->position_append_match_capacity) {
+    index->position_append_match_capacity = grow_record_capacity(
+      index->position_append_match_capacity,
+      sizeof(*index->position_append_matches),
+      "compact_back_demod: incremental position match overflow");
+    index->position_append_matches = safe_realloc(
+      index->position_append_matches,
+      index->position_append_match_capacity *
+        sizeof(*index->position_append_matches));
+  }
+}
+
+static void append_position_match(Compact_back_demod_index index,
+                                  size_t *count, uint32_t bucket,
+                                  uint32_t root_offset)
+{
+  ensure_position_append_matches(index, *count + 1);
+  index->position_append_matches[*count].bucket = bucket;
+  index->position_append_matches[*count].root_offset = root_offset;
+  (*count)++;
+}
+
+/* Traverse one serialized subject occurrence once and resolve all admitted
+   exact-position features through their existing hash.  The former update
+   path traversed the complete record once or twice per active feature; its
+   steady insertion cost therefore grew with the planner's feature count even
+   after construction had frozen. */
+static uint32_t collect_position_append_matches_rec(
+  Compact_back_demod_index index, const int32_t *tokens,
+  uint32_t token_end, uint32_t position, uint32_t root_symbol,
+  uint32_t root_offset, uint64_t path, size_t *count)
+{
+  int32_t code;
+  int i, arity;
+  if (position >= token_end)
+    fatal_error("compact_back_demod: corrupt incremental position subject");
+  if (index->position_append_token_visits != ULLONG_MAX)
+    index->position_append_token_visits++;
+  code = tokens[position++];
+  arity = code < 0 ? 0 : sn_to_arity(code);
+  for (i = 0; i < arity; i++) {
+    uint32_t child_start = position;
+    uint64_t child_path = position_child_path(path, (unsigned) i);
+    int32_t child_code;
+    if (child_start >= token_end)
+      fatal_error("compact_back_demod: corrupt incremental position child");
+    child_code = tokens[child_start];
+    if (child_code >= 0) {
+      uint32_t bucket;
+      if (index->position_append_feature_lookups != ULLONG_MAX)
+        index->position_append_feature_lookups++;
+      bucket = lookup_position_bucket(
+        index, root_symbol, child_path, (uint32_t) child_code);
+      if (bucket != CBD_NONE && index->position_buckets[bucket].active)
+        append_position_match(index, count, bucket, root_offset);
+    }
+    position = collect_position_append_matches_rec(
+      index, tokens, token_end, child_start, root_symbol, root_offset,
+      child_path, count);
+  }
+  return position;
+}
+
+static int increasing_position_append_match(const void *left,
+                                            const void *right)
+{
+  const struct cbd_position_append_match *a = left;
+  const struct cbd_position_append_match *b = right;
+  if (a->bucket != b->bucket)
+    return a->bucket < b->bucket ? -1 : 1;
+  return a->root_offset < b->root_offset ? -1 :
+    a->root_offset > b->root_offset ? 1 : 0;
+}
+
+static size_t collect_position_append_matches(
+  Compact_back_demod_index index, struct cbd_record *record)
+{
+  const int32_t *tokens;
+  uint32_t i, end = compact_term_slice_length(record->tokens);
+  size_t count = 0, in, out;
+  if (index->position_append_records != ULLONG_MAX)
+    index->position_append_records++;
+  if (end == 0)
+    return 0;
+  tokens = compact_term_pool_slice_tokens(index->term_pool, record->tokens);
+  for (i = 0; i < end; i++)
+    if (tokens[i] >= 0 &&
+        (size_t) tokens[i] < index->position_root_capacity &&
+        index->position_root_buckets[tokens[i]] != CBD_NONE) {
+      if (index->position_append_root_scans != ULLONG_MAX)
+        index->position_append_root_scans++;
+      (void) collect_position_append_matches_rec(
+        index, tokens, end, i, (uint32_t) tokens[i], i, 0, &count);
+    }
+  if (count < 2) {
+    if (count != 0 && index->position_append_matches_count != ULLONG_MAX)
+      index->position_append_matches_count++;
+    return count;
+  }
+  qsort(index->position_append_matches, count,
+        sizeof(*index->position_append_matches),
+        increasing_position_append_match);
+  out = 1;
+  for (in = 1; in < count; in++)
+    if (index->position_append_matches[in].bucket !=
+          index->position_append_matches[out - 1].bucket ||
+        index->position_append_matches[in].root_offset !=
+          index->position_append_matches[out - 1].root_offset)
+      index->position_append_matches[out++] =
+        index->position_append_matches[in];
+  if (ULLONG_MAX - index->position_append_matches_count < out)
+    index->position_append_matches_count = ULLONG_MAX;
+  else
+    index->position_append_matches_count += out;
+  return out;
 }
 
 static void append_admitted_position_features(
   Compact_back_demod_index index, uint32_t record_index)
 {
   struct cbd_record *record = &index->records[record_index];
-  size_t i, added_blocks = 0;
+  size_t i, matches, added_blocks = 0;
   unsigned long long bitmap_growth = 0;
   if (!strategy_uses_position(index->strategy) ||
       !index->position_complete || index->position_bucket_count <= 1)
     return;
-  for (i = 1; i < index->position_bucket_count; i++) {
-    struct cbd_position_bucket *bucket = &index->position_buckets[i];
-    if (bucket->active && record_has_position_bucket(index, record, bucket)) {
-      unsigned long long growth = position_bitmap_growth(
-        bucket, record_index);
-      if (ULLONG_MAX - bitmap_growth < growth)
-        fatal_error("compact_back_demod: projected bitmap byte overflow");
-      bitmap_growth += growth;
-      if (bucket->inline_record != CBD_NONE)
-        added_blocks++;
-    }
+  matches = collect_position_append_matches(index, record);
+  for (i = 0; i < matches;) {
+    uint32_t bucket_index = index->position_append_matches[i].bucket;
+    struct cbd_position_bucket *bucket =
+      &index->position_buckets[bucket_index];
+    unsigned long long growth = position_bitmap_growth(
+      bucket, record_index);
+    if (ULLONG_MAX - bitmap_growth < growth)
+      fatal_error("compact_back_demod: projected bitmap byte overflow");
+    bitmap_growth += growth;
+    if (bucket->inline_record != CBD_NONE)
+      added_blocks++;
+    do i++;
+    while (i < matches &&
+           index->position_append_matches[i].bucket == bucket_index);
   }
   if (!index->position_rebuilding &&
       (added_blocks != 0 || bitmap_growth != 0) &&
@@ -3587,9 +3712,11 @@ static void append_admitted_position_features(
     /* Position postings are optional refinements over the complete path
        index.  Demote only features matched by this record; unrelated features
        remain complete and useful until compaction reclaims the dead arrays. */
-    for (i = 1; i < index->position_bucket_count; i++) {
-      struct cbd_position_bucket *bucket = &index->position_buckets[i];
-      if (bucket->active && record_has_position_bucket(index, record, bucket)) {
+    for (i = 0; i < matches;) {
+      uint32_t bucket_index = index->position_append_matches[i].bucket;
+      struct cbd_position_bucket *bucket =
+        &index->position_buckets[bucket_index];
+      if (bucket->active) {
         bucket->active = FALSE;
         defer_position_probation(index, bucket->root_symbol, bucket->path,
                                  bucket->symbol, ULLONG_MAX);
@@ -3597,15 +3724,32 @@ static void append_admitted_position_features(
         if (index->position_generation != ULLONG_MAX)
           index->position_generation++;
       }
+      do i++;
+      while (i < matches &&
+             index->position_append_matches[i].bucket == bucket_index);
     }
     index->position_budget_exhaustions++;
     freeze_position_admission(index);
     return;
   }
-  for (i = 1; i < index->position_bucket_count; i++) {
-    if (index->position_buckets[i].active)
-      (void) append_record_position_feature(
-        index, (uint32_t) i, record_index);
+  for (i = 0; i < matches;) {
+    uint32_t bucket_index = index->position_append_matches[i].bucket;
+    struct cbd_position_bucket *bucket =
+      &index->position_buckets[bucket_index];
+    uint32_t stream_offset = (uint32_t) index->occurrence_count;
+    uint32_t previous = 0;
+    size_t first = i;
+    while (i < matches &&
+           index->position_append_matches[i].bucket == bucket_index) {
+      uint32_t offset = index->position_append_matches[i].root_offset;
+      append_occurrence_delta(index, i == first ? offset : offset - previous);
+      previous = offset;
+      i++;
+    }
+    add_position_bitmap_record(index, bucket, record_index);
+    append_position_group(
+      index, bucket_index, record_index, stream_offset,
+      (uint32_t) index->occurrence_count - stream_offset);
   }
 }
 
@@ -4800,6 +4944,15 @@ static void copy_position_definitions(Compact_back_demod_index destination,
   destination->position_credit_reservations =
     source->position_credit_reservations;
   destination->position_census_records = source->position_census_records;
+  destination->position_append_records = source->position_append_records;
+  destination->position_append_root_scans =
+    source->position_append_root_scans;
+  destination->position_append_token_visits =
+    source->position_append_token_visits;
+  destination->position_append_feature_lookups =
+    source->position_append_feature_lookups;
+  destination->position_append_matches_count =
+    source->position_append_matches_count;
   destination->position_retry_deferrals =
     source->position_retry_deferrals;
   destination->position_admission_freezes =
@@ -5025,6 +5178,7 @@ static void compact_back_demod_compact_internal(
   safe_free(old.position_root_buckets);
   safe_free(old.position_blocks);
   safe_free(old.position_query);
+  safe_free(old.position_append_matches);
   safe_free(old.position_probation);
   safe_free(old.route_profiles);
   safe_free(old.route_frequency);
@@ -5217,6 +5371,7 @@ void compact_back_demod_compact_materialized(
   safe_free(old.position_root_buckets);
   safe_free(old.position_blocks);
   safe_free(old.position_query);
+  safe_free(old.position_append_matches);
   safe_free(old.position_probation);
   safe_free(old.route_profiles);
   safe_free(old.route_frequency);
@@ -5815,6 +5970,13 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->position_retry_deferrals = index->position_retry_deferrals;
   stats->position_backfill_records = index->position_backfill_records;
   stats->position_census_records = index->position_census_records;
+  stats->position_append_records = index->position_append_records;
+  stats->position_append_root_scans = index->position_append_root_scans;
+  stats->position_append_token_visits =
+    index->position_append_token_visits;
+  stats->position_append_feature_lookups =
+    index->position_append_feature_lookups;
+  stats->position_append_matches = index->position_append_matches_count;
   stats->position_credit_balance = index->position_credit_balance;
   stats->position_credit_earned = index->position_credit_earned;
   stats->position_credit_spent = index->position_credit_spent;
@@ -5936,7 +6098,9 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->hash_bytes = compact_id_map_bytes(index->id_map);
   stats->scratch_bytes = index->result_capacity * sizeof(*index->results) +
     index->query_capacity * sizeof(*index->query) +
-    index->position_query_capacity * sizeof(*index->position_query);
+    index->position_query_capacity * sizeof(*index->position_query) +
+    index->position_append_match_capacity *
+      sizeof(*index->position_append_matches);
   stats->total_bytes = index_bytes(index);
   stats->peak_bytes = index->peak_bytes;
 }
@@ -5961,6 +6125,7 @@ void compact_back_demod_free(Compact_back_demod_index index)
   safe_free(index->position_root_buckets);
   safe_free(index->position_blocks);
   safe_free(index->position_query);
+  safe_free(index->position_append_matches);
   safe_free(index->position_probation);
   safe_free(index->route_profiles);
   safe_free(index->route_frequency);

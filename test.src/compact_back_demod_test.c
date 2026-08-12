@@ -499,6 +499,50 @@ int main(void)
   }
 
   {
+    enum { ROOT_SIBLINGS = 24 };
+    Compact_back_demod_index roots;
+    struct compact_back_demod_stats before_root, after_first, after_second;
+    Topform clauses[ROOT_SIBLINGS], rule;
+    char text[96];
+    int j;
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_CODE_TREE);
+    roots = compact_back_demod_init();
+    for (j = 0; j < ROOT_SIBLINGS; j++) {
+      (void) snprintf(text, sizeof(text),
+                      "w(root_sibling_%d(a)).", j);
+      clauses[j] = indexed_clause(text);
+      CHECK(compact_back_demod_add(roots, clauses[j]),
+            "add top-level tree sibling family");
+    }
+    (void) snprintf(text, sizeof(text),
+                    "root_sibling_%d(a) = a.", ROOT_SIBLINGS - 1);
+    rule = indexed_clause(text);
+    compact_back_demod_get_stats(roots, &before_root);
+    ids = compact_back_demod_candidate_ids(roots, rule, ORIENTED, &count);
+    CHECK(count == 1 && ids[0] == clauses[ROOT_SIBLINGS - 1]->id,
+          "root sibling scan preserves the exact tree answer");
+    safe_free(ids);
+    compact_back_demod_get_stats(roots, &after_first);
+    ids = compact_back_demod_candidate_ids(roots, rule, ORIENTED, &count);
+    CHECK(count == 1 && ids[0] == clauses[ROOT_SIBLINGS - 1]->id,
+          "cached root dispatch preserves the exact tree answer");
+    safe_free(ids);
+    compact_back_demod_get_stats(roots, &after_second);
+    CHECK(after_first.tree_sibling_checks -
+            before_root.tree_sibling_checks >= ROOT_SIBLINGS &&
+          after_second.tree_sibling_checks ==
+            after_first.tree_sibling_checks &&
+          after_second.tree_child_cache_hits >
+            after_first.tree_child_cache_hits,
+          "route work counts cold root siblings and cached dispatch removes them");
+    compact_back_demod_free(roots);
+    delete_clause(rule);
+    for (j = 0; j < ROOT_SIBLINGS; j++)
+      delete_clause(clauses[j]);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
+  }
+
+  {
     enum { COST_FAMILY = 64 };
     Compact_back_demod_index cost_aware;
     struct compact_back_demod_stats cost_stats;
@@ -1086,6 +1130,94 @@ int main(void)
     delete_clause(rule);
     compact_back_demod_set_position_options(
       4096, 4, 8, 65536, 20, TRUE);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
+  }
+
+  {
+    enum {
+      APPEND_FEATURES = 32,
+      APPEND_FAMILY = 64,
+      APPEND_UNMATCHED = 128
+    };
+    Compact_back_demod_index appended;
+    struct compact_back_demod_stats trained, extended;
+    Topform family[APPEND_FAMILY];
+    Topform rules[APPEND_FEATURES];
+    Topform unmatched[APPEND_UNMATCHED];
+    Topform matched;
+    char text[128];
+    int j, round;
+    compact_back_demod_set_position_options(1, 4, 1, 65536, 20, TRUE);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_POSITION);
+    appended = compact_back_demod_init();
+    for (j = 0; j < APPEND_FAMILY; j++) {
+      (void) snprintf(text, sizeof(text),
+                      "w(append_fan(a,g(h(j(append_key_%d))))).", j);
+      family[j] = indexed_clause(text);
+      CHECK(compact_back_demod_add(appended, family[j]),
+            "add multi-feature incremental-position family");
+    }
+    for (j = 0; j < APPEND_FEATURES; j++) {
+      (void) snprintf(text, sizeof(text),
+                      "append_fan(x,g(h(j(append_key_%d)))) = x.", j);
+      rules[j] = indexed_clause(text);
+      for (round = 0; round < 2; round++) {
+        ids = compact_back_demod_candidate_ids(
+          appended, rules[j], ORIENTED, &count);
+        CHECK(count == 1 && ids[0] == family[j]->id,
+              "training each position feature preserves its answer");
+        safe_free(ids);
+      }
+    }
+    compact_back_demod_get_stats(appended, &trained);
+    CHECK(trained.position_admissions == APPEND_FEATURES &&
+          trained.position_features == APPEND_FEATURES,
+          "train thirty-two independent exact-position features");
+    for (j = 0; j < APPEND_UNMATCHED; j++) {
+      (void) snprintf(text, sizeof(text),
+                      "w(append_fan(a,g(h(j(append_fresh_%d))))).", j);
+      unmatched[j] = indexed_clause(text);
+      CHECK(compact_back_demod_add(appended, unmatched[j]),
+            "append record unmatched by thirty-two active features");
+    }
+    compact_back_demod_get_stats(appended, &extended);
+    CHECK(extended.position_append_records -
+            trained.position_append_records == APPEND_UNMATCHED &&
+          extended.position_append_root_scans -
+            trained.position_append_root_scans == APPEND_UNMATCHED &&
+          extended.position_append_token_visits -
+            trained.position_append_token_visits ==
+              APPEND_UNMATCHED * 6 &&
+          extended.position_append_feature_lookups -
+            trained.position_append_feature_lookups ==
+              APPEND_UNMATCHED * 5 &&
+          extended.position_append_matches -
+            trained.position_append_matches == 0,
+          "incremental position work follows record shape, not feature count");
+    matched = indexed_clause(
+      "w(append_fan(a,g(h(j(append_key_0))))).");
+    CHECK(compact_back_demod_add(appended, matched),
+          "append a record matching one of many active features");
+    ids = compact_back_demod_candidate_ids(
+      appended, rules[0], ORIENTED, &count);
+    CHECK(count == 2 && ids[0] == matched->id &&
+          ids[1] == family[0]->id,
+          "one-pass incremental update preserves exact posting membership");
+    safe_free(ids);
+    compact_back_demod_get_stats(appended, &extended);
+    CHECK(extended.position_append_matches -
+            trained.position_append_matches == 1,
+          "one-pass incremental update records only its actual match");
+    compact_back_demod_free(appended);
+    delete_clause(matched);
+    for (j = 0; j < APPEND_UNMATCHED; j++)
+      delete_clause(unmatched[j]);
+    for (j = 0; j < APPEND_FEATURES; j++)
+      delete_clause(rules[j]);
+    for (j = 0; j < APPEND_FAMILY; j++)
+      delete_clause(family[j]);
+    compact_back_demod_set_position_options(
+      4096, 4, 64, 16384, 20, TRUE);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
   }
 

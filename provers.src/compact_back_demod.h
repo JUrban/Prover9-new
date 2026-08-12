@@ -79,6 +79,11 @@ struct compact_back_demod_stats {
   unsigned long long position_retry_deferrals;
   unsigned long long position_backfill_records;
   unsigned long long position_census_records;
+  unsigned long long position_append_records;
+  unsigned long long position_append_root_scans;
+  unsigned long long position_append_token_visits;
+  unsigned long long position_append_feature_lookups;
+  unsigned long long position_append_matches;
   unsigned long long position_credit_balance;
   unsigned long long position_credit_earned;
   unsigned long long position_credit_spent;

@@ -77,6 +77,10 @@ CUMULATIVE_KEYS = (
     "back_position_admissions", "back_position_rejections",
     "back_position_demotions", "back_position_retry_deferrals",
     "back_position_census_records", "back_position_backfill_records",
+    "back_position_append_records", "back_position_append_root_scans",
+    "back_position_append_token_visits",
+    "back_position_append_feature_lookups",
+    "back_position_append_matches",
     "back_position_credit_earned", "back_position_credit_spent",
     "back_position_credit_reservations",
     "back_position_admission_freezes",
@@ -635,6 +639,10 @@ def run_summary(label, rows):
             "back_position_census_records"),
         "last_back_position_backfill_records": last.get(
             "back_position_backfill_records"),
+        "last_back_position_append_records": last.get(
+            "back_position_append_records"),
+        "last_back_position_append_token_visits": last.get(
+            "back_position_append_token_visits"),
         "last_back_position_credit_earned": last.get(
             "back_position_credit_earned"),
         "last_back_position_credit_spent": last.get(
@@ -996,6 +1004,11 @@ TSV_COLUMNS = (
     "delta_back_position_retry_deferrals",
     "delta_back_position_census_records",
     "delta_back_position_backfill_records",
+    "delta_back_position_append_records",
+    "delta_back_position_append_root_scans",
+    "delta_back_position_append_token_visits",
+    "delta_back_position_append_feature_lookups",
+    "delta_back_position_append_matches",
     "back_position_credit_balance", "delta_back_position_credit_earned",
     "delta_back_position_credit_spent",
     "delta_back_position_credit_reservations",
