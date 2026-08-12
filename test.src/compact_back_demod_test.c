@@ -544,6 +544,142 @@ int main(void)
   }
 
   {
+    enum { ROUTE_FAMILY = 128, ROUTE_TARGET = 73 };
+    Compact_back_demod_index adaptive;
+    struct compact_back_demod_stats selective_stats, broad_stats,
+      renamed_stats, growth_stats, stable_growth_stats, compacted_stats;
+    Topform clauses[ROUTE_FAMILY], growth[ROUTE_FAMILY];
+    Topform selective, broad, renamed;
+    char text[128];
+    unsigned long long tree_before_broad;
+    int j;
+    compact_back_demod_set_tree_budget_kb(65536);
+    compact_back_demod_set_tree_admit_work(1);
+    compact_back_demod_set_tree_build_factor(1);
+    compact_back_demod_set_position_options(4096, 4, 8, 65536, 20, FALSE);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_ADAPTIVE);
+    adaptive = compact_back_demod_init();
+    for (j = 0; j < ROUTE_FAMILY; j++) {
+      (void) snprintf(text, sizeof(text),
+                      "w(route(a,g(h(j(c%d))))).", j);
+      clauses[j] = indexed_clause(text);
+      CHECK(compact_back_demod_add(adaptive, clauses[j]),
+            "add mixed-shape adaptive-route family");
+    }
+    (void) snprintf(text, sizeof(text), "route(a,g(h(j(c%d)))) = a.",
+                    ROUTE_TARGET);
+    selective = indexed_clause(text);
+    for (j = 0; j < 4; j++) {
+      ids = compact_back_demod_candidate_ids(
+        adaptive, selective, ORIENTED, &count);
+      CHECK(count == 1 && ids[0] == clauses[ROUTE_TARGET]->id,
+            "selective adaptive route preserves the sole answer");
+      safe_free(ids);
+    }
+    compact_back_demod_get_stats(adaptive, &selective_stats);
+    CHECK(selective_stats.tree_root_admissions == 1 &&
+          selective_stats.route_tree_choices >= 1 &&
+          selective_stats.route_tree_observed_cost <
+            selective_stats.route_mask_observed_cost &&
+          selective_stats.route_profile_capacity == 4096 &&
+          selective_stats.route_profile_bytes <= 512 * 1024,
+          "selective shape promotes a bounded tree route");
+
+    broad = indexed_clause("route(x,y) = a.");
+    tree_before_broad = selective_stats.route_tree_choices;
+    for (j = 0; j < 8; j++) {
+      ids = compact_back_demod_candidate_ids(
+        adaptive, broad, ORIENTED, &count);
+      CHECK(count == ROUTE_FAMILY && ids[0] == clauses[ROUTE_FAMILY - 1]->id &&
+            ids[ROUTE_FAMILY - 1] == clauses[0]->id,
+            "broad adaptive route preserves every ordered answer");
+      safe_free(ids);
+    }
+    compact_back_demod_get_stats(adaptive, &broad_stats);
+    CHECK(broad_stats.route_tree_choices == tree_before_broad + 1 &&
+          broad_stats.route_mask_choices >=
+            selective_stats.route_mask_choices + 7,
+          "broad shape under the same root rejects tree promotion");
+
+    renamed = indexed_clause("route(y,x) = a.");
+    ids = compact_back_demod_candidate_ids(
+      adaptive, renamed, ORIENTED, &count);
+    CHECK(count == ROUTE_FAMILY,
+          "alpha-renamed broad route preserves every answer");
+    safe_free(ids);
+    compact_back_demod_get_stats(adaptive, &renamed_stats);
+    CHECK(renamed_stats.route_profile_occupied ==
+            broad_stats.route_profile_occupied &&
+          renamed_stats.route_tree_choices == broad_stats.route_tree_choices &&
+          renamed_stats.route_mask_choices == broad_stats.route_mask_choices + 1,
+          "alpha renaming reuses the semantic shape calibration");
+
+    for (j = 0; j < ROUTE_FAMILY; j++) {
+      (void) snprintf(text, sizeof(text),
+                      "w(route(a,g(h(k(c%d,c0))))).", j);
+      growth[j] = indexed_clause(text);
+      CHECK(compact_back_demod_add(adaptive, growth[j]),
+            "double adaptive-route physical population");
+    }
+    ids = compact_back_demod_candidate_ids(
+      adaptive, broad, ORIENTED, &count);
+    CHECK(count == ROUTE_FAMILY * 2,
+          "population-crossover probe preserves every answer");
+    safe_free(ids);
+    compact_back_demod_get_stats(adaptive, &growth_stats);
+    CHECK(growth_stats.route_tree_choices ==
+            renamed_stats.route_tree_choices + 1 &&
+          growth_stats.route_tree_probes ==
+            renamed_stats.route_tree_probes + 1,
+          "doubling physical population triggers one logical tree reprobe");
+    ids = compact_back_demod_candidate_ids(
+      adaptive, broad, ORIENTED, &count);
+    CHECK(count == ROUTE_FAMILY * 2,
+          "post-crossover mask route preserves every answer");
+    safe_free(ids);
+    compact_back_demod_get_stats(adaptive, &stable_growth_stats);
+    CHECK(stable_growth_stats.route_tree_choices ==
+            growth_stats.route_tree_choices &&
+          stable_growth_stats.route_mask_choices ==
+            growth_stats.route_mask_choices + 1,
+          "stable population pays no repeated exploration tax");
+
+    for (j = 0; j < ROUTE_FAMILY / 4; j++)
+      CHECK(compact_back_demod_remove(adaptive, clauses[j]->id),
+            "retire adaptive-route record before compaction");
+    compact_back_demod_compact_all_stale(adaptive);
+    ids = compact_back_demod_candidate_ids(
+      adaptive, broad, ORIENTED, &count);
+    CHECK(count == ROUTE_FAMILY * 2 - ROUTE_FAMILY / 4,
+          "compacted adaptive route preserves every live broad answer");
+    safe_free(ids);
+    compact_back_demod_get_stats(adaptive, &compacted_stats);
+    CHECK(compacted_stats.route_profile_occupied ==
+            stable_growth_stats.route_profile_occupied &&
+          compacted_stats.route_profile_bytes ==
+            stable_growth_stats.route_profile_bytes &&
+          compacted_stats.route_mask_choices ==
+            stable_growth_stats.route_mask_choices + 1 &&
+          compacted_stats.route_tree_choices ==
+            stable_growth_stats.route_tree_choices,
+          "compaction preserves bounded route calibration without retraining");
+
+    compact_back_demod_free(adaptive);
+    delete_clause(selective);
+    delete_clause(broad);
+    delete_clause(renamed);
+    for (j = 0; j < ROUTE_FAMILY; j++)
+      delete_clause(clauses[j]);
+    for (j = 0; j < ROUTE_FAMILY; j++)
+      delete_clause(growth[j]);
+    compact_back_demod_set_tree_admit_work(4096);
+    compact_back_demod_set_tree_build_factor(8);
+    compact_back_demod_set_position_options(
+      4096, 4, 8, 65536, 20, TRUE);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
+  }
+
+  {
     enum { DEMOTION_LIMIT = 512 };
     Compact_back_demod_index bounded_hot;
     struct compact_back_demod_stats before_s, after_s, bounded_stats;
