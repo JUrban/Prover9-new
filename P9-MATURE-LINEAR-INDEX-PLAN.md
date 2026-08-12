@@ -5,7 +5,8 @@ global shallow sparse-path stage landed in `1f1643d`, derived from the
 complete large CHAT run and the `out61`, `out71`, and `out81` measurements.
 The completed `out7`/`out8` reports reject the capped adaptive scheduler, and
 the stable wide-mask control plus its bounded superset directory landed in
-`a803cfc` and `b256b35`.
+`a803cfc`, `b256b35`, and `3dd3afb`; its integration with retained adaptive
+routes landed in `a738171`.
 Short prefixes remain useful for correctness and profiling, but they are not
 performance acceptance evidence for this work.  A new full CHAT run is still
 required before the CPU gate can be claimed.
@@ -147,6 +148,62 @@ structural and lookup improvement, not an end-to-end win.  The next candidate
 must combine this complete shallow fallback with the retained depth-four
 exact positions and the occurrence-linear rigid-edge route; `mask32` alone
 is a diagnostic control, not yet the full-run recommendation.
+
+Commit `a738171` adds that combination as the explicit `adaptive32` strategy;
+legacy `adaptive` remains reproducible.  It also corrects adaptive cost
+accounting to include shallow-directory traversal and reuses one exact mask
+population census across the edge and position gates in a pattern decision.
+A simultaneous 600-given pair with otherwise identical retained depth-four
+positions, edge, tree, unit, and nonunit settings preserved the 601 / 497,430
+/ 16,974 trajectory and 3,775 candidates.  `adaptive32` reduced posting
+groups from 1,043,027 to 258,439, occurrence checks from 880,924 to 212,158,
+and sampled back lookup from 0.436 to 0.246 seconds.  User CPU was tied at
+35.08 versus 34.98 seconds because backward lookup is not dominant at that
+endpoint; PSS increased by about 1.5 MiB.
+
+The matched 1,500-given extension preserved the 1,501 / 2,947,136 / 66,933
+trajectory and 23,401 candidates.  Relative to legacy adaptive, `adaptive32`
+reduced posting groups from 10,831,888 to 2,666,247 (-75.4%), occurrence
+checks from 9,150,614 to 2,232,665 (-75.6%), and sampled lookup CPU from
+7.013 to 3.983 seconds (-43.2%).  Total user CPU fell from 183.44 to 180.16
+seconds (-1.8%).  Its allocated back index was 17,308,050 rather than
+14,242,538 bytes; peak GNU-time RSS was 115,988 rather than 111,468 KiB,
+while the final PSS samples were 101,760 and 103,961 KiB respectively.
+
+That prefix rejects treating the Patricia directory as the final mature
+answer.  Its interval node visits per back query rise from about 250 in the
+first interval to 711 in the last complete interval; combined counted
+directory-plus-posting work/query grows by 3.13x.  The absolute lookup cost is
+much lower than mask8, but the directory still enumerates a growing set of
+compatible subtrees.
+
+Commit `3dd3afb` replaces it with 64-bucket per-root blocks containing 32
+transposed bit planes.  Each required shallow feature becomes one machine-word
+AND; set result bits map to compatible posting buckets.  The storage is a
+fixed 32 bits plus one bucket mapping per distinct root/mask bucket, hence
+linear.  The compatible bucket list and exact posting population are prepared
+once per pattern/query stamp and reused by edge/position gating and fallback
+collection.
+
+At 600 givens the bit-plane version preserved the exact trajectory and query
+fingerprints while reducing directory work from 2,744,471 Patricia node
+visits to 835,399 block/word operations, sampled lookup from 0.246 to 0.180
+seconds, and allocated back-index bytes from 6,789,145 to 6,449,145.  At 1,500
+givens it again preserved the exact trajectory, fingerprints, 2,666,247
+posting groups, and 23,401 candidates.  Relative to the trie it reduced
+sampled lookup from 3.983 to 2.494 seconds and allocated index bytes from
+17,308,050 to 16,439,490.  Late complete-interval directory work fell from
+about 711 to 236 operations/query; combined directory-plus-posting work fell
+from about 799 to 336/query.
+
+This is a substantially better complete fallback, not a proof of a flat
+mature slope.  Its first-to-last counted work/query still grows by 2.81x as
+the workload shifts toward broader late patterns and the compatible bucket
+set grows.  Exact positions remain preferable when their stream is cheaper,
+and the compact whole-pattern matcher remains the final correctness authority.
+The next full run must determine whether the smaller slope stays below the
+ordinary-P9 CPU gate through 7,365 givens and the proof endpoint; no short
+prefix can establish that.
 
 `out61` also contains a separate configuration regression.  It did not set
 `compact_unit_strategy=code_tree` or `compact_nonunit_path_filter`.  At its
