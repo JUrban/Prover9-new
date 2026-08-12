@@ -24,6 +24,8 @@
 #define STORE_REF_TAG ((uintptr_t) 1)
 #define MMAP_EVICT_STEP (8U * 1024U * 1024U)
 #define MMAP_HOT_WINDOW (8U * 1024U * 1024U)
+#define FILE_EVICT_STEP (64U * 1024U * 1024U)
+#define FILE_HOT_WINDOW (64U * 1024U * 1024U)
 
 #define AF_IS_FORMULA  0x0001U
 #define AF_NORMAL_VARS 0x0002U
@@ -61,6 +63,12 @@ struct clause_store {
   unsigned long long file_read_bytes;
   unsigned long long file_writes;
   unsigned long long file_write_bytes;
+  size_t file_cache_advised_bytes;
+  size_t file_last_evict_size;
+  unsigned long long file_cache_eviction_passes;
+  unsigned long long file_cache_eviction_bytes;
+  unsigned long long file_syncs;
+  unsigned long long file_cache_eviction_failures;
   unsigned long long offset_lookups;
   unsigned long long detached_records;
   size_t detached_current;
@@ -281,6 +289,63 @@ static void evict_cold_mmap_pages(Clause_store store)
 #endif
 }
 
+/* File mode avoids a process mapping, but its written pages still occupy the
+   host page cache and therefore count toward total job RAM.  Keep one bounded
+   hot tail; before asking the kernel to discard an older completed range,
+   make all preceding archive records durable. */
+static void evict_cold_file_pages(Clause_store store)
+{
+#if !defined(__EMSCRIPTEN__) && defined(POSIX_FADV_DONTNEED)
+  long page_size_long;
+  size_t page_size, cold_end, begin;
+  off_t begin_offset, length;
+  int rc;
+  if (store == NULL || store->mode != CLAUSE_STORE_ARCHIVE_FILE ||
+      store->backing_size <= FILE_HOT_WINDOW)
+    return;
+  if ((store->file_last_evict_size == 0 &&
+       store->backing_size < FILE_HOT_WINDOW + FILE_EVICT_STEP) ||
+      (store->file_last_evict_size != 0 &&
+       store->backing_size - store->file_last_evict_size < FILE_EVICT_STEP))
+    return;
+  page_size_long = sysconf(_SC_PAGESIZE);
+  if (page_size_long <= 0)
+    return;
+  page_size = (size_t) page_size_long;
+  cold_end = (store->backing_size - FILE_HOT_WINDOW) /
+             page_size * page_size;
+  begin = store->file_cache_advised_bytes;
+  if (cold_end <= begin)
+    return;
+  /* A transient failure must not turn into one sync/advice syscall per
+     subsequently appended record.  Retry only after another full batch. */
+  store->file_last_evict_size = store->backing_size;
+  begin_offset = (off_t) begin;
+  length = (off_t) (cold_end - begin);
+  if (begin_offset < 0 || length <= 0 ||
+      (size_t) begin_offset != begin ||
+      (size_t) length != cold_end - begin) {
+    store->file_cache_eviction_failures++;
+    return;
+  }
+  if (fdatasync(store->fd) != 0) {
+    store->file_cache_eviction_failures++;
+    return;
+  }
+  store->file_syncs++;
+  rc = posix_fadvise(store->fd, begin_offset, length, POSIX_FADV_DONTNEED);
+  if (rc != 0) {
+    store->file_cache_eviction_failures++;
+    return;
+  }
+  store->file_cache_advised_bytes = cold_end;
+  store->file_cache_eviction_passes++;
+  store->file_cache_eviction_bytes += cold_end - begin;
+#else
+  (void) store;
+#endif
+}
+
 static unsigned clause_flags(Topform c)
 {
   unsigned flags = 0;
@@ -430,6 +495,7 @@ static BOOL append_record(Clause_store store, Topform c,
   store->archive_logical_body_bytes += c->uncompressed_body_bytes;
   *record_offset = offset;
   evict_cold_mmap_pages(store);
+  evict_cold_file_pages(store);
   ok = TRUE;
 
 done:
@@ -652,6 +718,8 @@ static void release_backing(Clause_store store)
   store->backing_capacity = 0;
   store->mmap_synced_bytes = 0;
   store->mmap_last_evict_size = 0;
+  store->file_cache_advised_bytes = 0;
+  store->file_last_evict_size = 0;
   store->io_buffer = NULL;
   store->io_capacity = 0;
   store->fd = -1;
@@ -1294,8 +1362,12 @@ BOOL clause_store_sync(Clause_store store)
 #ifndef __EMSCRIPTEN__
   if (store->mode == CLAUSE_STORE_ARCHIVE_MMAP && store->backing != NULL)
     return msync(store->backing, store->backing_size, MS_SYNC) == 0;
-  if (store->mode == CLAUSE_STORE_ARCHIVE_FILE)
-    return fsync(store->fd) == 0;
+  if (store->mode == CLAUSE_STORE_ARCHIVE_FILE) {
+    BOOL ok = fsync(store->fd) == 0;
+    if (ok)
+      store->file_syncs++;
+    return ok;
+  }
 #endif
   return TRUE;
 }
@@ -1386,11 +1458,20 @@ struct clause_store_stats clause_store_get_stats(Clause_store store)
   struct clause_store_stats stats;
   memset(&stats, 0, sizeof(stats));
   if (store != NULL) {
+#ifndef __EMSCRIPTEN__
+    struct stat st;
+#endif
     stats.records = store->archive_records;
     stats.body_bytes = store->archive_body_bytes;
     stats.logical_body_bytes = store->archive_logical_body_bytes;
     stats.record_bytes = store->backing_size;
     stats.backing_bytes = store->backing_capacity;
+#ifndef __EMSCRIPTEN__
+    if (store->fd >= 0 && fstat(store->fd, &st) == 0)
+      stats.physical_bytes = (unsigned long long) st.st_blocks * 512ULL;
+    else
+#endif
+      stats.physical_bytes = store->backing_size;
     stats.handle_bytes = sizeof(*store) + store->capacity * sizeof(uintptr_t) +
       store->io_capacity;
     stats.materializations = store->materializations;
@@ -1404,6 +1485,12 @@ struct clause_store_stats clause_store_get_stats(Clause_store store)
     stats.file_read_bytes = store->file_read_bytes;
     stats.file_writes = store->file_writes;
     stats.file_write_bytes = store->file_write_bytes;
+    stats.file_cache_eviction_passes =
+      store->file_cache_eviction_passes;
+    stats.file_cache_eviction_bytes = store->file_cache_eviction_bytes;
+    stats.file_syncs = store->file_syncs;
+    stats.file_cache_eviction_failures =
+      store->file_cache_eviction_failures;
     stats.offset_lookups = store->offset_lookups;
     stats.detached_records = store->detached_records;
     stats.detached_current = store->detached_current;

@@ -21,6 +21,7 @@ struct clause_store_stats {
   unsigned long long records;
   unsigned long long record_bytes;
   unsigned long long backing_bytes;
+  unsigned long long physical_bytes;
   unsigned long long handle_bytes;
   unsigned long long body_bytes;
   unsigned long long logical_body_bytes;
@@ -35,6 +36,10 @@ struct clause_store_stats {
   unsigned long long file_read_bytes;
   unsigned long long file_writes;
   unsigned long long file_write_bytes;
+  unsigned long long file_cache_eviction_passes;
+  unsigned long long file_cache_eviction_bytes;
+  unsigned long long file_syncs;
+  unsigned long long file_cache_eviction_failures;
   unsigned long long offset_lookups;
   unsigned long long detached_records;
   unsigned long long detached_current;

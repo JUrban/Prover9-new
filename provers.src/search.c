@@ -2626,6 +2626,13 @@ void update_memory_stats(void)
   Stats.dense_passive_arena_file_read_bytes = ps.file_read_bytes;
   Stats.dense_passive_arena_file_writes = ps.file_writes;
   Stats.dense_passive_arena_file_write_bytes = ps.file_write_bytes;
+  Stats.dense_passive_arena_file_cache_eviction_passes =
+    ps.file_cache_eviction_passes;
+  Stats.dense_passive_arena_file_cache_eviction_bytes =
+    ps.file_cache_eviction_bytes;
+  Stats.dense_passive_arena_file_syncs = ps.file_syncs;
+  Stats.dense_passive_arena_file_cache_eviction_failures =
+    ps.file_cache_eviction_failures;
   dense_passive_compaction_stats(&Stats.dense_passive_compactions,
                                  &Stats.dense_passive_records_reclaimed);
   Stats.dense_passive_arena_bytes_reclaimed =
@@ -2712,6 +2719,7 @@ void update_memory_stats(void)
   Stats.ancestor_records = as.records;
   Stats.ancestor_record_bytes = as.record_bytes;
   Stats.ancestor_backing_bytes = as.backing_bytes;
+  Stats.ancestor_physical_bytes = as.physical_bytes;
   Stats.ancestor_handle_bytes = as.handle_bytes;
   Stats.ancestor_materializations = as.materializations;
   Stats.ancestor_validation_failures = as.validation_failures;
@@ -2724,6 +2732,12 @@ void update_memory_stats(void)
   Stats.ancestor_file_read_bytes = as.file_read_bytes;
   Stats.ancestor_file_writes = as.file_writes;
   Stats.ancestor_file_write_bytes = as.file_write_bytes;
+  Stats.ancestor_file_cache_eviction_passes =
+    as.file_cache_eviction_passes;
+  Stats.ancestor_file_cache_eviction_bytes = as.file_cache_eviction_bytes;
+  Stats.ancestor_file_syncs = as.file_syncs;
+  Stats.ancestor_file_cache_eviction_failures =
+    as.file_cache_eviction_failures;
   Stats.ancestor_offset_lookups = as.offset_lookups;
   Stats.ancestor_detached_records = as.detached_records;
   Stats.ancestor_detached_current = as.detached_current;
@@ -3395,7 +3409,9 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             "Dense_passive_gc: arena_materialized=%s, "
             "validation_failures=%s, compactions=%s, "
             "records_reclaimed=%s, arena_bytes_reclaimed=%s, "
-            "file_reads=%s (%s bytes), file_writes=%s (%s bytes).\n",
+            "file_reads=%s (%s bytes), file_writes=%s (%s bytes), "
+            "file_cache_evictions=%s (%s bytes), file_syncs=%s, "
+            "file_cache_eviction_failures=%s.\n",
             comma_num(s.dense_passive_arena_materializations),
             comma_num(s.dense_passive_arena_validation_failures),
             comma_num(s.dense_passive_compactions),
@@ -3404,7 +3420,12 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
             comma_num(s.dense_passive_arena_file_reads),
             comma_num(s.dense_passive_arena_file_read_bytes),
             comma_num(s.dense_passive_arena_file_writes),
-            comma_num(s.dense_passive_arena_file_write_bytes));
+            comma_num(s.dense_passive_arena_file_write_bytes),
+            comma_num(s.dense_passive_arena_file_cache_eviction_passes),
+            comma_num(s.dense_passive_arena_file_cache_eviction_bytes),
+            comma_num(s.dense_passive_arena_file_syncs),
+            comma_num(
+              s.dense_passive_arena_file_cache_eviction_failures));
   fprintf(fp,
           "Hint_store: compressed=%s, body_bytes=%s, estimated_full=%s.\n",
           comma_num(s.hint_compressed_clauses),
@@ -3423,15 +3444,20 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
     }
   fprintf(fp,
           "Ancestor_store: records=%s, record_bytes=%s, backing_bytes=%s, "
+          "physical_bytes=%s, "
           "handle_bytes=%s, materialized=%s, validation_failures=%s, "
           "mmap_eviction_passes=%s, mmap_eviction_bytes=%s, "
           "mmap_scan_eviction_passes=%s, mmap_scan_eviction_bytes=%s, "
           "io_buffer=%s, file_reads=%s (%s bytes), "
-          "file_writes=%s (%s bytes), offset_lookups=%s, "
+          "file_writes=%s (%s bytes), file_cache_evictions=%s "
+          "(%s bytes), file_syncs=%s, file_cache_eviction_failures=%s, "
+          "offset_lookups=%s, "
           "detached_records=%s, detached_current=%s, "
           "handle_bytes_avoided=%s.\n",
           comma_num(s.ancestor_records), comma_num(s.ancestor_record_bytes),
-          comma_num(s.ancestor_backing_bytes), comma_num(s.ancestor_handle_bytes),
+          comma_num(s.ancestor_backing_bytes),
+          comma_num(s.ancestor_physical_bytes),
+          comma_num(s.ancestor_handle_bytes),
           comma_num(s.ancestor_materializations),
           comma_num(s.ancestor_validation_failures),
           comma_num(s.ancestor_mmap_eviction_passes),
@@ -3443,6 +3469,10 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
           comma_num(s.ancestor_file_read_bytes),
           comma_num(s.ancestor_file_writes),
           comma_num(s.ancestor_file_write_bytes),
+          comma_num(s.ancestor_file_cache_eviction_passes),
+          comma_num(s.ancestor_file_cache_eviction_bytes),
+          comma_num(s.ancestor_file_syncs),
+          comma_num(s.ancestor_file_cache_eviction_failures),
           comma_num(s.ancestor_offset_lookups),
           comma_num(s.ancestor_detached_records),
           comma_num(s.ancestor_detached_current),

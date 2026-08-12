@@ -28,6 +28,10 @@ struct cold_passive_store_stats {
   unsigned long long file_read_bytes;
   unsigned long long file_writes;
   unsigned long long file_write_bytes;
+  unsigned long long file_cache_eviction_passes;
+  unsigned long long file_cache_eviction_bytes;
+  unsigned long long file_syncs;
+  unsigned long long file_cache_eviction_failures;
 };
 
 const char *cold_passive_store_mode_name(Cold_passive_store_mode mode);

@@ -68,6 +68,7 @@ int main(int argc, char **argv)
      sizeof(struct clist_pos) + sizeof(struct plist));
   printf("ancestor_store_scale_test: records=%llu record_bytes=%llu "
          "backing_bytes=%llu handle_bytes=%llu id_bytes=%llu "
+         "physical_bytes=%llu "
          "resident_bytes=%llu total_logical_bytes=%llu legacy_estimate=%llu "
          "resident_per_record=%.3f total_per_record=%.3f "
          "legacy_per_record=%.3f mmap_evictions=%llu "
@@ -75,11 +76,17 @@ int main(int argc, char **argv)
          "file_reads=%llu file_read_bytes=%llu "
          "file_writes=%llu file_write_bytes=%llu\n",
          records.records, records.record_bytes, records.backing_bytes,
-         records.handle_bytes, ids.allocated_bytes, resident, total, legacy,
+         records.handle_bytes, ids.allocated_bytes, records.physical_bytes,
+         resident, total, legacy,
          (double) resident / n, (double) total / n, (double) legacy / n,
          records.mmap_eviction_passes, records.mmap_eviction_bytes,
          records.io_buffer_bytes, records.file_reads, records.file_read_bytes,
          records.file_writes, records.file_write_bytes);
+  printf("ancestor_store_file_cache: evictions=%llu eviction_bytes=%llu "
+         "syncs=%llu failures=%llu\n",
+         records.file_cache_eviction_passes,
+         records.file_cache_eviction_bytes, records.file_syncs,
+         records.file_cache_eviction_failures);
   if (records.records != n || ids.entries != n || resident >= legacy ||
       total >= legacy ||
       (mode == CLAUSE_STORE_ARCHIVE_MMAP && records.record_bytes >=

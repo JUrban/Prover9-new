@@ -99,6 +99,8 @@ bookkeeping_lifecycle_test.o: ../ladr/clause_store.h ../ladr/clauseid.h
 
 ancestor_store_test.o: ../ladr/clause_store.h ../ladr/clauseid.h ../ladr/compress.h
 
+cold_passive_store_test.o: ../provers.src/cold_passive_store.h
+
 memory-tests: memory_lifecycle_test allocator_churn_test bookkeeping_lifecycle_test ancestor_store_test
 	./memory_lifecycle_test
 	./allocator_churn_test

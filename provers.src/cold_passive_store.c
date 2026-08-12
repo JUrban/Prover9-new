@@ -19,6 +19,8 @@
 #define COLD_MAGIC "P9PS"
 #define COLD_VERSION 1
 #define COLD_HEADER_SIZE 40
+#define FILE_EVICT_STEP (64U * 1024U * 1024U)
+#define FILE_HOT_WINDOW (64U * 1024U * 1024U)
 
 #define CF_NORMAL_VARS 0x0001U
 #define CF_USED        0x0002U
@@ -41,6 +43,12 @@ struct cold_passive_store {
   unsigned long long file_read_bytes;
   unsigned long long file_writes;
   unsigned long long file_write_bytes;
+  size_t file_cache_advised_bytes;
+  size_t file_last_evict_size;
+  unsigned long long file_cache_eviction_passes;
+  unsigned long long file_cache_eviction_bytes;
+  unsigned long long file_syncs;
+  unsigned long long file_cache_eviction_failures;
 };
 
 struct cold_record_view {
@@ -212,6 +220,58 @@ static BOOL ensure_backing(Cold_passive_store store, size_t needed)
   return FALSE;
 }
 
+static void evict_cold_file_pages(Cold_passive_store store)
+{
+#if !defined(__EMSCRIPTEN__) && defined(POSIX_FADV_DONTNEED)
+  long page_size_long;
+  size_t page_size, cold_end, begin;
+  off_t begin_offset, length;
+  int rc;
+  if (store == NULL || store->mode != COLD_PASSIVE_FILE ||
+      store->size <= FILE_HOT_WINDOW)
+    return;
+  if ((store->file_last_evict_size == 0 &&
+       store->size < FILE_HOT_WINDOW + FILE_EVICT_STEP) ||
+      (store->file_last_evict_size != 0 &&
+       store->size - store->file_last_evict_size < FILE_EVICT_STEP))
+    return;
+  page_size_long = sysconf(_SC_PAGESIZE);
+  if (page_size_long <= 0)
+    return;
+  page_size = (size_t) page_size_long;
+  cold_end = (store->size - FILE_HOT_WINDOW) / page_size * page_size;
+  begin = store->file_cache_advised_bytes;
+  if (cold_end <= begin)
+    return;
+  /* Back off for a full batch even when sync/advice fails, rather than
+     retrying expensive syscalls after every following clause. */
+  store->file_last_evict_size = store->size;
+  begin_offset = (off_t) begin;
+  length = (off_t) (cold_end - begin);
+  if (begin_offset < 0 || length <= 0 ||
+      (size_t) begin_offset != begin ||
+      (size_t) length != cold_end - begin) {
+    store->file_cache_eviction_failures++;
+    return;
+  }
+  if (fdatasync(store->fd) != 0) {
+    store->file_cache_eviction_failures++;
+    return;
+  }
+  store->file_syncs++;
+  rc = posix_fadvise(store->fd, begin_offset, length, POSIX_FADV_DONTNEED);
+  if (rc != 0) {
+    store->file_cache_eviction_failures++;
+    return;
+  }
+  store->file_cache_advised_bytes = cold_end;
+  store->file_cache_eviction_passes++;
+  store->file_cache_eviction_bytes += cold_end - begin;
+#else
+  (void) store;
+#endif
+}
+
 static BOOL append_record(Cold_passive_store store,
                           const unsigned char *record, size_t size)
 {
@@ -228,6 +288,7 @@ static BOOL append_record(Cold_passive_store store,
 #endif
     memcpy(store->backing + store->size, record, size);
   store->size += size;
+  evict_cold_file_pages(store);
   return TRUE;
 }
 
@@ -537,6 +598,13 @@ void cold_passive_store_inherit_counters(Cold_passive_store destination,
     destination->file_read_bytes += source->file_read_bytes;
     destination->file_writes += source->file_writes;
     destination->file_write_bytes += source->file_write_bytes;
+    destination->file_cache_eviction_passes +=
+      source->file_cache_eviction_passes;
+    destination->file_cache_eviction_bytes +=
+      source->file_cache_eviction_bytes;
+    destination->file_syncs += source->file_syncs;
+    destination->file_cache_eviction_failures +=
+      source->file_cache_eviction_failures;
   }
 }
 
@@ -547,8 +615,12 @@ BOOL cold_passive_store_sync(Cold_passive_store store)
 #ifndef __EMSCRIPTEN__
   if (store->mode == COLD_PASSIVE_MMAP && store->backing != NULL)
     return msync(store->backing, store->capacity, MS_SYNC) == 0;
-  if (store->mode == COLD_PASSIVE_FILE)
-    return fsync(store->fd) == 0;
+  if (store->mode == COLD_PASSIVE_FILE) {
+    BOOL ok = fsync(store->fd) == 0;
+    if (ok)
+      store->file_syncs++;
+    return ok;
+  }
 #endif
   return TRUE;
 }
@@ -587,6 +659,12 @@ cold_passive_store_get_stats(Cold_passive_store store)
     stats.file_read_bytes = store->file_read_bytes;
     stats.file_writes = store->file_writes;
     stats.file_write_bytes = store->file_write_bytes;
+    stats.file_cache_eviction_passes =
+      store->file_cache_eviction_passes;
+    stats.file_cache_eviction_bytes = store->file_cache_eviction_bytes;
+    stats.file_syncs = store->file_syncs;
+    stats.file_cache_eviction_failures =
+      store->file_cache_eviction_failures;
   }
   return stats;
 }
