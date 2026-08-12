@@ -640,14 +640,17 @@ void fprint_compact_back_demod(FILE *fp)
           "tree_census_occurrences=%llu, tree_root_demotions=%llu, "
           "tree_backfill_groups=%llu, "
           "tree_backfill_occurrences=%llu, tree_fallback_work=%llu, "
-          "position_features=%llu, position_postings=%llu, "
+          "position_features=%llu, position_physical_features=%llu, "
+          "position_postings=%llu, "
           "position_queries=%llu, position_records_examined=%llu, "
           "position_admissions=%llu, position_rejections=%llu, "
+          "position_demotions=%llu, "
           "position_cost_deferrals=%llu, "
           "position_probation_updates=%llu, "
           "position_probation_replacements=%llu, "
           "position_backfill_records=%llu, position_complete=%s, "
-          "position_budget=%llu, position_budget_pct=%u, "
+          "position_budget=%llu, position_effective_budget=%llu, "
+          "position_budget_pct=%u, "
           "position_estimated=%llu, position_probation_bytes=%llu, "
           "position_budget_exhaustions=%llu, "
           "position_admit_work=%u, position_min_gain=%u, "
@@ -683,15 +686,19 @@ void fprint_compact_back_demod(FILE *fp)
           stats.tree_root_census_occurrences, stats.tree_root_demotions,
           stats.tree_root_backfill_groups,
           stats.tree_root_backfill_occurrences, stats.tree_fallback_work,
-          stats.position_features, stats.position_postings,
+          stats.position_features, stats.position_physical_features,
+          stats.position_postings,
           stats.position_queries, stats.position_records_examined,
           stats.position_admissions, stats.position_rejections,
+          stats.position_demotions,
           stats.position_cost_deferrals,
           stats.position_probation_updates,
           stats.position_probation_replacements,
           stats.position_backfill_records,
           stats.position_complete ? "yes" : "no",
-          stats.position_budget_bytes, stats.position_budget_pct,
+          stats.position_budget_bytes,
+          stats.position_effective_budget_bytes,
+          stats.position_budget_pct,
           stats.position_estimated_bytes,
           stats.position_probation_bytes,
           stats.position_budget_exhaustions,

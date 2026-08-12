@@ -113,6 +113,7 @@ struct cbd_position_bucket {
   uint32_t last_record;
   uint32_t last_occurrence;
   uint32_t posting_count;
+  unsigned char active;
 };
 
 struct cbd_position_block {
@@ -236,6 +237,7 @@ struct compact_back_demod_index {
   unsigned long long position_records_examined;
   unsigned long long position_admissions;
   unsigned long long position_rejections;
+  unsigned long long position_demotions;
   unsigned long long position_cost_deferrals;
   unsigned long long position_probation_updates;
   unsigned long long position_probation_replacements;
@@ -246,6 +248,7 @@ struct compact_back_demod_index {
   unsigned position_build_factor;
   unsigned position_budget_pct;
   unsigned long long position_budget_bytes;
+  unsigned long long position_budget_high_water;
   BOOL position_complete;
   BOOL position_rebuilding;
   BOOL position_admission_enabled;
@@ -717,6 +720,7 @@ static uint32_t add_position_bucket(Compact_back_demod_index index,
   index->position_buckets[bucket].root_symbol = root_symbol;
   index->position_buckets[bucket].path = path;
   index->position_buckets[bucket].symbol = symbol;
+  index->position_buckets[bucket].active = TRUE;
   index->position_buckets[bucket].next_root =
     index->position_root_buckets[root_symbol];
   index->position_root_buckets[root_symbol] = bucket;
@@ -843,7 +847,7 @@ static unsigned long long projected_position_bytes(
 static unsigned long long position_budget_limit(
   Compact_back_demod_index index)
 {
-  unsigned long long base, relative = ULLONG_MAX;
+  unsigned long long base, relative = ULLONG_MAX, limit;
   unsigned long long current = position_estimated_bytes(index);
   unsigned long long total = index_bytes(index);
   base = total >= current ? total - current : 0;
@@ -852,11 +856,18 @@ static unsigned long long position_budget_limit(
       ULLONG_MAX : base * index->position_budget_pct / 100;
   }
   if (index->position_budget_bytes == 0)
-    return relative;
-  if (index->position_budget_pct == 0)
-    return index->position_budget_bytes;
-  return index->position_budget_bytes < relative ?
-    index->position_budget_bytes : relative;
+    limit = relative;
+  else if (index->position_budget_pct == 0)
+    limit = index->position_budget_bytes;
+  else
+    limit = index->position_budget_bytes < relative ?
+      index->position_budget_bytes : relative;
+  /* The percentage is an admission ramp, not a compaction trap.  Preserve
+     the largest deterministic allowance already earned by this index so a
+     smaller rebuilt base cannot globally invalidate complete features. */
+  if (limit > index->position_budget_high_water)
+    index->position_budget_high_water = limit;
+  return index->position_budget_high_water;
 }
 
 static BOOL position_budget_allows(Compact_back_demod_index index,
@@ -2700,20 +2711,30 @@ static void append_admitted_position_features(
     return;
   for (i = 1; i < index->position_bucket_count; i++) {
     struct cbd_position_bucket *bucket = &index->position_buckets[i];
-    if (record_has_position_bucket(index, record, bucket) &&
+    if (bucket->active && record_has_position_bucket(index, record, bucket) &&
         bucket->inline_record != CBD_NONE)
       added_blocks++;
   }
   if (!index->position_rebuilding && added_blocks != 0 &&
       !position_budget_allows(index, projected_position_bytes(
         index, 0, added_blocks))) {
-    index->position_complete = FALSE;
+    /* Position postings are optional refinements over the complete path
+       index.  Demote only features matched by this record; unrelated features
+       remain complete and useful until compaction reclaims the dead arrays. */
+    for (i = 1; i < index->position_bucket_count; i++) {
+      struct cbd_position_bucket *bucket = &index->position_buckets[i];
+      if (bucket->active && record_has_position_bucket(index, record, bucket)) {
+        bucket->active = FALSE;
+        index->position_demotions++;
+      }
+    }
     index->position_budget_exhaustions++;
     return;
   }
   for (i = 1; i < index->position_bucket_count; i++) {
-    (void) append_record_position_feature(
-      index, (uint32_t) i, record_index);
+    if (index->position_buckets[i].active)
+      (void) append_record_position_feature(
+        index, (uint32_t) i, record_index);
   }
 }
 
@@ -2855,7 +2876,7 @@ static uint32_t best_position_bucket(Compact_back_demod_index index,
     uint32_t bucket = lookup_position_bucket(
       index, root, index->position_query[i].path,
       index->position_query[i].symbol);
-    if (bucket != CBD_NONE &&
+    if (bucket != CBD_NONE && index->position_buckets[bucket].active &&
         (best == CBD_NONE ||
          index->position_buckets[bucket].posting_count <
            index->position_buckets[best].posting_count))
@@ -3109,12 +3130,15 @@ static void copy_position_definitions(Compact_back_demod_index destination,
   if (!strategy_uses_position(source->strategy))
     return;
   destination->position_complete = source->position_complete;
+  destination->position_budget_high_water =
+    source->position_budget_high_water;
   if (!source->position_complete)
     return;
   for (i = 1; i < source->position_bucket_count; i++) {
     struct cbd_position_bucket *bucket = &source->position_buckets[i];
-    (void) add_position_bucket(destination, bucket->root_symbol,
-                               bucket->path, bucket->symbol);
+    if (bucket->active)
+      (void) add_position_bucket(destination, bucket->root_symbol,
+                                 bucket->path, bucket->symbol);
   }
   if (source->position_probation_capacity != 0) {
     destination->position_probation = safe_malloc(
@@ -3360,6 +3384,7 @@ static void compact_back_demod_compact_internal(
   index->position_records_examined = old.position_records_examined;
   index->position_admissions = old.position_admissions;
   index->position_rejections = old.position_rejections;
+  index->position_demotions = old.position_demotions;
   index->position_cost_deferrals = old.position_cost_deferrals;
   index->position_probation_updates = old.position_probation_updates;
   index->position_probation_replacements =
@@ -3556,6 +3581,7 @@ void compact_back_demod_compact_materialized(
   index->position_records_examined = old.position_records_examined;
   index->position_admissions = old.position_admissions;
   index->position_rejections = old.position_rejections;
+  index->position_demotions = old.position_demotions;
   index->position_cost_deferrals = old.position_cost_deferrals;
   index->position_probation_updates = old.position_probation_updates;
   index->position_probation_replacements =
@@ -3637,6 +3663,7 @@ void compact_back_demod_rebase_term_pool(
 void compact_back_demod_get_stats(Compact_back_demod_index index,
                                   struct compact_back_demod_stats *stats)
 {
+  size_t i;
   struct compact_term_pool_stats terms;
   memset(stats, 0, sizeof(*stats));
   if (index == NULL)
@@ -3680,19 +3707,26 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->tree_admit_work = index->tree_admit_work;
   stats->tree_build_factor = index->tree_build_factor;
   stats->tree_complete = index->tree_complete;
-  stats->position_features = index->position_bucket_count == 0 ? 0 :
+  stats->position_physical_features = index->position_bucket_count == 0 ? 0 :
     index->position_bucket_count - 1;
+  stats->position_features = 0;
+  for (i = 1; i < index->position_bucket_count; i++)
+    if (index->position_buckets[i].active)
+      stats->position_features++;
   stats->position_postings = index->position_posting_count;
   stats->position_queries = index->position_queries;
   stats->position_records_examined = index->position_records_examined;
   stats->position_admissions = index->position_admissions;
   stats->position_rejections = index->position_rejections;
+  stats->position_demotions = index->position_demotions;
   stats->position_cost_deferrals = index->position_cost_deferrals;
   stats->position_probation_updates = index->position_probation_updates;
   stats->position_probation_replacements =
     index->position_probation_replacements;
   stats->position_backfill_records = index->position_backfill_records;
   stats->position_budget_bytes = index->position_budget_bytes;
+  stats->position_effective_budget_bytes =
+    index->position_budget_high_water;
   stats->position_estimated_bytes = position_estimated_bytes(index);
   stats->position_probation_bytes = index->position_probation_capacity *
     sizeof(*index->position_probation);

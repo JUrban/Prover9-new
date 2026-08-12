@@ -90,11 +90,15 @@ compact_unit_index_test: compact_unit_index_test.o ../provers.src/compact_unit_i
 compact_back_demod_test: compact_back_demod_test.o ../provers.src/compact_back_demod.o ../provers.src/compact_term_pool.o ../provers.src/compact_id_map.o ../ladr/libladr.a
 	$(CC) $(CFLAGS) -o compact_back_demod_test compact_back_demod_test.o ../provers.src/compact_back_demod.o ../provers.src/compact_term_pool.o ../provers.src/compact_id_map.o ../ladr/libladr.a -lm
 
+compact_back_demod_test.o: ../provers.src/compact_back_demod.h
+
 compact_feature_index_test: compact_feature_index_test.o ../provers.src/compact_feature_index.o ../ladr/libladr.a
 	$(CC) $(CFLAGS) -o compact_feature_index_test compact_feature_index_test.o ../provers.src/compact_feature_index.o ../ladr/libladr.a -lm
 
 compact_long_run_test: compact_long_run_test.o ../provers.src/compact_feature_index.o ../provers.src/compact_back_demod.o ../provers.src/compact_term_pool.o ../provers.src/compact_id_map.o ../ladr/libladr.a
 	$(CC) $(CFLAGS) -o compact_long_run_test compact_long_run_test.o ../provers.src/compact_feature_index.o ../provers.src/compact_back_demod.o ../provers.src/compact_term_pool.o ../provers.src/compact_id_map.o ../ladr/libladr.a -lm
+
+compact_long_run_test.o: ../provers.src/compact_back_demod.h ../provers.src/compact_feature_index.h
 
 memory_lifecycle_test.o allocator_churn_test.o bookkeeping_lifecycle_test.o ancestor_store_test.o: ../ladr/topform.h
 

@@ -639,6 +639,100 @@ int main(void)
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
   }
 
+  {
+    enum { POSITION_ROOT_FAMILY = 64, POSITION_DEMOTION_LIMIT = 4096 };
+    Compact_back_demod_index bounded_position;
+    struct compact_back_demod_stats before_s, after_s, bounded_stats;
+    Topform clauses[POSITION_ROOT_FAMILY * 2 + POSITION_DEMOTION_LIMIT];
+    Topform f_rule, s_rule;
+    char text[160];
+    int added = POSITION_ROOT_FAMILY * 2, j, rounds;
+    compact_back_demod_set_position_options(1, 4, 1, 16, 0, TRUE);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_POSITION);
+    bounded_position = compact_back_demod_init();
+    for (j = 0; j < POSITION_ROOT_FAMILY; j++) {
+      (void) snprintf(text, sizeof(text),
+                      "w(f(a,g(h(j(fc%d))))).", j);
+      clauses[j] = indexed_clause(text);
+      CHECK(compact_back_demod_add(bounded_position, clauses[j]),
+            "add first position-budget root family");
+      (void) snprintf(text, sizeof(text),
+                      "w(s(a,g(h(j(sc%d))))).", j);
+      clauses[POSITION_ROOT_FAMILY + j] = indexed_clause(text);
+      CHECK(compact_back_demod_add(
+              bounded_position, clauses[POSITION_ROOT_FAMILY + j]),
+            "add second position-budget root family");
+    }
+    f_rule = indexed_clause("f(a,g(h(j(fc31)))) = a.");
+    s_rule = indexed_clause("s(a,g(h(j(sc31)))) = a.");
+    for (rounds = 0; rounds < 4; rounds++) {
+      ids = compact_back_demod_candidate_ids(
+        bounded_position, f_rule, ORIENTED, &count);
+      safe_free(ids);
+      ids = compact_back_demod_candidate_ids(
+        bounded_position, s_rule, ORIENTED, &count);
+      safe_free(ids);
+    }
+    compact_back_demod_get_stats(bounded_position, &bounded_stats);
+    CHECK(bounded_stats.position_admissions == 2 &&
+          bounded_stats.position_features == 2,
+          "admit two independent position features under hard budget");
+    for (j = 0; j < POSITION_DEMOTION_LIMIT; j++) {
+      clauses[added] = indexed_clause("w(f(a,g(h(j(fc31))))).");
+      CHECK(compact_back_demod_add(bounded_position, clauses[added]),
+            "grow one position feature toward its hard budget");
+      added++;
+      compact_back_demod_get_stats(bounded_position, &bounded_stats);
+      if (bounded_stats.position_demotions != 0)
+        break;
+    }
+    CHECK(bounded_stats.position_demotions == 1 &&
+          bounded_stats.position_features == 1 &&
+          bounded_stats.position_physical_features == 2 &&
+          bounded_stats.position_budget_exhaustions == 1 &&
+          bounded_stats.position_complete,
+          "position growth demotes only its affected feature");
+    compact_back_demod_get_stats(bounded_position, &before_s);
+    ids = compact_back_demod_candidate_ids(
+      bounded_position, s_rule, ORIENTED, &count);
+    CHECK(count == 1 && ids[0] ==
+          clauses[POSITION_ROOT_FAMILY + 31]->id,
+          "unrelated position feature remains complete after demotion");
+    safe_free(ids);
+    compact_back_demod_get_stats(bounded_position, &after_s);
+    CHECK(after_s.position_queries == before_s.position_queries + 1,
+          "unrelated feature still uses position retrieval");
+    ids = compact_back_demod_candidate_ids(
+      bounded_position, f_rule, ORIENTED, &count);
+    CHECK(count == (size_t) (added - POSITION_ROOT_FAMILY * 2 + 1),
+          "demoted position feature falls back with every answer");
+    safe_free(ids);
+    CHECK(compact_back_demod_remove(
+            bounded_position, clauses[added - 1]->id),
+          "retire one position record before demotion compaction");
+    compact_back_demod_compact_all_stale(bounded_position);
+    compact_back_demod_get_stats(bounded_position, &bounded_stats);
+    CHECK(bounded_stats.position_features == 1 &&
+          bounded_stats.position_physical_features == 1 &&
+          bounded_stats.position_complete,
+          "forced compaction reclaims the demoted feature metadata");
+    compact_back_demod_get_stats(bounded_position, &before_s);
+    ids = compact_back_demod_candidate_ids(
+      bounded_position, s_rule, ORIENTED, &count);
+    safe_free(ids);
+    compact_back_demod_get_stats(bounded_position, &after_s);
+    CHECK(after_s.position_queries == before_s.position_queries + 1,
+          "surviving feature remains indexed after demotion compaction");
+    compact_back_demod_free(bounded_position);
+    delete_clause(f_rule);
+    delete_clause(s_rule);
+    for (j = 0; j < added; j++)
+      delete_clause(clauses[j]);
+    compact_back_demod_set_position_options(
+      4096, 4, 8, 65536, 20, TRUE);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
+  }
+
   delete_clause(first);
   delete_clause(second);
   delete_clause(irrelevant);

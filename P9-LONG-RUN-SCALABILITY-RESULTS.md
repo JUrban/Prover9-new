@@ -192,3 +192,29 @@ This is still a bounded-prefix result.  It does not establish the behavior at
 the 684,719-active back index in `chat_test.new.out41`, many competing hot
 roots, a filled position/tree budget, or deletion-heavy compaction.  The
 frozen candidate remains unchanged until those gates pass.
+
+### Position-budget isolation
+
+The original position mode had the same long-run failure shape as the former
+hot-root implementation: when one later record could not fit, it set global
+`position_complete` false.  Every useful admitted feature then became
+unqueryable while all of its arrays stayed allocated.
+
+Position buckets now carry independent active state.  If incremental growth
+would exceed the hard budget, only active features matched by that record are
+demoted to the complete path fallback.  Unrelated position features continue
+to answer queries.  The next stale compaction copies only active definitions,
+so demoted bucket/posting metadata is reclaimed.  Statistics distinguish
+active from physical features and report demotions plus the effective budget.
+
+The percentage budget is now a monotone admission ramp within one index
+generation.  Its largest previously earned deterministic allowance is kept
+across compaction; otherwise shrinking the non-position base during a rebuild
+could invalidate a set of features that fit before the rebuild.  The absolute
+byte cap remains authoritative.
+
+A focused 16 KiB test admits two independent position features, grows one
+until it reaches the hard cap, verifies exactly one demotion and complete
+fallback answers, confirms the other feature still uses position retrieval,
+and forces compaction.  Physical features then fall from two to the one active
+feature without globally disabling the position index.
