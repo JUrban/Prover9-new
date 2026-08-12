@@ -1067,16 +1067,15 @@ static unsigned long long position_budget_limit(
     relative = base > ULLONG_MAX / index->position_budget_pct ?
       ULLONG_MAX : base * index->position_budget_pct / 100;
   }
-  if (index->position_budget_bytes == 0)
-    limit = relative;
-  else if (index->position_budget_pct == 0)
-    limit = index->position_budget_bytes;
-  else
-    limit = index->position_budget_bytes < relative ?
-      index->position_budget_bytes : relative;
-  /* The percentage is an admission ramp, not a compaction trap.  Preserve
-     the largest deterministic allowance already earned by this index so a
-     smaller rebuilt base cannot globally invalidate complete features. */
+  /* An explicit byte budget is an independent hard cap.  Combining it with
+     a percentage-of-base ramp made admission depend on unrelated global
+     symbol numbers: sparse root arrays counted as position bytes but not as
+     base, so parsing many unrelated symbols could disable the index.  The
+     percentage remains available only when no absolute cap is configured. */
+  limit = index->position_budget_bytes == 0 ? relative :
+    index->position_budget_bytes;
+  /* Preserve the largest deterministic allowance already earned by this
+     index so a smaller rebuilt base cannot invalidate complete features. */
   if (limit > index->position_budget_high_water)
     index->position_budget_high_water = limit;
   return index->position_budget_high_water;

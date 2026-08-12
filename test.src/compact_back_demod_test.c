@@ -824,6 +824,80 @@ int main(void)
   }
 
   {
+    enum { COLD_ROUTE_CLASSES = 10000, HOT_ROUTE_CLASSES = 5000 };
+    Compact_back_demod_index churn;
+    struct compact_back_demod_stats churn_stats;
+    Topform *clauses = safe_malloc(COLD_ROUTE_CLASSES * sizeof(*clauses));
+    Topform *rules = safe_malloc(COLD_ROUTE_CLASSES * sizeof(*rules));
+    char text[96];
+    int j, round;
+    compact_back_demod_set_tree_budget_kb(65536);
+    compact_back_demod_set_tree_admit_work(1);
+    compact_back_demod_set_tree_build_factor(1);
+    compact_back_demod_set_position_options(4096, 4, 64, 16384, 20, FALSE);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_ADAPTIVE);
+    churn = compact_back_demod_init();
+    for (j = 0; j < COLD_ROUTE_CLASSES; j++) {
+      (void) snprintf(text, sizeof(text), "w(cold_route_%d(a)).", j);
+      clauses[j] = indexed_clause(text);
+      CHECK(compact_back_demod_add(churn, clauses[j]),
+            "add adversarial route-class subject");
+      (void) snprintf(text, sizeof(text), "cold_route_%d(a) = a.", j);
+      rules[j] = indexed_clause(text);
+    }
+    for (j = 0; j < COLD_ROUTE_CLASSES; j++) {
+      ids = compact_back_demod_candidate_ids(
+        churn, rules[j], ORIENTED, &count);
+      CHECK(count == 1 && ids[0] == clauses[j]->id,
+            "cold route first lookup preserves its sole answer");
+      safe_free(ids);
+      ids = compact_back_demod_candidate_ids(
+        churn, rules[j], ORIENTED, &count);
+      CHECK(count == 1 && ids[0] == clauses[j]->id,
+            "cold route frequency lookup preserves its sole answer");
+      safe_free(ids);
+    }
+    compact_back_demod_get_stats(churn, &churn_stats);
+    CHECK(churn_stats.route_profile_occupied == 0 &&
+          churn_stats.route_tree_probes == 0 &&
+          churn_stats.route_cold_fallbacks == COLD_ROUTE_CLASSES,
+          "ten thousand singleton classes allocate no profiles or probes");
+    for (round = 0; round < 32; round++)
+      for (j = 0; j < HOT_ROUTE_CLASSES; j++) {
+        ids = compact_back_demod_candidate_ids(
+          churn, rules[j], ORIENTED, &count);
+        CHECK(count == 1 && ids[0] == clauses[j]->id,
+              "hot route churn preserves its sole answer");
+        safe_free(ids);
+      }
+    compact_back_demod_get_stats(churn, &churn_stats);
+    CHECK(churn_stats.route_profile_occupied > 0 &&
+          churn_stats.route_profile_occupied <=
+            churn_stats.route_profile_capacity &&
+          churn_stats.route_admission_rejections > 0 &&
+          churn_stats.route_profile_replacements <= HOT_ROUTE_CLASSES &&
+          churn_stats.route_frequency_bytes == 256 * 1024,
+          "hot classes use bounded deterministic admission under table churn");
+    CHECK(churn_stats.route_tree_probes <= HOT_ROUTE_CLASSES &&
+          churn_stats.route_tree_probes * 32 <=
+            churn_stats.route_mask_choices +
+              churn_stats.route_tree_choices,
+          "tree calibration probes remain below one per 32 routed lookups");
+    compact_back_demod_free(churn);
+    for (j = 0; j < COLD_ROUTE_CLASSES; j++) {
+      delete_clause(clauses[j]);
+      delete_clause(rules[j]);
+    }
+    safe_free(clauses);
+    safe_free(rules);
+    compact_back_demod_set_tree_admit_work(4096);
+    compact_back_demod_set_tree_build_factor(8);
+    compact_back_demod_set_position_options(
+      4096, 4, 64, 16384, 20, TRUE);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
+  }
+
+  {
     enum { POSITION_FAMILY = 128, POSITION_TARGET = 73 };
     Compact_back_demod_index position;
     struct compact_back_demod_stats position_stats;
@@ -932,11 +1006,80 @@ int main(void)
     CHECK(bounded_stats.position_features == 0 &&
           bounded_stats.position_rejections == 1 &&
           bounded_stats.position_budget_exhaustions == 1 &&
+          bounded_stats.position_admission_frozen &&
+          bounded_stats.position_admission_freezes == 1 &&
           bounded_stats.position_complete,
           "position admission is rejected before exceeding its byte cap");
     compact_back_demod_free(bounded);
     delete_clause(clause);
     delete_clause(rule);
+    compact_back_demod_set_position_options(
+      4096, 4, 8, 65536, 20, TRUE);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
+  }
+
+  {
+    enum { RETRY_FAMILY = 32 };
+    Compact_back_demod_index retry_position;
+    struct compact_back_demod_stats rejected, cooled, retried;
+    Topform clauses[RETRY_FAMILY * 2], rule;
+    int j, round;
+    compact_back_demod_set_position_options(1, 4, 1, 65536, 20, TRUE);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_POSITION);
+    retry_position = compact_back_demod_init();
+    for (j = 0; j < RETRY_FAMILY; j++) {
+      clauses[j] = indexed_clause("w(qr(shared)).");
+      CHECK(compact_back_demod_add(retry_position, clauses[j]),
+            "add nonselective position-cooldown subject");
+    }
+    rule = indexed_clause("qr(shared) = a.");
+    for (round = 0; round < 2; round++) {
+      ids = compact_back_demod_candidate_ids(
+        retry_position, rule, ORIENTED, &count);
+      CHECK(count == RETRY_FAMILY,
+            "rejected position feature preserves every fallback answer");
+      safe_free(ids);
+    }
+    compact_back_demod_get_stats(retry_position, &rejected);
+    CHECK(rejected.position_rejections == 1 &&
+          rejected.position_credit_reservations == 1 &&
+          rejected.position_census_records == RETRY_FAMILY &&
+          rejected.position_backfill_records == 0,
+          "one global reservation buys one rejected feature census");
+    for (round = 0; round < 10; round++) {
+      ids = compact_back_demod_candidate_ids(
+        retry_position, rule, ORIENTED, &count);
+      safe_free(ids);
+    }
+    compact_back_demod_get_stats(retry_position, &cooled);
+    CHECK(cooled.position_rejections == rejected.position_rejections &&
+          cooled.position_credit_reservations ==
+            rejected.position_credit_reservations &&
+          cooled.position_census_records == rejected.position_census_records &&
+          cooled.position_retry_deferrals > 0,
+          "rejected feature cannot rescan before population doubles");
+    for (j = RETRY_FAMILY; j < RETRY_FAMILY * 2; j++) {
+      clauses[j] = indexed_clause("w(qr(shared)).");
+      CHECK(compact_back_demod_add(retry_position, clauses[j]),
+            "double population for deterministic position retry");
+    }
+    for (round = 0; round < 2; round++) {
+      ids = compact_back_demod_candidate_ids(
+        retry_position, rule, ORIENTED, &count);
+      CHECK(count == RETRY_FAMILY * 2,
+            "population retry preserves every fallback answer");
+      safe_free(ids);
+    }
+    compact_back_demod_get_stats(retry_position, &retried);
+    CHECK(retried.position_rejections == 2 &&
+          retried.position_credit_reservations == 2 &&
+          retried.position_census_records ==
+            RETRY_FAMILY + RETRY_FAMILY * 2,
+          "population doubling permits exactly one newly funded retry");
+    compact_back_demod_free(retry_position);
+    delete_clause(rule);
+    for (j = 0; j < RETRY_FAMILY * 2; j++)
+      delete_clause(clauses[j]);
     compact_back_demod_set_position_options(
       4096, 4, 8, 65536, 20, TRUE);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
@@ -961,13 +1104,23 @@ int main(void)
             "add correlated position-intersection family");
     }
     rule = indexed_clause("f(a,z(h(j(a0)),h(j(b0)))) = a.");
-    for (round = 0; round < 67; round++) {
+    for (round = 0; round < 512; round++) {
       ids = compact_back_demod_candidate_ids(
         intersected, rule, ORIENTED, &count);
       CHECK(count == 1,
             "position intersection preserves every exact candidate");
       safe_free(ids);
+      compact_back_demod_get_stats(intersected, &before_compact);
+      if (before_compact.position_admissions == 2)
+        break;
     }
+    CHECK(round < 512,
+          "two position features admit within the amortized training bound");
+    ids = compact_back_demod_candidate_ids(
+      intersected, rule, ORIENTED, &count);
+    CHECK(count == 1,
+          "trained position intersection preserves its exact candidate");
+    safe_free(ids);
     compact_back_demod_get_stats(intersected, &before_compact);
     CHECK(before_compact.position_admissions == 2 &&
           before_compact.position_features == 2 &&
@@ -1035,11 +1188,23 @@ int main(void)
             "add dense position-intersection family");
     }
     rule = indexed_clause("d(a,z(h(j(da0)),h(j(db0)))) = a.");
-    for (round = 0; round < 12; round++) {
+    for (round = 0; round < 128; round++) {
       ids = compact_back_demod_candidate_ids(
         dense_intersection, rule, ORIENTED, &count);
       CHECK(count == DENSE_INTERSECTION_FAMILY / 16,
             "dense bitmap intersection preserves exact candidates");
+      safe_free(ids);
+      compact_back_demod_get_stats(dense_intersection, &dense_stats);
+      if (dense_stats.position_admissions == 2)
+        break;
+    }
+    CHECK(round < 128,
+          "dense position features admit within their amortized bound");
+    for (round = 0; round < 2; round++) {
+      ids = compact_back_demod_candidate_ids(
+        dense_intersection, rule, ORIENTED, &count);
+      CHECK(count == DENSE_INTERSECTION_FAMILY / 16,
+            "trained dense intersection preserves exact candidates");
       safe_free(ids);
     }
     compact_back_demod_get_stats(dense_intersection, &dense_stats);
@@ -1061,14 +1226,14 @@ int main(void)
   }
 
   {
-    enum { POSITION_ROOT_FAMILY = 64, POSITION_DEMOTION_LIMIT = 4096 };
+    enum { POSITION_ROOT_FAMILY = 64, POSITION_DEMOTION_LIMIT = 32768 };
     Compact_back_demod_index bounded_position;
     struct compact_back_demod_stats before_s, after_s, bounded_stats;
     Topform clauses[POSITION_ROOT_FAMILY * 2 + POSITION_DEMOTION_LIMIT];
     Topform f_rule, s_rule;
     char text[160];
     int added = POSITION_ROOT_FAMILY * 2, j, rounds;
-    compact_back_demod_set_position_options(1, 4, 1, 16, 0, TRUE);
+    compact_back_demod_set_position_options(1, 4, 1, 352, 0, TRUE);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_POSITION);
     bounded_position = compact_back_demod_init();
     for (j = 0; j < POSITION_ROOT_FAMILY; j++) {
@@ -1086,14 +1251,19 @@ int main(void)
     }
     f_rule = indexed_clause("f(a,g(h(j(fc31)))) = a.");
     s_rule = indexed_clause("s(a,g(h(j(sc31)))) = a.");
-    for (rounds = 0; rounds < 6; rounds++) {
+    for (rounds = 0; rounds < 128; rounds++) {
       ids = compact_back_demod_candidate_ids(
         bounded_position, f_rule, ORIENTED, &count);
       safe_free(ids);
       ids = compact_back_demod_candidate_ids(
         bounded_position, s_rule, ORIENTED, &count);
       safe_free(ids);
+      compact_back_demod_get_stats(bounded_position, &bounded_stats);
+      if (bounded_stats.position_admissions == 2)
+        break;
     }
+    CHECK(rounds < 128,
+          "independent position features admit within amortized bound");
     compact_back_demod_get_stats(bounded_position, &bounded_stats);
     CHECK(bounded_stats.position_admissions == 2 &&
           bounded_stats.position_features == 2,
