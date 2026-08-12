@@ -31,6 +31,9 @@ set(paramodulation).\\
 assign(search_loop,otter).\\
 assign(inference_frontier,clauses).\\
 assign(passive_store,dense).\\
+assign(passive_directory,file).\\
+assign(passive_selector_store,file).\\
+assign(passive_selector_buffer,1024).\\
 assign(ancestor_store,file).\\
 assign(sos_limit,-1).\\
 set(compact_otter_demodulation).\\

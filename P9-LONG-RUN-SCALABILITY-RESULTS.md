@@ -436,6 +436,9 @@ givens.  The focused compaction test forces 64-entry buffers and preserves all
 remaining age selections through run merges and rebuild.  Both tests, plus a
 200,000-record scale test, pass ASan/UBSan with leak detection disabled (the
 repository has pre-existing process-lifetime parser/symbol allocations).
+The full compact-OTTER checkpoint differential now uses a file directory and
+1,024-entry file selectors; checkpoint boundaries zero and two reproduce the
+uninterrupted candidate/given traces, final search counters, and proof.
 
 With a 65,536-entry buffer, the 2.2-million-age-record probe now reports:
 
