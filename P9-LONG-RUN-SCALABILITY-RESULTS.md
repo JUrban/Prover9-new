@@ -52,6 +52,18 @@ The run still demonstrated the intended RAM direction: process RSS was about
 back index bought that RAM reduction by allowing near-linear retrieval work.
 It therefore fails the product gate despite its memory result.
 
+The dramatic *given-clause* rate at the end has a second cause which should
+not be attributed to the index.  Between the 3,300- and 3,600-second reports,
+only 68 additional clauses became given, but they generated 10,662,438 clauses
+(about 156,800 generated clauses per given).  The first 300 seconds averaged
+about 3,127 generated clauses per given.  During the last interval the
+back-demodulation clock grew by about 33.5 seconds, while the demodulation clock
+grew by about 172.5 seconds and the enclosing preprocessing clock by about
+219.7 seconds.  Thus the near-linear lookup slope is a genuine long-run defect
+and a large cumulative cost, but the final throughput cliff also reflects an
+inference/preprocessing burst in the fixed search trajectory.  A stronger
+index cannot make that generated work disappear.
+
 ### Required fix and acceptance test
 
 `hot_root_tree` must replace a fixed shallow fallback only after measured
@@ -254,3 +266,51 @@ from 28 to 33 and backfill records from 476,055 to 564,822; total user CPU rose
 to 85.77 seconds, worse than both the 82.39-second `mask8` baseline and the
 78.49-second earlier adaptive sample.  The implementation was removed rather
 than retaining an apparently principled policy which regressed the real case.
+
+### Complementary position intersection
+
+The singleton position policy has another general counterexample: two rigid
+deep features can each occur in a large fraction of the archive while their
+conjunction is selective.  The adaptive position index now keeps a bounded
+record-membership bitmap alongside each admitted compressed posting.  Once
+observed work has paid for a second feature, a query scans only the smaller
+posting and uses the other bitmap as an exact record-membership prefilter.
+The complete term match is still made at an occurrence of the first feature,
+so features found under different occurrences in one clause cannot create a
+false answer.  The bitmaps are charged to the hard position budget, extended
+on insertion, demoted per feature on budget exhaustion, rebuilt by stale
+compaction, and freed with their owning feature.
+
+A focused same-shallow-signature family has 128 records.  Each singleton deep
+feature selects 32 records and their conjunction selects 8.  After cost-aware
+admission, the query performs 32 compressed scans and 32 bitmap probes, then
+only 8 occurrence matches.  Candidate IDs and order remain identical through
+later insertion, deletion, and forced compaction.  New counters expose
+intersection queries, scans, probes, survivors, and allocated bitmap bytes.
+
+This mechanism does **not** make the compressed scan itself smaller than the
+smallest singleton posting.  It removes expensive occurrence matching for
+nonmembers and is therefore one bounded layer, not a claim that the 5.7
+billion-group `out41` slope is solved.  Dense word-wise intersections or a
+stronger conjunctive retrieval structure remain candidates if admitted
+singleton postings themselves grow too broad.
+
+### Same-host 1,000-given check after intersection support
+
+Fresh sequential runs used the current optimized executable, identical input,
+and a 1,000-given cap.  Both reproduced 1,268,285 generated and 33,909 kept
+clauses.
+
+| Strategy | User CPU (s) | Back groups | Tree nodes | Intersections | Bitmap probes | Intersection survivors | Peak RSS (KiB) |
+|:---|---:|---:|---:|---:|---:|---:|---:|
+| `mask8` | 88.54 | 9,323,859 | 0 | 0 | 0 | 0 | 90,408 |
+| adaptive | 85.45 | 2,835,834 | 15,249,493 | 722 | 306,685 | 86,479 | 90,268 |
+
+Adaptive mode is 3.5% faster in this same-host pair and retains the exact
+search trajectory.  The intersection filter avoids 220,206 full occurrence
+checks in the queries which use it, but the aggregate comparison cannot
+attribute the whole adaptive difference to this new layer because hot trees
+and singleton positions are also active.  In particular, the back-group count
+is the same as the earlier adaptive prefix: the current posting-plus-bitmap
+algorithm still decodes the smallest posting.  The result is a correctness and
+bounded-overhead validation, not a long-run crossover result.
