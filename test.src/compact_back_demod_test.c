@@ -18,6 +18,54 @@ static Topform indexed_clause(const char *text)
   return clause;
 }
 
+static void check_high_base_strategy(Compact_back_demod_strategy strategy)
+{
+  Compact_term_pool pool = compact_term_pool_init();
+  Compact_term_rebase_map map = compact_term_rebase_map_init();
+  Compact_back_demod_index index;
+  Topform first = indexed_clause("hp(f(a,g(c)),m(a,a)).");
+  Topform second = indexed_clause("hp(f(b,g(d)),m(a,b)).");
+  Topform exact = indexed_clause("f(a,g(c)) = a.");
+  Topform repeated = indexed_clause("m(x,x) = x.");
+  unsigned long long *ids;
+  size_t count;
+  int pass;
+
+  compact_term_pool_set_logical_base(
+    pool, (unsigned long long) UINT32_MAX + 613ULL);
+  compact_back_demod_set_strategy(strategy);
+  index = compact_back_demod_init_with_pool(pool);
+  CHECK(compact_back_demod_add(index, first) &&
+        compact_back_demod_add(index, second),
+        "all back-demod strategies index terms above the 32-bit boundary");
+
+  for (pass = 0; pass < 2; pass++) {
+    ids = compact_back_demod_candidate_ids(
+      index, exact, ORIENTED, &count);
+    CHECK(count == 1 && ids != NULL && ids[0] == first->id,
+          "high-base rigid back-demod retrieval is exact");
+    safe_free(ids);
+    ids = compact_back_demod_candidate_ids(
+      index, repeated, ORIENTED, &count);
+    CHECK(count == 1 && ids != NULL && ids[0] == first->id,
+          "high-base matching preserves repeated-variable equality");
+    safe_free(ids);
+    if (pass == 0) {
+      compact_back_demod_retain_live_clauses(index, map);
+      compact_term_pool_compact_retained(pool, map);
+      compact_back_demod_rebase_term_pool(index, pool, map);
+    }
+  }
+
+  compact_back_demod_free(index);
+  compact_term_rebase_map_free(map);
+  compact_term_pool_free(pool);
+  delete_clause(first);
+  delete_clause(second);
+  delete_clause(exact);
+  delete_clause(repeated);
+}
+
 int main(void)
 {
   Compact_back_demod_index index;
@@ -879,6 +927,24 @@ int main(void)
       4096, 4, 8, 65536, 20, TRUE);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
   }
+
+  compact_back_demod_set_tree_min_tokens(1);
+  compact_back_demod_set_tree_budget_kb(65536);
+  compact_back_demod_set_tree_admit_work(1);
+  compact_back_demod_set_tree_build_factor(1);
+  compact_back_demod_set_position_options(1, 1, 1, 65536, 20, TRUE);
+  check_high_base_strategy(COMPACT_BACK_DEMOD_MASK8);
+  check_high_base_strategy(COMPACT_BACK_DEMOD_SIGNATURE32);
+  check_high_base_strategy(COMPACT_BACK_DEMOD_CODE_TREE);
+  check_high_base_strategy(COMPACT_BACK_DEMOD_HYBRID_TREE);
+  check_high_base_strategy(COMPACT_BACK_DEMOD_HOT_ROOT_TREE);
+  check_high_base_strategy(COMPACT_BACK_DEMOD_POSITION);
+  check_high_base_strategy(COMPACT_BACK_DEMOD_ADAPTIVE);
+  compact_back_demod_set_tree_min_tokens(8);
+  compact_back_demod_set_tree_admit_work(4096);
+  compact_back_demod_set_tree_build_factor(8);
+  compact_back_demod_set_position_options(4096, 4, 8, 65536, 20, TRUE);
+  compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
 
   delete_clause(first);
   delete_clause(second);

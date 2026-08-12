@@ -64,8 +64,7 @@ struct cbd_path_bucket {
    terminal nodes allocate a posting-list descriptor, so common prefixes do
    not pay for empty posting metadata. */
 struct cbd_tree_node {
-  uint32_t token_offset;
-  uint32_t token_length;
+  Compact_term_slice tokens;
   uint32_t next_sibling;
   /* Complete serialized terms are prefix-free.  Nonterminals store their
      first child here; terminals store a flagged posting-list index. */
@@ -76,7 +75,7 @@ struct cbd_tree_posting_list {
   uint32_t posting_head;
   uint32_t posting_tail;
   uint32_t inline_record;
-  uint32_t term_offset;
+  uint32_t inline_relative;
 };
 
 /* This is a bounded positive cache, not an authoritative tree directory.
@@ -154,11 +153,17 @@ struct cbd_position_probation {
 
 struct cbd_record {
   unsigned long long proof_id;
-  uint32_t token_offset;
-  uint32_t token_length;
+  Compact_term_slice tokens;
   uint32_t query_stamp;
   unsigned char active;
 };
+
+typedef char compact_back_demod_tree_node_must_remain_16_bytes[
+  sizeof(struct cbd_tree_node) == 16 ? 1 : -1];
+typedef char compact_back_demod_tree_list_must_remain_16_bytes[
+  sizeof(struct cbd_tree_posting_list) == 16 ? 1 : -1];
+typedef char compact_back_demod_record_must_remain_24_bytes[
+  sizeof(struct cbd_record) == 24 ? 1 : -1];
 
 struct compact_back_demod_index {
   Compact_back_demod_strategy strategy;
@@ -210,8 +215,6 @@ struct compact_back_demod_index {
   size_t record_count;
   size_t record_capacity;
   Compact_term_pool term_pool;
-  const int32_t *tokens;
-  size_t token_limit;
   BOOL owns_term_pool;
   Compact_id_map id_map;
   unsigned long long *results;
@@ -1304,8 +1307,7 @@ static uint32_t tree_child_cache_get(Compact_back_demod_index index,
 }
 
 static uint32_t new_tree_node(Compact_back_demod_index index,
-                              uint32_t token_offset,
-                              uint32_t token_length)
+                              Compact_term_slice tokens)
 {
   uint32_t node;
   if (index->tree_node_count == index->tree_node_capacity) {
@@ -1320,8 +1322,7 @@ static uint32_t new_tree_node(Compact_back_demod_index index,
     fatal_error("compact_back_demod: tree node offsets exceed 32 bits");
   node = (uint32_t) index->tree_node_count++;
   memset(&index->tree_nodes[node], 0, sizeof(index->tree_nodes[node]));
-  index->tree_nodes[node].token_offset = token_offset;
-  index->tree_nodes[node].token_length = token_length;
+  index->tree_nodes[node].tokens = tokens;
   return node;
 }
 
@@ -1329,9 +1330,9 @@ static int32_t tree_first_code(Compact_back_demod_index index,
                                uint32_t node)
 {
   struct cbd_tree_node *n = &index->tree_nodes[node];
-  if (n->token_length == 0)
+  if (compact_term_slice_length(n->tokens) == 0)
     fatal_error("compact_back_demod: empty nonroot tree edge");
-  return index->tokens[n->token_offset];
+  return compact_term_pool_slice_tokens(index->term_pool, n->tokens)[0];
 }
 
 static BOOL tree_is_terminal(Compact_back_demod_index index, uint32_t node)
@@ -1372,22 +1373,29 @@ static void tree_set_posting_list(Compact_back_demod_index index,
 }
 
 static uint32_t insert_tree_path(Compact_back_demod_index index,
-                                 uint32_t offset, uint32_t length)
+                                 Compact_term_slice slice)
 {
   uint32_t parent = CBD_NONE;
   uint32_t position = 0;
+  uint32_t length = compact_term_slice_length(slice);
+  const int32_t *tokens = compact_term_pool_slice_tokens(
+    index->term_pool, slice);
   while (position < length) {
     uint32_t current = tree_first_child(index, parent);
     uint32_t previous = CBD_NONE;
-    int32_t wanted = index->tokens[offset + position];
+    int32_t wanted = tokens[position];
     while (current != CBD_NONE &&
            tree_code_compare(tree_first_code(index, current), wanted) < 0) {
       previous = current;
       current = index->tree_nodes[current].next_sibling;
     }
     if (current == CBD_NONE || tree_first_code(index, current) != wanted) {
-      uint32_t added = new_tree_node(index, offset + position,
-                                     length - position);
+      Compact_term_slice suffix;
+      uint32_t added;
+      if (!compact_term_slice_subslice(
+            slice, position, length - position, &suffix))
+        fatal_error("compact_back_demod: invalid tree suffix");
+      added = new_tree_node(index, suffix);
       if (previous == CBD_NONE) {
         index->tree_nodes[added].next_sibling =
           tree_first_child(index, parent);
@@ -1402,12 +1410,13 @@ static uint32_t insert_tree_path(Compact_back_demod_index index,
       return added;
     }
     else {
-      uint32_t old_offset = index->tree_nodes[current].token_offset;
-      uint32_t old_length = index->tree_nodes[current].token_length;
+      Compact_term_slice old_slice = index->tree_nodes[current].tokens;
+      const int32_t *old_tokens = compact_term_pool_slice_tokens(
+        index->term_pool, old_slice);
+      uint32_t old_length = compact_term_slice_length(old_slice);
       uint32_t common = 0;
       while (common < old_length && position + common < length &&
-             index->tokens[old_offset + common] ==
-               index->tokens[offset + position + common])
+             old_tokens[common] == tokens[position + common])
         common++;
       if (common == old_length) {
         if (tree_is_terminal(index, current) &&
@@ -1418,18 +1427,23 @@ static uint32_t insert_tree_path(Compact_back_demod_index index,
       }
       else {
         uint32_t old_next = index->tree_nodes[current].next_sibling;
-        uint32_t split = new_tree_node(index, old_offset, common);
+        Compact_term_slice prefix, old_suffix;
+        uint32_t split;
         uint32_t added;
         if (common == 0)
           fatal_error("compact_back_demod: invalid zero-length tree split");
+        if (!compact_term_slice_subslice(old_slice, 0, common, &prefix) ||
+            !compact_term_slice_subslice(
+              old_slice, common, old_length - common, &old_suffix))
+          fatal_error("compact_back_demod: invalid tree split slices");
+        split = new_tree_node(index, prefix);
         index->tree_nodes[split].next_sibling = old_next;
         if (previous == CBD_NONE)
           tree_set_first_child(index, parent, split);
         else
           index->tree_nodes[previous].next_sibling = split;
         tree_child_cache_put(index, parent, wanted, split, TRUE);
-        index->tree_nodes[current].token_offset += common;
-        index->tree_nodes[current].token_length -= common;
+        index->tree_nodes[current].tokens = old_suffix;
         index->tree_nodes[current].next_sibling = CBD_NONE;
         tree_set_first_child(index, split, current);
         tree_child_cache_put(index, split,
@@ -1437,7 +1451,13 @@ static uint32_t insert_tree_path(Compact_back_demod_index index,
         position += common;
         if (position == length)
           fatal_error("compact_back_demod: serialized term prefixes tree term");
-        added = new_tree_node(index, offset + position, length - position);
+        {
+          Compact_term_slice suffix;
+          if (!compact_term_slice_subslice(
+                slice, position, length - position, &suffix))
+            fatal_error("compact_back_demod: invalid added tree suffix");
+          added = new_tree_node(index, suffix);
+        }
         if (tree_code_compare(tree_first_code(index, added),
                               tree_first_code(index, current)) < 0) {
           index->tree_nodes[added].next_sibling = current;
@@ -1535,12 +1555,11 @@ static void append_symbol_record(Compact_back_demod_index index,
 }
 
 static void append_tree_record(Compact_back_demod_index index,
-                               uint32_t record, uint32_t token_offset,
-                               uint32_t token_length)
+                               uint32_t record, Compact_term_slice term)
 {
   unsigned char encoded[5];
   size_t length = 0;
-  uint32_t node = insert_tree_path(index, token_offset, token_length);
+  uint32_t node = insert_tree_path(index, term);
   uint32_t list_index = tree_posting_list(index, node);
   uint32_t block;
   struct cbd_tree_posting_list *list;
@@ -1551,8 +1570,17 @@ static void append_tree_record(Compact_back_demod_index index,
   }
   list = &index->tree_posting_lists[list_index];
   if (list->inline_record == CBD_NONE) {
+    unsigned long long record_offset;
+    unsigned long long term_offset;
     list->inline_record = record;
-    list->term_offset = token_offset;
+    if (record >= index->record_count)
+      fatal_error("compact_back_demod: invalid tree representative record");
+    record_offset = compact_term_slice_offset(index->records[record].tokens);
+    term_offset = compact_term_slice_offset(term);
+    if (term_offset < record_offset ||
+        term_offset - record_offset > UINT32_MAX)
+      fatal_error("compact_back_demod: tree representative offset overflow");
+    list->inline_relative = (uint32_t) (term_offset - record_offset);
     index->posting_count++;
     index->tree_posting_count++;
     return;
@@ -1640,39 +1668,43 @@ static cbd_path_mask path_feature_bits(Compact_back_demod_index index,
 }
 
 static cbd_path_mask token_path_mask_rec(Compact_back_demod_index index,
+                                         const int32_t *tokens,
+                                         uint32_t end,
                                          uint32_t *position, unsigned depth,
                                          uint64_t path)
 {
   int32_t code;
   int i, arity;
   cbd_path_mask mask = 0;
-  if ((size_t) *position >= index->token_limit)
+  if (*position >= end)
     fatal_error("compact_back_demod: corrupt path token offset");
-  code = index->tokens[(*position)++];
+  code = tokens[(*position)++];
   arity = code < 0 ? 0 : sn_to_arity(code);
   for (i = 0; i < arity; i++) {
     uint64_t child_path =
       strategy_uses_mask8(index->strategy) ?
         (uint32_t) path * 17U + (uint32_t) i + 1U :
         signature_child_path(path, (unsigned) i);
-    if ((size_t) *position >= index->token_limit)
+    if (*position >= end)
       fatal_error("compact_back_demod: corrupt path child offset");
     if ((!strategy_uses_mask8(index->strategy) ||
-         depth < CBD_PATH_DEPTH) && index->tokens[*position] >= 0)
+         depth < CBD_PATH_DEPTH) && tokens[*position] >= 0)
       mask |= path_feature_bits(
         index,
-        child_path, (uint32_t) index->tokens[*position]);
-    mask |= token_path_mask_rec(index, position, depth + 1, child_path);
+        child_path, (uint32_t) tokens[*position]);
+    mask |= token_path_mask_rec(index, tokens, end, position,
+                                depth + 1, child_path);
   }
   return !strategy_uses_mask8(index->strategy) ||
          depth < CBD_PATH_DEPTH ? mask : 0;
 }
 
 static cbd_path_mask token_path_mask(Compact_back_demod_index index,
-                                     uint32_t offset)
+                                     const int32_t *tokens,
+                                     uint32_t offset, uint32_t end)
 {
   uint32_t position = offset;
-  return token_path_mask_rec(index, &position, 0, 0);
+  return token_path_mask_rec(index, tokens, end, &position, 0, 0);
 }
 
 static cbd_path_mask term_path_mask_rec(Term term, unsigned depth,
@@ -1705,8 +1737,8 @@ static cbd_path_mask term_path_mask(Compact_back_demod_index index, Term term)
   return term_path_mask_rec(term, 0, 0, index);
 }
 
-static uint32_t token_term_end(Compact_back_demod_index index,
-                               uint32_t position);
+static uint32_t token_term_end(const int32_t *tokens, uint32_t position,
+                               uint32_t end);
 static unsigned long long occurrence_items(
   Compact_back_demod_index index, uint32_t offset, uint32_t length);
 
@@ -1737,20 +1769,30 @@ static void note_symbol(struct cbd_symbol_set *set, uint32_t symbol,
 }
 
 static void collect_term_slice(Compact_back_demod_index index,
-                               uint32_t offset, uint32_t length,
-                               uint32_t base,
+                               Compact_term_slice term,
+                               unsigned long long base,
                                struct cbd_symbol_set *symbols)
 {
+  const int32_t *tokens = compact_term_pool_slice_tokens(
+    index->term_pool, term);
+  unsigned long long term_offset = compact_term_slice_offset(term);
+  uint32_t length = compact_term_slice_length(term);
+  unsigned long long relative_base;
   uint32_t i;
+  if (term_offset < base ||
+      term_offset - base > COMPACT_TERM_SLICE_LENGTH_MAX ||
+      length > COMPACT_TERM_SLICE_LENGTH_MAX - (term_offset - base))
+    fatal_error("compact_back_demod: pooled clause-relative offset overflow");
+  relative_base = term_offset - base;
   for (i = 0; i < length; i++) {
-    int32_t code = index->tokens[offset + i];
+    int32_t code = tokens[i];
     if (code >= 0) {
-      uint32_t term_end = token_term_end(index, offset + i);
+      uint32_t term_end = token_term_end(tokens, i, length);
       note_symbol(symbols, (uint32_t) code,
-                  offset + i - base,
-                  term_end - (offset + i),
+                  (uint32_t) relative_base + i,
+                  term_end - i,
                   index->strategy == COMPACT_BACK_DEMOD_CODE_TREE ? 0 :
-                    token_path_mask(index, offset + i));
+                    token_path_mask(index, tokens, i, length));
       index->symbol_occurrences++;
     }
   }
@@ -1769,16 +1811,15 @@ static int increasing_local_bucket(const void *left, const void *right)
   return 0;
 }
 
-static int compare_tree_occurrence(Compact_back_demod_index index,
-                                   uint32_t base,
+static int compare_tree_occurrence(const int32_t *tokens,
                                    const struct cbd_local_occurrence *a,
                                    const struct cbd_local_occurrence *b)
 {
   uint32_t common = a->length < b->length ? a->length : b->length;
   uint32_t i;
   for (i = 0; i < common; i++) {
-    int32_t ac = index->tokens[base + a->offset + i];
-    int32_t bc = index->tokens[base + b->offset + i];
+    int32_t ac = tokens[a->offset + i];
+    int32_t bc = tokens[b->offset + i];
     if (ac != bc)
       return ac < bc ? -1 : 1;
   }
@@ -1787,8 +1828,7 @@ static int compare_tree_occurrence(Compact_back_demod_index index,
   return a->offset < b->offset ? -1 : a->offset > b->offset ? 1 : 0;
 }
 
-static void sift_tree_occurrences(Compact_back_demod_index index,
-                                  uint32_t base,
+static void sift_tree_occurrences(const int32_t *tokens,
                                   struct cbd_local_occurrence *values,
                                   size_t root, size_t count)
 {
@@ -1801,10 +1841,10 @@ static void sift_tree_occurrences(Compact_back_demod_index index,
     if (child >= count)
       return;
     if (child + 1 < count &&
-        compare_tree_occurrence(index, base, &values[child],
+        compare_tree_occurrence(tokens, &values[child],
                                 &values[child + 1]) < 0)
       child++;
-    if (compare_tree_occurrence(index, base, &values[root],
+    if (compare_tree_occurrence(tokens, &values[root],
                                 &values[child]) >= 0)
       return;
     saved = values[root];
@@ -1814,8 +1854,7 @@ static void sift_tree_occurrences(Compact_back_demod_index index,
   }
 }
 
-static void sort_tree_occurrences(Compact_back_demod_index index,
-                                  uint32_t base,
+static void sort_tree_occurrences(const int32_t *tokens,
                                   struct cbd_local_occurrence *values,
                                   size_t count)
 {
@@ -1823,12 +1862,12 @@ static void sort_tree_occurrences(Compact_back_demod_index index,
   if (count < 2)
     return;
   for (start = count / 2; start != 0; start--)
-    sift_tree_occurrences(index, base, values, start - 1, count);
+    sift_tree_occurrences(tokens, values, start - 1, count);
   for (end = count - 1; end != 0; end--) {
     struct cbd_local_occurrence saved = values[0];
     values[0] = values[end];
     values[end] = saved;
-    sift_tree_occurrences(index, base, values, 0, end);
+    sift_tree_occurrences(tokens, values, 0, end);
   }
 }
 
@@ -1852,15 +1891,13 @@ static Compact_back_demod_index compact_back_demod_init_with_pool_strategy(
   index->position_budget_bytes = Back_demod_position_budget_bytes;
   index->position_complete = TRUE;
   index->position_admission_enabled = Back_demod_position_admission;
-  index->tokens = compact_term_pool_tokens(pool);
   index->id_map = compact_id_map_init(1);
   index->lookup_clock = clock_init("compact_back_demod_lookup");
   index->maintenance_clock = clock_init("compact_back_demod_maintenance");
-  index->token_limit = compact_term_pool_token_count(pool);
   if (new_posting_block(index, FALSE) != CBD_NONE)
     fatal_error("compact_back_demod: invalid posting block sentinel");
   if (strategy_uses_tree(strategy)) {
-    if (new_tree_node(index, 0, 0) != CBD_NONE ||
+    if (new_tree_node(index, 0) != CBD_NONE ||
         new_tree_posting_list(index) != CBD_NONE)
       fatal_error("compact_back_demod: invalid tree sentinel");
   }
@@ -1970,7 +2007,8 @@ BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
   struct cbd_record *record;
   struct cbd_symbol_set symbols;
   Literals literal;
-  uint32_t token_end = 0;
+  unsigned long long record_base = 0;
+  unsigned long long token_end = 0;
   BOOL have_tokens = FALSE;
   if (index == NULL || clause == NULL || clause->id == 0 ||
       clause->literals == NULL ||
@@ -1992,28 +2030,31 @@ BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
     Term atom = literal->atom;
     int arg;
     for (arg = 0; arg < ARITY(atom); arg++) {
-      uint32_t length;
-      uint32_t offset = compact_term_pool_intern(
-        index->term_pool, clause->id, clause->literals, ARG(atom, arg),
-        &length);
-      index->tokens = compact_term_pool_tokens(index->term_pool);
-      index->token_limit = compact_term_pool_token_count(index->term_pool);
+      Compact_term_slice term = compact_term_pool_intern_slice(
+        index->term_pool, clause->id, clause->literals, ARG(atom, arg));
+      unsigned long long offset = compact_term_slice_offset(term);
+      uint32_t length = compact_term_slice_length(term);
       if (!have_tokens) {
-        record->token_offset = offset;
+        record_base = offset;
         token_end = offset + length;
         have_tokens = TRUE;
       }
       else {
-        if (offset < record->token_offset)
+        if (offset < record_base)
           fatal_error("compact_back_demod: nonmonotone pooled clause slice");
         if (offset + length > token_end)
           token_end = offset + length;
       }
-      collect_term_slice(index, offset, length, record->token_offset,
-                         &symbols);
+      collect_term_slice(index, term, record_base, &symbols);
     }
   }
-  record->token_length = have_tokens ? token_end - record->token_offset : 0;
+  if ((have_tokens &&
+       token_end - record_base > COMPACT_TERM_SLICE_LENGTH_MAX) ||
+      !compact_term_slice_encode(
+        have_tokens ? record_base : 0,
+        have_tokens ? (uint32_t) (token_end - record_base) : 0,
+        &record->tokens))
+    fatal_error("compact_back_demod: pooled clause slice overflow");
   if (strategy_uses_paths(index->strategy)) {
     qsort(symbols.occurrence_values, symbols.occurrence_count,
           sizeof(*symbols.occurrence_values), increasing_local_bucket);
@@ -2061,7 +2102,9 @@ BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
       if (eligible == 0)
         goto tree_index_done;
     }
-    sort_tree_occurrences(index, record->token_offset,
+    const int32_t *record_tokens = compact_term_pool_slice_tokens(
+      index->term_pool, record->tokens);
+    sort_tree_occurrences(record_tokens,
                           symbols.occurrence_values,
                           symbols.occurrence_count);
     if (index->strategy == COMPACT_BACK_DEMOD_HYBRID_TREE) {
@@ -2111,10 +2154,9 @@ BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
       uint32_t length = symbols.occurrence_values[i].length;
       while (j < symbols.occurrence_count &&
              symbols.occurrence_values[j].length == length &&
-             memcmp(index->tokens + record->token_offset + relative,
-                    index->tokens + record->token_offset +
-                      symbols.occurrence_values[j].offset,
-                    (size_t) length * sizeof(*index->tokens)) == 0)
+             memcmp(record_tokens + relative,
+                    record_tokens + symbols.occurrence_values[j].offset,
+                    (size_t) length * sizeof(*record_tokens)) == 0)
         j++;
       if (index->strategy == COMPACT_BACK_DEMOD_CODE_TREE ||
           (index->strategy == COMPACT_BACK_DEMOD_HYBRID_TREE &&
@@ -2124,8 +2166,13 @@ BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause)
              index->tree_root_capacity &&
            index->tree_roots[
              symbols.occurrence_values[i].symbol].admitted))
-        append_tree_record(
-          index, record_index, record->token_offset + relative, length);
+        {
+          Compact_term_slice term;
+          if (!compact_term_slice_subslice(
+                record->tokens, relative, length, &term))
+            fatal_error("compact_back_demod: invalid occurrence slice");
+          append_tree_record(index, record_index, term);
+        }
       i = j;
     }
   }
@@ -2187,17 +2234,17 @@ static void collect_record(Compact_back_demod_index index, uint32_t at,
   index->results[(*count)++] = record->proof_id;
 }
 
-static uint32_t token_term_end(Compact_back_demod_index index,
-                               uint32_t position)
+static uint32_t token_term_end(const int32_t *tokens, uint32_t position,
+                               uint32_t end)
 {
   int32_t code;
   int i, arity;
-  if ((size_t) position >= index->token_limit)
+  if (position >= end)
     fatal_error("compact_back_demod: corrupt term token offset");
-  code = index->tokens[position++];
+  code = tokens[position++];
   arity = code < 0 ? 0 : sn_to_arity(code);
   for (i = 0; i < arity; i++)
-    position = token_term_end(index, position);
+    position = token_term_end(tokens, position, end);
   return position;
 }
 
@@ -2207,27 +2254,28 @@ struct cbd_binding {
   unsigned char bound;
 };
 
-static BOOL match_token_term(Compact_back_demod_index index, Term pattern,
+static BOOL match_token_term(const int32_t *tokens, uint32_t token_end,
+                             Term pattern,
                              uint32_t *position,
                              struct cbd_binding *bindings)
 {
   uint32_t at = *position;
   int i;
-  if ((size_t) at >= index->token_limit)
+  if (at >= token_end)
     fatal_error("compact_back_demod: corrupt match token offset");
   if (VARIABLE(pattern)) {
     int variable = VARNUM(pattern);
     uint32_t end;
     if (variable < 0 || variable >= MAX_VARS)
       fatal_error("compact_back_demod: pattern variable exceeds MAX_VARS");
-    end = token_term_end(index, at);
+    end = token_term_end(tokens, at, token_end);
     if (bindings[variable].bound) {
       size_t old_length = bindings[variable].end - bindings[variable].offset;
       size_t new_length = end - at;
       if (old_length != new_length ||
-          memcmp(index->tokens + bindings[variable].offset,
-                 index->tokens + at,
-                 new_length * sizeof(*index->tokens)) != 0)
+          memcmp(tokens + bindings[variable].offset,
+                 tokens + at,
+                 new_length * sizeof(*tokens)) != 0)
         return FALSE;
     }
     else {
@@ -2238,22 +2286,23 @@ static BOOL match_token_term(Compact_back_demod_index index, Term pattern,
     *position = end;
     return TRUE;
   }
-  if (index->tokens[at] < 0 || index->tokens[at] != SYMNUM(pattern))
+  if (tokens[at] < 0 || tokens[at] != SYMNUM(pattern))
     return FALSE;
   *position = at + 1;
   for (i = 0; i < ARITY(pattern); i++)
-    if (!match_token_term(index, ARG(pattern, i), position, bindings))
+    if (!match_token_term(tokens, token_end, ARG(pattern, i),
+                          position, bindings))
       return FALSE;
   return TRUE;
 }
 
-static BOOL occurrence_matches(Compact_back_demod_index index,
+static BOOL occurrence_matches(const int32_t *tokens, uint32_t token_end,
                                Term pattern, uint32_t token_offset)
 {
   struct cbd_binding bindings[MAX_VARS];
   uint32_t position = token_offset;
   memset(bindings, 0, sizeof(bindings));
-  return match_token_term(index, pattern, &position, bindings);
+  return match_token_term(tokens, token_end, pattern, &position, bindings);
 }
 
 static uint64_t position_child_path(uint64_t path, unsigned child)
@@ -2315,31 +2364,33 @@ static size_t collect_pattern_position_features(
 }
 
 static uint32_t mark_subject_position_features_rec(
-  Compact_back_demod_index index, uint32_t position, uint64_t path,
+  const int32_t *tokens, uint32_t token_end,
+  uint32_t position, uint64_t path,
   struct cbd_position_query_feature *features, size_t feature_count,
   unsigned char *matched)
 {
   int32_t code;
   int i, arity;
-  if ((size_t) position >= index->token_limit)
+  if (position >= token_end)
     fatal_error("compact_back_demod: corrupt position subject");
-  code = index->tokens[position++];
+  code = tokens[position++];
   arity = code < 0 ? 0 : sn_to_arity(code);
   for (i = 0; i < arity; i++) {
     uint32_t child_start = position;
     uint64_t child_path = position_child_path(path, (unsigned) i);
     int32_t child_code;
     size_t j;
-    if ((size_t) child_start >= index->token_limit)
+    if (child_start >= token_end)
       fatal_error("compact_back_demod: corrupt position child");
-    child_code = index->tokens[child_start];
+    child_code = tokens[child_start];
     if (child_code >= 0)
       for (j = 0; j < feature_count; j++)
         if (!matched[j] && features[j].path == child_path &&
             features[j].symbol == (uint32_t) child_code)
           matched[j] = TRUE;
     position = mark_subject_position_features_rec(
-      index, child_start, child_path, features, feature_count, matched);
+      tokens, token_end, child_start, child_path,
+      features, feature_count, matched);
   }
   return position;
 }
@@ -2349,18 +2400,16 @@ static void record_position_features(
   uint32_t root_symbol, struct cbd_position_query_feature *features,
   size_t feature_count, unsigned char *matched)
 {
-  uint32_t i, end;
+  const int32_t *tokens;
+  uint32_t i, end = compact_term_slice_length(record->tokens);
   memset(matched, 0, feature_count);
-  if (record->token_length > UINT32_MAX - record->token_offset)
-    fatal_error("compact_back_demod: corrupt position record length");
-  end = record->token_offset + record->token_length;
-  if ((size_t) end > index->token_limit)
-    fatal_error("compact_back_demod: corrupt position record slice");
-  for (i = record->token_offset; i < end; i++)
-    if (index->tokens[i] >= 0 &&
-        (uint32_t) index->tokens[i] == root_symbol)
+  if (end == 0)
+    return;
+  tokens = compact_term_pool_slice_tokens(index->term_pool, record->tokens);
+  for (i = 0; i < end; i++)
+    if (tokens[i] >= 0 && (uint32_t) tokens[i] == root_symbol)
       (void) mark_subject_position_features_rec(
-        index, i, 0, features, feature_count, matched);
+        tokens, end, i, 0, features, feature_count, matched);
 }
 
 static void record_position_occurrences(
@@ -2368,21 +2417,19 @@ static void record_position_occurrences(
   uint32_t root_symbol, struct cbd_position_query_feature *feature,
   struct cbd_symbol_set *occurrences)
 {
-  uint32_t i, end;
-  if (record->token_length > UINT32_MAX - record->token_offset)
-    fatal_error("compact_back_demod: corrupt position occurrence length");
-  end = record->token_offset + record->token_length;
-  if ((size_t) end > index->token_limit)
-    fatal_error("compact_back_demod: corrupt position occurrence slice");
-  for (i = record->token_offset; i < end; i++)
-    if (index->tokens[i] >= 0 &&
-        (uint32_t) index->tokens[i] == root_symbol) {
+  const int32_t *tokens;
+  uint32_t i, end = compact_term_slice_length(record->tokens);
+  if (end == 0)
+    return;
+  tokens = compact_term_pool_slice_tokens(index->term_pool, record->tokens);
+  for (i = 0; i < end; i++)
+    if (tokens[i] >= 0 && (uint32_t) tokens[i] == root_symbol) {
       unsigned char matched = FALSE;
       (void) mark_subject_position_features_rec(
-        index, i, 0, feature, 1, &matched);
+        tokens, end, i, 0, feature, 1, &matched);
       if (matched)
         note_symbol(occurrences, root_symbol,
-                    i - record->token_offset, 0, 0);
+                    i, 0, 0);
     }
 }
 
@@ -2456,6 +2503,9 @@ static BOOL posting_contains_pattern(Compact_back_demod_index index,
                                      struct cbd_record *record,
                                      Term pattern, int32_t symbol)
 {
+  const int32_t *tokens = compact_term_pool_slice_tokens(
+    index->term_pool, record->tokens);
+  uint32_t token_length = compact_term_slice_length(record->tokens);
   uint32_t position = occurrence_offset;
   uint32_t end;
   uint32_t relative = 0;
@@ -2469,11 +2519,9 @@ static BOOL posting_contains_pattern(Compact_back_demod_index index,
     if (delta > UINT32_MAX - relative)
       fatal_error("compact_back_demod: occurrence offset overflow");
     relative += delta;
-    if (relative >= record->token_length ||
-        index->tokens[record->token_offset + relative] != symbol)
+    if (relative >= token_length || tokens[relative] != symbol)
       fatal_error("compact_back_demod: corrupt occurrence offset");
-    if (occurrence_matches(index, pattern,
-                           record->token_offset + relative))
+    if (occurrence_matches(tokens, token_length, pattern, relative))
       return TRUE;
   }
   return FALSE;
@@ -2606,11 +2654,22 @@ static void collect_tree_posting_list(
   Compact_back_demod_index index, struct cbd_tree_posting_list *list,
   Term pattern, unsigned long long exclude_id, size_t *count)
 {
+  struct cbd_record *representative;
+  const int32_t *tokens;
+  uint32_t token_length;
   uint32_t block;
-  if (list->inline_record == CBD_NONE)
+  if (list->inline_record == CBD_NONE ||
+      list->inline_record >= index->record_count)
     fatal_error("compact_back_demod: missing inline tree posting");
+  representative = &index->records[list->inline_record];
+  tokens = compact_term_pool_slice_tokens(index->term_pool,
+                                           representative->tokens);
+  token_length = compact_term_slice_length(representative->tokens);
+  if (list->inline_relative >= token_length)
+    fatal_error("compact_back_demod: corrupt tree representative offset");
   index->occurrences_examined++;
-  if (!occurrence_matches(index, pattern, list->term_offset))
+  if (!occurrence_matches(tokens, token_length, pattern,
+                          list->inline_relative))
     return;
   index->posting_bytes_decoded += sizeof(uint32_t);
   index->query_bytes_decoded += sizeof(uint32_t);
@@ -2653,6 +2712,8 @@ static unsigned long long backfill_root_group(
   uint32_t relative = 0;
   unsigned long long occurrences = 0;
   struct cbd_symbol_set terms;
+  const int32_t *tokens;
+  uint32_t token_length;
   if (record_index == CBD_NONE || record_index >= index->record_count ||
       occurrence_offset > index->occurrence_count ||
       occurrence_length > index->occurrence_count - occurrence_offset)
@@ -2663,6 +2724,8 @@ static unsigned long long backfill_root_group(
   record = &index->records[record_index];
   if (!record->active)
     return 0;
+  tokens = compact_term_pool_slice_tokens(index->term_pool, record->tokens);
+  token_length = compact_term_slice_length(record->tokens);
   memset(&terms, 0, sizeof(terms));
   terms.occurrence_values = terms.occurrence_fixed;
   terms.occurrence_capacity = sizeof(terms.occurrence_fixed) /
@@ -2670,19 +2733,18 @@ static unsigned long long backfill_root_group(
   end = occurrence_offset + occurrence_length;
   while (position < end) {
     uint32_t delta = decode_occurrence_delta(index, &position, end);
-    uint32_t token_offset, token_end;
+    uint32_t token_end;
     if (delta > UINT32_MAX - relative)
       fatal_error("compact_back_demod: root backfill offset overflow");
     relative += delta;
-    if (relative >= record->token_length)
+    if (relative >= token_length)
       fatal_error("compact_back_demod: corrupt root backfill occurrence");
-    token_offset = record->token_offset + relative;
-    token_end = token_term_end(index, token_offset);
-    note_symbol(&terms, (uint32_t) index->tokens[token_offset], relative,
-                token_end - token_offset, 0);
+    token_end = token_term_end(tokens, relative, token_length);
+    note_symbol(&terms, (uint32_t) tokens[relative], relative,
+                token_end - relative, 0);
     occurrences++;
   }
-  sort_tree_occurrences(index, record->token_offset,
+  sort_tree_occurrences(tokens,
                         terms.occurrence_values, terms.occurrence_count);
   {
     size_t i = 0;
@@ -2692,13 +2754,17 @@ static unsigned long long backfill_root_group(
       uint32_t length = terms.occurrence_values[i].length;
       while (j < terms.occurrence_count &&
              terms.occurrence_values[j].length == length &&
-             memcmp(index->tokens + record->token_offset + local,
-                    index->tokens + record->token_offset +
-                      terms.occurrence_values[j].offset,
-                    (size_t) length * sizeof(*index->tokens)) == 0)
+             memcmp(tokens + local,
+                    tokens + terms.occurrence_values[j].offset,
+                    (size_t) length * sizeof(*tokens)) == 0)
         j++;
-      append_tree_record(index, record_index,
-                         record->token_offset + local, length);
+      {
+        Compact_term_slice term;
+        if (!compact_term_slice_subslice(
+              record->tokens, local, length, &term))
+          fatal_error("compact_back_demod: invalid root backfill slice");
+        append_tree_record(index, record_index, term);
+      }
       i = j;
     }
   }
@@ -2857,10 +2923,13 @@ static void collect_tree_candidates(Compact_back_demod_index index,
                                     size_t *count)
 {
   struct cbd_tree_node *edge = &index->tree_nodes[node];
+  const int32_t *tokens = compact_term_pool_slice_tokens(
+    index->term_pool, edge->tokens);
+  uint32_t token_length = compact_term_slice_length(edge->tokens);
   uint32_t at, child;
   index->tree_nodes_examined++;
-  for (at = 0; at < edge->token_length; at++) {
-    int32_t code = index->tokens[edge->token_offset + at];
+  for (at = 0; at < token_length; at++) {
+    int32_t code = tokens[at];
     if (pending != 0) {
       int arity = code < 0 ? 0 : sn_to_arity(code);
       pending--;
@@ -3131,16 +3200,15 @@ static BOOL record_contains_pattern(Compact_back_demod_index index,
                                     struct cbd_record *record,
                                     Term pattern, int32_t symbol)
 {
-  uint32_t at, end;
-  if (record->token_length > UINT32_MAX - record->token_offset)
-    fatal_error("compact_back_demod: corrupt bitmap record length");
-  end = record->token_offset + record->token_length;
-  if ((size_t) end > index->token_limit)
-    fatal_error("compact_back_demod: corrupt bitmap record slice");
-  for (at = record->token_offset; at < end; at++)
-    if (index->tokens[at] == symbol) {
+  const int32_t *tokens;
+  uint32_t at, end = compact_term_slice_length(record->tokens);
+  if (end == 0)
+    return FALSE;
+  tokens = compact_term_pool_slice_tokens(index->term_pool, record->tokens);
+  for (at = 0; at < end; at++)
+    if (tokens[at] == symbol) {
       index->occurrences_examined++;
-      if (occurrence_matches(index, pattern, at))
+      if (occurrence_matches(tokens, end, pattern, at))
         return TRUE;
     }
   return FALSE;
@@ -3769,8 +3837,6 @@ unsigned long long *compact_back_demod_candidate_ids(
   index->query_duplicates = 0;
   index->query_bytes_decoded = 0;
   occurrences_before = index->occurrences_examined;
-  index->tokens = compact_term_pool_tokens(index->term_pool);
-  index->token_limit = compact_term_pool_token_count(index->term_pool);
   atom = demod->literals->atom;
   alpha = ARG(atom, 0);
   beta = ARG(atom, 1);
@@ -3860,22 +3926,44 @@ static unsigned long long occurrence_items(
   return count;
 }
 
+static Compact_term_slice tree_list_term(
+  Compact_back_demod_index index, const struct cbd_tree_posting_list *list)
+{
+  struct cbd_record *record;
+  const int32_t *tokens;
+  uint32_t length, end;
+  Compact_term_slice term;
+  if (list->inline_record == CBD_NONE ||
+      list->inline_record >= index->record_count)
+    fatal_error("compact_back_demod: corrupt tree representative record");
+  record = &index->records[list->inline_record];
+  tokens = compact_term_pool_slice_tokens(index->term_pool, record->tokens);
+  length = compact_term_slice_length(record->tokens);
+  if (list->inline_relative >= length)
+    fatal_error("compact_back_demod: corrupt tree representative offset");
+  end = token_term_end(tokens, list->inline_relative, length);
+  if (!compact_term_slice_subslice(
+        record->tokens, list->inline_relative,
+        end - list->inline_relative, &term))
+    fatal_error("compact_back_demod: invalid tree representative slice");
+  return term;
+}
+
 static void copy_live_tree_record(Compact_back_demod_index source,
                                   Compact_back_demod_index replacement,
                                   const uint32_t *record_map,
                                   uint32_t record_index,
-                                  uint32_t token_offset)
+                                  Compact_term_slice term)
 {
-  uint32_t mapped, token_end;
+  uint32_t mapped;
   if (record_index == CBD_NONE || record_index >= source->record_count ||
-      token_offset >= source->token_limit)
+      compact_term_slice_length(term) == 0)
     fatal_error("compact_back_demod: corrupt compacted tree posting");
+  (void) compact_term_pool_slice_tokens(source->term_pool, term);
   mapped = record_map[record_index];
   if (mapped == CBD_NONE)
     return;
-  token_end = token_term_end(source, token_offset);
-  append_tree_record(replacement, mapped, token_offset,
-                     token_end - token_offset);
+  append_tree_record(replacement, mapped, term);
 }
 
 static void copy_hot_root_states(Compact_back_demod_index destination,
@@ -3969,8 +4057,6 @@ static void compact_back_demod_compact_internal(
   copy_hot_root_states(replacement, index);
   copy_position_definitions(replacement, index);
   replacement->position_rebuilding = TRUE;
-  replacement->tokens = compact_term_pool_tokens(index->term_pool);
-  replacement->token_limit = compact_term_pool_token_count(index->term_pool);
   record_map = safe_calloc(index->record_count, sizeof(*record_map));
   for (i = 1; i < index->record_count; i++)
     if (index->records[i].active) {
@@ -3994,25 +4080,25 @@ static void compact_back_demod_compact_internal(
     for (i = 1; i < index->tree_posting_list_count; i++) {
       struct cbd_tree_posting_list *list =
         &index->tree_posting_lists[i];
+      Compact_term_slice term;
       uint32_t block;
       uint32_t record_index = list->inline_record;
+      term = tree_list_term(index, list);
       if (strategy_uses_hot_tree(index->strategy)) {
-        unsigned symbol;
-        if (list->term_offset >= index->token_limit)
-          fatal_error("compact_back_demod: corrupt hot-root tree term");
-        symbol = (unsigned) index->tokens[list->term_offset];
+        unsigned symbol = (unsigned) compact_term_pool_slice_tokens(
+          index->term_pool, term)[0];
         if ((size_t) symbol >= index->tree_root_capacity ||
             !index->tree_roots[symbol].admitted)
           continue;
       }
-      if (record_index == CBD_NONE || list->term_offset >= index->token_limit)
+      if (record_index == CBD_NONE || compact_term_slice_length(term) == 0)
         fatal_error("compact_back_demod: corrupt compacted tree inline posting");
       copy_live_tree_record(index, replacement, record_map, record_index,
-                            list->term_offset);
+                            term);
       if ((list->posting_head & CBD_TREE_DIRECT_RECORD) != 0) {
         copy_live_tree_record(
           index, replacement, record_map,
-          list->posting_head & CBD_TREE_INDEX_MASK, list->term_offset);
+          list->posting_head & CBD_TREE_INDEX_MASK, term);
         continue;
       }
       for (block = list->posting_head; block != CBD_NONE;
@@ -4024,7 +4110,7 @@ static void compact_back_demod_compact_internal(
         while (position < current->used) {
           record_index = decode_posting_value(current, &position);
           copy_live_tree_record(index, replacement, record_map, record_index,
-                                list->term_offset);
+                                term);
           entries++;
         }
         if (position != current->used || entries != current->count)
@@ -4458,18 +4544,14 @@ void compact_back_demod_rebase_term_pool(
   if (index == NULL)
     return;
   for (i = 1; i < index->record_count; i++)
-    index->records[i].token_offset = compact_term_rebase_offset(
-      map, index->records[i].token_offset);
+    if (compact_term_slice_length(index->records[i].tokens) != 0)
+      index->records[i].tokens = compact_term_rebase_slice(
+        map, index->records[i].tokens);
   for (i = 1; i < index->tree_node_count; i++)
-    if (index->tree_nodes[i].token_length != 0)
-      index->tree_nodes[i].token_offset = compact_term_rebase_offset(
-        map, index->tree_nodes[i].token_offset);
-  for (i = 1; i < index->tree_posting_list_count; i++)
-    index->tree_posting_lists[i].term_offset = compact_term_rebase_offset(
-      map, index->tree_posting_lists[i].term_offset);
+    if (compact_term_slice_length(index->tree_nodes[i].tokens) != 0)
+      index->tree_nodes[i].tokens = compact_term_rebase_slice(
+        map, index->tree_nodes[i].tokens);
   index->term_pool = pool;
-  index->tokens = compact_term_pool_tokens(pool);
-  index->token_limit = compact_term_pool_token_count(pool);
   update_peak(index);
 }
 

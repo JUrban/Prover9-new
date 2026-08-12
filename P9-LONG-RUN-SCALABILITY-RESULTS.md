@@ -873,5 +873,23 @@ and the unifier carries one local token base for all recursive expressions.
 Each of root-scan, position-feature, and code-tree strategies passes high-base
 generalization, instance, binding/occurs-check, retained compaction, and
 post-rebase checks.  Optimized and ASan/UBSan test builds pass.
-Back-demodulation is now the remaining shared-pool consumer before the
-production token-offset ceiling is removed and mature CPU comparison begins.
+
+The compact back-demod consumer now completes that representation migration.
+Records remain 24 bytes, radix nodes remain 16 bytes, and terminal posting
+descriptors remain 16 bytes.  A terminal descriptor uses the first posting's
+clause-relative occurrence offset; this is invariant under shared-pool
+rebasing and reconstructs the complete term even when the terminal radix edge
+contains only a suffix after a split.  Path masks, position features, exact
+matching, hot-root backfill, tree traversal, standalone index compaction, and
+shared-pool rebasing operate on pointer-relative spans resolved outside token
+loops.
+
+Every back-demod strategy—mask8, signature32, code tree, hybrid tree, hot-root
+tree, position, and adaptive—returns the same rigid and repeated-variable
+answers above `UINT32_MAX`, both before and after retained compaction/rebasing.
+The complete existing back-demod differential suite, the pool/rewrite/unit
+integration set, the synthetic long-run gates, optimized builds, ASan/UBSan,
+and the full release Prover9 build pass.  These tests remove the immediate
+10.5-day shared-token correctness boundary without increasing the hot stored
+layouts.  They do not yet establish mature CPU parity: `chat_test.in`, the
+larger chat prefix, and a long Osborn/AIM slope comparison remain required.
