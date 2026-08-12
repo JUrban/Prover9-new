@@ -27,6 +27,7 @@ Dense_passive_selector: store=file, buffer_bytes=240, run_logical=480, reads=3 (
 Dense_passive_gc: validation_failures=0.
 Ancestor_store: validation_failures=0, file_reads=10 (1000 bytes), file_writes=5 (500 bytes).
 Process_residency_kb: pss=10240, anonymous=8192, swap=0.
+Allocator_slabs: current=1, peak=2, RSS_kb: current=10240, peak=11000.
 User_CPU=10.00, System_CPU=1.00, Wall_clock=11.
 clock infer          :   1.00 seconds.
 clock preprocess     :   8.00 seconds.
@@ -36,6 +37,7 @@ Given=140. Generated=1800. Kept=300. proofs=0.
 Compact_back_demod: mode=authoritative, strategy=adaptive, failures=0, active=90, queries=30, candidates=6, groups_examined=350, tree_nodes_examined=180, tree_sibling_checks=70, tree_child_lookups=20, tree_child_hits=17, tree_child_parents=3, tree_child_bytes=2048, bytes=8192.
 Compact_index_timing: component=back_demod, lookup_seconds=3.0, exact_seconds=0.2, materialize_seconds=0.3, maintenance_seconds=0.4.
 Process_residency_kb: pss=12288, anonymous=9216, swap=1024.
+Allocator_slabs: current=2, peak=3, RSS_kb: current=12288, peak=13000.
 User_CPU=20.00, System_CPU=2.00, Wall_clock=22.
 clock infer          :   2.00 seconds.
 clock preprocess     :  17.00 seconds.
@@ -82,6 +84,9 @@ class ReportTest(unittest.TestCase):
             self.assertIn("process reports nonzero swap residency",
                           summary["signals"])
             self.assertEqual(summary["statistics_format_buffers"], 32)
+            self.assertEqual(summary["peak_rss_kb"], 13000)
+            self.assertEqual(summary["peak_rss_source"],
+                             "Prover9 allocator report")
             self.assertNotIn(
                 "output predates the safe long-statistics formatting marker; "
                 "long comma-formatted lines may contain overwritten fields",
@@ -136,6 +141,67 @@ User_CPU=2.0, System_CPU=0.0, Wall_clock=2.
             REPORT.markdown_summary(summary)
         self.assertIn("Final: strategy=adaptive", output.getvalue())
         self.assertNotIn("Given/CPU", output.getvalue())
+
+    def test_gnu_time_sidecar_overrides_allocator_peak(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = os.path.join(directory, "candidate.out")
+            time_path = os.path.join(directory, "candidate.time")
+            with open(output_path, "w") as stream:
+                stream.write(SAMPLE)
+            with open(time_path, "w") as stream:
+                stream.write("\tUser time (seconds): 21.25\n")
+                stream.write("\tMaximum resident set size (kbytes): 54321\n")
+            rows = REPORT.derive_intervals(REPORT.parse_run(output_path))
+            summary = REPORT.run_summary("candidate", rows)
+            self.assertEqual(summary["last_user_cpu"], 20.0)
+            self.assertEqual(summary["peak_rss_kb"], 54321)
+            self.assertEqual(summary["peak_rss_source"], "GNU time sidecar")
+
+    def test_matched_threshold_audit(self):
+        reference = {
+            "label": "old", "last_given": 100, "last_generated": 1000,
+            "last_kept": 200, "last_proofs": 0, "last_user_cpu": 100.0,
+            "peak_rss_kb": 100000, "peak_rss_mib": 100000 / 1024,
+            "samples": 2, "combined_slope_ratio": 1.0,
+        }
+        candidate = {
+            "label": "new", "last_given": 100, "last_generated": 1000,
+            "last_kept": 200, "last_proofs": 0, "last_user_cpu": 120.0,
+            "peak_rss_kb": 19000, "peak_rss_mib": 19000 / 1024,
+            "samples": 3, "combined_slope_ratio": 1.20,
+        }
+        comparison = REPORT.compare_summaries(reference, candidate)
+        self.assertEqual(comparison["result"], "eligible")
+        self.assertEqual(comparison["trajectory_gate"], "pass")
+        self.assertEqual(comparison["cpu_gate"], "pass")
+        self.assertEqual(comparison["ram_gate"], "pass")
+        self.assertEqual(comparison["slope_gate"], "pass")
+
+        candidate["last_user_cpu"] = 130.0
+        self.assertEqual(REPORT.compare_summaries(
+            reference, candidate)["result"], "reject")
+        candidate["last_user_cpu"] = 120.0
+        candidate["peak_rss_kb"] = None
+        candidate["peak_rss_mib"] = None
+        self.assertEqual(REPORT.compare_summaries(
+            reference, candidate)["result"], "incomplete")
+
+    def test_comparison_markdown_names_thresholds(self):
+        comparison = {
+            "candidate": "new", "trajectory_gate": "pass",
+            "cpu_ratio": 1.1, "cpu_gate": "pass",
+            "reference_peak_rss_mib": 100.0,
+            "candidate_peak_rss_mib": 10.0, "ram_savings_pct": 90.0,
+            "ram_gate": "pass", "candidate_periodic_samples": 3,
+            "interval_gate": "pass",
+            "candidate_back_slope_ratio": 1.1, "slope_gate": "pass",
+            "result": "eligible",
+        }
+        output = io.StringIO()
+        with redirect_stdout(output):
+            REPORT.markdown_comparisons([comparison])
+        self.assertIn("Matched-run threshold audit", output.getvalue())
+        self.assertIn("| new | pass | 1.10 | pass |", output.getvalue())
 
 
 if __name__ == "__main__":

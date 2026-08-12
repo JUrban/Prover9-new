@@ -18,6 +18,8 @@ its first-to-last summary still uses the complete run:
 ./test.src/compact_long_run_report.py --format tsv *.out.gz > slopes.tsv
 ./test.src/compact_long_run_report.py --format json candidate.out > slopes.json
 ./test.src/compact_long_run_report.py --summary-only *.out.gz
+./test.src/compact_long_run_report.py --summary-only --compare-to-first \
+    old.out.gz candidate.out.gz
 ```
 
 The report separates given/CPU and generated/given from inference,
@@ -36,6 +38,17 @@ The warning thresholds are triage aids, not pass/fail decisions: an integrated
 query distribution can legitimately change, so promotion still requires the
 same logical trajectory and a matched reference run.
 
+With `--compare-to-first`, the first output is the reference and each later
+output is checked mechanically.  The audit requires identical final given,
+generated, kept, and proof counters; at most 1.25 times the reference user CPU;
+at least 80% lower peak RSS; at least two periodic samples; and no more than a
+1.25-fold first-to-last counted back-work/query slope.  Missing evidence is
+`unknown`, never a pass.  `eligible` still requires independent proof checking
+and total-job/cgroup accounting.  For uncompressed matrix output, a neighboring
+GNU `time` file such as `case.time` is discovered automatically and takes
+precedence over Prover9's allocator peak.  Both matrix runners use their first
+selected case as the comparison reference in `long-run-summary.md`.
+
 During implementation, the reporting audit found that `comma_num()` retained
 only 16 rotating results while one statistics `fprintf` used 24.  Later calls
 could overwrite earlier values before printing; a recent example reported
@@ -51,6 +64,26 @@ diagnosis: counted back work/query rises from about 1,182 in the first interval
 to about 10,101 in the last, an 8.55-fold increase.  The last interval also
 generates about 156,801 clauses/given.  These are two simultaneous problems;
 the adaptive index work targets the former and cannot remove the latter.
+
+### Full-proof audit of `chat_test.new.out1--3`
+
+The mechanical audit also quantifies why the two already uploaded compact
+full-proof runs cannot support the original optimistic report.  It uses the
+safe 15-argument allocator RSS line; both candidate files have only a final
+statistics block, so their interval and back-slope evidence remains unknown.
+
+| Output | Final counters (given/generated/kept) | User CPU (s) | Peak RSS (MiB) | CPU/reference | RAM saved | Threshold result |
+|:---|:---|---:|---:|---:|---:|:---|
+| `chat_test.new.out1.gz` (old P9 reference) | 11,368 / 253,338,893 / 2,216,836 | 5,110.38 | 3,519.3 | 1.00 | 0% | reference |
+| `chat_test.new.out2.gz` | 11,369 / 253,302,129 / 2,207,014 | 15,144.10 | 1,457.7 | 2.96 | 58.6% | reject |
+| `chat_test.new.out3.gz` | 11,369 / 253,302,129 / 2,207,014 | 12,201.61 | 815.2 | 2.39 | 76.8% | reject |
+
+Both candidates miss the agreed CPU gate, the 80% peak-RSS target, and exact
+trajectory equality.  `out3` comes close to the RAM target but is still 3.2
+percentage points short and takes 2.39 times the old-P9 CPU.  These files
+predate the current adaptive semantic hashing, position intersections, rigid
+sibling pruning, and bounded child dispatch, so they reject the earlier
+compact configurations; they do not yet decide the current branch.
 
 ## `chat_test.new.out41`: mask8 backward-demodulation collapse
 

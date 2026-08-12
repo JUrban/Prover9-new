@@ -115,8 +115,12 @@ given-clause throughput, generated work, clock shares, compact-index work,
 PSS/swap, and file I/O directly from an existing plain or gzip output.  Use
 `--format tsv` or `--format json` for every sample, `--tail 0` for a complete
 Markdown table, and `--summary-only` for several runs.  No theorem search is
-started by the reporter.  See `P9-LONG-RUN-SCALABILITY-RESULTS.md` for the
-measurement caveats and acceptance criteria.
+started by the reporter.  Put the reference first and add
+`--compare-to-first` to audit exact final counters, CPU ratio, peak-RSS saving,
+periodic evidence, and back-index slope.  Matrix runs discover their adjacent
+GNU `time` sidecars automatically and include this audit when more than one
+case is selected.  See `P9-LONG-RUN-SCALABILITY-RESULTS.md` for the measurement
+caveats and acceptance criteria.
 
 ---
 

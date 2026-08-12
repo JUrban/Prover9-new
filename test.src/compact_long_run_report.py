@@ -24,6 +24,12 @@ CLOCK_RE = re.compile(
     r"^clock\s+([A-Za-z0-9_]+)\s*:\s*([0-9]+(?:\.[0-9]+)?) seconds\.")
 NUMBER_RE = re.compile(r"^([-+]?[0-9]+(?:\.[0-9]+)?)")
 IO_RE = re.compile(r"^([0-9]+) \(([0-9]+) bytes\)$")
+RSS_KB_RE = re.compile(
+    r"RSS_kb:\s*current=([0-9,]+),\s*peak=([0-9,]+)")
+GNU_TIME_USER_RE = re.compile(
+    r"^\s*User time \(seconds\):\s*([0-9]+(?:\.[0-9]+)?)\s*$")
+GNU_TIME_RSS_RE = re.compile(
+    r"^\s*Maximum resident set size \(kbytes\):\s*([0-9]+)\s*$")
 
 PREFIXES = (
     ("Compact_back_demod:", "back"),
@@ -60,6 +66,10 @@ def scalar(text):
         number = match.group(1)
         return float(number) if "." in number else int(number)
     return text
+
+
+def integer_with_commas(text):
+    return int(text.replace(",", ""))
 
 
 def assignments(payload):
@@ -141,6 +151,15 @@ def parse_stream(lines, source="<stream>"):
             sample["demod_attempts"] = values.get("Demod_attempts")
             sample["demod_rewrites"] = values.get("Demod_rewrites")
             continue
+        if line.startswith("Megabytes="):
+            sample["reported_megabytes"] = scalar(line.split("=", 1)[1])
+            continue
+        rss_match = RSS_KB_RE.search(line)
+        if rss_match:
+            sample["allocator_rss_current_kb"] = integer_with_commas(
+                rss_match.group(1))
+            sample["allocator_rss_peak_kb"] = integer_with_commas(
+                rss_match.group(2))
         if line.startswith("Compact_index_timing:"):
             values = assignments(line.split(":", 1)[1])
             component = values.get("component")
@@ -170,6 +189,41 @@ def parse_file(path):
     finally:
         if stream is not sys.stdin:
             stream.close()
+
+
+def inferred_time_sidecar(path):
+    if path == "-":
+        return None
+    base = path[:-3] if path.endswith(".gz") else path
+    if base.endswith(".out"):
+        base = base[:-4]
+    candidates = (base + ".time", path + ".time")
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def parse_gnu_time(path):
+    result = {"external_time_file": path}
+    with open(path, "r", encoding="utf-8", errors="replace") as stream:
+        for line in stream:
+            match = GNU_TIME_USER_RE.match(line)
+            if match:
+                result["external_user_cpu"] = float(match.group(1))
+                continue
+            match = GNU_TIME_RSS_RE.match(line)
+            if match:
+                result["external_peak_rss_kb"] = int(match.group(1))
+    return result
+
+
+def parse_run(path):
+    samples = parse_file(path)
+    sidecar = inferred_time_sidecar(path)
+    if samples and sidecar is not None:
+        samples[-1].update(parse_gnu_time(sidecar))
+    return samples
 
 
 def number(sample, key, default=0):
@@ -303,15 +357,25 @@ def run_summary(label, rows):
         signals.append("back-demod counted work/query grew by more than 25%")
     if len(given_rates) >= 2 and given_rates[0] > 0 and given_rates[-1] < given_rates[0] * 0.75:
         signals.append("given/user-CPU rate fell by more than 25%")
+    peak_rss_kb = number(last, "external_peak_rss_kb", None)
+    peak_rss_source = "GNU time sidecar" if peak_rss_kb is not None else None
+    if peak_rss_kb is None:
+        peak_rss_kb = number(last, "allocator_rss_peak_kb", None)
+        if peak_rss_kb is not None:
+            peak_rss_source = "Prover9 allocator report"
+    last_user_cpu = number(last, "user_cpu", None)
+    if last_user_cpu is None:
+        last_user_cpu = number(last, "external_user_cpu", None)
     return {
         "label": label,
         "samples": len(rows),
         "first_user_cpu": first.get("user_cpu"),
-        "last_user_cpu": last.get("user_cpu"),
+        "last_user_cpu": last_user_cpu,
         "first_given": first.get("given"),
         "last_given": last.get("given"),
         "last_generated": last.get("generated"),
         "last_kept": last.get("kept"),
+        "last_proofs": last.get("proofs"),
         "strategy": last.get("back_strategy"),
         "first_back_active": first.get("back_active"),
         "last_back_active": last.get("back_active"),
@@ -329,6 +393,10 @@ def run_summary(label, rows):
         "last_swap_mib": last.get("swap_mib"),
         "last_back_mib": last.get("back_mib"),
         "last_child_hit_pct": last.get("back_child_hit_pct"),
+        "peak_rss_kb": peak_rss_kb,
+        "peak_rss_mib": safe_ratio(peak_rss_kb, 1024),
+        "peak_rss_source": peak_rss_source,
+        "reported_megabytes": last.get("reported_megabytes"),
         "statistics_format_buffers": formatting_buffers or None,
         "last_passive_records": last.get("passive_records"),
         "last_passive_directory_bytes": last.get("passive_directory_logical"),
@@ -336,6 +404,65 @@ def run_summary(label, rows):
         "last_ancestor_file_read_bytes": last.get("ancestor_file_reads_bytes"),
         "last_ancestor_file_write_bytes": last.get("ancestor_file_writes_bytes"),
         "signals": signals,
+    }
+
+
+def threshold_state(value):
+    if value is True:
+        return "pass"
+    if value is False:
+        return "fail"
+    return "unknown"
+
+
+def compare_summaries(reference, candidate):
+    trajectory_fields = ("last_given", "last_generated", "last_kept",
+                         "last_proofs")
+    trajectory_known = all(
+        reference.get(key) is not None and candidate.get(key) is not None
+        for key in trajectory_fields)
+    trajectory_match = (all(reference.get(key) == candidate.get(key)
+                            for key in trajectory_fields)
+                        if trajectory_known else None)
+
+    cpu_ratio = safe_ratio(candidate.get("last_user_cpu"),
+                           reference.get("last_user_cpu"))
+    cpu_gate = cpu_ratio <= 1.25 if cpu_ratio is not None else None
+    rss_ratio = safe_ratio(candidate.get("peak_rss_kb"),
+                           reference.get("peak_rss_kb"))
+    ram_savings_pct = ((1.0 - rss_ratio) * 100.0
+                       if rss_ratio is not None else None)
+    ram_gate = (ram_savings_pct >= 80.0
+                if ram_savings_pct is not None else None)
+    interval_gate = True if candidate.get("samples", 0) >= 2 else None
+    slope_ratio = (candidate.get("combined_slope_ratio")
+                   if candidate.get("samples", 0) >= 2 else None)
+    slope_gate = slope_ratio <= 1.25 if slope_ratio is not None else None
+
+    checks = (trajectory_match, cpu_gate, ram_gate, interval_gate, slope_gate)
+    if any(value is False for value in checks):
+        result = "reject"
+    elif any(value is None for value in checks):
+        result = "incomplete"
+    else:
+        result = "eligible"
+    return {
+        "reference": reference.get("label"),
+        "candidate": candidate.get("label"),
+        "result": result,
+        "trajectory_match": trajectory_match,
+        "trajectory_gate": threshold_state(trajectory_match),
+        "cpu_ratio": cpu_ratio,
+        "cpu_gate": threshold_state(cpu_gate),
+        "reference_peak_rss_mib": reference.get("peak_rss_mib"),
+        "candidate_peak_rss_mib": candidate.get("peak_rss_mib"),
+        "rss_ratio": rss_ratio,
+        "ram_savings_pct": ram_savings_pct,
+        "ram_gate": threshold_state(ram_gate),
+        "candidate_periodic_samples": candidate.get("samples"),
+        "interval_gate": threshold_state(interval_gate),
+        "candidate_back_slope_ratio": slope_ratio,
+        "slope_gate": threshold_state(slope_gate),
     }
 
 
@@ -398,6 +525,9 @@ def markdown_summary(summary):
               fmt(summary.get("last_generated")), fmt(summary.get("last_kept")),
               fmt(summary.get("last_pss_mib"), 1),
               fmt(summary.get("last_back_mib"), 1)))
+    print("Peak RSS={} MiB ({}).".format(
+        fmt(summary.get("peak_rss_mib"), 1),
+        fmt(summary.get("peak_rss_source"))))
     print("First-to-last interval ratios: counted back work/query={}, "
           "given/CPU={}.".format(
               fmt(summary.get("combined_slope_ratio"), 2),
@@ -409,6 +539,31 @@ def markdown_summary(summary):
     else:
         print("Signals: none in the parsed counters (mature acceptance still "
               "requires a matched reference run).")
+    print()
+
+
+def markdown_comparisons(comparisons):
+    print("## Matched-run threshold audit")
+    print()
+    print("The first output is the reference. `eligible` means the parsed "
+          "thresholds pass; it is not a substitute for independent proof "
+          "checking or total-job/cgroup accounting.")
+    print()
+    print("| Candidate | Trajectory | CPU ratio | CPU | Reference peak MiB | "
+          "Candidate peak MiB | RAM saved % | RAM | Samples | Periodic | "
+          "Back slope | Slope | Result |")
+    print("|:---|:---:|---:|:---:|---:|---:|---:|:---:|---:|:---:|---:|:---:|:---:|")
+    for comparison in comparisons:
+        print("| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |".format(
+            comparison["candidate"], comparison["trajectory_gate"],
+            fmt(comparison["cpu_ratio"], 2), comparison["cpu_gate"],
+            fmt(comparison["reference_peak_rss_mib"], 1),
+            fmt(comparison["candidate_peak_rss_mib"], 1),
+            fmt(comparison["ram_savings_pct"], 1), comparison["ram_gate"],
+            fmt(comparison["candidate_periodic_samples"]),
+            comparison["interval_gate"],
+            fmt(comparison["candidate_back_slope_ratio"], 2),
+            comparison["slope_gate"], comparison["result"]))
     print()
 
 
@@ -427,6 +582,8 @@ TSV_COLUMNS = (
     "delta_ancestor_file_writes_bytes", "delta_selector_reads_bytes",
     "delta_selector_writes_bytes", "ancestor_io_mib_per_cpu",
     "selector_io_mib_per_cpu", "statistics_format_comma_num_buffers",
+    "allocator_rss_current_kb", "allocator_rss_peak_kb",
+    "external_peak_rss_kb", "external_user_cpu",
     "clock_infer", "clock_preprocess",
     "clock_demod", "clock_back_demod",
 )
@@ -455,23 +612,33 @@ def main(argv=None):
     parser.add_argument(
         "--summary-only", action="store_true",
         help="markdown only: omit interval tables")
+    parser.add_argument(
+        "--compare-to-first", action="store_true",
+        help="audit each later output against the first (Markdown/JSON only)")
     args = parser.parse_args(argv)
     if args.tail < 0:
         parser.error("--tail must be nonnegative")
+    if args.compare_to_first and len(args.outputs) < 2:
+        parser.error("--compare-to-first requires at least two outputs")
+    if args.compare_to_first and args.format == "tsv":
+        parser.error("--compare-to-first is available in Markdown or JSON")
     runs = []
     basenames = ["stdin" if path == "-" else os.path.basename(path)
                  for path in args.outputs]
     for path, basename in zip(args.outputs, basenames):
         label = (os.path.relpath(path) if path != "-" and
                  basenames.count(basename) > 1 else basename)
-        rows = derive_intervals(parse_file(path))
+        rows = derive_intervals(parse_run(path))
         runs.append((label, rows, run_summary(label, rows)))
+    comparisons = ([compare_summaries(runs[0][2], run[2])
+                    for run in runs[1:]] if args.compare_to_first else [])
     if args.format == "tsv":
         emit_tsv(runs)
     elif args.format == "json":
         print(json.dumps({"runs": [
             {"label": label, "samples": rows, "summary": summary}
-            for label, rows, summary in runs]}, indent=2, sort_keys=True))
+            for label, rows, summary in runs],
+            "comparisons": comparisons}, indent=2, sort_keys=True))
     else:
         for label, rows, summary in runs:
             if args.summary_only:
@@ -481,6 +648,8 @@ def main(argv=None):
             else:
                 shown = rows if args.tail == 0 else rows[-args.tail:]
                 markdown(label, shown, summary, len(rows))
+        if comparisons:
+            markdown_comparisons(comparisons)
     return 0
 
 

@@ -156,7 +156,12 @@ changes in generated clauses must be separated from index cost.  New reports
 carry a statistics-format capacity marker.  Older long `comma_num`-formatted
 lines can contain overwritten arguments and are explicitly warned about;
 direct `%llu` compact-index lines and the short process-residency line are not
-affected by that historical formatter defect.
+affected by that historical formatter defect.  `--compare-to-first` now audits
+the exact final trajectory, total user-CPU ratio, peak-RSS saving, presence of
+periodic evidence, and counted back-work slope against the promotion
+thresholds.  A GNU `time` sidecar named like `case.time` is preferred for peak
+RSS; otherwise the allocator's process peak is used.  The matrix runners put
+their first selected case in the reference role automatically.
 
 ## 5. Phase D: passive control plane for tens of millions of live clauses
 

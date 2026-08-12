@@ -421,8 +421,13 @@ done
   > "$output_dir/profiles.json"
 python3 "$repo_dir/test.src/compact_long_run_report.py" --format tsv "$@" \
   > "$output_dir/long-run-slopes.tsv"
-python3 "$repo_dir/test.src/compact_long_run_report.py" --summary-only "$@" \
-  > "$output_dir/long-run-summary.md"
+if test "$#" -gt 1; then
+  python3 "$repo_dir/test.src/compact_long_run_report.py" --summary-only \
+    --compare-to-first "$@" > "$output_dir/long-run-summary.md"
+else
+  python3 "$repo_dir/test.src/compact_long_run_report.py" --summary-only "$@" \
+    > "$output_dir/long-run-summary.md"
+fi
 
 echo "compact generalization matrix written to $output_dir"
 awk '{ print }' "$summary"
