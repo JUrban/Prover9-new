@@ -986,3 +986,143 @@ and the full release Prover9 build pass.  These tests remove the immediate
 10.5-day shared-token correctness boundary without increasing the hot stored
 layouts.  They do not yet establish mature CPU parity: `chat_test.in`, the
 larger chat prefix, and a long Osborn/AIM slope comparison remain required.
+
+## Reversible structural/scale-class adaptive routing
+
+The root-wide adaptive decision described above was still unsafe for a long
+general workload.  Once a root tree was admitted, every nonvariable pattern
+under that root used it even when a broad or variable-rich shape was cheaper
+through the mask path.  A useful position posting was likewise unconditional
+after admission.  Those are classic short-prefix overfitting mechanisms: the
+right route depends on both query structure and current population scale.
+
+The current `adaptive-back-index-crossover` branch makes candidate routing a
+bounded performance cache rather than an index authority:
+
+- A 4,096-entry, two-way set-associative table is keyed by stable semantic
+  root, structural summary, and the base-two bucket of the current compatible
+  mask population.  Alpha-renamed patterns share a class, while crossing a
+  population power of two starts fresh calibration.
+- Each 104-byte entry records mask/tree logical costs, populations, sample
+  counts, and preference.  A compile-time assertion fixes the complete table
+  at 425,984 bytes (416 KiB); it cannot grow during a week- or month-long run.
+- No table entry is created until a root tree actually exists.  A new class
+  first establishes a mask baseline and performs at most one tree probe.  A
+  route switch requires a 20% cost advantage.  Earlier exact-pattern keys
+  filled the table without sharing useful evidence; an earlier geometric
+  re-probe policy retrained too often.  Neither experiment was retained.
+- Path buckets carry exact posting populations, so estimating the mask path
+  costs one bounded pass over that root's structural buckets rather than a
+  clause scan.  At the completed-chat scale this is thousands of small bucket
+  counters, not millions of passive clauses.
+- An admitted position route bypasses mask/tree only when its exact current
+  posting/bitmap estimate is at least four times better than the current mask
+  population.  Marginal positions remain available but do not force a bad
+  route.
+- Mask, tree, and position remain complete candidate generators.  Results are
+  exact-tested, deduplicated, and sorted into the established decreasing-ID
+  order, so eviction or a different preference can change performance but not
+  theorem-search semantics.
+
+The adaptive state survives both maintenance boundaries.  In-memory compact
+rebuilds copy the fixed route table.  A search checkpoint writes
+`compact_back_adaptive.txt` inside its checkpoint directory and restores root
+admission evidence, active positions, probation, budget high-water state, and
+route profiles.  Old checkpoints without the sidecar resume with safe cold
+calibration.  The sidecar is ordinary checkpoint state and is removed only
+when its owning checkpoint directory is removed; it is unrelated to the
+automatically unlinked passive/ancestor temporary backing files.
+
+### Focused and bounded evidence
+
+Focused differential tests exercise selective and broad patterns with the
+same root, alpha renaming, a mask-population scale transition, position
+cost-gating, forced compaction, and checkpoint/rebuild/restore.  They require
+the same candidate IDs and order for every route and assert the fixed table
+size.  The 10,000-record variable-prefix test uses one position group/query,
+versus 10,000 groups for mask and 39,998 combined operations for the raw tree.
+
+The accepted structural/scale policy reproduced the matched 1,000-given chat
+trajectory: 1,268,285 generated and 33,909 kept.  Raw directories are
+`chat-crossover-1k-mask` and `chat-crossover-bucket-1k`.
+
+| Strategy | User CPU (s) | Back groups | Tree nodes | Sibling checks | Route table | Peak RSS (KiB) |
+|:---|---:|---:|---:|---:|---:|---:|
+| current `mask8` | 105.46 | 10,871,045 | 0 | 0 | none | 90,536 |
+| structural/scale adaptive | 108.18 | 6,300,093 | 3,242,266 | 4,375,241 | 3,992 / 4,096 | 90,540 |
+
+Adaptive routing reduced mask-group scans by 42.0%.  It made 20,166 mask,
+7,212 tree, and 386 position choices, with 3,795 bounded initial tree probes.
+A discarded fast-path experiment produced byte-identical logical counters but
+took 112.27 user seconds, versus 108.18 for the accepted build.  This 3.8%
+same-work timing spread and the 2.6% candidate/control difference mean the
+bounded result is inside the planned 5% regression gate, not evidence of a CPU
+win.  Peak process RSS is unchanged at this scale; the final route table is
+416 KiB (the recorded development run used the preceding 480 KiB layout).
+
+The completed `bob/chat_test.new.out4` now supplies the mature mask endpoint.
+It proves after 11,369 givens with 1,529,207 active back-demod records,
+20,764,898,738 posting groups, and 3,607.118 seconds of backward lookup.  Its
+9,573.63 user seconds are 1.87 times old P9 while peak RSS is 73.8% lower.
+The final interval reaches approximately 22,608 groups and 4,672 microseconds
+per lookup.  Thus the mature problem is unquestionably real, but no current
+adaptive run has yet reached that population.  The new policy remains
+provisional until that experiment.
+
+Source hashes for reproduction:
+
+```text
+9781ee07691bc62e01f67534208620ca0be3f026f55248a227e9161f1ed17e6c  chat_test.in
+309074bb18e63cfb98034c9524a4c21e8e2f769e56c780ab4f37b49bfcab47c6  chat_test.new.out4
+66bf2e3e67f2794d0725bbec39976db9b81b78540d01452c24657e1f1b26b146  chat_test.new.out41
+8c3345918095bff029de85544660003d3453d678ee55fb290d9830353fe7e702  development prover9 binary
+```
+
+### Running the decisive large-chat comparison
+
+No new input knob is required beyond selecting `adaptive`.  First isolate the
+back-index crossover with the heap selector and compare it to the completed
+mask archive.  Replace CPU 0 with an otherwise idle real core and choose limits
+appropriate to the host:
+
+```sh
+CHAT_CASES=new_otter_compact_file_heap \
+CHAT_REFERENCE_OUTPUT=/project/bob/chat_test.new.out4 \
+CHAT_COMPARE_MIN_RAM_SAVING_PCT=0 \
+CHAT_CGROUP_ACCOUNTING=1 CHAT_REPORT_SECONDS=300 CHAT_CPU=0 \
+./test.src/chat_test_matrix.sh /project/bob/chat_test.in \
+    chat-adaptive-full -1 604800 22000 604860
+```
+
+This case generates the established OTTER/compact settings and includes
+`assign(compact_back_demod_strategy,adaptive).`  It writes raw output, GNU
+time and cgroup accounting, hashes, interval TSV, and a threshold report.  The
+0% RAM threshold is deliberate for this within-compact CPU comparison.
+
+If that run crosses over cleanly, perform the final RAM candidate with
+file-backed selectors and compare against old P9.  `chat_test.new.out1.gz` is
+the existing old-P9 reference if it is present on that machine:
+
+```sh
+CHAT_CASES=new_otter_compact_file_runs \
+CHAT_REFERENCE_OUTPUT=/project/bob/chat_test.new.out1.gz \
+CHAT_CGROUP_ACCOUNTING=1 CHAT_REPORT_SECONDS=300 CHAT_CPU=0 \
+./test.src/chat_test_matrix.sh /project/bob/chat_test.in \
+    chat-adaptive-file-full -1 604800 22000 604860
+```
+
+For a direct input file, retain the prior compact OTTER flags and change only
+the strategy assignment to:
+
+```text
+assign(compact_back_demod_strategy,adaptive).
+```
+
+Do not delete periodic reporting: the newly extended long-run reporter shows
+interval mask/tree/position mix, observed cost per selected route, switches,
+reversions, and hysteresis holds.  Acceptance still requires the proof and
+logical trajectory, at most 1.25 times old-P9 user CPU, the chosen RAM gate
+under total-job cgroup accounting, and a stable mature lookup slope.  If route
+table replacements climb while tree share or cost/choice degrades, retain the
+output; those counters distinguish inadequate generalization from an
+intrinsically bad tree route.

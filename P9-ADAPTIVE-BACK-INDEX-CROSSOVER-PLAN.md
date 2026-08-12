@@ -1,6 +1,7 @@
 # Adaptive backward-index crossover plan
 
-Status: active implementation on branch `adaptive-back-index-crossover`.
+Status: implemented and locally validated on branch
+`adaptive-back-index-crossover`; mature-host acceptance remains open.
 
 This tranche addresses the remaining CPU risk in compact backward
 demodulation.  The complete large-chat `mask8` run saved 73.8% of peak RSS
@@ -29,9 +30,9 @@ if their posting population later grows past the cheaper alternative.
    problem-name special case.
 3. The planner is fixed-size.  Its resident cost must not grow with clauses,
    roots, queries, or runtime, and replacement must be deterministic.
-4. No route is permanently promoted.  Sparse deterministic probes must permit
-   tree, symbol/mask, and position routes to be selected again as the live
-   population and stale fraction change.
+4. No decision is reused across every scale.  A power-of-two population-class
+   transition retrains mask and tree, while the exact current position gate is
+   reevaluated on every eligible query.
 5. The complete `mask8` path remains available.  An unavailable, collided, or
    untrained planner entry falls back safely rather than omitting an answer.
 6. This work does not change given-clause scheduling, hint matching,
@@ -41,20 +42,25 @@ if their posting population later grows past the cheaper alternative.
 
 ## 2. Deterministic bounded router
 
-Add a fixed two-way set-associative table keyed by a stable semantic pattern
-fingerprint.  Variables are canonicalized by first occurrence so an alpha
-renaming has the same route profile.  Each entry retains bounded saturated
-counters for:
+The implemented planner uses a fixed 4,096-entry, two-way set-associative
+table.  Its key combines the stable semantic root hash with a deliberately
+coarse structural class: total nodes, rigid preorder prefix before the first
+variable, variable occurrence count, repeated-variable bit, maximum depth,
+root arity, and the base-two scale class of the current compatible-mask
+population.  Variable numbers are absent, so alpha renaming shares evidence.
+The population class generalizes related queries without assuming evidence at
+1,000 records remains valid at a million.  Each entry retains bounded
+saturated counters for:
 
-- query count and the next deterministic re-probe generation;
+- query count;
 - observed symbol/mask, tree, and position logical costs;
 - sample counts for each available route; and
 - current preferred route and the evidence-backed switch count.
 
 The table is a cache, never an authority.  Collisions use deterministic least-
-evidence replacement and merely lose performance history.  The initial target
-is at most 4,096 entries and substantially less than 1 MiB including all
-metadata.
+evidence replacement and merely lose performance history.  A compile-time
+assertion fixes each entry at 104 bytes, so all 4,096 entries occupy 425,984
+bytes (416 KiB), independent of clauses, queries, and runtime.
 
 Use operation-weighted integer cost rather than the sampled CPU clocks.  The
 cost function includes posting groups decoded, tree nodes, sibling checks,
@@ -64,39 +70,41 @@ tested on adversarial synthetic distributions; they are not fitted to Osborn
 or chat runtimes.  Saturating arithmetic prevents a month-long run from
 wrapping.
 
-Before doing an expensive retrieval, cheaply estimate the symbol/mask route by
-counting compatible posting-list groups from bucket metadata.  Position routes
-already expose posting counts and dense bitmap sizes.  Tree cost must be
-learned by actual exact probes because branching depends on pattern shape.
-The router chooses a trained route only with a hysteresis margin; otherwise it
-uses the complete mask route.  It probes the nonpreferred available route on a
-geometric logical schedule, making exploration frequent during warm-up and
-vanishingly sparse in mature runs.  A large change in the cheap mask or
-position estimate advances the next probe so growth can reverse an earlier
-choice.
+Before doing an expensive retrieval, the implementation counts compatible
+posting-list populations from path-bucket metadata.  Each bucket now maintains
+an exact 32-bit posting count.  Position routes already expose posting counts
+and dense-bitmap word counts.  Tree cost is learned by one real complete query
+because branching depends on pattern shape.  A new structural/scale class
+first records a mask baseline, then one tree sample; later queries use the
+preferred route and update an integer EWMA.  Switching requires a 20% margin.
+Crossing a power-of-two mask-population boundary creates fresh evidence, which
+is the bounded mature-growth recheck; there are no periodic intra-class
+exploration probes.  This replaced a geometric-probe experiment which
+retrained too often on the integrated workload.
 
 ## 3. Route lifecycle and maintenance
 
 Root tree construction remains cost- and byte-gated.  Admission makes the tree
-available; it no longer makes it mandatory.  A newly admitted root obtains one
-tree sample per encountered shape before promotion.  Until then the router
-uses mask except for its bounded probes.
+available; it no longer makes it mandatory.  Cold roots do not allocate or
+hash route profiles: their complete mask queries continue accumulating the
+existing tree-admission evidence.  After admission, each new structural/scale
+class obtains a mask baseline and at most one initial tree probe.
 
 Admitted rigid-position postings are alternatives, not unconditional winners.
-For one posting, intersections, and dense intersections, compute a conservative
-pre-query work estimate and compare it with the trained tree and current mask
-estimate.  Position fanout may therefore revert to tree or mask without
-destroying the posting.  Expensive tree probes still contribute evidence for
-admitting a missing selective position.
+The current policy deliberately bypasses the profile only when its exact
+current work estimate is at least four times smaller than the compatible mask
+population, the same minimum gain required for position construction.  A
+marginal position remains indexed but cannot displace mask/tree routing.
+Expensive complete routes still contribute evidence for admitting a missing
+selective position.
 
-Compaction copies the bounded route table and counters, then invalidates only
-samples whose physical-work basis was changed materially.  Logical query
-counts and preferred-route history survive so compaction cannot cause a burst
-of unbounded retraining.  Rebuild and checkpoint tests must demonstrate the
-same answer sequence.  If the current checkpoint format reconstructs an index
-instead of serializing its adaptive state, the implementation will either
-serialize the bounded state or explicitly rebuild a deterministic equivalent
-before promotion; silently changing post-restart routing is not accepted.
+Compaction copies the bounded route table and counters.  Its samples use
+logical decoded work rather than addresses or allocation capacities, so no
+physical-generation invalidation is needed.  Checkpoints now write
+`compact_back_adaptive.txt` beside the existing checkpoint files.  It restores
+tree admission evidence, active position definitions, probation state, the
+position budget high-water mark, and every occupied route slot before search
+continues.  An older checkpoint without this sidecar cold-calibrates safely.
 
 ## 4. Observability
 
@@ -105,7 +113,7 @@ Extend backward-index statistics with:
 - fixed route-table capacity and bytes;
 - occupied entries, collisions, and replacements;
 - mask, tree, and position choices and exploration probes;
-- promotions, reversions, hysteresis holds, and estimate-triggered rechecks;
+- switches, reversions, hysteresis holds, and bounded initial probes;
 - cumulative estimated and observed cost by route; and
 - per-route exact candidate counts.
 
@@ -119,7 +127,7 @@ flat total can no longer hide a progressively failing shape.
    strategy and route before and after admission.
 2. Mixed-shape adversarial tests use the same root for a selective rigid
    pattern, a variable prefix with a selective suffix, and a broad true-answer
-   pattern.  They require different route choices and bounded re-probes rather
+   pattern.  They require different route choices and bounded probes rather
    than one root-wide choice.
 3. Crossover tests grow the population through powers of ten and verify that
    selective queries promote the tree, broad queries can return to mask, and a
@@ -162,3 +170,31 @@ flat total can no longer hide a progressively failing shape.
 Every implementation commit will state the theorem-proving invariant it
 preserves, the focused tests run, and which mature-scale claim remains open.
 Generated binaries and user-owned result directories remain untracked.
+
+## 7. Implemented validation and current decision
+
+Focused tests cover selective and broad patterns under one root, alpha
+renaming, a power-of-two population transition, bounded one-probe calibration,
+position cost gating, forced compaction, checkpoint save/rebuild/restore, and
+the fixed 416 KiB table bound.  Every route returns the same decreasing clause
+ID sequence.  The 10,000-record variable-prefix longevity case uses one
+position group/query instead of 10,000 mask groups or 39,998 combined raw-tree
+operations.  Optimized tests and the checkpoint/restart proof differential
+pass; sanitizer validation is recorded with the final implementation commit.
+
+On the accepted structural/scale-class implementation, the 1,000-given chat
+candidate reproduced 1,268,285 generated and 33,909 kept clauses.  It examined
+6,300,093 mask groups versus 10,871,045 for the matched mask control, a 42.0%
+reduction.  The route table had 3,992 occupied entries; cumulative choices were
+20,166 mask, 7,212 tree, and 386 position.  Total user CPU was 108.18 seconds
+versus 105.46 for the mask control.  An identical-work rerun took 112.27
+seconds, showing material host timing spread; the result is inside the planned
+5% short-prefix gate only if that noise is acknowledged.  It is not a CPU-win
+claim.
+
+The completed archived `chat_test.new.out4` mask run is the mature reference:
+9,573.63 user seconds, 20,764,898,738 posting groups, and 3,607.118 seconds in
+back lookup.  It saved 73.8% peak RSS against old P9 but used 1.87 times its
+user CPU.  No adaptive run yet reaches its 1.53-million-active back index.
+Consequently the branch is ready for a bounded/mature host comparison, not for
+promotion as the default strategy.
