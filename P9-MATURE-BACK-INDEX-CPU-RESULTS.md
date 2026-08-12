@@ -1,9 +1,10 @@
 # Mature backward-index CPU recovery: implementation and bounded results
 
 Status: implemented and locally validated on branch
-`mature-back-index-cpu`.  The external 7,365-given and proof-endpoint gates
-remain open; the short runs below are compatibility and fixed-overhead gates,
-not a claim that a week-long run has already been reproduced.
+`mature-back-index-cpu`.  An exact 1,500-given CHAT gate is now within 5.1%
+of normal P9 user CPU while using 67.2% less peak RSS.  The external
+7,365-given and proof-endpoint gates remain open; these bounded runs are not a
+claim that a week-long run has already been reproduced.
 
 ## Why the former adaptive mode failed
 
@@ -36,10 +37,45 @@ The changes are split into reviewable commits:
 | `091c386` | mask-derived execution cap, rollback, and fallback for initial tree probes |
 | `3f0d83d` | stable-index root-backfill iterator fixing the supplied `out6` crash |
 | `ccd8f43` | repeated-class qualification before any adaptive root-tree construction |
+| `4ddf9ed` | bounded compact forward-rewrite hot-path acceleration |
 
 Candidate completeness and decreasing-ID order remain authoritative in the
 mask/tree/position paths.  Scheduling, wall time, and cache residency never
 affect the selected route or the returned ID set.
+
+### Forward rewrite traversal
+
+The matched mature prefix showed that backward lookup was only part of the
+remaining gap.  At about 1,500 given clauses, compact forward demodulation was
+also materially slower than normal P9.  A 300-given `gprof` run found more
+than 56 million calls each to packed-slice validation/access helpers and more
+than 13 million recursive radix retrieval calls.  That work grows with rewrite
+attempts, so it cannot be treated as short-run setup overhead.
+
+The compact rewrite bank now:
+
+- snapshots the immutable token-array address and logical base once per
+  rewrite query, then decodes already-validated packed slices directly in
+  recursive matching and contractum construction;
+- stores each radix node's first token code in a four-byte parallel array,
+  avoiding repeated token-slice resolution during sibling routing;
+- maps rigid children of the rewrite root directly by P9 symbol number.  This
+  is a performance cache only: variables retain predecessor order and a miss
+  falls back to the original ordered sibling scan; and
+- represents bound rewrite variables with two 64-bit words plus the existing
+  trail, instead of clearing all 100 binding pointers per rewrite attempt.
+
+Radix insertion and splitting update the cached first codes and root map.
+Index compaction rebuilds both from live rules.  Term-pool rebasing does not
+change symbol codes, and each query refreshes the token-array snapshot.  The
+focused test covers normal-form and justification equality with the legacy
+demodulator, wide-root lookup, rewrite-bank compaction, and a pool whose
+logical base is above 32 bits.
+
+The long-lived memory cost is four bytes per physical radix node plus one
+`uint32_t` per allocated P9 symbol slot.  It is independent of query and
+rewrite-attempt counts.  On the 1,500-given CHAT prefix the root map is 1 KiB;
+the parallel first-code array is about 256 KiB at the current capacity.
 
 ### Route calibration
 
@@ -99,6 +135,13 @@ replace mask retrieval.
   one deduplicated match set drives budget checks, bitmaps, occurrences, and
   postings.  Its work no longer multiplies by the total admitted-feature
   count.  Roots whose last feature is demoted trigger no later traversal.
+
+Factor 16 is intentionally not the new default.  On the exact 1,500-given
+gate it took 210.38 seconds versus 210.57 seconds for factor 64, which is
+measurement parity.  Factor 16 admitted 43 position features and spent 73.5
+million census/backfill credits; factor 64 admitted 2 and spent 53.0 million.
+With no endpoint CPU benefit, factor 64 preserves the stronger construction
+bound for unseen long-running workloads.
 
 At the supplied later `out51` state, the old route-observed work totals about
 8.128 billion units.  Applying the new default ledger to the same amount of
@@ -168,6 +211,8 @@ with release binary SHA-256
 The post-completion-audit 600- and 1,000-given pairs used release binary
 SHA-256
 `dd308c0d7a95e35d776c184a8e5b8042b108b12d2374435c7537e6be88348bc2`.
+The forward-rewrite and exact 1,500-given gates used release binary SHA-256
+`fc674b7ba3c75092732ab91a86e5d969d3f2cccd17d59a7dddb745927f440463`.
 Mask8 and adaptive cases ran with the same generated input on dedicated CPUs.
 
 | Gate | mask8 | adaptive | Result |
@@ -188,6 +233,34 @@ The final-binary cold-prefix gates are:
 | 600 given, generated / kept | 497,430 / 16,974 | 497,430 / 16,974 | identical |
 | 1,000 given, user CPU | 95.23 s | 93.20 s | adaptive -2.1% |
 | 1,000 given, generated / kept | 1,268,285 / 33,909 | 1,268,285 / 33,909 | identical |
+
+Four reversed-core 600-given comparisons isolated commit `4ddf9ed` from CPU
+assignment.  The pre-change compact binary averaged 48.68 seconds user CPU;
+the new binary averaged 44.54 seconds, an 8.5% reduction.  Every run ended at
+601 given clauses with an identical generated/kept trajectory, and peak RSS
+remained about 90 MiB.
+
+The exact mature-prefix comparison is:
+
+| 1,500-given gate | User CPU | Peak RSS | Generated / kept | Demod attempts / rewrites |
+|:---|---:|---:|---:|---:|
+| normal P9 | 200.32 s | 275,584 KiB | 2,947,138 / 66,935 | 83,176,695 / 10,001,163 |
+| compact before `4ddf9ed` | 222.65 s | 90,420 KiB | 2,947,136 / 66,933 | 83,176,656 / 10,001,165 |
+| compact at `4ddf9ed` | 210.38 s | 90,428 KiB | 2,947,136 / 66,933 | 83,176,656 / 10,001,165 |
+
+Thus current compact is 5.0% slower than normal P9 at this endpoint and 5.5%
+faster than the preceding compact binary.  It removes 55% of the former
+compact CPU penalty while preserving the compact trajectory exactly.  Peak
+RSS is 67.2% below normal P9 here.  This prefix has not yet accumulated the
+passive population of the supplied multi-hour/day outputs, so this is a CPU
+competitiveness result, not an 80--90% endpoint-RAM claim.
+
+The component clocks explain why the proof endpoint remains open: current
+compact forward demodulation takes 61.96 seconds versus 50.60 seconds for
+normal P9, and compact backward demodulation takes 22.10 seconds versus 5.92
+seconds.  Other compact-path savings nearly offset those gaps at 1,500 given,
+but their mature slopes still require the supplied 7,365-given and full-proof
+comparisons.
 
 At 1,000 givens all 27,764 adaptive lookups had been observed by the pre-tree
 frequency sketch and 370 were post-threshold observations, but the separate
@@ -263,9 +336,13 @@ reached its 120-second timeout at 392,028 KiB before completing all four
 synthetic phases; it is recorded as an incomplete resource-bound run, not as
 scale evidence and not as a failure hidden by extrapolation.
 
-The focused test passes under ASan+UBSan.  Compact ID-map, rewrite, unit-index,
-feature-index, report-parser, OTTER audit, and OTTER checkpoint suites also
-pass.
+The focused test passes under ASan+UBSan with leak reporting disabled;
+enabling LeakSanitizer reports the test process's pre-existing process-global
+LADR allocations, not an invalid access in this change.  The complete
+`compact-frontier-tests`, `compact-generalization-smoke`, and
+`long-run-scalability-tests` targets pass, including compact ID-map, rewrite,
+unit-index, feature-index, report-parser, OTTER audit, and OTTER checkpoint
+coverage.
 
 The long-run report parser now exports interval deltas for the new admission,
 churn, credit, census, backfill, cooldown, and freeze counters.  This makes the
