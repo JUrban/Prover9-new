@@ -61,6 +61,7 @@ class ReportTest(unittest.TestCase):
         self.assertAlmostEqual(rows[1]["back_children_per_query"], 1.0)
         self.assertAlmostEqual(rows[1]["back_combined_per_query"], 26.0)
         self.assertAlmostEqual(rows[1]["back_lookup_cpu_pct"], 10.0)
+        self.assertAlmostEqual(rows[1]["back_lookup_us_per_query"], 100000.0)
         self.assertAlmostEqual(rows[1]["back_child_hit_pct"], 85.0)
         self.assertAlmostEqual(rows[1]["clock_preprocess_cpu_pct"], 90.0)
         self.assertAlmostEqual(rows[1]["clock_demod_cpu_pct"], 40.0)
@@ -179,12 +180,14 @@ User_CPU=2.0, System_CPU=0.0, Wall_clock=2.
             "last_kept": 200, "last_proofs": 0, "last_user_cpu": 100.0,
             "peak_rss_kb": 100000, "peak_rss_mib": 100000 / 1024,
             "samples": 2, "combined_slope_ratio": 1.0,
+            "back_lookup_cpu_slope_ratio": 1.0,
         }
         candidate = {
             "label": "new", "last_given": 100, "last_generated": 1000,
             "last_kept": 200, "last_proofs": 0, "last_user_cpu": 120.0,
             "peak_rss_kb": 19000, "peak_rss_mib": 19000 / 1024,
-            "samples": 3, "combined_slope_ratio": 1.20,
+            "samples": 3, "combined_slope_ratio": 4.0,
+            "back_lookup_cpu_slope_ratio": 1.20,
         }
         comparison = REPORT.compare_summaries(reference, candidate)
         self.assertEqual(comparison["result"], "eligible")
@@ -192,6 +195,12 @@ User_CPU=2.0, System_CPU=0.0, Wall_clock=2.
         self.assertEqual(comparison["cpu_gate"], "pass")
         self.assertEqual(comparison["ram_gate"], "pass")
         self.assertEqual(comparison["slope_gate"], "pass")
+
+        candidate["back_lookup_cpu_slope_ratio"] = 1.30
+        cpu_slope_failure = REPORT.compare_summaries(reference, candidate)
+        self.assertEqual(cpu_slope_failure["slope_gate"], "fail")
+        self.assertEqual(cpu_slope_failure["result"], "reject")
+        candidate["back_lookup_cpu_slope_ratio"] = 1.20
 
         candidate["peak_rss_kb"] = 100000
         candidate["peak_rss_mib"] = 100000 / 1024
@@ -219,7 +228,7 @@ User_CPU=2.0, System_CPU=0.0, Wall_clock=2.
             "candidate_peak_rss_mib": 10.0, "ram_savings_pct": 90.0,
             "ram_gate": "pass", "candidate_periodic_samples": 3,
             "interval_gate": "pass",
-            "candidate_back_slope_ratio": 1.1, "slope_gate": "pass",
+            "candidate_back_cpu_slope_ratio": 1.1, "slope_gate": "pass",
             "max_cpu_ratio": 1.25, "min_ram_saving_pct": 80.0,
             "max_back_slope_ratio": 1.25,
             "result": "eligible",

@@ -42,7 +42,9 @@ With `--compare-to-first`, the first output is the reference and each later
 output is checked mechanically.  The audit requires identical final given,
 generated, kept, and proof counters; at most 1.25 times the reference user CPU;
 at least 80% lower peak RSS; at least two periodic samples; and no more than a
-1.25-fold first-to-last counted back-work/query slope.  Missing evidence is
+1.25-fold first-to-last measured back-lookup CPU/query slope.  The separately
+reported tree/group/sibling/child work counts remain diagnostic because those
+operations do not have equal costs.  Missing evidence is
 `unknown`, never a pass.  `eligible` still requires independent proof checking
 and total-job/cgroup accounting.  For uncompressed matrix output, a neighboring
 GNU `time` file such as `case.time` is discovered automatically and takes
@@ -119,9 +121,11 @@ index reports and the short `Process_residency_kb` report are unaffected.
 
 Applied to `chat_test.new.out41`, the interval view sharpens the existing
 diagnosis: counted back work/query rises from about 1,182 in the first interval
-to about 10,101 in the last, an 8.55-fold increase.  The last interval also
-generates about 156,801 clauses/given.  These are two simultaneous problems;
-the adaptive index work targets the former and cannot remove the latter.
+to about 10,101 in the last, an 8.55-fold increase.  More importantly, measured
+back-lookup CPU/query rises from about 147 to 1,419 microseconds, a 9.65-fold
+increase.  The last interval also generates about 156,801 clauses/given.  These
+are two simultaneous problems; the adaptive index work targets the former and
+cannot remove the latter.
 
 ### Full-proof audit of `chat_test.new.out1--3`
 
