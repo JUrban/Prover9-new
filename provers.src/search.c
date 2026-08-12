@@ -2111,6 +2111,8 @@ Prover_options init_prover_options(void)
   p->report_given =     init_parm("report_given",         -1,     -1,INT_MAX);
   p->report_preprocessing = init_parm("report_preprocessing", -1, -1,INT_MAX);
   p->compact_passive_cache = init_parm("compact_passive_cache", 4, 0, 1024);
+  p->passive_selector_buffer =
+    init_parm("passive_selector_buffer", 65536, 1024, INT_MAX);
   p->compact_term_reclaim_kb =
     init_parm("compact_term_reclaim_kb", 8192, 1, INT_MAX);
   p->compact_index_stale_pct =
@@ -2207,6 +2209,10 @@ Prover_options init_prover_options(void)
   p->passive_directory = init_stringparm("passive_directory", 2,
                                          "memory",
                                          "file");
+
+  p->passive_selector_store = init_stringparm("passive_selector_store", 2,
+                                              "heap",
+                                              "file");
 
   p->compact_unit_strategy =
     init_stringparm("compact_unit_strategy", 3,
@@ -2603,6 +2609,8 @@ void update_memory_stats(void)
     cold_passive_store_get_stats(Dense_body_store);
   struct dense_passive_directory_stats directory =
     dense_passive_directory_stats();
+  struct dense_passive_selector_stats selectors =
+    dense_passive_selector_stats();
   struct memory_stats ms;
   struct memory_process_stats process;
   memory_get_stats(&ms);
@@ -2633,6 +2641,29 @@ void update_memory_stats(void)
     directory.file_eviction_bytes;
   Stats.dense_passive_directory_file_eviction_failures =
     directory.file_eviction_failures;
+  Stats.dense_passive_selector_buffered_entries =
+    selectors.buffered_entries;
+  Stats.dense_passive_selector_buffer_bytes = selectors.buffer_bytes;
+  Stats.dense_passive_selector_run_entries = selectors.run_entries;
+  Stats.dense_passive_selector_run_logical_bytes =
+    selectors.run_logical_bytes;
+  Stats.dense_passive_selector_run_physical_bytes =
+    selectors.run_physical_bytes;
+  Stats.dense_passive_selector_runs = selectors.runs;
+  Stats.dense_passive_selector_peak_runs = selectors.peak_runs;
+  Stats.dense_passive_selector_flushes = selectors.flushes;
+  Stats.dense_passive_selector_merges = selectors.merges;
+  Stats.dense_passive_selector_file_reads = selectors.file_reads;
+  Stats.dense_passive_selector_file_read_bytes = selectors.file_read_bytes;
+  Stats.dense_passive_selector_file_writes = selectors.file_writes;
+  Stats.dense_passive_selector_file_write_bytes = selectors.file_write_bytes;
+  Stats.dense_passive_selector_file_evictions = selectors.file_evictions;
+  Stats.dense_passive_selector_file_eviction_bytes =
+    selectors.file_eviction_bytes;
+  Stats.dense_passive_selector_file_eviction_failures =
+    selectors.file_eviction_failures;
+  Stats.dense_passive_selector_stale_entries_discarded =
+    selectors.stale_entries_discarded;
   Stats.dense_passive_arena_records = ps.records;
   Stats.dense_passive_arena_record_bytes = ps.record_bytes;
   Stats.dense_passive_arena_backing_bytes = ps.backing_bytes;
@@ -3430,6 +3461,34 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
                       s.dense_passive_heap_bytes +
                       s.dense_passive_arena_backing_bytes) /
             s.dense_passive_records);
+  if (dense_passive_mode())
+    fprintf(fp,
+            "Dense_passive_selector: store=%s, buffer_limit=%d, "
+            "buffered=%s, buffer_bytes=%s, run_entries=%s, "
+            "run_logical=%s, run_physical=%s, runs=%s, peak_runs=%s, "
+            "flushes=%s, merges=%s, reads=%s (%s bytes), "
+            "writes=%s (%s bytes), evictions=%s (%s bytes), "
+            "eviction_failures=%s, stale_discarded=%s.\n",
+            str_ident(stringparm1(Opt->passive_selector_store), "file") ?
+              "file" : "heap",
+            parm(Opt->passive_selector_buffer),
+            comma_num(s.dense_passive_selector_buffered_entries),
+            comma_num(s.dense_passive_selector_buffer_bytes),
+            comma_num(s.dense_passive_selector_run_entries),
+            comma_num(s.dense_passive_selector_run_logical_bytes),
+            comma_num(s.dense_passive_selector_run_physical_bytes),
+            comma_num(s.dense_passive_selector_runs),
+            comma_num(s.dense_passive_selector_peak_runs),
+            comma_num(s.dense_passive_selector_flushes),
+            comma_num(s.dense_passive_selector_merges),
+            comma_num(s.dense_passive_selector_file_reads),
+            comma_num(s.dense_passive_selector_file_read_bytes),
+            comma_num(s.dense_passive_selector_file_writes),
+            comma_num(s.dense_passive_selector_file_write_bytes),
+            comma_num(s.dense_passive_selector_file_evictions),
+            comma_num(s.dense_passive_selector_file_eviction_bytes),
+            comma_num(s.dense_passive_selector_file_eviction_failures),
+            comma_num(s.dense_passive_selector_stale_entries_discarded));
   if (dense_passive_mode())
     fprintf(fp,
             "Dense_passive_gc: arena_materialized=%s, "
@@ -16163,6 +16222,10 @@ Prover_results search(Prover_input p)
     cold_passive_store_free(Dense_body_store);
     Dense_body_store = NULL;
     Dense_arena_bytes_reclaimed = 0;
+    configure_dense_passive_selectors(
+      str_ident(stringparm1(Opt->passive_selector_store), "file") ?
+        DENSE_SELECTOR_FILE : DENSE_SELECTOR_HEAP,
+      (size_t) parm(Opt->passive_selector_buffer));
     configure_dense_passive_directory(
       str_ident(stringparm1(Opt->passive_directory), "file") ?
         DENSE_DIRECTORY_FILE : DENSE_DIRECTORY_MEMORY);

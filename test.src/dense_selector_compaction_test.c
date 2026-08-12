@@ -82,6 +82,7 @@ int main(void)
   size_t restored_cursor;
 
   init_standard_ladr();
+  configure_dense_passive_selectors(DENSE_SELECTOR_FILE, 64);
   configure_dense_passive_directory(DENSE_DIRECTORY_FILE);
   configure_dense_passive(TRUE, archive_clause, activate_clause);
   rules = plist_append(rules,
@@ -139,11 +140,18 @@ int main(void)
   {
     struct dense_passive_directory_stats stats =
       dense_passive_directory_stats();
+    struct dense_passive_selector_stats selectors =
+      dense_passive_selector_stats();
     if (stats.mode != DENSE_DIRECTORY_FILE ||
         stats.logical_bytes !=
           (CLAUSES - SELECT_BEFORE_COMPACT) * 64ULL ||
         stats.allocated_bytes < stats.logical_bytes)
       fail("file directory accounting changed during compaction");
+    if (selectors.mode != DENSE_SELECTOR_FILE || selectors.flushes == 0 ||
+        selectors.merges == 0 || selectors.runs == 0 ||
+        selectors.run_entries + selectors.buffered_entries !=
+          CLAUSES - SELECT_BEFORE_COMPACT)
+      fail("file selector accounting changed during compaction");
   }
   check_payload(SELECT_BEFORE_COMPACT + 1, CLAUSES,
                 "payload totals changed during compaction");
@@ -163,6 +171,7 @@ int main(void)
   zap_given_selectors();
   configure_dense_passive(FALSE, NULL, NULL);
   configure_dense_passive_directory(DENSE_DIRECTORY_MEMORY);
+  configure_dense_passive_selectors(DENSE_SELECTOR_HEAP, 65536);
   for (i = 0; i < CLAUSES; i++)
     zap_topform(Stored[i]);
   puts("dense_selector_compaction_test: PASS");

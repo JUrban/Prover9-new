@@ -20,6 +20,7 @@
 #include "semantics.h"
 #include "../ladr/avltree.h"
 #include "../ladr/clause_eval.h"
+#include <errno.h>
 #include <stdint.h>
 #include <unistd.h>
 #ifndef __EMSCRIPTEN__
@@ -38,6 +39,30 @@ enum { GS_ORDER_WEIGHT,
 
 typedef struct giv_select *Giv_select;
 
+#define DENSE_SELECTOR_RUN_LEVELS 64
+#define DENSE_SELECTOR_READ_ENTRIES 256
+
+struct dense_selector_entry {
+  unsigned long long id;
+  union {
+    unsigned long long hint_id;
+    double weight;
+  } key;
+  uint32_t record;
+  uint32_t padding;
+};
+
+struct dense_selector_run {
+  int fd;
+  unsigned long long remaining;
+  off_t next_offset;
+  struct dense_selector_entry head;
+  BOOL head_valid;
+  struct dense_selector_entry *read_buffer;
+  size_t read_size;
+  size_t read_at;
+};
+
 struct giv_select {
   char         *name;
   int          order;
@@ -51,6 +76,20 @@ struct giv_select {
   size_t dense_capacity;
   size_t dense_active;
   unsigned dense_bit;
+  struct dense_selector_entry *dense_buffer;
+  size_t dense_buffer_size;
+  struct dense_selector_run dense_runs[DENSE_SELECTOR_RUN_LEVELS];
+  unsigned long long dense_peak_runs;
+  unsigned long long dense_flushes;
+  unsigned long long dense_merges;
+  unsigned long long dense_file_reads;
+  unsigned long long dense_file_read_bytes;
+  unsigned long long dense_file_writes;
+  unsigned long long dense_file_write_bytes;
+  unsigned long long dense_file_evictions;
+  unsigned long long dense_file_eviction_bytes;
+  unsigned long long dense_file_eviction_failures;
+  unsigned long long dense_stale_entries_discarded;
 };  /* struct giv_select */
 
 #define DENSE_PASSIVE_ACTIVE  0x01U
@@ -103,6 +142,8 @@ static Dense_passive_activate_fn Dense_activate = NULL;
 static struct dense_passive_record *Dense_records = NULL;
 static Dense_passive_directory_mode Dense_directory_mode =
   DENSE_DIRECTORY_MEMORY;
+static Dense_passive_selector_mode Dense_selector_mode = DENSE_SELECTOR_HEAP;
+static size_t Dense_selector_buffer_limit = 65536;
 static int Dense_record_fd = -1;
 static size_t Dense_directory_advised_bytes = 0;
 static size_t Dense_directory_last_evict_bytes = 0;
@@ -369,6 +410,26 @@ void configure_dense_passive_directory(
 }
 
 /* PUBLIC */
+void configure_dense_passive_selectors(Dense_passive_selector_mode mode,
+                                       size_t buffer_entries)
+{
+  if (mode != DENSE_SELECTOR_HEAP && mode != DENSE_SELECTOR_FILE)
+    fatal_error("configure_dense_passive_selectors: invalid mode");
+#ifdef __EMSCRIPTEN__
+  if (mode == DENSE_SELECTOR_FILE)
+    fatal_error("configure_dense_passive_selectors: file mode unavailable");
+#endif
+  if (Dense_record_count != 0 || High.selectors != NULL ||
+      Low.selectors != NULL)
+    fatal_error("configure_dense_passive_selectors: live selectors");
+  if (buffer_entries < 2 ||
+      buffer_entries > SIZE_MAX / sizeof(struct dense_selector_entry))
+    fatal_error("configure_dense_passive_selectors: invalid buffer size");
+  Dense_selector_mode = mode;
+  Dense_selector_buffer_limit = buffer_entries;
+}
+
+/* PUBLIC */
 struct dense_passive_directory_stats dense_passive_directory_stats(void)
 {
   struct dense_passive_directory_stats stats;
@@ -591,13 +652,17 @@ void dense_passive_memory(unsigned long long *record_bytes,
 {
   unsigned long long heaps = 0;
   Plist p;
-  for (p = High.selectors; p != NULL; p = p->next) {
-    Giv_select gs = p->v;
-    heaps += (unsigned long long) gs->dense_capacity * sizeof(uint32_t);
-  }
-  for (p = Low.selectors; p != NULL; p = p->next) {
-    Giv_select gs = p->v;
-    heaps += (unsigned long long) gs->dense_capacity * sizeof(uint32_t);
+  if (Dense_selector_mode == DENSE_SELECTOR_FILE)
+    heaps = dense_passive_selector_stats().buffer_bytes;
+  else {
+    for (p = High.selectors; p != NULL; p = p->next) {
+      Giv_select gs = p->v;
+      heaps += (unsigned long long) gs->dense_capacity * sizeof(uint32_t);
+    }
+    for (p = Low.selectors; p != NULL; p = p->next) {
+      Giv_select gs = p->v;
+      heaps += (unsigned long long) gs->dense_capacity * sizeof(uint32_t);
+    }
   }
   if (record_bytes != NULL)
     *record_bytes = Dense_directory_mode == DENSE_DIRECTORY_MEMORY ?
@@ -677,6 +742,448 @@ static int dense_compare(Giv_select gs, uint32_t ai, uint32_t bi)
   return 0;
 }
 
+static int dense_entry_compare(int order,
+                               const struct dense_selector_entry *a,
+                               const struct dense_selector_entry *b)
+{
+  if (order == GS_ORDER_WEIGHT) {
+    if (a->key.weight < b->key.weight) return -1;
+    if (a->key.weight > b->key.weight) return 1;
+  }
+  else if (order == GS_ORDER_HINT_AGE) {
+    if (a->key.hint_id != 0 && b->key.hint_id == 0) return -1;
+    if (a->key.hint_id == 0 && b->key.hint_id != 0) return 1;
+    if (a->key.hint_id < b->key.hint_id) return -1;
+    if (a->key.hint_id > b->key.hint_id) return 1;
+  }
+  if (a->id < b->id) return -1;
+  if (a->id > b->id) return 1;
+  return 0;
+}
+
+static int Dense_entry_sort_order = GS_ORDER_AGE;
+
+static int dense_entry_qsort_compare(const void *va, const void *vb)
+{
+  return dense_entry_compare(
+    Dense_entry_sort_order,
+    (const struct dense_selector_entry *) va,
+    (const struct dense_selector_entry *) vb);
+}
+
+static void dense_selector_write_all(Giv_select gs, int fd,
+                                     const void *buffer, size_t bytes)
+{
+#ifndef __EMSCRIPTEN__
+  const unsigned char *p = buffer;
+  size_t done = 0;
+  while (done < bytes) {
+    ssize_t n = write(fd, p + done, bytes - done);
+    if (n < 0 && errno == EINTR)
+      continue;
+    if (n <= 0)
+      fatal_error("dense_selector_write_all: write failed");
+    done += (size_t) n;
+  }
+  gs->dense_file_writes++;
+  gs->dense_file_write_bytes += bytes;
+#else
+  (void) gs;
+  (void) fd;
+  (void) buffer;
+  (void) bytes;
+  fatal_error("dense_selector_write_all: file mode unavailable");
+#endif
+}
+
+static void dense_selector_run_init(struct dense_selector_run *run)
+{
+  memset(run, 0, sizeof(*run));
+  run->fd = -1;
+}
+
+static void dense_selector_run_close(struct dense_selector_run *run)
+{
+  if (run->fd >= 0 && close(run->fd) != 0)
+    fatal_error("dense_selector_run_close: close failed");
+  safe_free(run->read_buffer);
+  dense_selector_run_init(run);
+}
+
+static unsigned long long dense_selector_run_entries(
+  const struct dense_selector_run *run)
+{
+  return run->remaining + (run->head_valid ? 1 : 0);
+}
+
+static BOOL dense_selector_run_next(Giv_select gs,
+                                    struct dense_selector_run *run,
+                                    struct dense_selector_entry *entry)
+{
+#ifndef __EMSCRIPTEN__
+  if (run->remaining == 0)
+    return FALSE;
+  if (run->read_at == run->read_size) {
+    size_t request = run->remaining < DENSE_SELECTOR_READ_ENTRIES ?
+      (size_t) run->remaining : DENSE_SELECTOR_READ_ENTRIES;
+    size_t bytes = request * sizeof(*run->read_buffer);
+    size_t done = 0;
+    if (run->read_buffer == NULL)
+      run->read_buffer = safe_malloc(
+        DENSE_SELECTOR_READ_ENTRIES * sizeof(*run->read_buffer));
+    while (done < bytes) {
+      ssize_t n = pread(run->fd, (unsigned char *) run->read_buffer + done,
+                        bytes - done, run->next_offset + (off_t) done);
+      if (n < 0 && errno == EINTR)
+        continue;
+      if (n <= 0)
+        fatal_error("dense_selector_run_next: read failed");
+      done += (size_t) n;
+    }
+    run->next_offset += (off_t) bytes;
+    run->read_size = request;
+    run->read_at = 0;
+    gs->dense_file_reads++;
+    gs->dense_file_read_bytes += bytes;
+  }
+  *entry = run->read_buffer[run->read_at++];
+  run->remaining--;
+  return TRUE;
+#else
+  (void) gs;
+  (void) run;
+  (void) entry;
+  fatal_error("dense_selector_run_next: file mode unavailable");
+  return FALSE;
+#endif
+}
+
+static BOOL dense_selector_run_stream_next(
+  Giv_select gs, struct dense_selector_run *run,
+  struct dense_selector_entry *entry)
+{
+  if (run->head_valid) {
+    *entry = run->head;
+    run->head_valid = FALSE;
+    return TRUE;
+  }
+  return dense_selector_run_next(gs, run, entry);
+}
+
+static void dense_selector_run_evict(Giv_select gs,
+                                     struct dense_selector_run *run)
+{
+#if !defined(__EMSCRIPTEN__) && defined(POSIX_FADV_DONTNEED)
+  unsigned long long bytes = dense_selector_run_entries(run) *
+    sizeof(struct dense_selector_entry);
+  if (fsync(run->fd) != 0 ||
+      posix_fadvise(run->fd, 0, 0, POSIX_FADV_DONTNEED) != 0) {
+    gs->dense_file_eviction_failures++;
+    return;
+  }
+  gs->dense_file_evictions++;
+  gs->dense_file_eviction_bytes += bytes;
+#else
+  (void) gs;
+  (void) run;
+#endif
+}
+
+static struct dense_selector_run dense_selector_run_from_buffer(
+  Giv_select gs, const struct dense_selector_entry *entries, size_t count)
+{
+  struct dense_selector_run run;
+  dense_selector_run_init(&run);
+#ifndef __EMSCRIPTEN__
+  run.fd = open_private_temp_file("prover9-selector-XXXXXX");
+  if (run.fd < 0)
+    fatal_error("dense_selector_run_from_buffer: cannot create backing file");
+  dense_selector_write_all(gs, run.fd, entries,
+                           count * sizeof(*entries));
+  run.remaining = count;
+  run.next_offset = 0;
+#else
+  (void) gs;
+  (void) entries;
+  (void) count;
+  fatal_error("dense_selector_run_from_buffer: file mode unavailable");
+#endif
+  return run;
+}
+
+static struct dense_selector_run dense_selector_merge_runs(
+  Giv_select gs, struct dense_selector_run *a,
+  struct dense_selector_run *b)
+{
+  struct dense_selector_run output;
+  struct dense_selector_entry ae, be;
+  struct dense_selector_entry out[DENSE_SELECTOR_READ_ENTRIES];
+  size_t out_size = 0;
+  unsigned long long count = 0;
+  BOOL have_a, have_b;
+  dense_selector_run_init(&output);
+#ifndef __EMSCRIPTEN__
+  output.fd = open_private_temp_file("prover9-selector-XXXXXX");
+  if (output.fd < 0)
+    fatal_error("dense_selector_merge_runs: cannot create backing file");
+  have_a = dense_selector_run_stream_next(gs, a, &ae);
+  have_b = dense_selector_run_stream_next(gs, b, &be);
+  while (have_a || have_b) {
+    if (!have_b || (have_a && dense_entry_compare(gs->order, &ae, &be) <= 0)) {
+      out[out_size++] = ae;
+      have_a = dense_selector_run_stream_next(gs, a, &ae);
+    }
+    else {
+      out[out_size++] = be;
+      have_b = dense_selector_run_stream_next(gs, b, &be);
+    }
+    count++;
+    if (out_size == DENSE_SELECTOR_READ_ENTRIES) {
+      dense_selector_write_all(gs, output.fd, out, sizeof(out));
+      out_size = 0;
+    }
+  }
+  if (out_size != 0)
+    dense_selector_write_all(gs, output.fd, out,
+                             out_size * sizeof(*out));
+  output.remaining = count;
+  output.next_offset = 0;
+  dense_selector_run_close(a);
+  dense_selector_run_close(b);
+#else
+  (void) gs;
+  (void) a;
+  (void) b;
+  fatal_error("dense_selector_merge_runs: file mode unavailable");
+#endif
+  return output;
+}
+
+static unsigned dense_selector_run_count(Giv_select gs)
+{
+  unsigned level, count = 0;
+  for (level = 0; level < DENSE_SELECTOR_RUN_LEVELS; level++)
+    if (gs->dense_runs[level].fd >= 0)
+      count++;
+  return count;
+}
+
+static void dense_selector_flush(Giv_select gs)
+{
+  struct dense_selector_run incoming;
+  unsigned level;
+  if (gs->dense_buffer_size == 0)
+    return;
+  Dense_entry_sort_order = gs->order;
+  qsort(gs->dense_buffer, gs->dense_buffer_size,
+        sizeof(*gs->dense_buffer), dense_entry_qsort_compare);
+  incoming = dense_selector_run_from_buffer(
+    gs, gs->dense_buffer, gs->dense_buffer_size);
+  gs->dense_buffer_size = 0;
+  gs->dense_flushes++;
+  for (level = 0; level < DENSE_SELECTOR_RUN_LEVELS; level++) {
+    if (gs->dense_runs[level].fd < 0) {
+      gs->dense_runs[level] = incoming;
+      dense_selector_run_init(&incoming);
+      dense_selector_run_evict(gs, &gs->dense_runs[level]);
+      break;
+    }
+    incoming = dense_selector_merge_runs(
+      gs, &gs->dense_runs[level], &incoming);
+    gs->dense_merges++;
+  }
+  if (level == DENSE_SELECTOR_RUN_LEVELS)
+    fatal_error("dense_selector_flush: run-level overflow");
+  {
+    unsigned runs = dense_selector_run_count(gs);
+    if (runs > gs->dense_peak_runs)
+      gs->dense_peak_runs = runs;
+  }
+}
+
+static void dense_selector_buffer_remove_root(Giv_select gs)
+{
+  struct dense_selector_entry last;
+  size_t i = 0;
+  if (gs->dense_buffer_size == 0)
+    return;
+  last = gs->dense_buffer[--gs->dense_buffer_size];
+  while (i * 2 + 1 < gs->dense_buffer_size) {
+    size_t child = i * 2 + 1;
+    if (child + 1 < gs->dense_buffer_size &&
+        dense_entry_compare(gs->order, &gs->dense_buffer[child+1],
+                            &gs->dense_buffer[child]) < 0)
+      child++;
+    if (dense_entry_compare(gs->order, &last,
+                            &gs->dense_buffer[child]) <= 0)
+      break;
+    gs->dense_buffer[i] = gs->dense_buffer[child];
+    i = child;
+  }
+  if (gs->dense_buffer_size != 0)
+    gs->dense_buffer[i] = last;
+}
+
+static void dense_selector_file_push(Giv_select gs, uint32_t record)
+{
+  struct dense_passive_record *r = &Dense_records[record];
+  struct dense_selector_entry entry;
+  size_t i;
+  if (gs->dense_buffer == NULL)
+    gs->dense_buffer = safe_malloc(
+      Dense_selector_buffer_limit * sizeof(*gs->dense_buffer));
+  entry.id = r->id;
+  if (gs->order == GS_ORDER_WEIGHT)
+    entry.key.weight = r->weight;
+  else if (gs->order == GS_ORDER_HINT_AGE)
+    entry.key.hint_id = r->hint_id;
+  else
+    entry.key.hint_id = 0;
+  entry.record = record;
+  entry.padding = 0;
+  i = gs->dense_buffer_size++;
+  while (i > 0) {
+    size_t parent = (i - 1) / 2;
+    if (dense_entry_compare(gs->order, &gs->dense_buffer[parent],
+                            &entry) <= 0)
+      break;
+    gs->dense_buffer[i] = gs->dense_buffer[parent];
+    i = parent;
+  }
+  gs->dense_buffer[i] = entry;
+  if (gs->dense_buffer_size == Dense_selector_buffer_limit)
+    dense_selector_flush(gs);
+}
+
+static BOOL dense_selector_file_min(Giv_select gs,
+                                    struct dense_selector_entry *entry,
+                                    int *source)
+{
+  unsigned level;
+  BOOL found = FALSE;
+  if (gs->dense_buffer_size != 0) {
+    *entry = gs->dense_buffer[0];
+    *source = -1;
+    found = TRUE;
+  }
+  for (level = 0; level < DENSE_SELECTOR_RUN_LEVELS; level++) {
+    struct dense_selector_run *run = &gs->dense_runs[level];
+    if (run->fd < 0)
+      continue;
+    if (!run->head_valid) {
+      if (!dense_selector_run_next(gs, run, &run->head)) {
+        dense_selector_run_close(run);
+        continue;
+      }
+      run->head_valid = TRUE;
+    }
+    if (!found || dense_entry_compare(gs->order, &run->head, entry) < 0) {
+      *entry = run->head;
+      *source = (int) level;
+      found = TRUE;
+    }
+  }
+  return found;
+}
+
+static void dense_selector_file_remove_min(Giv_select gs, int source)
+{
+  if (source < 0)
+    dense_selector_buffer_remove_root(gs);
+  else
+    gs->dense_runs[source].head_valid = FALSE;
+}
+
+static void dense_selector_file_reset(Giv_select gs)
+{
+  unsigned level;
+  safe_free(gs->dense_buffer);
+  gs->dense_buffer = NULL;
+  gs->dense_buffer_size = 0;
+  for (level = 0; level < DENSE_SELECTOR_RUN_LEVELS; level++)
+    dense_selector_run_close(&gs->dense_runs[level]);
+}
+
+static void dense_selector_initialize(Giv_select gs)
+{
+  unsigned level;
+  gs->dense_heap = NULL;
+  gs->dense_size = 0;
+  gs->dense_capacity = 0;
+  gs->dense_active = 0;
+  gs->dense_buffer = NULL;
+  gs->dense_buffer_size = 0;
+  for (level = 0; level < DENSE_SELECTOR_RUN_LEVELS; level++)
+    dense_selector_run_init(&gs->dense_runs[level]);
+  gs->dense_peak_runs = 0;
+  gs->dense_flushes = 0;
+  gs->dense_merges = 0;
+  gs->dense_file_reads = 0;
+  gs->dense_file_read_bytes = 0;
+  gs->dense_file_writes = 0;
+  gs->dense_file_write_bytes = 0;
+  gs->dense_file_evictions = 0;
+  gs->dense_file_eviction_bytes = 0;
+  gs->dense_file_eviction_failures = 0;
+  gs->dense_stale_entries_discarded = 0;
+}
+
+static void dense_selector_add_stats(
+  Giv_select gs, struct dense_passive_selector_stats *stats)
+{
+  unsigned level;
+  stats->buffered_entries += gs->dense_buffer_size;
+  if (gs->dense_buffer != NULL)
+    stats->buffer_bytes +=
+      (unsigned long long) Dense_selector_buffer_limit *
+        sizeof(*gs->dense_buffer);
+  for (level = 0; level < DENSE_SELECTOR_RUN_LEVELS; level++) {
+    struct dense_selector_run *run = &gs->dense_runs[level];
+    if (run->fd >= 0) {
+      unsigned long long entries = dense_selector_run_entries(run);
+      struct stat sb;
+      stats->runs++;
+      stats->run_entries += entries;
+      stats->run_logical_bytes +=
+        entries * sizeof(struct dense_selector_entry);
+#ifndef __EMSCRIPTEN__
+      if (fstat(run->fd, &sb) == 0)
+        stats->run_physical_bytes +=
+          (unsigned long long) sb.st_blocks * 512ULL;
+#endif
+    }
+    if (run->read_buffer != NULL)
+      stats->buffer_bytes +=
+        DENSE_SELECTOR_READ_ENTRIES * sizeof(*run->read_buffer);
+  }
+  stats->peak_runs += gs->dense_peak_runs;
+  stats->flushes += gs->dense_flushes;
+  stats->merges += gs->dense_merges;
+  stats->file_reads += gs->dense_file_reads;
+  stats->file_read_bytes += gs->dense_file_read_bytes;
+  stats->file_writes += gs->dense_file_writes;
+  stats->file_write_bytes += gs->dense_file_write_bytes;
+  stats->file_evictions += gs->dense_file_evictions;
+  stats->file_eviction_bytes += gs->dense_file_eviction_bytes;
+  stats->file_eviction_failures += gs->dense_file_eviction_failures;
+  stats->stale_entries_discarded += gs->dense_stale_entries_discarded;
+}
+
+/* PUBLIC */
+struct dense_passive_selector_stats dense_passive_selector_stats(void)
+{
+  struct dense_passive_selector_stats stats;
+  Plist p;
+  memset(&stats, 0, sizeof(stats));
+  stats.mode = Dense_selector_mode;
+  stats.buffer_limit = Dense_selector_buffer_limit;
+  for (p = High.selectors; p != NULL; p = p->next)
+    dense_selector_add_stats(p->v, &stats);
+  for (p = Low.selectors; p != NULL; p = p->next)
+    dense_selector_add_stats(p->v, &stats);
+  return stats;
+}
+
 static void dense_heap_push(Giv_select gs, uint32_t record)
 {
   size_t i;
@@ -697,6 +1204,14 @@ static void dense_heap_push(Giv_select gs, uint32_t record)
     i = parent;
   }
   gs->dense_heap[i] = record;
+}
+
+static void dense_selector_push(Giv_select gs, uint32_t record)
+{
+  if (Dense_selector_mode == DENSE_SELECTOR_FILE)
+    dense_selector_file_push(gs, record);
+  else
+    dense_heap_push(gs, record);
   gs->dense_active++;
 }
 
@@ -722,17 +1237,54 @@ static void dense_heap_remove_root(Giv_select gs)
     gs->dense_heap[i] = last;
 }
 
-static void dense_heap_prune(Giv_select gs)
+static BOOL dense_selector_peek(Giv_select gs, uint32_t *record)
 {
   unsigned long long bit = 1ULL << gs->dense_bit;
+  if (Dense_selector_mode == DENSE_SELECTOR_FILE) {
+    struct dense_selector_entry entry;
+    int source = -1;
+    while (dense_selector_file_min(gs, &entry, &source)) {
+      if (entry.record < Dense_record_count) {
+        struct dense_passive_record *r = &Dense_records[entry.record];
+        if (r->id == entry.id &&
+            (r->flags & DENSE_PASSIVE_ACTIVE) != 0 &&
+            (r->selector_mask & bit) != 0) {
+          *record = entry.record;
+          return TRUE;
+        }
+      }
+      dense_selector_file_remove_min(gs, source);
+      gs->dense_stale_entries_discarded++;
+    }
+    return FALSE;
+  }
   while (gs->dense_size != 0) {
     struct dense_passive_record *r =
       &Dense_records[gs->dense_heap[0]];
     if ((r->flags & DENSE_PASSIVE_ACTIVE) != 0 &&
-        (r->selector_mask & bit) != 0)
-      break;
+        (r->selector_mask & bit) != 0) {
+      *record = gs->dense_heap[0];
+      return TRUE;
+    }
     dense_heap_remove_root(gs);
   }
+  return FALSE;
+}
+
+static void dense_selector_prune(Giv_select gs)
+{
+  uint32_t record;
+  (void) dense_selector_peek(gs, &record);
+}
+
+static void dense_selector_clear_contents(Giv_select gs)
+{
+  safe_free(gs->dense_heap);
+  gs->dense_heap = NULL;
+  gs->dense_size = 0;
+  gs->dense_capacity = 0;
+  dense_selector_file_reset(gs);
+  gs->dense_active = 0;
 }
 
 /* PUBLIC */
@@ -783,20 +1335,12 @@ void dense_passive_compact(Dense_passive_relocate_fn relocate,
   High.occurrences = 0;
   for (p = High.selectors; p != NULL; p = p->next) {
     Giv_select gs = p->v;
-    safe_free(gs->dense_heap);
-    gs->dense_heap = NULL;
-    gs->dense_size = 0;
-    gs->dense_capacity = 0;
-    gs->dense_active = 0;
+    dense_selector_clear_contents(gs);
   }
   Low.occurrences = 0;
   for (p = Low.selectors; p != NULL; p = p->next) {
     Giv_select gs = p->v;
-    safe_free(gs->dense_heap);
-    gs->dense_heap = NULL;
-    gs->dense_size = 0;
-    gs->dense_capacity = 0;
-    gs->dense_active = 0;
+    dense_selector_clear_contents(gs);
   }
 
   for (i = 0; i < active; i++) {
@@ -804,14 +1348,14 @@ void dense_passive_compact(Dense_passive_relocate_fn relocate,
     for (p = High.selectors; p != NULL; p = p->next) {
       Giv_select gs = p->v;
       if ((r->selector_mask & (1ULL << gs->dense_bit)) != 0) {
-        dense_heap_push(gs, (uint32_t) i);
+        dense_selector_push(gs, (uint32_t) i);
         High.occurrences++;
       }
     }
     for (p = Low.selectors; p != NULL; p = p->next) {
       Giv_select gs = p->v;
       if ((r->selector_mask & (1ULL << gs->dense_bit)) != 0) {
-        dense_heap_push(gs, (uint32_t) i);
+        dense_selector_push(gs, (uint32_t) i);
         Low.occurrences++;
       }
     }
@@ -860,22 +1404,14 @@ void reset_selector_indexes(void)
   for (p = High.selectors; p; p = p->next) {
     Giv_select gs = p->v;
     gs->idx = NULL;  /* leak old AVL nodes (small, one-time) */
-    safe_free(gs->dense_heap);
-    gs->dense_heap = NULL;
-    gs->dense_size = 0;
-    gs->dense_capacity = 0;
-    gs->dense_active = 0;
+    dense_selector_clear_contents(gs);
     gs->selected = 0;
   }
   High.occurrences = 0;
   for (p = Low.selectors; p; p = p->next) {
     Giv_select gs = p->v;
     gs->idx = NULL;
-    safe_free(gs->dense_heap);
-    gs->dense_heap = NULL;
-    gs->dense_size = 0;
-    gs->dense_capacity = 0;
-    gs->dense_active = 0;
+    dense_selector_clear_contents(gs);
     gs->selected = 0;
   }
   Low.occurrences = 0;
@@ -926,6 +1462,7 @@ void init_giv_select(Plist rules)
     order_term = ARG(ARG(t,0),2);
     property_term = ARG(ARG(t,0),3);
     gs = get_giv_select();
+    dense_selector_initialize(gs);
     if (Dense_selector_count >= 64)
       fatal_error("dense passive supports at most 64 given selectors");
     gs->dense_bit = Dense_selector_count++;
@@ -1161,14 +1698,14 @@ static void dense_insert_passive(Topform c)
   for (p = High.selectors; p != NULL; p = p->next) {
     Giv_select gs = p->v;
     if ((r.selector_mask & (1ULL << gs->dense_bit)) != 0) {
-      dense_heap_push(gs, record);
+      dense_selector_push(gs, record);
       High.occurrences++;
     }
   }
   for (p = Low.selectors; p != NULL; p = p->next) {
     Giv_select gs = p->v;
     if ((r.selector_mask & (1ULL << gs->dense_bit)) != 0) {
-      dense_heap_push(gs, record);
+      dense_selector_push(gs, record);
       Low.occurrences++;
     }
   }
@@ -1231,8 +1768,11 @@ static void dense_reactivate_record(uint32_t record)
   for (p = High.selectors; p != NULL; p = p->next) {
     Giv_select gs = p->v;
     if ((r->selector_mask & (1ULL << gs->dense_bit)) != 0) {
-      /* Deactivation is lazy: the original heap entry is still present and
-         the unchanged selector key remains valid. */
+      /* A heap retains its lazy entry.  File runs may already have discarded
+         that inactive entry, so reinsertion is required; an unconsumed
+         duplicate is harmless and is pruned after the next deactivation. */
+      if (Dense_selector_mode == DENSE_SELECTOR_FILE)
+        dense_selector_file_push(gs, record);
       gs->dense_active++;
       High.occurrences++;
     }
@@ -1240,6 +1780,8 @@ static void dense_reactivate_record(uint32_t record)
   for (p = Low.selectors; p != NULL; p = p->next) {
     Giv_select gs = p->v;
     if ((r->selector_mask & (1ULL << gs->dense_bit)) != 0) {
+      if (Dense_selector_mode == DENSE_SELECTOR_FILE)
+        dense_selector_file_push(gs, record);
       gs->dense_active++;
       Low.occurrences++;
     }
@@ -1480,14 +2022,14 @@ Giv_select next_selector(Select_state s)
     Plist start = s->current;
     Giv_select gs = s->current->v;
     if (Dense_passive)
-      dense_heap_prune(gs);
+      dense_selector_prune(gs);
     while (selector_size(gs) == 0 || s->count >= gs->part) {
       s->current = s->current->next;
       if (!s->current)
 	s->current = s->selectors;
       gs = s->current->v;
       if (Dense_passive)
-        dense_heap_prune(gs);
+        dense_selector_prune(gs);
       s->count = 0;
       if (s->current == start)
 	break;  /* we're back to the start */
@@ -1537,7 +2079,9 @@ Topform get_given_clause2(Clist sos, int num_given,
     return NULL;  /* no clauses are available */
 
   if (Dense_passive) {
-    uint32_t record = gs->dense_heap[0];
+    uint32_t record;
+    if (!dense_selector_peek(gs, &record))
+      fatal_error("get_given_clause2: selected dense queue is empty");
     struct dense_passive_record r = Dense_records[record];
     dense_deactivate_record(record);
     giv = Dense_activate(r.store_position, r.id, r.hint_id);
@@ -1778,7 +2322,7 @@ void zap_given_selectors(void)
     Giv_select gs = p->v;
     zap_clause_eval_rule(gs->property);
     avl_zap(gs->idx);
-    safe_free(gs->dense_heap);
+    dense_selector_clear_contents(gs);
     free_giv_select(gs);
   }
   zap_plist(High.selectors);  /* shallow */
@@ -1786,10 +2330,22 @@ void zap_given_selectors(void)
     Giv_select gs = p->v;
     zap_clause_eval_rule(gs->property);
     avl_zap(gs->idx);
-    safe_free(gs->dense_heap);
+    dense_selector_clear_contents(gs);
     free_giv_select(gs);
   }
   zap_plist(Low.selectors);  /* shallow */
+  High.selectors = NULL;
+  High.current = NULL;
+  High.occurrences = 0;
+  High.count = 0;
+  High.cycle_size = 0;
+  Low.selectors = NULL;
+  Low.current = NULL;
+  Low.occurrences = 0;
+  Low.count = 0;
+  Low.cycle_size = 0;
+  Dense_selector_count = 0;
+  Rule_needs_semantics = FALSE;
   dense_reset_directory_storage();
   Dense_record_count = 0;
   Dense_active_count = 0;

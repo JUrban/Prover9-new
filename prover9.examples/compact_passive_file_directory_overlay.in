@@ -7,7 +7,13 @@
 %
 % The immutable passive bodies continue to use ancestor_store/passive_backing.
 % This option moves the fixed 64-byte selector directory to a separate private
-% temporary file.  The file is unlinked immediately and closes automatically
-% at normal exit or after process termination.  Selector heaps remain in RAM.
+% temporary file.  The selector priority queues use bounded 65,536-entry
+% insertion buffers and immutable sorted runs in separate private files.
+% Every file is unlinked immediately and closes automatically at normal exit
+% or after process termination.  This trades sequential temporary-file IO for
+% resident memory; keep it opt-in until a representative long-prefix CPU run
+% has passed.
 
 assign(passive_directory,file).
+assign(passive_selector_store,file).
+assign(passive_selector_buffer,65536).

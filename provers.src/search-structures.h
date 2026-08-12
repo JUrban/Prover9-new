@@ -249,6 +249,7 @@ struct prover_options {
     report_given,  // report every N given clauses
     report_preprocessing,  // report preprocessing progress every N seconds
     compact_passive_cache, // MiB cap for decoded compact-OTTER passive bodies
+    passive_selector_buffer, // entries per file-backed selector buffer
     compact_term_reclaim_kb, // minimum estimated stale token payload to compact
     compact_index_stale_pct, // inactive physical records before index rebuild
     compact_back_tree_min_tokens, // complete structural partition cutoff
@@ -295,6 +296,7 @@ struct prover_options {
     search_loop,         // otter, discount
     passive_store,       // full, compressed
     passive_directory,   // memory, file
+    passive_selector_store, // heap, file
     compact_unit_strategy, // root_scan, position, code_tree
     compact_back_demod_strategy, // mask8, signature32, trees, position, adaptive
     discount_demodulation, // selected, eager_legacy, eager_interreduced
@@ -554,6 +556,23 @@ struct prover_stats {
     dense_passive_directory_file_eviction_passes,
     dense_passive_directory_file_eviction_bytes,
     dense_passive_directory_file_eviction_failures,
+    dense_passive_selector_buffered_entries,
+    dense_passive_selector_buffer_bytes,
+    dense_passive_selector_run_entries,
+    dense_passive_selector_run_logical_bytes,
+    dense_passive_selector_run_physical_bytes,
+    dense_passive_selector_runs,
+    dense_passive_selector_peak_runs,
+    dense_passive_selector_flushes,
+    dense_passive_selector_merges,
+    dense_passive_selector_file_reads,
+    dense_passive_selector_file_read_bytes,
+    dense_passive_selector_file_writes,
+    dense_passive_selector_file_write_bytes,
+    dense_passive_selector_file_evictions,
+    dense_passive_selector_file_eviction_bytes,
+    dense_passive_selector_file_eviction_failures,
+    dense_passive_selector_stale_entries_discarded,
     dense_passive_arena_records,
     dense_passive_arena_record_bytes,
     dense_passive_arena_backing_bytes,

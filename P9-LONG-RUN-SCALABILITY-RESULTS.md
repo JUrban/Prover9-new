@@ -388,8 +388,8 @@ separate logical/file capacity from anonymous `record_bytes` and count every
 eviction, byte, and failure.  Age selectors compare monotone physical indexes
 directly, so their heap operations do not fault directory pages merely to read
 proof IDs.  Weight and hint-age selectors still access their keys through the
-mapping; external sorted selector runs remain the required general solution
-for those queues.
+mapping in the default heap mode.  The optional external selector mode below
+removes that dependency and bounds their resident queues.
 
 The accelerated scale probe inserted 2.2 million active age-selected records:
 
@@ -410,5 +410,56 @@ At the 65.9-million-passive scale seen in the uploaded nine-hour clauses run,
 this stage moves roughly 4.22 GB of fixed directory records out of anonymous
 RAM.  It does **not** yet bound selector heaps: extrapolating the measured
 `out41` heap density still leaves roughly 0.42 GB at 65.9 million passives.
-Thus it is a material RAM step and a useful isolation boundary, not completion
-of the external passive control plane.
+Thus the directory alone is a material RAM step and a useful isolation
+boundary, not completion of the external passive control plane.
+
+## File-backed dense selector runs
+
+`assign(passive_selector_store,file).` replaces every growing in-memory
+selector heap with a bounded insertion heap and immutable sorted temporary-file
+runs.  `assign(passive_selector_buffer,65536).` controls the entry cap of each
+selector's insertion heap.  Each 24-byte run entry stores only the selector's
+one necessary key, the stable clause ID tie breaker, and its current physical
+record index.  One run is retained at each binary level; a full buffer is
+sorted and carried through occupied levels by sequential merge.  Selection
+compares the insertion-heap root with the head of each live run, reads runs in
+256-entry sequential blocks, and validates activity lazily against the dense
+directory.  Directory compaction closes every old run and deterministically
+rebuilds queues from active records, so disk and stale entries remain bounded
+by the same live/stale policy as the directory.
+
+Age, weight, and hint-age comparisons reproduce the existing heap's exact
+tie-breaking.  A differential test combines all three orders and selector
+ratios, a deactivate/reactivate cycle, full queue draining, and a mid-run dense
+compaction.  Its file schedule is identical to the heap schedule for all 3,000
+givens.  The focused compaction test forces 64-entry buffers and preserves all
+remaining age selections through run merges and rebuild.  Both tests, plus a
+200,000-record scale test, pass ASan/UBSan with leak detection disabled (the
+repository has pre-existing process-lifetime parser/symbol allocations).
+
+With a 65,536-entry buffer, the 2.2-million-age-record probe now reports:
+
+| Directory logical | Selector resident | Selector run logical | PSS | Anonymous | Selector bytes written |
+|---:|---:|---:|---:|---:|---:|
+| 140.8 MB | 1.50 MiB | 49.50 MiB | 38.62 MiB | 2.46 MiB | 289.5 MiB |
+
+There were two current runs, 40,993 batched writes, and the first selected ID
+was still one.  Compared with the preceding directory-only probe, anonymous
+memory fell from about 8.70 MiB to 2.46 MiB; the selector runs introduce real
+write amplification and are therefore opt-in rather than the default.
+
+An integrated 300-given `chat_test.in` differential used a deliberately small
+1,024-entry buffer to force six flushes and three merges.  All 300 printed
+given clauses and all 120,793 candidate trace outcomes were byte-identical to
+the heap control; both retained 5,737 kept clauses.  The final selector state
+held 6,138 entries in three runs and 654 buffered entries using 126 KiB of
+resident selector buffers.  Single timing samples (18.5 versus 21.6 user
+seconds) reversed earlier repetitions and are treated as noise, not as a speed
+claim.  The required 1,000-given and multi-million-passive IO/CPU gates remain
+open.
+
+At the observed 65.9-million-passive scale, file directory plus file selectors
+remove the roughly 4.22 GB directory and approximately 0.42 GB selector heaps
+from anonymous RAM.  This does not reduce compact inference-index memory or
+the OS-accounted file cache; those remain separate totals in the 80--90% RAM
+acceptance calculation.

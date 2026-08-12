@@ -170,6 +170,14 @@ Gate: a synthetic 100-million-passive population stays within a documented
 bounded RAM budget, selection order is byte-identical to the in-memory dense
 reference, and restart/checkpoint reconstruction is deterministic.
 
+Implementation status: the file-backed fixed record directory and optional
+binary-leveled selector runs are implemented.  Differential ordering,
+reactivation, compaction, sanitizer, 200,000-record, 2.2-million-record, and
+300-given integrated gates pass.  The 100-million projection, checkpoint
+restart differential, 1,000-given CPU/IO gate, and multi-million Osborn/AIM
+validation remain open; the file selector therefore stays explicit and
+non-default.
+
 ## 6. Phase E: remaining indexes and offset spaces
 
 ### E1. Backward demodulation

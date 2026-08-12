@@ -13,9 +13,10 @@ cpu=${CHAT_CPU:-0}
 trace=${CHAT_TRACE:-0}
 compact_term_reclaim_kb=${CHAT_COMPACT_TERM_RECLAIM_KB:-8192}
 compact_index_stale_pct=${CHAT_COMPACT_INDEX_STALE_PCT:-25}
+passive_selector_buffer=${CHAT_PASSIVE_SELECTOR_BUFFER:-65536}
 new_prover=${CHAT_NEW_PROVER:-"$repo_dir/bin/prover9"}
 old_prover=${CHAT_OLD_PROVER:-/project/Prover9-old-LADR-2026-6A/bin/prover9}
-all_cases='old_otter new_otter_fpa new_otter_packed new_otter_packed_fast new_otter_compact_full new_otter_compact_packed_fast discount_clauses_selected discount_clauses_eager collective_balanced_selected collective_balanced_legacy collective_balanced_eager'
+all_cases='old_otter new_otter_fpa new_otter_packed new_otter_packed_fast new_otter_compact_full new_otter_compact_packed_fast new_otter_compact_file_heap new_otter_compact_file_runs discount_clauses_selected discount_clauses_eager collective_balanced_selected collective_balanced_legacy collective_balanced_eager'
 selected_cases=${CHAT_CASES:-$all_cases}
 
 if test ! -f "$input"; then
@@ -43,6 +44,7 @@ sha256sum "$input" "$new_prover" "$old_prover" > "$output_dir/hashes.txt"
   echo "trace=$trace"
   echo "compact_term_reclaim_kb=$compact_term_reclaim_kb"
   echo "compact_index_stale_pct=$compact_index_stale_pct"
+  echo "passive_selector_buffer=$passive_selector_buffer"
   echo "cases=$selected_cases"
   echo "new_prover=$new_prover"
   echo "old_prover=$old_prover"
@@ -54,7 +56,8 @@ sha256sum "$input" "$new_prover" "$old_prover" > "$output_dir/hashes.txt"
 base_input="$output_dir/base-filtered.in"
 awk '
   /^assign\((max_given|max_seconds|max_minutes|max_hours|max_days|max_megs|report|stats),/ { next }
-  /^assign\((search_loop|passive_store|discount_demodulation|hint_index|inference_frontier|collective_scheduler|ancestor_store),/ { next }
+  /^assign\((search_loop|passive_store|passive_directory|passive_selector_store|discount_demodulation|hint_index|inference_frontier|collective_scheduler|ancestor_store),/ { next }
+  /^assign\(passive_selector_buffer,/ { next }
   /^assign\(compact_term_reclaim_kb,/ { next }
   /^assign\(compact_index_stale_pct,/ { next }
   /^assign\((collective_[a-z_]+|rewrite_refresh_[a-z_]+),/ { next }
@@ -147,6 +150,35 @@ set(compact_otter_demodulation).
 set(compact_otter_unit_index).
 set(compact_otter_back_demod_index).
 set(compact_otter_nonunit_index).'
+
+write_case new_otter_compact_file_heap '
+assign(search_loop,otter).
+assign(passive_store,dense).
+assign(passive_directory,file).
+assign(passive_selector_store,heap).
+assign(hint_index,packed_fast).
+assign(inference_frontier,clauses).
+assign(ancestor_store,file).
+set(compact_otter_demodulation).
+set(compact_otter_unit_index).
+set(compact_otter_back_demod_index).
+set(compact_otter_nonunit_index).
+assign(compact_back_demod_strategy,adaptive).'
+
+write_case new_otter_compact_file_runs '
+assign(search_loop,otter).
+assign(passive_store,dense).
+assign(passive_directory,file).
+assign(passive_selector_store,file).
+assign(passive_selector_buffer,'"$passive_selector_buffer"').
+assign(hint_index,packed_fast).
+assign(inference_frontier,clauses).
+assign(ancestor_store,file).
+set(compact_otter_demodulation).
+set(compact_otter_unit_index).
+set(compact_otter_back_demod_index).
+set(compact_otter_nonunit_index).
+assign(compact_back_demod_strategy,adaptive).'
 
 write_case discount_clauses_selected '
 assign(search_loop,discount).

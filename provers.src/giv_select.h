@@ -43,6 +43,11 @@ typedef enum {
   DENSE_DIRECTORY_FILE
 } Dense_passive_directory_mode;
 
+typedef enum {
+  DENSE_SELECTOR_HEAP,
+  DENSE_SELECTOR_FILE
+} Dense_passive_selector_mode;
+
 struct dense_passive_directory_stats {
   Dense_passive_directory_mode mode;
   unsigned long long logical_bytes;
@@ -50,6 +55,28 @@ struct dense_passive_directory_stats {
   unsigned long long file_eviction_passes;
   unsigned long long file_eviction_bytes;
   unsigned long long file_eviction_failures;
+};
+
+struct dense_passive_selector_stats {
+  Dense_passive_selector_mode mode;
+  unsigned long long buffer_limit;
+  unsigned long long buffered_entries;
+  unsigned long long buffer_bytes;
+  unsigned long long run_entries;
+  unsigned long long run_logical_bytes;
+  unsigned long long run_physical_bytes;
+  unsigned long long runs;
+  unsigned long long peak_runs;
+  unsigned long long flushes;
+  unsigned long long merges;
+  unsigned long long file_reads;
+  unsigned long long file_read_bytes;
+  unsigned long long file_writes;
+  unsigned long long file_write_bytes;
+  unsigned long long file_evictions;
+  unsigned long long file_eviction_bytes;
+  unsigned long long file_eviction_failures;
+  unsigned long long stale_entries_discarded;
 };
 
 /* Read-only metadata for one active dense passive.  Dense passives are
@@ -84,6 +111,11 @@ void configure_dense_passive_directory(
   Dense_passive_directory_mode mode);
 
 struct dense_passive_directory_stats dense_passive_directory_stats(void);
+
+void configure_dense_passive_selectors(Dense_passive_selector_mode mode,
+                                       size_t buffer_entries);
+
+struct dense_passive_selector_stats dense_passive_selector_stats(void);
 
 BOOL dense_passive_enabled(void);
 

@@ -47,6 +47,7 @@ int main(int argc, char **argv)
   Plist rules = NULL;
   Clist sos;
   struct dense_passive_directory_stats directory;
+  struct dense_passive_selector_stats selectors;
   struct memory_process_stats process;
   unsigned long long record_bytes, heap_bytes, records;
   size_t i;
@@ -55,6 +56,7 @@ int main(int argc, char **argv)
     return 2;
   }
   init_standard_ladr();
+  configure_dense_passive_selectors(DENSE_SELECTOR_FILE, 65536);
   configure_dense_passive_directory(DENSE_DIRECTORY_FILE);
   configure_dense_passive(TRUE, archive_clause, activate_clause);
   rules = plist_append(
@@ -68,19 +70,28 @@ int main(int argc, char **argv)
     insert_into_sos2(c, sos);
   }
   directory = dense_passive_directory_stats();
+  selectors = dense_passive_selector_stats();
   dense_passive_memory(&record_bytes, &heap_bytes, &records);
   memory_get_process_stats(&process);
   if (records != count || record_bytes != 0 ||
       directory.logical_bytes != count * 64ULL ||
-      directory.file_eviction_passes == 0 ||
-      heap_bytes > count * sizeof(uint32_t) * 2ULL)
+      (directory.logical_bytes > 128ULL * 1024ULL * 1024ULL &&
+       directory.file_eviction_passes == 0) ||
+      selectors.mode != DENSE_SELECTOR_FILE || selectors.flushes == 0 ||
+      selectors.merges == 0 ||
+      selectors.run_entries + selectors.buffered_entries != count ||
+      heap_bytes > 4ULL * 1024ULL * 1024ULL)
     fatal_error("dense_selector_file_scale_test: accounting failure");
   printf("{\"records\":%llu,\"directory_logical\":%llu,"
          "\"directory_allocated\":%llu,\"heap_bytes\":%llu,"
+         "\"selector_runs\":%llu,\"selector_run_bytes\":%llu,"
+         "\"selector_writes\":%llu,\"selector_write_bytes\":%llu,"
          "\"eviction_passes\":%llu,\"eviction_bytes\":%llu,"
          "\"pss_kib\":%llu,\"anonymous_kib\":%llu}\n",
          (unsigned long long) count, directory.logical_bytes,
          directory.allocated_bytes, heap_bytes,
+         selectors.runs, selectors.run_logical_bytes,
+         selectors.file_writes, selectors.file_write_bytes,
          directory.file_eviction_passes,
          directory.file_eviction_bytes, process.pss_kbytes,
          process.anonymous_kbytes);
@@ -95,5 +106,6 @@ int main(int argc, char **argv)
   zap_given_selectors();
   configure_dense_passive(FALSE, NULL, NULL);
   configure_dense_passive_directory(DENSE_DIRECTORY_MEMORY);
+  configure_dense_passive_selectors(DENSE_SELECTOR_HEAP, 65536);
   return 0;
 }
