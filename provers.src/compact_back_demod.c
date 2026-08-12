@@ -5740,6 +5740,14 @@ static unsigned long long route_position_population(
     postings * selected_positions;
 }
 
+static BOOL position_route_beats_baseline(
+  Compact_back_demod_index index, unsigned long long position,
+  unsigned long long baseline)
+{
+  unsigned gain = index->position_eager_depth == 0 ? 4 : 1;
+  return baseline >= gain && position <= baseline / gain;
+}
+
 struct cbd_route_work_snapshot {
   unsigned long long query_work;
   unsigned long long path_filter_checks;
@@ -6121,13 +6129,17 @@ static void collect_pattern(Compact_back_demod_index index, Term pattern,
     population[CBD_ROUTE_POSITION] = route_position_population(
       index, position_bucket, selected_positions, position_feature_count);
 
-    /* An admitted position has exact current posting metadata.  Use it only
-       for the same fourfold gain required at construction; marginal features
-       remain available but cannot displace a safer mask/tree route. */
+    /* Demand-built positions must repay their archive census with the same
+       fourfold margin required at construction.  Eager rooted paths have no
+       census debt and use the same compressed record/occurrence format as the
+       mask fallback, so choose them whenever their measured posting work is
+       no larger.  This matters at mature populations: requiring a fourfold
+       gain was a short-prefix tuning artifact that discarded useful FPA
+       constraints as both posting lists grew. */
     if (position_bucket != CBD_NONE &&
-        population[CBD_ROUTE_MASK] >= 4 &&
-        population[CBD_ROUTE_POSITION] <=
-          population[CBD_ROUTE_MASK] / 4) {
+        position_route_beats_baseline(
+          index, population[CBD_ROUTE_POSITION],
+          population[CBD_ROUTE_MASK])) {
       /* Root population is a cheap scale-class hint, not a safe comparison
          with the mask path filter.  Pay the exact bucket census only after an
          admitted position passes that coarse screen. */
@@ -6137,9 +6149,9 @@ static void collect_pattern(Compact_back_demod_index index, Term pattern,
       }
       population[CBD_ROUTE_MASK] = mask_population;
       population[CBD_ROUTE_TREE] = population[CBD_ROUTE_MASK];
-      if (population[CBD_ROUTE_MASK] < 4 ||
-          population[CBD_ROUTE_POSITION] >
-            population[CBD_ROUTE_MASK] / 4)
+      if (!position_route_beats_baseline(
+            index, population[CBD_ROUTE_POSITION],
+            population[CBD_ROUTE_MASK]))
         goto adaptive_nonposition;
       work_before = route_work_snapshot(index);
       if (selected_positions > 1 && index->position_sparse)
