@@ -85,6 +85,12 @@ static unsigned Better_equivalence_reference_count = 0;
 static unsigned Better_equivalence_reference_capacity = 0;
 static unsigned *Better_hint_feature_count = NULL;
 static unsigned long long *Better_hint_match_fingerprint = NULL;
+#define BETTER_BACK_FINGERPRINT_WORDS 4U
+#define BETTER_BACK_FINGERPRINT_DEPTH 4U
+struct better_back_fingerprint {
+  unsigned long long words[BETTER_BACK_FINGERPRINT_WORDS];
+};
+static struct better_back_fingerprint *Better_hint_back_fingerprint = NULL;
 static unsigned short *Better_hint_positive_count = NULL;
 static unsigned short *Better_hint_negative_count = NULL;
 static unsigned *Better_intersection_member = NULL;
@@ -401,6 +407,10 @@ static void packed_reserve_hints(unsigned id)
       Better_hint_match_fingerprint = safe_realloc(
         Better_hint_match_fingerprint,
         (size_t) cap * sizeof(unsigned long long));
+      if (Fast_packed_index)
+        Better_hint_back_fingerprint = safe_realloc(
+          Better_hint_back_fingerprint,
+          (size_t) cap * sizeof(struct better_back_fingerprint));
       Better_hint_positive_count = safe_realloc(
         Better_hint_positive_count,
         (size_t) cap * sizeof(unsigned short));
@@ -442,6 +452,10 @@ static void packed_reserve_hints(unsigned id)
              (size_t) (cap - old) * sizeof(unsigned));
       memset(Better_hint_match_fingerprint + old, 0,
              (size_t) (cap - old) * sizeof(unsigned long long));
+      if (Better_hint_back_fingerprint != NULL)
+        memset(Better_hint_back_fingerprint + old, 0,
+               (size_t) (cap - old) *
+                 sizeof(struct better_back_fingerprint));
       memset(Better_hint_positive_count + old, 0,
              (size_t) (cap - old) * sizeof(unsigned short));
       memset(Better_hint_negative_count + old, 0,
@@ -751,6 +765,77 @@ static unsigned long long better_back_correlated_key(
          (x & 0x00ffffffffffffffULL);
 }
 
+static unsigned long long better_back_fingerprint_mix(
+  unsigned long long value)
+{
+  value ^= value >> 30;
+  value *= 0xbf58476d1ce4e5b9ULL;
+  value ^= value >> 27;
+  value *= 0x94d049bb133111ebULL;
+  return value ^ (value >> 31);
+}
+
+static void better_back_fingerprint_add(
+  struct better_back_fingerprint *fingerprint, int root_symbol,
+  unsigned long long path, int symbol)
+{
+  unsigned long long mixed = better_back_fingerprint_mix(
+    ((unsigned long long) (unsigned) root_symbol << 32) ^
+    (unsigned) symbol ^ path);
+  unsigned bit = (unsigned) (mixed &
+    (BETTER_BACK_FINGERPRINT_WORDS * 64U - 1U));
+  fingerprint->words[bit / 64] |= 1ULL << (bit % 64);
+}
+
+static void better_back_fingerprint_pattern_rec(
+  Term term, int root_symbol, unsigned long long path, unsigned depth,
+  struct better_back_fingerprint *fingerprint)
+{
+  unsigned i;
+  if (VARIABLE(term))
+    return;
+  better_back_fingerprint_add(
+    fingerprint, root_symbol, path, SYMNUM(term));
+  if (depth >= BETTER_BACK_FINGERPRINT_DEPTH)
+    return;
+  for (i = 0; i < (unsigned) ARITY(term); i++) {
+    unsigned long long child_path = better_back_fingerprint_mix(
+      path ^ (0x9e3779b97f4a7c15ULL * ((unsigned long long) i + 1)));
+    better_back_fingerprint_pattern_rec(
+      ARG(term,i), root_symbol, child_path, depth + 1, fingerprint);
+  }
+}
+
+static struct better_back_fingerprint better_back_fingerprint_pattern(
+  Term term)
+{
+  struct better_back_fingerprint fingerprint;
+  memset(&fingerprint, 0, sizeof(fingerprint));
+  if (!VARIABLE(term) && !packed_term_has_theory_symbol(term))
+    better_back_fingerprint_pattern_rec(
+      term, SYMNUM(term), 0, 0, &fingerprint);
+  return fingerprint;
+}
+
+static BOOL better_back_fingerprint_contains(
+  const struct better_back_fingerprint *stored,
+  const struct better_back_fingerprint *required)
+{
+  unsigned i;
+  for (i = 0; i < BETTER_BACK_FINGERPRINT_WORDS; i++)
+    if ((stored->words[i] & required->words[i]) != required->words[i])
+      return FALSE;
+  return TRUE;
+}
+
+static void better_back_fingerprint_saturate(
+  struct better_back_fingerprint *fingerprint)
+{
+  unsigned i;
+  for (i = 0; i < BETTER_BACK_FINGERPRINT_WORDS; i++)
+    fingerprint->words[i] = ~0ULL;
+}
+
 static unsigned long long better_equivalence_key(
   unsigned long long positive_mask, unsigned long long negative_mask,
   unsigned positive, unsigned negative, unsigned query_literals)
@@ -959,21 +1044,30 @@ static void better_collect_back_features(Term t)
   better_collect_back_correlated_features(t, SYMNUM(t), 0, 0);
 }
 
-static void better_collect_back_occurrences(Term t)
+static void better_collect_back_occurrences(
+  Term t, struct better_back_fingerprint *fingerprint)
 {
   int i;
   if (VARIABLE(t))
     return;
   better_collect_back_features(t);
+  if (Fast_packed_index)
+    better_back_fingerprint_pattern_rec(
+      t, SYMNUM(t), 0, 0, fingerprint);
   for (i = 0; i < ARITY(t); i++)
-    better_collect_back_occurrences(ARG(t,i));
+    better_collect_back_occurrences(ARG(t,i), fingerprint);
 }
 
 static void better_collect_hint_features(Topform h, BOOL anyconst)
 {
   Literals lit;
   unsigned positive = 0, negative = 0;
+  BOOL theory = FALSE;
+  struct better_back_fingerprint *back_fingerprint =
+    Fast_packed_index ? Better_hint_back_fingerprint + h->id : NULL;
   better_scratch_clear();
+  if (back_fingerprint != NULL)
+    memset(back_fingerprint, 0, sizeof(*back_fingerprint));
   for (lit = h->literals; lit != NULL; lit = lit->next) {
     if (lit->sign)
       positive++;
@@ -987,10 +1081,16 @@ static void better_collect_hint_features(Topform h, BOOL anyconst)
                                        Fast_packed_index ?
                                          FAST_MATCH_FEATURE_DEPTH :
                                          BETTER_MATCH_FEATURE_DEPTH);
-      for (i = 0; i < ARITY(lit->atom); i++)
-        better_collect_back_occurrences(ARG(lit->atom,i));
+      for (i = 0; i < ARITY(lit->atom); i++) {
+        Term argument = ARG(lit->atom,i);
+        if (Fast_packed_index && packed_term_has_theory_symbol(argument))
+          theory = TRUE;
+        better_collect_back_occurrences(argument, back_fingerprint);
+      }
     }
   }
+  if (theory)
+    better_back_fingerprint_saturate(back_fingerprint);
   if (positive > USHRT_MAX || negative > USHRT_MAX)
     fatal_error("better_collect_hint_features: too many literals");
   Better_hint_positive_count[h->id] = (unsigned short) positive;
@@ -1012,6 +1112,9 @@ static void better_rebuild_postings(void)
     Topform h = Packed_hint_by_id[id];
     Better_hint_feature_count[id] = 0;
     Better_hint_match_fingerprint[id] = 0;
+    if (Better_hint_back_fingerprint != NULL)
+      memset(Better_hint_back_fingerprint + id, 0,
+             sizeof(struct better_back_fingerprint));
     Better_hint_positive_count[id] = 0;
     Better_hint_negative_count[id] = 0;
     if (Packed_hint_active[id] && h != NULL) {
@@ -1110,6 +1213,9 @@ static void better_deactivate_hint(unsigned id)
   }
   Better_hint_feature_count[id] = 0;
   Better_hint_match_fingerprint[id] = 0;
+  if (Better_hint_back_fingerprint != NULL)
+    memset(Better_hint_back_fingerprint + id, 0,
+           sizeof(struct better_back_fingerprint));
   Better_hint_positive_count[id] = 0;
   Better_hint_negative_count[id] = 0;
   better_maybe_rebuild_postings();
@@ -1749,6 +1855,8 @@ void done_with_hints(void)
   if (Better_hint_feature_count) safe_free(Better_hint_feature_count);
   if (Better_hint_match_fingerprint)
     safe_free(Better_hint_match_fingerprint);
+  if (Better_hint_back_fingerprint)
+    safe_free(Better_hint_back_fingerprint);
   if (Better_hint_positive_count) safe_free(Better_hint_positive_count);
   if (Better_hint_negative_count) safe_free(Better_hint_negative_count);
   if (Better_intersection_member) safe_free(Better_intersection_member);
@@ -1788,6 +1896,7 @@ void done_with_hints(void)
   Better_anyconst_reference_capacity = 0;
   Better_hint_feature_count = NULL;
   Better_hint_match_fingerprint = NULL;
+  Better_hint_back_fingerprint = NULL;
   Better_hint_positive_count = Better_hint_negative_count = NULL;
   Better_intersection_member = Better_intersection_match = NULL;
   Better_intersection_ids = NULL;
@@ -2650,16 +2759,24 @@ void back_demod_hints(Topform demod, int type, BOOL lex_order_vars)
     unsigned i, candidate_count;
     unsigned *candidate_ids;
     unsigned long long wanted = 0;
+    struct better_back_fingerprint required_fingerprints[2];
+    unsigned required_fingerprint_count = 0;
     enum packed_hint_operation op = PACKED_HINT_BACK_DEMOD;
     packed_operation_begin(op);
     packed_begin_candidates();
     if (type == ORIENTED || type == LEX_DEP_LR || type == LEX_DEP_BOTH) {
+      if (Fast_packed_index)
+        required_fingerprints[required_fingerprint_count++] =
+          better_back_fingerprint_pattern(alpha);
       if (VARIABLE(alpha))
         wanted = ULLONG_MAX;
       else
         wanted |= 1ULL << (((unsigned) SYMNUM(alpha) * 2654435761U) >> 26);
     }
     if (type == LEX_DEP_RL || type == LEX_DEP_BOTH) {
+      if (Fast_packed_index)
+        required_fingerprints[required_fingerprint_count++] =
+          better_back_fingerprint_pattern(beta);
       if (VARIABLE(beta))
         wanted = ULLONG_MAX;
       else
@@ -2694,10 +2811,24 @@ void back_demod_hints(Topform demod, int type, BOOL lex_order_vars)
       Topform hint = Packed_hint_by_id[id];
       Topform before;
       BOOL changed;
+      BOOL fingerprint_match = !Fast_packed_index ||
+                               required_fingerprint_count == 0;
+      unsigned fingerprint_index;
       if (hint == NULL || !Packed_hint_active[id] ||
           (MATCH_HINTS_ANYCONST && Packed_hint_anyconst[id])) {
         if (hint == NULL || !Packed_hint_active[id])
           packed_note_stale_skip(op);
+        continue;
+      }
+      for (fingerprint_index = 0;
+           fingerprint_index < required_fingerprint_count &&
+             !fingerprint_match;
+           fingerprint_index++)
+        fingerprint_match = better_back_fingerprint_contains(
+          Better_hint_back_fingerprint + id,
+          required_fingerprints + fingerprint_index);
+      if (!fingerprint_match) {
+        Packed_operation_stats[op].fingerprint_rejects++;
         continue;
       }
       if (hint->compressed != NULL) {
@@ -2900,6 +3031,9 @@ void packed_hint_index_stats(unsigned long long *node_bytes,
     *table_bytes += (unsigned long long) Packed_hint_capacity *
       (3 * sizeof(unsigned) + sizeof(unsigned long long) +
        2 * sizeof(unsigned short)) +
+      (Better_hint_back_fingerprint == NULL ? 0 :
+        (unsigned long long) Packed_hint_capacity *
+          sizeof(struct better_back_fingerprint)) +
       (unsigned long long) Better_key_scratch_capacity *
         sizeof(unsigned long long) +
       (unsigned long long) Better_intersection_capacity * sizeof(unsigned) +
@@ -3002,6 +3136,7 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             "equivalence_live=%llu, equivalence_stale=%llu, "
             "anyconst_references=%u, anyconst_live=%llu, "
             "table_bytes=%llu, reference_bytes=%llu, fingerprint_bytes=%llu, "
+            "back_fingerprint_bytes=%llu, "
             "dense_keys=%llu, dense_bit_bytes=%llu, "
             "dense_summary_bytes=%llu, dense_budget_bytes=%llu, "
             "dense_budget_denials=%llu, "
@@ -3017,6 +3152,9 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             table_bytes, reference_bytes,
             (unsigned long long) Packed_hint_capacity *
               sizeof(unsigned long long),
+            Better_hint_back_fingerprint != NULL ?
+              (unsigned long long) Packed_hint_capacity *
+                sizeof(struct better_back_fingerprint) : 0,
             s.dense_keys, s.dense_bit_bytes, s.dense_summary_bytes,
             s.dense_budget_bytes, s.dense_budget_denials,
             Better_posting_rebuilds, Better_posting_rebuild_refs,

@@ -9,6 +9,16 @@ static int Failures;
   }                                                                    \
 } while (0)
 
+static void no_op_demod(Topform clause, int step_limit, int increase_limit,
+                        BOOL print, BOOL lex_order_vars)
+{
+  (void) clause;
+  (void) step_limit;
+  (void) increase_limit;
+  (void) print;
+  (void) lex_order_vars;
+}
+
 static void run_case(BOOL packed, BOOL better, BOOL fast, int bsub)
 {
   Topform hint = parse_clause_from_string("p(f(a)).");
@@ -169,6 +179,57 @@ static void run_observed_stale_rebuild_case(int bsub)
   delete_clause(stale);
 }
 
+static void run_back_fingerprint_case(int bsub)
+{
+  Topform exact = parse_clause_from_string("p(f(g(h(a)))).");
+  Topform deep_mismatch = parse_clause_from_string("p(f(g(h(b)))).");
+  Topform demod = parse_clause_from_string("f(g(h(a))) = z.");
+  unsigned long long rejects = 0, positives = 0, rewrites = 0;
+  BOOL saw_back = FALSE;
+  FILE *stats;
+  char line[4096];
+
+  init_hints(ORDINARY_UNIF, bsub, FALSE, TRUE, 2,
+             TRUE, TRUE, TRUE, 2048, 8, no_op_demod);
+  index_hint(exact);
+  index_hint(deep_mismatch);
+  back_demod_hints(demod, ORIENTED, FALSE);
+  stats = tmpfile();
+  CHECK(stats != NULL, "open back-fingerprint statistics stream");
+  if (stats != NULL) {
+    fprint_packed_hint_operation_stats(stats);
+    rewind(stats);
+    while (fgets(line, sizeof(line), stats) != NULL)
+      if (strstr(line, "Packed_hint_operation: op=back_demod,") != NULL) {
+        char *field;
+        saw_back = TRUE;
+        field = strstr(line, "fingerprint_rejects=");
+        if (field != NULL)
+          rejects = strtoull(
+            field + strlen("fingerprint_rejects="), NULL, 10);
+        field = strstr(line, "exact_positive=");
+        if (field != NULL)
+          positives = strtoull(
+            field + strlen("exact_positive="), NULL, 10);
+        field = strstr(line, "rewrites=");
+        if (field != NULL)
+          rewrites = strtoull(field + strlen("rewrites="), NULL, 10);
+      }
+    fclose(stats);
+  }
+  CHECK(saw_back && rejects == 1,
+        "deep back fingerprint rejects only the impossible hint");
+  CHECK(positives == 1 && rewrites == 0,
+        "deep back fingerprint preserves exact rewrite authority");
+
+  unindex_hint(exact);
+  unindex_hint(deep_mismatch);
+  done_with_hints();
+  delete_clause(demod);
+  delete_clause(deep_mismatch);
+  delete_clause(exact);
+}
+
 int main(void)
 {
   init_standard_ladr();
@@ -180,6 +241,7 @@ int main(void)
   run_case(TRUE, TRUE, TRUE, bsub);
   run_variable_cache_case(bsub);
   run_observed_stale_rebuild_case(bsub);
+  run_back_fingerprint_case(bsub);
   if (Failures != 0) {
     fprintf(stderr, "hint_preview_test: %d failure(s)\n", Failures);
     return 1;
