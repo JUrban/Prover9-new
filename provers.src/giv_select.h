@@ -96,6 +96,7 @@ struct dense_passive_view {
   double weight;
   unsigned simplifier_epoch;
   unsigned rewrite_epoch;
+  unsigned first_fpa_id;
   unsigned body_bytes;
   unsigned justification_bytes;
   unsigned logical_body_bytes;

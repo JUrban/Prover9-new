@@ -6204,6 +6204,8 @@ static void compact_passive_cache_init(unsigned megs)
 static void restore_compact_passive_metadata(
   Topform c, const struct dense_passive_view *view)
 {
+  Literals literal;
+  unsigned offset = 0;
   c->matching_hint = hint_by_id(view->hint_id);
   c->weight = view->weight;
   c->semantics = view->semantics;
@@ -6212,6 +6214,17 @@ static void restore_compact_passive_metadata(
   c->used = view->used;
   c->delayed_demodulator = view->delayed_demodulator;
   c->rewrite_rule_dirty = view->rewrite_rule_dirty;
+  if (view->first_fpa_id != 0) {
+    for (literal = c->literals; literal != NULL; literal = literal->next) {
+      if (view->first_fpa_id > UINT_MAX - offset)
+        fatal_error("compact passive: literal FPA ID overflow");
+      if (FPA_ID(literal->atom) != 0 &&
+          FPA_ID(literal->atom) != view->first_fpa_id + offset)
+        fatal_error("compact passive: materialized literal has wrong FPA ID");
+      FPA_ID(literal->atom) = view->first_fpa_id + offset;
+      offset++;
+    }
+  }
 }
 
 static Topform materialize_compact_otter_passive(

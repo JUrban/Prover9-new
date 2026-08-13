@@ -20,7 +20,9 @@
 #include "semantics.h"
 #include "../ladr/avltree.h"
 #include "../ladr/clause_eval.h"
+#include "../ladr/fpa.h"
 #include <errno.h>
+#include <limits.h>
 #include <stdint.h>
 #include <unistd.h>
 #ifndef __EMSCRIPTEN__
@@ -128,6 +130,7 @@ struct dense_passive_record {
   unsigned simplifier_epoch;
   unsigned rewrite_epoch;
   unsigned flags;
+  unsigned first_fpa_id;
   unsigned body_bytes;
   unsigned justification_bytes;
   unsigned logical_body_bytes;
@@ -183,6 +186,46 @@ static unsigned long long Dense_justification_bytes = 0;
 static unsigned long long Dense_logical_body_bytes = 0;
 
 static size_t dense_find_record(unsigned long long id);
+
+/* Legacy literal FPA indexes assign one monotonically increasing ID to each
+   root atom, in literal order, when a retained clause is first indexed.
+   Dense storage destroys those Term objects and later decodes fresh ones.
+   Preserve the first ID; the remaining literal-root IDs are consecutive and
+   can therefore be reconstructed without a per-literal side allocation. */
+static unsigned dense_clause_first_fpa_id(Topform c)
+{
+  Literals literal;
+  unsigned first = 0;
+  unsigned offset = 0;
+  for (literal = c->literals; literal != NULL; literal = literal->next) {
+    unsigned id = (unsigned) FPA_ID(literal->atom);
+    if (offset == 0)
+      first = id;
+    else if ((first == 0 && id != 0) ||
+             (first != 0 &&
+              (first > UINT_MAX - offset || id != first + offset)))
+      fatal_error("dense passive: nonconsecutive literal FPA IDs");
+    offset++;
+  }
+  return first;
+}
+
+static void dense_restore_clause_fpa_ids(Topform c, unsigned first)
+{
+  Literals literal;
+  unsigned offset = 0;
+  if (first == 0)
+    return;
+  for (literal = c->literals; literal != NULL; literal = literal->next) {
+    if (first > UINT_MAX - offset)
+      fatal_error("dense passive: literal FPA ID overflow");
+    if (FPA_ID(literal->atom) != 0 &&
+        FPA_ID(literal->atom) != first + offset)
+      fatal_error("dense passive: materialized literal has wrong FPA ID");
+    FPA_ID(literal->atom) = first + offset;
+    offset++;
+  }
+}
 
 static void dense_release_directory(
   struct dense_passive_record *records, size_t capacity, int fd,
@@ -321,6 +364,7 @@ static void dense_record_view(const struct dense_passive_record *r,
   view->weight = r->weight;
   view->simplifier_epoch = r->simplifier_epoch;
   view->rewrite_epoch = r->rewrite_epoch;
+  view->first_fpa_id = r->first_fpa_id;
   view->body_bytes = r->body_bytes;
   view->justification_bytes = r->justification_bytes;
   view->logical_body_bytes = r->logical_body_bytes;
@@ -1755,6 +1799,7 @@ static void dense_insert_passive(Topform c)
   r.weight = c->weight;
   r.simplifier_epoch = c->simplifier_epoch;
   r.rewrite_epoch = c->rewrite_epoch;
+  r.first_fpa_id = dense_clause_first_fpa_id(c);
   r.flags = DENSE_PASSIVE_ACTIVE |
             (c->used ? DENSE_PASSIVE_USED : 0) |
             (c->delayed_demodulator ? DENSE_PASSIVE_DELAYED : 0) |
@@ -2177,6 +2222,7 @@ Topform get_given_clause2(Clist sos, int num_given,
     giv = Dense_activate(r.store_position, r.id, r.hint_id);
     if (giv == NULL || giv->id != r.id)
       fatal_error("get_given_clause2: dense archive identity mismatch");
+    dense_restore_clause_fpa_ids(giv, r.first_fpa_id);
     giv->weight = r.weight;
     giv->semantics = dense_record_semantics(&r);
     giv->simplifier_epoch = r.simplifier_epoch;
