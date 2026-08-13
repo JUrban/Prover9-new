@@ -731,3 +731,55 @@ improve on `out9`, if resident memory grows without a corresponding posting
 count explanation, or if the interval back lookup resumes population-linear
 growth.  The ordinary-P9 total CPU and 80% resident-memory reduction remain
 the final product gates.
+
+## Osborn OTTER trajectory preservation
+
+The first full `adaptive32` Osborn run was substantially faster than the
+ordinary-P9 run, but it did not replay the proof-producing OTTER search.  The
+historical `outaH` and the compact run selected identical given clauses
+through given 491 and first differed at given 492.  Although the historical
+proof clause later appeared in the compact run, it was generated in a
+different search state and did not lead to the same proof.
+
+Generation/retention tracing located the earlier cause.  Ordinary FPA indexes
+assign `FPA_ID` values when clauses are retained, and FPA retrieval uses those
+values to break candidate-order ties.  Authoritative compact unit indexing
+had skipped the legacy insertion and therefore delayed assignment until the
+clause became given.  The answer sets were identical, but hyper-resolution
+candidate order first changed at given 205; that changed kept-clause order and
+eventually changed given 492.  The compact authoritative unit and nonunit
+paths now reserve the legacy root-literal FPA IDs at the original retention
+point while still avoiding the memory cost of the legacy index.
+
+Dense passive archival exposed a second lifecycle issue: serializing a clause
+destroyed its term objects and their reserved IDs.  Dense records now retain
+the first root-literal FPA ID and restore the consecutive literal IDs when the
+clause is materialized.  This adds eight padded bytes to each dense directory
+record (72 instead of 64 bytes); it does not restore the legacy FPA postings.
+
+With both fixes, the production compact configuration and a modern legacy-FPA
+control select exactly the same 510 given-clause bodies and finish that prefix
+with the same `(given, generated, kept, proofs)` tuple:
+
+```text
+(511, 390236, 25140, 0)
+```
+
+The optional regression requires the supplied Osborn input and can be run as:
+
+```sh
+make osborn-trajectory-test
+OSBORN_INPUT=/path/to/rr_osbe.in.gz make osborn-trajectory-test
+P9_OSBORN_MAX_GIVEN=600 OSBORN_INPUT=/path/to/rr_osbe.in.gz \
+  make osborn-trajectory-test
+```
+
+It checks all 510 current reference/compact given clauses, the historical
+`outaH` suffix from given 195 onward by a pinned digest, and the endpoint
+statistics.  A larger `P9_OSBORN_MAX_GIVEN` continues the exact comparison
+against the modern legacy-FPA control while retaining the pinned historical
+510-clause check.  On the development machine the 510-clause reference took
+about 68 user seconds and the compact run about 93; an extended 600-clause
+check also passed (about 87 versus 130 user seconds).  These bounded
+regressions establish exact early trajectory preservation; a proof-endpoint
+run remains the external CPU and proof-replay gate.

@@ -95,6 +95,12 @@ compact-generalization-validate:
 compact-generalization-smoke: all
 	./test.src/compact_generalization_smoke_test.sh
 
+# Exact supplied Osborn-prefix replay.  This is intentionally separate from
+# the fast default suites; it runs when rr_osbe.in.gz is available beside the
+# repository or through OSBORN_INPUT=/path/to/rr_osbe.in.gz.
+osborn-trajectory-test: all
+	./test.src/osborn_compact_trajectory_test.sh
+
 long-run-scalability-tests: all
 	cd test.src && $(MAKE) compact_long_run_test ancestor_store_scale_test
 	./test.src/compact_long_run_test
