@@ -105,6 +105,8 @@ unsigned get_fpa_id_count(void);
 
 void set_fpa_id_count(unsigned n);
 
+void fpa_reserve_id(Term t);
+
 unsigned get_fpa_new_assigns(void);
 
 void reset_fpa_new_assigns(void);

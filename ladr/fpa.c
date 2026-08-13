@@ -925,6 +925,34 @@ Fpa_index fpa_init_index(int depth)
 
 /*************
  *
+ *    fpa_reserve_id -- assign the ordering identity owned by FPA indexes.
+ *
+ *************/
+
+/* DOCUMENTATION
+Assign an FPA ordering ID without inserting the term into an index.
+
+Compact authoritative indexes use this at the point where the displaced
+legacy FPA index would have first seen the term.  FPA retrieval orders leaf
+answers by this ID, including answers from other live FPA indexes that still
+contain the term.  Delaying the assignment until one of those later indexes
+sees the term can therefore change inference order even when the compact
+index returns exactly the same logical answer set.
+*/
+
+/* PUBLIC */
+void fpa_reserve_id(Term t)
+{
+  if (t == NULL)
+    fatal_error("fpa_reserve_id: null term");
+  if (FPA_ID(t) == 0) {
+    FPA_ID(t) = ++Fpa_id_count;
+    Fpa_new_assigns++;
+  }
+}  /* fpa_reserve_id */
+
+/*************
+ *
  *    fpa_update -- Insert/delete a term into/from a FPA-PATH index.
  *
  *************/
@@ -944,14 +972,10 @@ void fpa_update(Term t, Fpa_index idx, Indexop op)
 {
   struct path p;
 
-  if (FPA_ID(t) == 0) {
-    if (op == INSERT) {
-      FPA_ID(t) = ++Fpa_id_count;
-      Fpa_new_assigns++;
-    }
-    else
-      fatal_error("fpa_update: FPA_ID=0.");
-  }
+  if (op == INSERT)
+    fpa_reserve_id(t);
+  else if (FPA_ID(t) == 0)
+    fatal_error("fpa_update: FPA_ID=0.");
 
   p.first = p.last = NULL;
   fpa_paths(t, t, &p, idx->depth, op, idx->root);

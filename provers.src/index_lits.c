@@ -19,6 +19,7 @@
 #include "index_lits.h"
 #include "compact_unit_index.h"
 #include "compact_feature_index.h"
+#include "../ladr/fpa.h"
 
 /* Private definitions and types */
 
@@ -43,6 +44,19 @@ static unsigned long long Compact_nonunit_back_exact_tests;
 static struct compact_query_timer Compact_nonunit_exact_timer;
 static struct compact_query_timer Compact_nonunit_materialize_timer;
 static struct compact_query_timer Compact_nonunit_summary_timer;
+
+/* FPA leaf lists are ordered by the atom IDs assigned on first insertion.
+   Replacing a subsumption FPA index must not postpone that assignment until
+   the same clause later enters the clashable inference index: doing so
+   changes hyper-resolution candidate order.  Reserve IDs in literal order,
+   exactly as lindex_update() would have done, without allocating the
+   displaced pointer-heavy index. */
+static void reserve_literal_fpa_ids(Topform c)
+{
+  Literals literal;
+  for (literal = c->literals; literal != NULL; literal = literal->next)
+    fpa_reserve_id(literal->atom);
+}
 static Compact_clause_resolver Compact_clause_resolve;
 static Compact_clause_releaser Compact_clause_release;
 static void *Compact_clause_context;
@@ -643,6 +657,9 @@ void destroy_literals_index(void)
 void index_literals(Topform c, Indexop op, Clock clock, BOOL no_fapl)
 {
   BOOL unit = (number_of_literals(c->literals) == 1);
+  BOOL compact_authoritative = unit ? Compact_unit_authoritative :
+                                      Compact_nonunit_authoritative;
+  BOOL fpa_eligible = !no_fapl || !positive_clause(c->literals);
   clock_start(clock);
   if (unit && compact_unit_index_mode()) {
     BOOL ok = op == INSERT ? compact_unit_index_add(Compact_units, c) :
@@ -654,9 +671,14 @@ void index_literals(Topform c, Indexop op, Clock clock, BOOL no_fapl)
     if (op == DELETE && compact_unit_index_compaction_needed(Compact_units))
       compact_unit_index_compact(Compact_units);
   }
-  if ((unit ? !Compact_unit_authoritative : !Compact_nonunit_authoritative) &&
-      (!no_fapl || !positive_clause(c->literals)))
-    lindex_update(unit ? Unit_fpa_idx : Nonunit_fpa_idx, c, op);
+  if (fpa_eligible) {
+    if (compact_authoritative) {
+      if (op == INSERT)
+        reserve_literal_fpa_ids(c);
+    }
+    else
+      lindex_update(unit ? Unit_fpa_idx : Nonunit_fpa_idx, c, op);
+  }
 
   if (unit) {
     if (!Compact_unit_authoritative)
@@ -708,6 +730,8 @@ void index_literals(Topform c, Indexop op, Clock clock, BOOL no_fapl)
 void index_denial(Topform c, Indexop op, Clock clock)
 {
   BOOL unit = (number_of_literals(c->literals) == 1);
+  BOOL compact_authoritative = unit ? Compact_unit_authoritative :
+                                      Compact_nonunit_authoritative;
   clock_start(clock);
   if (unit && compact_unit_index_mode()) {
     BOOL ok = op == INSERT ? compact_unit_index_add(Compact_units, c) :
@@ -717,7 +741,11 @@ void index_denial(Topform c, Indexop op, Clock clock)
         "index_denial: duplicate compact unit" :
         "index_denial: missing compact unit");
   }
-  if (unit ? !Compact_unit_authoritative : !Compact_nonunit_authoritative)
+  if (compact_authoritative) {
+    if (op == INSERT)
+      reserve_literal_fpa_ids(c);
+  }
+  else
     lindex_update(unit ? Unit_fpa_idx : Nonunit_fpa_idx, c, op);
   clock_stop(clock);
 }  /* index_denial */
