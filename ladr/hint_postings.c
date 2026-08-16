@@ -358,6 +358,11 @@ unsigned long long hint_postings_generation(Hint_postings index,
   return posting->occupied ? posting->generation : 0;
 }
 
+unsigned long long hint_postings_reference_count(Hint_postings index)
+{
+  return index == NULL ? 0 : index->references;
+}
+
 void hint_postings_set_dense_budget(Hint_postings index,
                                     unsigned long long bytes)
 {

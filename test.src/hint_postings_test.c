@@ -29,6 +29,8 @@ int main(void)
   hint_postings_add(index, 17, 91);
   hint_postings_add(index, 99, 3);
   hint_postings_add(index, 0, 7);
+  require(hint_postings_reference_count(index) == 4,
+          "constant-time reference count after initial insertions");
   refs = hint_postings_get(index, 17, &count);
   require(count == 2, "posting 17 count");
   require(contains(refs, count, 3), "posting 17 ID 3");
@@ -67,6 +69,8 @@ int main(void)
           "absent posting");
 
   hint_postings_get_stats(index, &stats);
+  require(hint_postings_reference_count(index) == stats.references,
+          "constant-time reference count matches full statistics");
   require(stats.keys == 2004, "key statistics");
   require(stats.references == 4005, "reference statistics");
   require(stats.maximum_posting == 2000, "maximum posting statistics");
@@ -122,6 +126,8 @@ int main(void)
             "singleton profile keeps its exact mask plane");
   }
   hint_postings_get_stats(index, &stats);
+  require(hint_postings_reference_count(index) == stats.references,
+          "profile reference count matches full statistics");
   require(stats.keys == 1001 && stats.references == 1130 &&
           stats.profile_bytes > 0 && stats.profile_mask_words == 64192 &&
           stats.profile_key_histogram[0] == 1000 &&

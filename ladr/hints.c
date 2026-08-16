@@ -1619,14 +1619,17 @@ static void better_rebuild_postings(void)
 
 static void better_maybe_rebuild_postings(void)
 {
-  struct hint_postings_stats stats;
+  unsigned long long references;
   unsigned long long stale, live, scan_threshold;
   BOOL storage_trigger, scan_trigger;
-  hint_postings_get_stats(Better_postings, &stats);
-  if (stats.references < Better_feature_live_count ||
+  /* Full posting statistics aggregate profile histograms and dense storage
+     by scanning every hash slot.  Rebuild admission needs only the exact
+     logical reference counter maintained by the index itself. */
+  references = hint_postings_reference_count(Better_postings);
+  if (references < Better_feature_live_count ||
       Better_equivalence_reference_count < Better_equivalence_live_count)
     fatal_error("better_maybe_rebuild_postings: reference count underflow");
-  stale = stats.references - Better_feature_live_count;
+  stale = references - Better_feature_live_count;
   stale += Better_equivalence_reference_count -
            Better_equivalence_live_count;
   live = (unsigned long long) Packed_hint_capacity +

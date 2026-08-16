@@ -78,6 +78,10 @@ const unsigned *hint_postings_get(Hint_postings index,
 unsigned long long hint_postings_generation(Hint_postings index,
                                              unsigned long long key);
 
+/* O(1) logical reference count for hot maintenance decisions.  Full stats
+   intentionally scan the table to aggregate dense/profile layout details. */
+unsigned long long hint_postings_reference_count(Hint_postings index);
+
 /* Bound the combined dense bitset and summary allocation.  Zero disables
    dense views; sparse postings remain complete. */
 void hint_postings_set_dense_budget(Hint_postings index,
