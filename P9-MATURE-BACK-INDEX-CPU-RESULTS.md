@@ -9,6 +9,146 @@ regression.  The external 7,365-given run and proof endpoint remain open;
 these bounded runs are not a claim that a week-long run has already been
 reproduced.
 
+## August 16 packed-hint admission and CPU update
+
+Commit `c62994a` replaces repeated posting-list intersections for eligible
+`packed_fast` match queries with a same-sign conjunction table.  A hint whose
+complete shallow profile has at most nine keys is stored under every nonempty
+subset of that profile.  The query performs one lookup for its complete key
+set, and fixed bit planes reject incompatible literal counts and 64-bit
+structural summaries before any stable hint ID is read.  Hash collisions can
+only admit an extra candidate; activity, exact subsumption, hint ordering, and
+the decreasing stable-ID rule remain authoritative.
+
+The first implementation exposed why a general admission policy is necessary.
+Josef's 153,681-hint population used 314,579,336 bytes and reduced a
+1,000-given control from about 111.2 to 77.7 total CPU seconds.  The 310,153
+Osborn hints required about 542 MiB; constructing that table raised a
+100-given control from 27.1 seconds and 295 MiB RSS to 63.6 seconds and
+1.36 GiB RSS because the table displaced demodulation's working set.  A
+prefix extrapolation was rejected after it misclassified Josef: the first
+16,384 hints were not representative of the full file.
+
+Commit `bd6c7c9` therefore plans the complete population before committing the
+large sidecars.  Initial indexing retains compact sign profiles.  A temporary
+16-byte-per-key count table then computes the exact final hash-table capacity,
+per-posting allocation capacities, and 64-candidate mask blocks.  The counter
+is released before real construction.  If the exact layout exceeds
+`hint_conjunction_kb`, the conjunction table is never constructed and the run
+uses the established complete dense/sparse matcher.  A partial table is never
+queried, and the same hard cap remains in force after hint rewrites and index
+rebuilds.
+
+The default is 327,680 KiB (320 MiB).  Set the option to zero to force the
+dense/sparse path, or raise it only when the process has a deliberately larger
+resident allowance:
+
+```text
+assign(hint_index,packed_fast).
+assign(hint_conjunction_kb,327680).
+```
+
+`Packed_fast_conjunction` reports the budget, accepted/rejected state, exact
+estimated bytes, actual peak bytes, planned profiles, scanned profiles, and
+budget denials.  The following bounded controls preserve their exact search
+trajectories:
+
+| workload | decision | current total CPU | comparison | peak RSS |
+|---|---:|---:|---:|---:|
+| Osborn, 100 given | reject at 335,545,032 bytes | 25.0 s | 27.1 s before conjunction; 63.6 s unbounded | 295,896 KiB |
+| Josef, 1,000 given | accept 314,579,336 bytes | 78.8 s | 111.2 s dense; 77.7 s direct unplanned build | 549,332 KiB |
+| CHAT, 600 given | accept 108,087,264 bytes | 21.6 s | 23.0 s immediately before population planning | 143,064 KiB |
+
+These results establish safe per-population selection and a mature-prefix
+crossover, not proof-endpoint competitiveness.  The complete 11,369-given
+CHAT rerun remains the CPU product gate.
+
+Commit `ddef6c2` also batches append-only ancestor records in a bounded 1 MiB
+write buffer: the 2,000-given Josef control issued 121 physical writes for
+739,000 logical records.  Commit `d00c6c3` and `3d056be` prune incompatible
+unit code-tree siblings, including the sign-root sentinel.  Finally,
+`4706283` changes `compact_passive_cache`'s default to zero.  The mature cache
+controls found no CPU benefit and higher RSS, so the single-owner archive path
+is now both the recommended configuration and the safe default; explicit
+nonzero cache experiments remain available.
+
+## August 16 short-prefix CPU parity
+
+The first current-code Osborn trajectory checks still had a real startup
+regression: at 510 givens compact needed about 93 user seconds versus 68 for
+the legacy-index control, and at 600 it needed about 130 versus 87.  This was
+not a search divergence: every given clause and the final
+`(given, generated, kept, proofs)` tuple were identical.  A production CHAT
+profile and retained Osborn outputs isolated four independent causes.
+
+Commit `be674a2` collapses the compact rewrite radix hot path.  At CHAT given
+600, 13.3 million rewrite probes caused about 122 million calls through a
+mutually recursive edge wrapper, plus 189 million packed-slice length checks
+for an invariant already established during construction.  Rigid rewrite
+roots now use the exact root-symbol table directly; edge matching and binding
+trail cleanup are inlined; the unusual variable-root case retains the
+original ordered DFS.  Profiled demodulation fell from about 10.6 to 7.2
+seconds, and the final Osborn demod clock is 9.65 seconds versus 9.82 for the
+legacy control.
+
+Commit `89af8ab` replaces a second accidental table scan.  Hint rebuild
+admission asked for full posting statistics after every hint lifecycle event,
+although it needed only the exact logical reference count.  The full report
+still computes its dense/profile histograms; the hot admission path now reads
+the maintained counter in O(1).
+
+Commit `997d69b` removes the largest Osborn cost.  The compact unit trie had
+already found an exact stable subsumer ID, but the generic interface then
+materialized the archived unit clause solely so `cl_process` could read its
+ID and immediately release it.  The 600-given prefix performs roughly 89,000
+successful unit generalizations.  Ordinary clause deletion and DISCOUNT
+refresh now request a stable ID; the Topform-returning and
+ancestor-subsumption interfaces remain available when a caller actually has
+to inspect the proof.  In the retained pair this change reduced compact user
+CPU from 109.12 to 84.96 seconds before rebuild tuning.
+
+Finally, commit `7fe2adb` makes stale compaction growth-aware.  The configured
+percentage is unchanged, but a growing live set is no longer recopied every
+1,024 retirements.  Below 16K live records the stale threshold approaches the
+live population; above that it has a 16K floor until the percentage becomes
+larger.  This removed three premature rebuilds each from the rewrite, unit,
+and backward indexes at given 600.  The policy converges to the original 25%
+rule for mature populations, so it is not a short-run-only configuration.
+
+The final simultaneous Osborn comparison is:
+
+| implementation | user CPU | system CPU | total CPU | final PSS |
+|---|---:|---:|---:|---:|
+| legacy resident indexes | 75.64 s | 7.71 s | 83.35 s | 281,274 KiB |
+| compact file-backed indexes | 77.69 s | 7.18 s | 84.87 s | 230,325 KiB |
+
+Both runs end at `(601, 564041, 33429, 0)`, select the same 600 clauses, and
+match the pinned historical `outaH` suffix.  Compact is now within 1.8% total
+CPU of the legacy control at the formerly adverse short prefix while using
+18.1% less resident memory.  This complements rather than replaces the full
+Osborn evidence: `rr_osbe.out2-unl-rad-comp-otter7.gz` reaches the exact old
+proof endpoint in 20,757 total CPU seconds versus 80,139 for `outa50`, with
+about 93.7% less Prover9-accounted memory.  The latest four changes preserve
+the bounded trajectory; a new proof-endpoint run would still be required to
+attribute an exact full-run number to their specific commits.
+
+The same code was also compared simultaneously against the actual old-P9
+binary on the larger CHAT input through 2,000 given clauses:
+
+| implementation | user CPU | system CPU | total CPU | peak RSS |
+|---|---:|---:|---:|---:|
+| old P9 | 154.66 s | 43.37 s | 198.03 s | 170,880 KiB |
+| compact file-backed indexes | 143.98 s | 42.53 s | 186.51 s | 217,784 KiB |
+
+Both runs end at `(2001, 4432172, 73432, 0)` and have an exact given-clause
+trajectory.  Here compact is 5.8% faster in total CPU.  Its higher RSS is an
+explicit workload tradeoff, not hidden index growth: CHAT admits the
+109,777,280-byte packed-hint conjunction table under the 320 MiB cap, whereas
+Osborn rejects its larger proposed table and remains 18.1% smaller than the
+resident-index control.  Set `hint_conjunction_kb` lower (or to zero) when the
+additional CHAT hint-matching speed is less important than that resident
+allowance.
+
 ## August 2026 completed-run verdict and current rerun
 
 The now-complete `chat_test.new.out7` and `chat_test.new.out8` runs have the
@@ -71,6 +211,7 @@ assign(passive_directory,file).
 assign(passive_selector_store,file).
 assign(passive_selector_buffer,65536).
 assign(hint_index,packed_fast).
+assign(hint_conjunction_kb,327680).
 assign(inference_frontier,clauses).
 assign(ancestor_store,file).
 assign(sos_limit,-1).
@@ -429,6 +570,7 @@ assign(passive_directory,file).
 assign(passive_selector_store,file).
 assign(passive_selector_buffer,65536).
 assign(hint_index,packed_fast).
+assign(hint_conjunction_kb,327680).
 assign(inference_frontier,clauses).
 assign(ancestor_store,file).
 assign(sos_limit,-1).
