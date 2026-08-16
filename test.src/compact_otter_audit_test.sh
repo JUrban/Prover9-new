@@ -348,6 +348,7 @@ set(compact_otter_unit_index).\
 set(compact_otter_back_demod_index).\
 set(compact_otter_nonunit_index).\
 set(compact_nonunit_path_filter).\
+assign(compact_passive_cache,4).\
 assign(stats,all).' "$test_tmp/nonunit.in" | \
   "$repo_dir/bin/prover9" > "$test_tmp/nonunit-archive.out" 2> "$test_tmp/nonunit-archive.err"
 
