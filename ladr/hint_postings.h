@@ -12,12 +12,24 @@ struct hint_postings_stats {
   unsigned long long references;
   unsigned long long table_bytes;
   unsigned long long reference_bytes;
+  unsigned long long profile_bytes;
+  unsigned long long profile_mask_words;
+  unsigned long long profile_key_histogram[7];
+  unsigned long long profile_reference_histogram[7];
   unsigned long long maximum_posting;
   unsigned long long dense_keys;
   unsigned long long dense_bit_bytes;
   unsigned long long dense_summary_bytes;
   unsigned long long dense_budget_bytes;
   unsigned long long dense_budget_denials;
+};
+
+struct hint_profile_view {
+  const unsigned *ids;
+  const unsigned long long *mask_planes;
+  const unsigned *literal_counts;
+  unsigned count;
+  unsigned mask_blocks;
 };
 
 struct hint_dense_view {
@@ -33,6 +45,17 @@ void hint_postings_destroy(Hint_postings index);
 
 void hint_postings_add(Hint_postings index, unsigned long long key,
                        unsigned id);
+
+/* Add/get a posting whose references carry a 64-bit necessary-feature mask
+   and packed positive/negative literal counts.  Profile and ordinary keys
+   must not be mixed in one posting. */
+void hint_postings_add_profile(Hint_postings index, unsigned long long key,
+                               unsigned id, unsigned long long mask,
+                               unsigned positive, unsigned negative);
+
+BOOL hint_postings_get_profile(Hint_postings index,
+                               unsigned long long key,
+                               struct hint_profile_view *view);
 
 const unsigned *hint_postings_get(Hint_postings index,
                                   unsigned long long key,

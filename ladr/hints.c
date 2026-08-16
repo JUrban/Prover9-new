@@ -137,6 +137,23 @@ static unsigned Preview_key_scratch_capacity = 0;
 #define FAST_DENSE_MIN_POSTING 512U
 #define FAST_DENSE_MAX_KEYS 64U
 #define FAST_DENSE_BUDGET_BYTES (16ULL * 1024ULL * 1024ULL)
+#define FAST_CONJUNCTION_MAX_KEYS 9U
+
+/* A match hint whose complete same-polarity shallow profile has at most nine
+   keys is entered under every nonempty subset of that profile.  Generated
+   clauses can consequently ask for their complete conjunction with one hash
+   lookup instead of intersecting six-to-nine broad bitsets.  Larger profiles
+   remain in a conservative overflow vector and are admitted to every lookup;
+   exact subsumption remains authoritative.  Nine is the largest profile in
+   the measured long-run inputs and bounds one hint at 511 32-bit references. */
+static Hint_postings Fast_conjunction_postings = NULL;
+static unsigned *Fast_conjunction_overflow[2] = {NULL, NULL};
+static unsigned Fast_conjunction_overflow_count[2] = {0, 0};
+static unsigned Fast_conjunction_overflow_capacity[2] = {0, 0};
+static unsigned long long Fast_conjunction_queries = 0;
+static unsigned long long Fast_conjunction_posting_candidates = 0;
+static unsigned long long Fast_conjunction_overflow_candidates = 0;
+static unsigned long long Fast_conjunction_profile_rejects = 0;
 
 struct fast_match_cache_entry {
   unsigned long long seed_key;
@@ -987,6 +1004,95 @@ static void better_scratch_add(unsigned long long key)
   Better_key_scratch[Better_key_scratch_count++] = key;
 }
 
+static unsigned long long fast_conjunction_mix(unsigned long long x)
+{
+  x ^= x >> 30;
+  x *= UINT64_C(0xbf58476d1ce4e5b9);
+  x ^= x >> 27;
+  x *= UINT64_C(0x94d049bb133111eb);
+  return x ^ (x >> 31);
+}
+
+/* The index has its own posting table, so the high-byte tag is diagnostic
+   rather than a namespace requirement.  Hash collisions can only admit an
+   extra exact candidate; they can never omit a matching hint. */
+static unsigned long long fast_conjunction_key(
+  unsigned long long mixed, unsigned count)
+{
+  unsigned long long h = mixed ^
+    ((unsigned long long) count * UINT64_C(0x9e3779b97f4a7c15));
+  h = fast_conjunction_mix(h);
+  return (UINT64_C(0xf5) << 56) | (h & UINT64_C(0x00ffffffffffffff));
+}
+
+static void fast_conjunction_overflow_add(unsigned sign, unsigned id)
+{
+  if (Fast_conjunction_overflow_count[sign] ==
+      Fast_conjunction_overflow_capacity[sign]) {
+    unsigned old = Fast_conjunction_overflow_capacity[sign];
+    unsigned capacity = old == 0 ? 64 : old + (old + 1) / 2;
+    if (capacity <= old)
+      fatal_error("fast conjunction overflow capacity");
+    Fast_conjunction_overflow[sign] = safe_realloc(
+      Fast_conjunction_overflow[sign],
+      (size_t) capacity * sizeof(unsigned));
+    Fast_conjunction_overflow_capacity[sign] = capacity;
+  }
+  Fast_conjunction_overflow[sign]
+    [Fast_conjunction_overflow_count[sign]++] = id;
+}
+
+static void fast_conjunction_index_sign(
+  Hint_postings postings, unsigned id, unsigned sign)
+{
+  unsigned long long keys[FAST_CONJUNCTION_MAX_KEYS];
+  unsigned long long subset_mixed[1U << FAST_CONJUNCTION_MAX_KEYS];
+  unsigned char subset_count[1U << FAST_CONJUNCTION_MAX_KEYS];
+  unsigned wanted_kind = sign ? BETTER_FEATURE_MATCH_POS :
+                                BETTER_FEATURE_MATCH_NEG;
+  unsigned long long feature_mask = sign ?
+    Packed_hint_pos_features[id] : Packed_hint_neg_features[id];
+  unsigned positive = Better_hint_positive_count[id];
+  unsigned negative = Better_hint_negative_count[id];
+  unsigned count = 0;
+  unsigned i, subsets;
+  for (i = 0; i < Better_key_scratch_count; i++) {
+    unsigned kind = (unsigned) (Better_key_scratch[i] >> 56);
+    if (kind == wanted_kind) {
+      if (count == FAST_CONJUNCTION_MAX_KEYS) {
+        fast_conjunction_overflow_add(sign, id);
+        return;
+      }
+      keys[count++] = Better_key_scratch[i];
+    }
+  }
+  if (count == 0)
+    return;
+  subset_mixed[0] = 0;
+  subset_count[0] = 0;
+  subsets = 1U << count;
+  for (i = 1; i < subsets; i++) {
+    unsigned bit = (unsigned) __builtin_ctz(i);
+    unsigned previous = i & (i - 1);
+    unsigned long long key;
+    subset_mixed[i] = subset_mixed[previous] ^
+                      fast_conjunction_mix(keys[bit]);
+    subset_count[i] = subset_count[previous] + 1;
+    key = fast_conjunction_key(subset_mixed[i], subset_count[i]);
+    hint_postings_add_profile(
+      postings, key, id, feature_mask, positive, negative);
+  }
+}
+
+static void fast_conjunction_index_hint(
+  Hint_postings postings, unsigned id, BOOL anyconst)
+{
+  if (postings == NULL || anyconst)
+    return;
+  fast_conjunction_index_sign(postings, id, 0);
+  fast_conjunction_index_sign(postings, id, 1);
+}
+
 static unsigned better_child_path(unsigned path, unsigned depth,
                                   unsigned child)
 {
@@ -1102,6 +1208,8 @@ static void better_collect_hint_features(Topform h, BOOL anyconst)
 static void better_rebuild_postings(void)
 {
   Hint_postings postings = hint_postings_init();
+  Hint_postings conjunctions = Fast_packed_index ?
+    hint_postings_init() : NULL;
   unsigned long long live = 0;
   unsigned long long equivalence_live = 0;
   unsigned long long anyconst_live = 0;
@@ -1109,6 +1217,8 @@ static void better_rebuild_postings(void)
   hint_postings_set_dense_budget(
     postings, Fast_packed_index ? FAST_DENSE_BUDGET_BYTES : 0);
   Better_anyconst_reference_count = 0;
+  Fast_conjunction_overflow_count[0] = 0;
+  Fast_conjunction_overflow_count[1] = 0;
   for (id = 1; id < Packed_hint_capacity; id++) {
     Topform h = Packed_hint_by_id[id];
     Better_hint_feature_count[id] = 0;
@@ -1131,6 +1241,8 @@ static void better_rebuild_postings(void)
       live += Better_key_scratch_count;
       for (i = 0; i < Better_key_scratch_count; i++)
         hint_postings_add(postings, Better_key_scratch[i], id);
+      fast_conjunction_index_hint(
+        conjunctions, id, Packed_hint_anyconst[id]);
       equivalence_live += better_equivalence_memberships(id);
       if (Packed_hint_anyconst[id]) {
         better_anyconst_add(id);
@@ -1147,6 +1259,8 @@ static void better_rebuild_postings(void)
   }
   hint_postings_destroy(Better_postings);
   Better_postings = postings;
+  hint_postings_destroy(Fast_conjunction_postings);
+  Fast_conjunction_postings = conjunctions;
   if (Fast_packed_index)
     fast_cache_invalidate_all();
   Better_feature_live_count = live;
@@ -1236,6 +1350,7 @@ static void better_index_hint_terms(Topform h, BOOL anyconst)
     unsigned long long key = Better_key_scratch[i];
     hint_postings_add(Better_postings, key, id);
   }
+  fast_conjunction_index_hint(Fast_conjunction_postings, id, anyconst);
   Better_feature_live_count += Better_key_scratch_count;
   if (Fast_packed_index && anyconst)
     fast_cache_invalidate_all();
@@ -1703,6 +1818,99 @@ static BOOL fast_dense_collect_candidates(
   return TRUE;
 }
 
+static BOOL fast_conjunction_collect_candidates(
+  const unsigned long long *keys, unsigned key_count,
+  unsigned long long first_mask, unsigned positive, unsigned negative,
+  enum packed_hint_operation op)
+{
+  unsigned kind, sign, i;
+  struct hint_profile_view view;
+  unsigned long long mixed = 0;
+  if (Fast_conjunction_postings == NULL || key_count == 0)
+    return FALSE;
+  kind = (unsigned) (keys[0] >> 56);
+  if (kind != BETTER_FEATURE_MATCH_POS &&
+      kind != BETTER_FEATURE_MATCH_NEG)
+    return FALSE;
+  sign = kind == BETTER_FEATURE_MATCH_POS ? 1 : 0;
+  for (i = 0; i < key_count; i++) {
+    if ((unsigned) (keys[i] >> 56) != kind)
+      return FALSE;
+    mixed ^= fast_conjunction_mix(keys[i]);
+  }
+  if (!Hint_preview_active) {
+    Fast_conjunction_queries++;
+    Packed_operation_stats[op].posting_lists++;
+  }
+  if (key_count <= FAST_CONJUNCTION_MAX_KEYS) {
+    unsigned long long key = fast_conjunction_key(mixed, key_count);
+    hint_postings_get_profile(Fast_conjunction_postings, key, &view);
+  }
+  else
+    memset(&view, 0, sizeof(view));
+  if (!Hint_preview_active) {
+    Packed_operation_stats[op].posting_candidates += view.count;
+    Fast_conjunction_posting_candidates += view.count;
+  }
+  {
+    unsigned block;
+    unsigned mask_survivors = 0;
+    for (block = 0; block < view.mask_blocks; block++) {
+      unsigned base = block * 64;
+      unsigned remaining = view.count - base;
+      unsigned long long common = remaining >= 64 ? ~0ULL :
+        ((1ULL << remaining) - 1);
+      unsigned long long required = first_mask;
+      while (required != 0 && common != 0) {
+        unsigned bit = (unsigned) __builtin_ctzll(required);
+        common &= view.mask_planes[(size_t) block * 64 + bit];
+        required &= required - 1;
+      }
+      mask_survivors += (unsigned) __builtin_popcountll(common);
+      while (common != 0) {
+        unsigned bit = (unsigned) __builtin_ctzll(common);
+        unsigned position = base + bit;
+        unsigned id = view.ids[position];
+        unsigned counts = view.literal_counts[position];
+        if ((counts >> 16) < positive ||
+            (counts & 0xffffU) < negative) {
+          if (!Hint_preview_active)
+            Fast_conjunction_profile_rejects++;
+        }
+        else if (id == 0 || id >= Packed_hint_capacity ||
+                 !Packed_hint_active[id] || Packed_hint_anyconst[id]) {
+          if (!Hint_preview_active)
+            packed_note_stale_skip(op);
+        }
+        else
+          packed_add_candidate(id);
+        common &= common - 1;
+      }
+    }
+    if (!Hint_preview_active)
+      Fast_conjunction_profile_rejects += view.count - mask_survivors;
+  }
+  for (i = 0; i < Fast_conjunction_overflow_count[sign]; i++) {
+    unsigned id = Fast_conjunction_overflow[sign][i];
+    if (!Hint_preview_active) {
+      Packed_operation_stats[op].posting_candidates++;
+      Fast_conjunction_overflow_candidates++;
+    }
+    if (id == 0 || id >= Packed_hint_capacity ||
+        !Packed_hint_active[id] || Packed_hint_anyconst[id]) {
+      if (!Hint_preview_active)
+        packed_note_stale_skip(op);
+    }
+    else if (Better_hint_positive_count[id] >= positive &&
+             Better_hint_negative_count[id] >= negative &&
+             (((sign ? Packed_hint_pos_features[id] :
+                       Packed_hint_neg_features[id]) & first_mask) ==
+               first_mask))
+      packed_add_candidate(id);
+  }
+  return TRUE;
+}
+
 static void discard_packed_hint_proof(Topform c)
 {
   /* Hints influence search only through their body, attributes, ID and match
@@ -1822,6 +2030,8 @@ void init_hints(Uniftype utype,
     hint_postings_set_dense_budget(
       Better_postings, Fast_packed_index ? FAST_DENSE_BUDGET_BYTES : 0);
     Better_rebuild_clock = clock_init("packed_hint_rebuild");
+    if (Fast_packed_index)
+      Fast_conjunction_postings = hint_postings_init();
   }
   /* Keep an empty Lindex in packed mode so the established lifecycle and
      checkpoint code can use the same ownership boundary. */
@@ -1883,11 +2093,16 @@ void done_with_hints(void)
   if (Fast_match_cache_keys) safe_free(Fast_match_cache_keys);
   if (Fast_match_cache_key_owners) safe_free(Fast_match_cache_key_owners);
   hint_postings_destroy(Better_postings);
+  hint_postings_destroy(Fast_conjunction_postings);
   if (Better_rebuild_clock != NULL)
     free_clock(Better_rebuild_clock);
   if (Better_equivalence_buckets) safe_free(Better_equivalence_buckets);
   if (Better_equivalence_references) safe_free(Better_equivalence_references);
   if (Better_anyconst_references) safe_free(Better_anyconst_references);
+  if (Fast_conjunction_overflow[0])
+    safe_free(Fast_conjunction_overflow[0]);
+  if (Fast_conjunction_overflow[1])
+    safe_free(Fast_conjunction_overflow[1]);
   Packed_hint_by_id = NULL; Packed_hint_active = NULL;
   Packed_hint_anyconst = NULL; Packed_candidate_mark = NULL;
   Packed_hint_rewrite_symbols = NULL;
@@ -1898,9 +2113,19 @@ void done_with_hints(void)
   Preview_candidate_mark = NULL;
   Preview_candidates = NULL;
   Better_postings = NULL;
+  Fast_conjunction_postings = NULL;
   Better_equivalence_buckets = NULL;
   Better_equivalence_references = NULL;
   Better_anyconst_references = NULL;
+  Fast_conjunction_overflow[0] = Fast_conjunction_overflow[1] = NULL;
+  Fast_conjunction_overflow_count[0] =
+    Fast_conjunction_overflow_count[1] = 0;
+  Fast_conjunction_overflow_capacity[0] =
+    Fast_conjunction_overflow_capacity[1] = 0;
+  Fast_conjunction_queries = 0;
+  Fast_conjunction_posting_candidates = 0;
+  Fast_conjunction_overflow_candidates = 0;
+  Fast_conjunction_profile_rejects = 0;
   Better_equivalence_bucket_capacity = 0;
   Better_equivalence_reference_count = 0;
   Better_equivalence_reference_capacity = 0;
@@ -2154,8 +2379,11 @@ static void better_collect_clause_candidates(
           Packed_operation_stats[op].posting_candidates;
     }
     if (!Fast_packed_index ||
-        !fast_dense_collect_candidates(
-          Better_key_scratch, Better_key_scratch_count, op, TRUE))
+        (!fast_conjunction_collect_candidates(
+           Better_key_scratch, Better_key_scratch_count,
+           first_mask, positive, negative, op) &&
+         !fast_dense_collect_candidates(
+           Better_key_scratch, Better_key_scratch_count, op, TRUE)))
       better_intersect_scratch_candidates(op, TRUE, FALSE);
   }
 
@@ -3098,12 +3326,23 @@ void packed_hint_index_stats(unsigned long long *node_bytes,
         sizeof(unsigned);
   }
   if (Fast_packed_index)
-    *table_bytes +=
+    {
+      struct hint_postings_stats conjunction_stats;
+      hint_postings_get_stats(
+        Fast_conjunction_postings, &conjunction_stats);
+      *node_bytes += conjunction_stats.table_bytes;
+      *reference_bytes += conjunction_stats.reference_bytes +
+                          conjunction_stats.profile_bytes;
+      *table_bytes +=
       (unsigned long long) Fast_match_cache_capacity *
         sizeof(struct fast_match_cache_entry) +
       (unsigned long long) Fast_match_cache_key_capacity *
         (sizeof(*Fast_match_cache_keys) +
-         sizeof(*Fast_match_cache_key_owners));
+         sizeof(*Fast_match_cache_key_owners)) +
+      (unsigned long long) (Fast_conjunction_overflow_capacity[0] +
+                            Fast_conjunction_overflow_capacity[1]) *
+        sizeof(unsigned);
+    }
 }
 
 static unsigned long long packed_preview_workspace_bytes(void)
@@ -3225,6 +3464,46 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             clock_seconds(Better_rebuild_clock));
   }
   if (Fast_packed_index) {
+    struct hint_postings_stats conjunction_stats;
+    hint_postings_get_stats(
+      Fast_conjunction_postings, &conjunction_stats);
+    fprintf(fp,
+            "Packed_fast_conjunction: max_keys=%u, keys=%llu, "
+            "references=%llu, reference_bytes=%llu, profile_bytes=%llu, "
+            "table_bytes=%llu, mask_words=%llu, "
+            "negative_overflow=%u, positive_overflow=%u, queries=%llu, "
+            "posting_candidates=%llu, profile_rejects=%llu, "
+            "overflow_candidates=%llu.\n",
+            FAST_CONJUNCTION_MAX_KEYS, conjunction_stats.keys,
+            conjunction_stats.references,
+            conjunction_stats.reference_bytes,
+            conjunction_stats.profile_bytes,
+            conjunction_stats.table_bytes,
+            conjunction_stats.profile_mask_words,
+            Fast_conjunction_overflow_count[0],
+            Fast_conjunction_overflow_count[1],
+            Fast_conjunction_queries,
+            Fast_conjunction_posting_candidates,
+            Fast_conjunction_profile_rejects,
+            Fast_conjunction_overflow_candidates);
+    fprintf(fp,
+            "Packed_fast_conjunction_histogram: keys=%llu/%llu/%llu/%llu/"
+            "%llu/%llu/%llu, references=%llu/%llu/%llu/%llu/%llu/%llu/"
+            "%llu.\n",
+            conjunction_stats.profile_key_histogram[0],
+            conjunction_stats.profile_key_histogram[1],
+            conjunction_stats.profile_key_histogram[2],
+            conjunction_stats.profile_key_histogram[3],
+            conjunction_stats.profile_key_histogram[4],
+            conjunction_stats.profile_key_histogram[5],
+            conjunction_stats.profile_key_histogram[6],
+            conjunction_stats.profile_reference_histogram[0],
+            conjunction_stats.profile_reference_histogram[1],
+            conjunction_stats.profile_reference_histogram[2],
+            conjunction_stats.profile_reference_histogram[3],
+            conjunction_stats.profile_reference_histogram[4],
+            conjunction_stats.profile_reference_histogram[5],
+            conjunction_stats.profile_reference_histogram[6]);
     fprintf(fp,
             "Packed_fast_cache: budget_bytes=%llu, entries=%u, "
             "entry_bytes=%llu, key_capacity=%llu, key_cursor=%llu, "

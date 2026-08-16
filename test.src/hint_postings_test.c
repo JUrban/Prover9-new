@@ -78,6 +78,59 @@ int main(void)
 
   hint_postings_destroy(index);
 
+  /* Profile postings keep their sidecars aligned across posting growth and
+     table rehashes.  Masks are block-major bit planes: plane B says which
+     of the next 64 IDs contain feature bit B. */
+  index = hint_postings_init();
+  for (i = 0; i < 130; i++)
+    hint_postings_add_profile(index, 700, i + 1,
+                              (i % 3 == 0 ? 1ULL << 2 : 0) |
+                              (i % 5 == 1 ? 1ULL << 47 : 0),
+                              i % 11, i % 7);
+  for (i = 1; i <= 1000; i++)
+    hint_postings_add_profile(index, 10000 + i, i,
+                              1ULL << (i % 64), i % 9, i % 5);
+  {
+    struct hint_profile_view profile;
+    require(hint_postings_get_profile(index, 700, &profile),
+            "profile posting lookup after rehash");
+    require(profile.count == 130 && profile.mask_blocks == 3,
+            "profile posting spans three mask blocks");
+    require(profile.mask_planes != NULL,
+            "profile exposes its mask bit planes");
+    for (i = 0; i < profile.count; i++) {
+      unsigned block = i / 64;
+      unsigned long long flag = 1ULL << (i % 64);
+      require(profile.ids[i] == i + 1,
+              "profile IDs stay aligned after growth");
+      require(profile.literal_counts[i] ==
+                (((i % 11) << 16) | (i % 7)),
+              "profile literal counts stay aligned after growth");
+      require(((profile.mask_planes[(size_t) block * 64 + 2] & flag) != 0) ==
+                (i % 3 == 0),
+              "low profile mask plane is exact");
+      require(((profile.mask_planes[(size_t) block * 64 + 47] & flag) != 0) ==
+                (i % 5 == 1),
+              "high profile mask plane is exact");
+    }
+    require(!hint_postings_get_profile(index, 123456789, &profile) &&
+            profile.count == 0,
+            "absent profile posting returns an empty view");
+    require(hint_postings_get_profile(index, 10001, &profile) &&
+            profile.count == 1 &&
+            (profile.mask_planes[1] & 1ULL) != 0,
+            "singleton profile keeps its exact mask plane");
+  }
+  hint_postings_get_stats(index, &stats);
+  require(stats.keys == 1001 && stats.references == 1130 &&
+          stats.profile_bytes > 0 && stats.profile_mask_words == 64192 &&
+          stats.profile_key_histogram[0] == 1000 &&
+          stats.profile_reference_histogram[0] == 1000 &&
+          stats.profile_key_histogram[6] == 1 &&
+          stats.profile_reference_histogram[6] == 130,
+          "profile key, reference, and sidecar byte statistics");
+  hint_postings_destroy(index);
+
   /* A dense cache that cannot grow must disappear rather than omit a later
      ID.  The sparse posting is always the complete fallback. */
   index = hint_postings_init();

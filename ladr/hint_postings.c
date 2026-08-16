@@ -9,14 +9,18 @@
 struct hint_posting {
   unsigned long long key;
   unsigned *references;
+  unsigned long long *profile_mask_planes;
+  unsigned *profile_literal_counts;
   unsigned long long *dense_bits;
   unsigned long long *dense_summary;
   unsigned count;
   unsigned capacity;
   unsigned dense_words;
   unsigned dense_summary_words;
+  unsigned profile_mask_blocks;
   unsigned long long generation;
   unsigned char occupied;
+  unsigned char profile;
 };
 
 struct hint_postings {
@@ -86,6 +90,10 @@ void hint_postings_destroy(Hint_postings index)
   for (i = 0; i < index->capacity; i++) {
     if (index->table[i].references != NULL)
       safe_free(index->table[i].references);
+    if (index->table[i].profile_mask_planes != NULL)
+      safe_free(index->table[i].profile_mask_planes);
+    if (index->table[i].profile_literal_counts != NULL)
+      safe_free(index->table[i].profile_literal_counts);
     if (index->table[i].dense_bits != NULL)
       safe_free(index->table[i].dense_bits);
     if (index->table[i].dense_summary != NULL)
@@ -181,6 +189,8 @@ void hint_postings_add(Hint_postings index, unsigned long long key,
     posting->key = key;
     index->keys++;
   }
+  else if (posting->profile)
+    fatal_error("hint_postings_add: profile key reused as ordinary key");
   if (posting->count == posting->capacity) {
     unsigned old = posting->capacity;
     unsigned capacity = old == 0 ? 4 : old + (old + 1) / 2;
@@ -202,6 +212,92 @@ void hint_postings_add(Hint_postings index, unsigned long long key,
   index->references++;
   if (posting->count > index->maximum_posting)
     index->maximum_posting = posting->count;
+}
+
+void hint_postings_add_profile(Hint_postings index, unsigned long long key,
+                               unsigned id, unsigned long long mask,
+                               unsigned positive, unsigned negative)
+{
+  struct hint_posting *posting;
+  if (index == NULL || id == 0 ||
+      positive > USHRT_MAX || negative > USHRT_MAX)
+    fatal_error("hint_postings_add_profile: invalid argument");
+  if ((unsigned long long) index->keys * 10 >=
+      (unsigned long long) index->capacity * 7)
+    posting_rehash(index, index->capacity * 2);
+  posting = posting_slot(index, key);
+  if (!posting->occupied) {
+    posting->occupied = 1;
+    posting->profile = 1;
+    posting->key = key;
+    index->keys++;
+  }
+  else if (!posting->profile)
+    fatal_error("hint_postings_add_profile: ordinary key reused as profile");
+  if (posting->count == posting->capacity) {
+    unsigned old = posting->capacity;
+    unsigned capacity = old == 0 ? 4 : old + (old + 1) / 2;
+    if (capacity <= old)
+      fatal_error("hint_postings_add_profile: posting capacity overflow");
+    posting->references = safe_realloc(
+      posting->references, (size_t) capacity * sizeof(unsigned));
+    posting->profile_literal_counts = safe_realloc(
+      posting->profile_literal_counts,
+      (size_t) capacity * sizeof(unsigned));
+    posting->capacity = capacity;
+    index->reference_capacity += capacity - old;
+  }
+  if (posting->count / 64 >= posting->profile_mask_blocks) {
+    unsigned old_blocks = posting->profile_mask_blocks;
+    unsigned blocks = old_blocks + 1;
+    posting->profile_mask_planes = safe_realloc(
+      posting->profile_mask_planes,
+      (size_t) blocks * 64 * sizeof(unsigned long long));
+    memset(posting->profile_mask_planes + (size_t) old_blocks * 64, 0,
+           64 * sizeof(unsigned long long));
+    posting->profile_mask_blocks = blocks;
+  }
+  posting->references[posting->count] = id;
+  posting->profile_literal_counts[posting->count] =
+    (positive << 16) | negative;
+  {
+    unsigned bit;
+    unsigned block = posting->count / 64;
+    unsigned long long flag = 1ULL << (posting->count % 64);
+    for (bit = 0; bit < 64; bit++)
+      if (mask & (1ULL << bit))
+        posting->profile_mask_planes[(size_t) block * 64 + bit] |= flag;
+  }
+  posting->count++;
+  posting->generation++;
+  if (posting->generation == 0)
+    posting->generation = 1;
+  index->references++;
+  if (posting->count > index->maximum_posting)
+    index->maximum_posting = posting->count;
+}
+
+BOOL hint_postings_get_profile(Hint_postings index,
+                               unsigned long long key,
+                               struct hint_profile_view *view)
+{
+  struct hint_posting *posting;
+  if (view == NULL)
+    fatal_error("hint_postings_get_profile: NULL view");
+  memset(view, 0, sizeof(*view));
+  if (index == NULL)
+    return FALSE;
+  posting = posting_slot(index, key);
+  if (!posting->occupied)
+    return FALSE;
+  if (!posting->profile)
+    fatal_error("hint_postings_get_profile: ordinary posting");
+  view->ids = posting->references;
+  view->mask_planes = posting->profile_mask_planes;
+  view->literal_counts = posting->profile_literal_counts;
+  view->count = posting->count;
+  view->mask_blocks = posting->profile_mask_blocks;
+  return TRUE;
 }
 
 const unsigned *hint_postings_get(Hint_postings index,
@@ -304,6 +400,21 @@ void hint_postings_get_stats(Hint_postings index,
   stats->dense_budget_denials = index->dense_budget_denials;
   for (i = 0; i < index->capacity; i++) {
     struct hint_posting *posting = index->table + i;
+    if (posting->profile) {
+      unsigned bucket = posting->count <= 1 ? 0 :
+        posting->count <= 3 ? 1 : posting->count <= 7 ? 2 :
+        posting->count <= 15 ? 3 : posting->count <= 31 ? 4 :
+        posting->count <= 63 ? 5 : 6;
+      stats->profile_key_histogram[bucket]++;
+      stats->profile_reference_histogram[bucket] += posting->count;
+      stats->profile_bytes +=
+        (unsigned long long) posting->capacity *
+          sizeof(unsigned) +
+        (unsigned long long) posting->profile_mask_blocks * 64 *
+          sizeof(unsigned long long);
+      stats->profile_mask_words +=
+        (unsigned long long) posting->profile_mask_blocks * 64;
+    }
     if (posting->dense_bits != NULL) {
       stats->dense_keys++;
       stats->dense_bit_bytes +=
