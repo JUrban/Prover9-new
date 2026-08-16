@@ -2121,7 +2121,11 @@ Prover_options init_prover_options(void)
   p->report_stderr =    init_parm("report_stderr",        -1,     -1,INT_MAX);
   p->report_given =     init_parm("report_given",         -1,     -1,INT_MAX);
   p->report_preprocessing = init_parm("report_preprocessing", -1, -1,INT_MAX);
-  p->compact_passive_cache = init_parm("compact_passive_cache", 4, 0, 1024);
+  /* Materialization caching did not improve the mature CHAT controls and it
+     adds a second decoded-clause identity for a record.  Keep it available
+     for explicit experiments, but make the faster, single-owner path the
+     safe default. */
+  p->compact_passive_cache = init_parm("compact_passive_cache", 0, 0, 1024);
   p->passive_selector_buffer =
     init_parm("passive_selector_buffer", 65536, 1024, INT_MAX);
   p->compact_term_reclaim_kb =
@@ -6389,8 +6393,20 @@ static void compact_passive_cache_discard(unsigned long long id,
   struct compact_passive_cache_entry *entry =
     compact_passive_cache_find(id);
   if (entry != NULL) {
-    if (expected != NULL && entry->clause != expected)
-      fatal_error("compact passive cache: materialized identity mismatch");
+    if (expected != NULL && entry->clause != expected) {
+      /* Checkpoint/selector traversal can independently materialize the same
+         immutable archive record while an unpinned cached copy survives.
+         Pointer identity is not an ownership invariant in that case: retire
+         both decoded copies and let the caller activate the archive owner.
+         A pinned different copy would indicate a genuine overlapping-use
+         lifecycle error and remains fatal. */
+      if (entry->pins != 0)
+        fatal_error("compact passive cache: overlapping materialized identities");
+      compact_passive_cache_clear_entry(entry);
+      clause_store_release_materialized(expected);
+      Compact_passive_cache_invalidations++;
+      return;
+    }
     if (entry->pins != (expected == NULL ? 0U : 1U))
       fatal_error("compact passive cache: invalid activation pin count");
     entry->pins = 0;
