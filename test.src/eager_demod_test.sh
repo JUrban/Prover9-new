@@ -27,9 +27,9 @@ fi
 grep -q 'end of proof' "$test_tmp/parents.out"
 grep -q 'Directproof did' "$test_tmp/direct.out"
 
-# packed_fast uses the bounded dense posting engine for back-demodulating
-# hints as well as for ordinary hint matching.  The exact rewrite/reindex
-# authority and proof must remain unchanged.
+# packed_fast uses conjunction postings for ordinary hint matching and keeps
+# the bounded dense/fallback path for back-demodulating hints.  The exact
+# rewrite/reindex authority and proof must remain unchanged.
 sed 's/assign(hint_index,packed)\./assign(hint_index,packed_fast)./' \
   "$repo_dir/test.src/eager_demod.in" | \
   "$repo_dir/bin/prover9" > "$test_tmp/packed-fast.out" \
@@ -37,7 +37,9 @@ sed 's/assign(hint_index,packed)\./assign(hint_index,packed_fast)./' \
 grep -q 'THEOREM PROVED' "$test_tmp/packed-fast.out"
 grep -Eq 'Packed_hint_operation: op=back_demod, .*exact_positive=[1-9][0-9]*, rewrites=[1-9][0-9]*, reindexes=[1-9][0-9]*' \
   "$test_tmp/packed-fast.out"
-grep -Eq 'Packed_fast_dense: .*queries=[1-9][0-9]*, .*sparse_used=[1-9][0-9]*' \
+grep -Eq 'Packed_fast_conjunction: .*queries=[1-9][0-9]*, .*posting_candidates=[1-9][0-9]*' \
+  "$test_tmp/packed-fast.out"
+grep -Eq 'Packed_fast_dense: .*queries=[1-9][0-9]*' \
   "$test_tmp/packed-fast.out"
 if grep -q 'Fatal error' "$test_tmp/packed-fast.err"; then
   cat "$test_tmp/packed-fast.err" >&2
