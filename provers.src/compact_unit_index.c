@@ -1163,9 +1163,9 @@ static void collect_instance_tree_candidates(
   unsigned long long *dead)
 {
   struct cui_node *edge = &index->nodes[node];
-  const int32_t *edge_tokens = compact_term_pool_slice_tokens(
-    index->term_pool, edge->tokens);
   uint32_t edge_length = compact_term_slice_length(edge->tokens);
+  const int32_t *edge_tokens = edge_length == 0 ? NULL :
+    compact_term_pool_slice_tokens(index->term_pool, edge->tokens);
   uint32_t at;
   uint32_t child;
 
@@ -1523,9 +1523,9 @@ static void collect_code_tree_candidates(
   unsigned long long *dead)
 {
   struct cui_node *edge = &index->nodes[node];
-  const int32_t *edge_tokens = compact_term_pool_slice_tokens(
-    index->term_pool, edge->tokens);
   uint32_t edge_length = compact_term_slice_length(edge->tokens);
+  const int32_t *edge_tokens = edge_length == 0 ? NULL :
+    compact_term_pool_slice_tokens(index->term_pool, edge->tokens);
   uint32_t at;
   uint32_t child;
 
@@ -1586,11 +1586,35 @@ static void collect_code_tree_candidates(
     return;
   }
 
-  for (child = edge->first_child; child != CUI_NONE;
-       child = index->nodes[child].next_sibling)
-    collect_code_tree_candidates(index, child, query_position, query_end,
-                                 pending, query, exclude_id, found, visited,
-                                 live, dead);
+  /* Siblings are kept in code_compare() order: stored variables first, then
+     fixed symbols.  At an ordinary resident symbol only a variable edge or
+     the one equal-symbol edge can unify.  Calling the recursive matcher for
+     every other sibling made mature indexes examine about a thousand nodes
+     per conflict query merely to reject most at their first token.  A
+     resident variable (or a stored subtree currently covered by one) still
+     visits every child, preserving the complete unification answer set. */
+  if (pending != 0 ||
+      (query_position < query_end &&
+       VARIABLE(index->query[query_position].term))) {
+    for (child = edge->first_child; child != CUI_NONE;
+         child = index->nodes[child].next_sibling)
+      collect_code_tree_candidates(index, child, query_position, query_end,
+                                   pending, query, exclude_id, found, visited,
+                                   live, dead);
+  }
+  else if (query_position < query_end) {
+    int wanted = SYMNUM(index->query[query_position].term);
+    for (child = edge->first_child; child != CUI_NONE;
+         child = index->nodes[child].next_sibling) {
+      int32_t code = first_code(index, child);
+      if (code < 0 || code == wanted)
+        collect_code_tree_candidates(
+          index, child, query_position, query_end, pending, query,
+          exclude_id, found, visited, live, dead);
+      else if (code > wanted)
+        break;
+    }
+  }
 }
 
 struct cui_feature_choice {
@@ -1740,16 +1764,13 @@ unsigned long long *compact_unit_unifier_ids(
   memset(&choice, 0, sizeof(choice));
   if (index->strategy == COMPACT_UNIT_CODE_TREE) {
     size_t query_count = 0;
-    uint32_t child;
     index->code_tree_queries++;
     flatten_query(index, query, &query_count);
     if (query_count > UINT32_MAX)
       fatal_error("compact_unit_index: code-tree query overflow");
-    for (child = index->nodes[index->roots[sign ? 1 : 0]].first_child;
-         child != CUI_NONE; child = index->nodes[child].next_sibling)
-      collect_code_tree_candidates(
-        index, child, 0, (uint32_t) query_count, 0, query, exclude_id,
-        &found, &visited, &live, &dead);
+    collect_code_tree_candidates(
+      index, index->roots[sign ? 1 : 0], 0, (uint32_t) query_count, 0,
+      query, exclude_id, &found, &visited, &live, &dead);
   }
   else if (index->strategy == COMPACT_UNIT_POSITION) {
     size_t key_at;

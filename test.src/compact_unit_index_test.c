@@ -278,9 +278,10 @@ int main(void)
           position_stats.position_fallback_queries == 0,
           "position index records unbounded-depth rigid and variable features");
     CHECK(tree_stats.code_tree_queries == 1 &&
+          tree_stats.code_tree_nodes_examined < FAMILY / 4 &&
           tree_stats.code_tree_postings_examined <= 2 &&
           tree_stats.feature_bytes == 0,
-          "code-tree retrieval reuses the compact radix tree without features");
+          "code-tree retrieval prunes incompatible siblings without features");
     CHECK(tree_stats.instance_tree_queries == 1 &&
           tree_stats.instance_exact_tests == 1 &&
           tree_stats.instance_tree_postings_examined == 1,
