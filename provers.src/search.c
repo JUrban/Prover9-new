@@ -8336,9 +8336,10 @@ BOOL cl_process_delete(Topform c)
   // Forward subsumption
 
   {
-    Topform subsumer;
+    unsigned long long subsumer_id = 0;
     clock_start(Clocks.subsume);
     if (flag(Opt->ancestor_subsume)) {
+      Topform subsumer;
       /* Iterate through ALL generalizers (not just the first the index
          returns) and accept the first whose proof is no longer than c's.
          If the index's first hit happens to be a high-cost variant,
@@ -8348,22 +8349,21 @@ BOOL cl_process_delete(Topform c)
       BOOL use_prf_weight = flag(Opt->proof_weight);
       subsumer = forward_subsumption_filter(c, anc_subsume_accept_cb,
                                             &use_prf_weight);
-    } else {
-      subsumer = forward_subsumption(c);
-    }
-    clock_stop(Clocks.subsume);
-    if (subsumer != NULL && !c->used) {
-      unsigned long long subsumer_id = subsumer->id;
+      if (subsumer != NULL)
+        subsumer_id = subsumer->id;
       release_compact_index_clause(subsumer);
+    }
+    else
+      subsumer_id = forward_subsumption_id(c);
+    clock_stop(Clocks.subsume);
+    if (subsumer_id != 0 && !c->used) {
       if (flag(Opt->print_gen))
 	printf("%ssubsumed by %llu.\n", TPTP_PFX, subsumer_id);
       Stats.subsumed++;
       return TRUE;  // delete
     }
-    else {
-      release_compact_index_clause(subsumer);
+    else
       return FALSE;  // keep the clause
-    }
   }
 }  // cl_process_delete
 
@@ -10029,7 +10029,7 @@ static
 BOOL discount_refresh_selected(Topform c)
 {
   Topform copy;
-  Topform subsumer;
+  unsigned long long subsumer_id = 0;
 
   if (c->simplifier_epoch == Simplifier_epoch &&
       c->rewrite_epoch == Rewrite_epoch)
@@ -10067,17 +10067,19 @@ BOOL discount_refresh_selected(Topform c)
      is necessary only after an active-state epoch change. */
   clock_start(Clocks.subsume);
   if (flag(Opt->ancestor_subsume)) {
+    Topform subsumer;
     BOOL use_prf_weight = flag(Opt->proof_weight);
     subsumer = forward_subsumption_filter(c, anc_subsume_accept_cb,
                                           &use_prf_weight);
+    if (subsumer != NULL)
+      subsumer_id = subsumer->id;
+    release_compact_index_clause(subsumer);
   }
   else
-    subsumer = forward_subsumption(c);
+    subsumer_id = forward_subsumption_id(c);
   clock_stop(Clocks.subsume);
 
-  if (subsumer != NULL && !c->used) {
-    unsigned long long subsumer_id = subsumer->id;
-    release_compact_index_clause(subsumer);
+  if (subsumer_id != 0 && !c->used) {
     if (flag(Opt->print_gen))
       printf("%sDISCOUNT refresh: %llu subsumed by %llu.\n",
              TPTP_PFX, c->id, subsumer_id);
@@ -10093,8 +10095,6 @@ BOOL discount_refresh_selected(Topform c)
     retain_disabled_clause(c);
     return FALSE;
   }
-  release_compact_index_clause(subsumer);
-
   c->simplifier_epoch = Simplifier_epoch;
   c->rewrite_epoch = Rewrite_epoch;
   return TRUE;

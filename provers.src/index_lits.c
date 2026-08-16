@@ -959,6 +959,25 @@ static Plist compact_nonunit_back_subsumption(Topform query)
   return result;
 }
 
+static Topform forward_nonunit_subsumption(Topform d)
+{
+  Topform subsumer;
+  if (Compact_nonunit_authoritative)
+    subsumer = compact_nonunit_forward_subsumption(d);
+  else {
+    Topform compact = NULL;
+    subsumer = forward_feature_subsume(d, Nonunit_features_idx);
+    if (Compact_nonunit_audit) {
+      compact = compact_nonunit_forward_subsumption(d);
+      if (subsumer != compact)
+        compact_nonunit_audit_mismatch(
+          "forward", d, subsumer == NULL ? 0 : subsumer->id,
+          compact == NULL ? 0 : compact->id);
+    }
+  }
+  return subsumer;
+}
+
 /* DOCUMENTATION
 */
 
@@ -993,23 +1012,34 @@ Topform forward_subsumption(Topform d)
                                   subsumer == NULL ? 0 : subsumer->id,
                                   compact);
   }
-  if (!subsumer) {
-    if (Compact_nonunit_authoritative)
-      subsumer = compact_nonunit_forward_subsumption(d);
-    else {
-      Topform compact = NULL;
-      subsumer = forward_feature_subsume(d, Nonunit_features_idx);
-      if (Compact_nonunit_audit) {
-        compact = compact_nonunit_forward_subsumption(d);
-        if (subsumer != compact)
-          compact_nonunit_audit_mismatch(
-            "forward", d, subsumer == NULL ? 0 : subsumer->id,
-            compact == NULL ? 0 : compact->id);
-      }
-    }
-  }
+  if (!subsumer)
+    subsumer = forward_nonunit_subsumption(d);
   return subsumer;
 }  /* forward_subsumption */
+
+unsigned long long forward_subsumption_id(Topform d)
+{
+  Topform subsumer;
+  unsigned long long id;
+  if (Compact_unit_authoritative) {
+    Literals literal;
+    for (literal = d->literals; literal != NULL; literal = literal->next) {
+      id = compact_unit_generalization_first(
+        Compact_units, literal->atom, literal->sign, 0);
+      if (id != 0)
+        return id;
+    }
+    /* Unit retrieval above was complete.  Continue directly with nonunits
+       instead of entering forward_subsumption() and repeating every unit
+       query. */
+    subsumer = forward_nonunit_subsumption(d);
+  }
+  else
+    subsumer = forward_subsumption(d);
+  id = subsumer == NULL ? 0 : subsumer->id;
+  release_compact_index_clause(subsumer);
+  return id;
+}
 
 /*************
  *

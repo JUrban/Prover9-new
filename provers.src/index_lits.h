@@ -73,6 +73,11 @@ Plist back_unit_deletable(Topform c);
 
 Topform forward_subsumption(Topform d);
 
+/* Return only the stable proof ID when the caller does not need to inspect
+   the subsumer.  Authoritative compact unit retrieval is already exact, so
+   this avoids materializing an archived unit clause merely to read its ID. */
+unsigned long long forward_subsumption_id(Topform d);
+
 Topform forward_subsumption_filter(Topform d,
                                    BOOL (*accept_cb)(Topform subsumer,
                                                      Topform new_clause,
