@@ -9,6 +9,7 @@
 #define CFI_NONE 0U
 #define CFI_TOMBSTONE UINT64_MAX
 #define CFI_BACK_STRUCTURAL_BITS 96
+#define CFI_GROWTH_STALE_FLOOR 16384ULL
 
 static unsigned Compaction_stale_pct = 25;
 
@@ -680,6 +681,10 @@ BOOL compact_feature_index_compaction_needed(Compact_feature_index index)
   stale = physical - index->active;
   threshold = (index->active / 100) * Compaction_stale_pct +
     ((index->active % 100) * Compaction_stale_pct + 99) / 100;
+  if (threshold < index->active &&
+      threshold < CFI_GROWTH_STALE_FLOOR)
+    threshold = index->active < CFI_GROWTH_STALE_FLOOR ?
+      index->active : CFI_GROWTH_STALE_FLOOR;
   if (threshold < 1024)
     threshold = 1024;
   return stale >= threshold;

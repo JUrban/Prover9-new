@@ -5,6 +5,7 @@
 #include <string.h>
 
 #define CUI_NONE 0U
+#define CUI_GROWTH_STALE_FLOOR 16384ULL
 
 static unsigned Compaction_stale_pct = 25;
 static Compact_unit_strategy Unit_strategy = COMPACT_UNIT_ROOT_SCAN;
@@ -740,6 +741,10 @@ BOOL compact_unit_index_compaction_needed(Compact_unit_index index)
   stale = physical - index->active;
   threshold = (index->active / 100) * Compaction_stale_pct +
     ((index->active % 100) * Compaction_stale_pct + 99) / 100;
+  if (threshold < index->active &&
+      threshold < CUI_GROWTH_STALE_FLOOR)
+    threshold = index->active < CUI_GROWTH_STALE_FLOOR ?
+      index->active : CUI_GROWTH_STALE_FLOOR;
   if (threshold < 1024)
     threshold = 1024;
   return stale >= threshold;

@@ -20,6 +20,7 @@
 #define CBD_MASK_DIRECTORY_BUCKETS 64
 #define CBD_POSITION_SPARSE_INTERSECTION_MAX 4
 #define CBD_TREE_CHILD_CACHE_MAX_BYTES (UINT64_C(8) * 1024 * 1024)
+#define CBD_GROWTH_STALE_FLOOR 16384ULL
 #define CBD_TREE_CHILD_CACHE_MIN_SCAN 8
 #define CBD_ROUTE_PROFILE_CAPACITY 4096
 #define CBD_ROUTE_FREQUENCY_CAPACITY 65536
@@ -6422,6 +6423,10 @@ BOOL compact_back_demod_compaction_needed(Compact_back_demod_index index)
   stale = physical - index->active;
   threshold = (index->active / 100) * Compaction_stale_pct +
     ((index->active % 100) * Compaction_stale_pct + 99) / 100;
+  if (threshold < index->active &&
+      threshold < CBD_GROWTH_STALE_FLOOR)
+    threshold = index->active < CBD_GROWTH_STALE_FLOOR ?
+      index->active : CBD_GROWTH_STALE_FLOOR;
   if (threshold < 1024)
     threshold = 1024;
   return stale >= threshold;

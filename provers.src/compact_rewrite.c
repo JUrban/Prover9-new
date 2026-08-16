@@ -19,6 +19,7 @@ static unsigned long long Deep_child_cache_budget_bytes = 0;
 #define CR_DEEP_CHILD_CACHE_MIN_SCAN 32
 #define CR_DEEP_CHILD_CACHE_EMPTY UINT32_MAX
 #define CR_SUBJECT_BLOCK_NODES 1024
+#define CR_GROWTH_STALE_FLOOR 16384ULL
 
 struct cr_node {
   Compact_term_slice tokens;
@@ -1046,6 +1047,14 @@ BOOL compact_rewrite_compaction_needed(Compact_rewrite_bank bank)
   stale = physical - bank->active_rules;
   threshold = (bank->active_rules / 100) * Compaction_stale_pct +
     ((bank->active_rules % 100) * Compaction_stale_pct + 99) / 100;
+  /* While an index is still growing, rebuilding every 1,024 retirements can
+     copy the same expanding live population repeatedly.  Require stale
+     records to approach the live population, capped at 16K; beyond that
+     point the configured percentage regains control. */
+  if (threshold < bank->active_rules &&
+      threshold < CR_GROWTH_STALE_FLOOR)
+    threshold = bank->active_rules < CR_GROWTH_STALE_FLOOR ?
+      bank->active_rules : CR_GROWTH_STALE_FLOOR;
   if (threshold < 1024)
     threshold = 1024;
   return stale >= threshold;
