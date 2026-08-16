@@ -169,6 +169,17 @@ The Osborn conjunction sidecar was correctly rejected at an estimated
 335,545,032 bytes under the 335,544,320-byte cap, so none of the compact
 process's resident result is hidden in that optional acceleration table.
 
+An optional latest-code proof rerun was then allowed to continue for about
+20 minutes before manual termination under the local bounded-experiment
+policy.  It selected 2,250 clauses.  Givens 195 through 2,250 are identical to
+the historical old-P9 `outaH` sequence; their normalized SHA-256 digest is
+`fbdc80cfb930a84f1c274262e02d5f4f8406e34e15a5d87182bd901c55d65469`.
+This extends the latest-commit trajectory check into the mature prefix but is
+not presented as another complete proof timing.  The completed exact endpoint
+comparison remains `outa50` versus
+`rr_osbe.out2-unl-rad-comp-otter7.gz`, while the direct same-host CPU claim
+above deliberately uses the completed 1,000-given pair.
+
 ## August 2026 completed-run verdict and current rerun
 
 The now-complete `chat_test.new.out7` and `chat_test.new.out8` runs have the
