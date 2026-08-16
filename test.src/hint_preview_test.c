@@ -32,7 +32,7 @@ static void run_case(BOOL packed, BOOL better, BOOL fast, int bsub)
 
   hint->attributes = set_int_attribute(hint->attributes, bsub, 7);
   init_hints(ORDINARY_UNIF, bsub, FALSE, FALSE, 2, packed, better, fast, 2048,
-             8, NULL);
+             327680, 0, 8, NULL);
   index_hint(hint);
   epoch_before = hint_state_epoch();
   packed_hint_index_stats(&nb, &rb, &tb, &checks_before);
@@ -86,7 +86,7 @@ static void run_variable_cache_case(int bsub)
 
   hint->attributes = set_int_attribute(hint->attributes, bsub, 5);
   init_hints(ORDINARY_UNIF, bsub, FALSE, FALSE, 2,
-             TRUE, TRUE, TRUE, 64, 8, NULL);
+             TRUE, TRUE, TRUE, 64, 327680, 0, 8, NULL);
   index_hint(hint);
   adjust_weight_with_hints(first, FALSE, FALSE);
   adjust_weight_with_hints(second, FALSE, FALSE);
@@ -134,7 +134,7 @@ static void run_observed_stale_rebuild_case(int bsub)
   unsigned i;
 
   init_hints(ORDINARY_UNIF, bsub, FALSE, FALSE, 2,
-             TRUE, TRUE, FALSE, 0, 1, NULL);
+             TRUE, TRUE, FALSE, 0, 327680, 0, 1, NULL);
   index_hint(stale);
   unindex_hint(stale);
 
@@ -190,7 +190,7 @@ static void run_back_fingerprint_case(int bsub)
   char line[4096];
 
   init_hints(ORDINARY_UNIF, bsub, FALSE, TRUE, 2,
-             TRUE, TRUE, TRUE, 2048, 8, no_op_demod);
+             TRUE, TRUE, TRUE, 2048, 327680, 0, 8, no_op_demod);
   index_hint(exact);
   index_hint(deep_mismatch);
   back_demod_hints(demod, ORIENTED, FALSE);
@@ -230,6 +230,76 @@ static void run_back_fingerprint_case(int bsub)
   delete_clause(exact);
 }
 
+static void run_conjunction_budget_case(int bsub)
+{
+  Topform hint = parse_clause_from_string("budget_probe(f(a,b,c)).");
+  Topform candidate = parse_clause_from_string("budget_probe(f(a,b,c)).");
+  BOOL saw_denial = FALSE;
+  FILE *stats;
+  char line[4096];
+
+  init_hints(ORDINARY_UNIF, bsub, FALSE, FALSE, 2,
+             TRUE, TRUE, TRUE, 0, 1, 1, 8, NULL);
+  index_hint(hint);
+  finalize_hint_conjunction_index();
+  adjust_weight_with_hints(candidate, FALSE, FALSE);
+  CHECK(candidate->matching_hint == hint,
+        "budget denial falls back to exact packed hint matching");
+  stats = tmpfile();
+  CHECK(stats != NULL, "open conjunction-budget statistics stream");
+  if (stats != NULL) {
+    fprint_packed_hint_operation_stats(stats);
+    rewind(stats);
+    while (fgets(line, sizeof(line), stats) != NULL)
+      if (strstr(line, "Packed_fast_conjunction:") != NULL)
+        saw_denial = strstr(line, "enabled=no,") != NULL &&
+          strstr(line, "budget_denials=1,") != NULL;
+    fclose(stats);
+  }
+  CHECK(saw_denial,
+        "conjunction budget reports one permanent conservative fallback");
+  unindex_hint(hint);
+  done_with_hints();
+  delete_clause(candidate);
+  delete_clause(hint);
+}
+
+static void run_conjunction_plan_case(int bsub)
+{
+  Topform hint = parse_clause_from_string("plan_probe(f(a,b,c)).");
+  Topform candidate = parse_clause_from_string("plan_probe(f(a,b,c)).");
+  BOOL saw_plan = FALSE;
+  FILE *stats;
+  char line[4096];
+
+  init_hints(ORDINARY_UNIF, bsub, FALSE, FALSE, 2,
+             TRUE, TRUE, TRUE, 0, 1024, 1, 8, NULL);
+  index_hint(hint);
+  finalize_hint_conjunction_index();
+  adjust_weight_with_hints(candidate, FALSE, FALSE);
+  CHECK(candidate->matching_hint == hint,
+        "accepted population plan preserves exact hint matching");
+  stats = tmpfile();
+  CHECK(stats != NULL, "open conjunction-plan statistics stream");
+  if (stats != NULL) {
+    fprint_packed_hint_operation_stats(stats);
+    rewind(stats);
+    while (fgets(line, sizeof(line), stats) != NULL)
+      if (strstr(line, "Packed_fast_conjunction:") != NULL)
+        saw_plan = strstr(line, "enabled=yes,") != NULL &&
+          strstr(line, "budget_denials=0,") != NULL &&
+          strstr(line, "planned_profiles=1,") != NULL &&
+          strstr(line, "plan_scans=1,") != NULL;
+    fclose(stats);
+  }
+  CHECK(saw_plan,
+        "accepted conjunction plan reports its complete population scan");
+  unindex_hint(hint);
+  done_with_hints();
+  delete_clause(candidate);
+  delete_clause(hint);
+}
+
 static void run_hint_lifecycle_case(BOOL packed, BOOL better, BOOL fast,
                                     int bsub)
 {
@@ -243,7 +313,7 @@ static void run_hint_lifecycle_case(BOOL packed, BOOL better, BOOL fast,
   clist_append(once, owners);
   clist_append(expiring, owners);
   init_hints(ORDINARY_UNIF, bsub, FALSE, FALSE, 2,
-             packed, better, fast, fast ? 64 : 0, 8, NULL);
+             packed, better, fast, fast ? 64 : 0, 327680, 0, 8, NULL);
   set_hint_match_once(TRUE);
   index_hint(once);
   set_hints_given_count(10);
@@ -298,7 +368,7 @@ static void run_terminal_bulk_discard_case(int bsub)
   int i;
 
   init_hints(ORDINARY_UNIF, bsub, FALSE, FALSE, 2,
-             TRUE, TRUE, TRUE, 64, 8, NULL);
+             TRUE, TRUE, TRUE, 64, 327680, 0, 8, NULL);
   for (i = 0; i < HINTS; i++) {
     snprintf(text, sizeof(text), "terminal_hint_%d(f(a)).", i);
     hints[i] = parse_clause_from_string(text);
@@ -328,6 +398,8 @@ int main(void)
   run_variable_cache_case(bsub);
   run_observed_stale_rebuild_case(bsub);
   run_back_fingerprint_case(bsub);
+  run_conjunction_budget_case(bsub);
+  run_conjunction_plan_case(bsub);
   run_hint_lifecycle_case(FALSE, FALSE, FALSE, bsub);
   run_hint_lifecycle_case(TRUE, FALSE, FALSE, bsub);
   run_hint_lifecycle_case(TRUE, TRUE, FALSE, bsub);

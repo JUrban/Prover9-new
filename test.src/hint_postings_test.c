@@ -129,6 +129,14 @@ int main(void)
           stats.profile_key_histogram[6] == 1 &&
           stats.profile_reference_histogram[6] == 130,
           "profile key, reference, and sidecar byte statistics");
+  require(hint_postings_profile_allocated_bytes(index) ==
+            stats.table_bytes + stats.reference_bytes + stats.profile_bytes,
+          "profile resident accounting is exact and constant-time");
+  require(hint_postings_profile_layout_bytes(
+            2048, stats.reference_bytes / sizeof(unsigned),
+            stats.profile_mask_words / 64) ==
+            hint_postings_profile_allocated_bytes(index),
+          "lightweight profile layout estimate matches actual allocation");
   hint_postings_destroy(index);
 
   /* A dense cache that cannot grow must disappear rather than omit a later

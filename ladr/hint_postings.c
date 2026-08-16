@@ -29,6 +29,8 @@ struct hint_postings {
   unsigned keys;
   unsigned long long references;
   unsigned long long reference_capacity;
+  unsigned long long profile_reference_capacity;
+  unsigned long long profile_mask_bytes;
   unsigned long long maximum_posting;
   unsigned long long dense_bytes;
   unsigned long long dense_budget_bytes;
@@ -246,6 +248,7 @@ void hint_postings_add_profile(Hint_postings index, unsigned long long key,
       (size_t) capacity * sizeof(unsigned));
     posting->capacity = capacity;
     index->reference_capacity += capacity - old;
+    index->profile_reference_capacity += capacity - old;
   }
   if (posting->count / 64 >= posting->profile_mask_blocks) {
     unsigned old_blocks = posting->profile_mask_blocks;
@@ -256,6 +259,8 @@ void hint_postings_add_profile(Hint_postings index, unsigned long long key,
     memset(posting->profile_mask_planes + (size_t) old_blocks * 64, 0,
            64 * sizeof(unsigned long long));
     posting->profile_mask_blocks = blocks;
+    index->profile_mask_bytes +=
+      64 * sizeof(unsigned long long);
   }
   posting->references[posting->count] = id;
   posting->profile_literal_counts[posting->count] =
@@ -298,6 +303,29 @@ BOOL hint_postings_get_profile(Hint_postings index,
   view->count = posting->count;
   view->mask_blocks = posting->profile_mask_blocks;
   return TRUE;
+}
+
+unsigned long long hint_postings_profile_allocated_bytes(
+  Hint_postings index)
+{
+  if (index == NULL)
+    return 0;
+  return sizeof(*index) +
+    (unsigned long long) index->capacity * sizeof(struct hint_posting) +
+    index->reference_capacity * sizeof(unsigned) +
+    index->profile_reference_capacity * sizeof(unsigned) +
+    index->profile_mask_bytes;
+}
+
+unsigned long long hint_postings_profile_layout_bytes(
+  unsigned table_capacity,
+  unsigned long long reference_capacity,
+  unsigned long long mask_blocks)
+{
+  return sizeof(struct hint_postings) +
+    (unsigned long long) table_capacity * sizeof(struct hint_posting) +
+    reference_capacity * 2 * sizeof(unsigned) +
+    mask_blocks * 64 * sizeof(unsigned long long);
 }
 
 const unsigned *hint_postings_get(Hint_postings index,
@@ -398,6 +426,9 @@ void hint_postings_get_stats(Hint_postings index,
   stats->maximum_posting = index->maximum_posting;
   stats->dense_budget_bytes = index->dense_budget_bytes;
   stats->dense_budget_denials = index->dense_budget_denials;
+  stats->profile_bytes =
+    index->profile_reference_capacity * sizeof(unsigned) +
+    index->profile_mask_bytes;
   for (i = 0; i < index->capacity; i++) {
     struct hint_posting *posting = index->table + i;
     if (posting->profile) {
@@ -407,11 +438,6 @@ void hint_postings_get_stats(Hint_postings index,
         posting->count <= 63 ? 5 : 6;
       stats->profile_key_histogram[bucket]++;
       stats->profile_reference_histogram[bucket] += posting->count;
-      stats->profile_bytes +=
-        (unsigned long long) posting->capacity *
-          sizeof(unsigned) +
-        (unsigned long long) posting->profile_mask_blocks * 64 *
-          sizeof(unsigned long long);
       stats->profile_mask_words +=
         (unsigned long long) posting->profile_mask_blocks * 64;
     }

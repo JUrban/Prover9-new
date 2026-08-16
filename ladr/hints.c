@@ -154,6 +154,43 @@ static unsigned long long Fast_conjunction_queries = 0;
 static unsigned long long Fast_conjunction_posting_candidates = 0;
 static unsigned long long Fast_conjunction_overflow_candidates = 0;
 static unsigned long long Fast_conjunction_profile_rejects = 0;
+static unsigned long long Fast_conjunction_budget_bytes = 0;
+static unsigned long long Fast_conjunction_peak_bytes = 0;
+static unsigned long long Fast_conjunction_budget_denials = 0;
+static unsigned long long Fast_conjunction_expected_hints = 0;
+static unsigned long long Fast_conjunction_projected_bytes = 0;
+static unsigned long long Fast_conjunction_planned_profiles = 0;
+static unsigned long long Fast_conjunction_plan_scans = 0;
+static BOOL Fast_conjunction_planning = FALSE;
+static BOOL Fast_conjunction_disabled = FALSE;
+
+struct fast_conjunction_plan_record {
+  unsigned id;
+  unsigned key_offset;
+  unsigned char sign;
+  unsigned char count;
+};
+
+struct fast_conjunction_estimate_slot {
+  unsigned long long key;
+  unsigned count;
+  unsigned capacity;
+};
+
+struct fast_conjunction_estimator {
+  struct fast_conjunction_estimate_slot *table;
+  unsigned capacity;
+  unsigned keys;
+  unsigned long long reference_capacity;
+  unsigned long long mask_blocks;
+};
+
+static struct fast_conjunction_plan_record *Fast_conjunction_plan = NULL;
+static unsigned Fast_conjunction_plan_count = 0;
+static unsigned Fast_conjunction_plan_capacity = 0;
+static unsigned long long *Fast_conjunction_plan_keys = NULL;
+static unsigned Fast_conjunction_plan_key_count = 0;
+static unsigned Fast_conjunction_plan_key_capacity = 0;
 
 struct fast_match_cache_entry {
   unsigned long long seed_key;
@@ -1042,31 +1079,164 @@ static void fast_conjunction_overflow_add(unsigned sign, unsigned id)
     [Fast_conjunction_overflow_count[sign]++] = id;
 }
 
-static void fast_conjunction_index_sign(
-  Hint_postings postings, unsigned id, unsigned sign)
+static void fast_conjunction_release_overflow(void)
 {
-  unsigned long long keys[FAST_CONJUNCTION_MAX_KEYS];
-  unsigned long long subset_mixed[1U << FAST_CONJUNCTION_MAX_KEYS];
-  unsigned char subset_count[1U << FAST_CONJUNCTION_MAX_KEYS];
+  unsigned sign;
+  for (sign = 0; sign < 2; sign++) {
+    if (Fast_conjunction_overflow[sign] != NULL)
+      safe_free(Fast_conjunction_overflow[sign]);
+    Fast_conjunction_overflow[sign] = NULL;
+    Fast_conjunction_overflow_count[sign] = 0;
+    Fast_conjunction_overflow_capacity[sign] = 0;
+  }
+}
+
+static void fast_conjunction_release_plan(void)
+{
+  if (Fast_conjunction_plan != NULL)
+    safe_free(Fast_conjunction_plan);
+  if (Fast_conjunction_plan_keys != NULL)
+    safe_free(Fast_conjunction_plan_keys);
+  Fast_conjunction_plan = NULL;
+  Fast_conjunction_plan_count = 0;
+  Fast_conjunction_plan_capacity = 0;
+  Fast_conjunction_plan_keys = NULL;
+  Fast_conjunction_plan_key_count = 0;
+  Fast_conjunction_plan_key_capacity = 0;
+}
+
+static struct fast_conjunction_estimate_slot *
+fast_conjunction_estimator_slot(struct fast_conjunction_estimator *estimator,
+                                unsigned long long key)
+{
+  unsigned mask = estimator->capacity - 1;
+  unsigned slot = (unsigned) fast_conjunction_mix(key) & mask;
+  while (estimator->table[slot].key != 0 &&
+         estimator->table[slot].key != key)
+    slot = (slot + 1) & mask;
+  return estimator->table + slot;
+}
+
+static void fast_conjunction_estimator_init(
+  struct fast_conjunction_estimator *estimator)
+{
+  memset(estimator, 0, sizeof(*estimator));
+  estimator->capacity = 256;
+  estimator->table = safe_calloc(
+    estimator->capacity, sizeof(*estimator->table));
+}
+
+static void fast_conjunction_estimator_rehash(
+  struct fast_conjunction_estimator *estimator)
+{
+  struct fast_conjunction_estimate_slot *old = estimator->table;
+  unsigned old_capacity = estimator->capacity;
+  unsigned i;
+  if (old_capacity > UINT_MAX / 2)
+    fatal_error("fast conjunction estimator capacity overflow");
+  estimator->capacity *= 2;
+  estimator->table = safe_calloc(
+    estimator->capacity, sizeof(*estimator->table));
+  estimator->keys = 0;
+  for (i = 0; i < old_capacity; i++) {
+    if (old[i].key != 0) {
+      struct fast_conjunction_estimate_slot *dest =
+        fast_conjunction_estimator_slot(estimator, old[i].key);
+      *dest = old[i];
+      estimator->keys++;
+    }
+  }
+  safe_free(old);
+}
+
+static void fast_conjunction_estimator_add(
+  struct fast_conjunction_estimator *estimator, unsigned long long key)
+{
+  struct fast_conjunction_estimate_slot *slot;
+  if ((unsigned long long) estimator->keys * 10 >=
+      (unsigned long long) estimator->capacity * 7)
+    fast_conjunction_estimator_rehash(estimator);
+  slot = fast_conjunction_estimator_slot(estimator, key);
+  if (slot->key == 0) {
+    slot->key = key;
+    estimator->keys++;
+  }
+  if (slot->count == slot->capacity) {
+    unsigned old = slot->capacity;
+    unsigned capacity = old == 0 ? 4 : old + (old + 1) / 2;
+    if (capacity <= old)
+      fatal_error("fast conjunction estimator posting overflow");
+    slot->capacity = capacity;
+    estimator->reference_capacity += capacity - old;
+  }
+  if (slot->count % 64 == 0)
+    estimator->mask_blocks++;
+  slot->count++;
+}
+
+static unsigned long long fast_conjunction_estimator_bytes(
+  const struct fast_conjunction_estimator *estimator)
+{
+  return hint_postings_profile_layout_bytes(
+    estimator->capacity, estimator->reference_capacity,
+    estimator->mask_blocks);
+}
+
+static void fast_conjunction_estimator_done(
+  struct fast_conjunction_estimator *estimator)
+{
+  safe_free(estimator->table);
+  memset(estimator, 0, sizeof(*estimator));
+}
+
+/* Enforce the profile-only resident budget in O(1) after construction and
+   after later dynamic additions.  Once denied, packed_fast permanently falls
+   back to its established dense/sparse path; a partial index is never used. */
+static BOOL fast_conjunction_enforce_budget(Hint_postings *postings)
+{
+  unsigned long long bytes;
+  if (postings == NULL || *postings == NULL)
+    return FALSE;
+  bytes = hint_postings_profile_allocated_bytes(*postings);
+  if (bytes > Fast_conjunction_peak_bytes)
+    Fast_conjunction_peak_bytes = bytes;
+  if (Fast_conjunction_budget_bytes != 0 &&
+      bytes <= Fast_conjunction_budget_bytes)
+    return TRUE;
+  hint_postings_destroy(*postings);
+  *postings = NULL;
+  fast_conjunction_release_overflow();
+  Fast_conjunction_disabled = TRUE;
+  Fast_conjunction_budget_denials++;
+  return FALSE;
+}
+
+static unsigned fast_conjunction_collect_sign_keys(
+  unsigned sign, unsigned long long *keys)
+{
   unsigned wanted_kind = sign ? BETTER_FEATURE_MATCH_POS :
                                 BETTER_FEATURE_MATCH_NEG;
-  unsigned long long feature_mask = sign ?
-    Packed_hint_pos_features[id] : Packed_hint_neg_features[id];
-  unsigned positive = Better_hint_positive_count[id];
-  unsigned negative = Better_hint_negative_count[id];
   unsigned count = 0;
-  unsigned i, subsets;
+  unsigned i;
   for (i = 0; i < Better_key_scratch_count; i++) {
     unsigned kind = (unsigned) (Better_key_scratch[i] >> 56);
     if (kind == wanted_kind) {
-      if (count == FAST_CONJUNCTION_MAX_KEYS) {
-        fast_conjunction_overflow_add(sign, id);
-        return;
-      }
+      if (count == FAST_CONJUNCTION_MAX_KEYS)
+        return FAST_CONJUNCTION_MAX_KEYS + 1;
       keys[count++] = Better_key_scratch[i];
     }
   }
-  if (count == 0)
+  return count;
+}
+
+static void fast_conjunction_for_each_subset(
+  const unsigned long long *keys, unsigned count,
+  void (*visit)(unsigned long long, void *), void *context)
+{
+  unsigned long long subset_mixed[1U << FAST_CONJUNCTION_MAX_KEYS];
+  unsigned char subset_count[1U << FAST_CONJUNCTION_MAX_KEYS];
+  unsigned i, subsets;
+  if (count == 0 || count > FAST_CONJUNCTION_MAX_KEYS)
     return;
   subset_mixed[0] = 0;
   subset_count[0] = 0;
@@ -1079,9 +1249,113 @@ static void fast_conjunction_index_sign(
                       fast_conjunction_mix(keys[bit]);
     subset_count[i] = subset_count[previous] + 1;
     key = fast_conjunction_key(subset_mixed[i], subset_count[i]);
-    hint_postings_add_profile(
-      postings, key, id, feature_mask, positive, negative);
+    visit(key, context);
   }
+}
+
+struct fast_conjunction_index_context {
+  Hint_postings postings;
+  unsigned id;
+  unsigned long long feature_mask;
+  unsigned positive;
+  unsigned negative;
+};
+
+static void fast_conjunction_index_subset(unsigned long long key,
+                                          void *context)
+{
+  struct fast_conjunction_index_context *index_context = context;
+  hint_postings_add_profile(
+    index_context->postings, key, index_context->id,
+    index_context->feature_mask, index_context->positive,
+    index_context->negative);
+}
+
+static void fast_conjunction_estimate_subset(unsigned long long key,
+                                             void *context)
+{
+  fast_conjunction_estimator_add(context, key);
+}
+
+static void fast_conjunction_index_profile(
+  Hint_postings postings, unsigned id, unsigned sign,
+  const unsigned long long *keys, unsigned count)
+{
+  struct fast_conjunction_index_context context;
+  context.postings = postings;
+  context.id = id;
+  context.feature_mask = sign ? Packed_hint_pos_features[id] :
+                                Packed_hint_neg_features[id];
+  context.positive = Better_hint_positive_count[id];
+  context.negative = Better_hint_negative_count[id];
+  fast_conjunction_for_each_subset(
+    keys, count, fast_conjunction_index_subset, &context);
+}
+
+static void fast_conjunction_index_sign(
+  Hint_postings postings, unsigned id, unsigned sign)
+{
+  unsigned long long keys[FAST_CONJUNCTION_MAX_KEYS];
+  unsigned count = fast_conjunction_collect_sign_keys(sign, keys);
+  if (count > FAST_CONJUNCTION_MAX_KEYS)
+    fast_conjunction_overflow_add(sign, id);
+  else
+    fast_conjunction_index_profile(postings, id, sign, keys, count);
+}
+
+static void fast_conjunction_plan_sign(unsigned id, unsigned sign)
+{
+  unsigned long long keys[FAST_CONJUNCTION_MAX_KEYS];
+  unsigned count = fast_conjunction_collect_sign_keys(sign, keys);
+  struct fast_conjunction_plan_record *record;
+  if (count > FAST_CONJUNCTION_MAX_KEYS) {
+    fast_conjunction_overflow_add(sign, id);
+    return;
+  }
+  if (count == 0)
+    return;
+  if (Fast_conjunction_plan_count == Fast_conjunction_plan_capacity) {
+    unsigned old = Fast_conjunction_plan_capacity;
+    unsigned capacity = old == 0 ? 1024 : old + (old + 1) / 2;
+    if (capacity <= old)
+      fatal_error("fast conjunction plan capacity overflow");
+    Fast_conjunction_plan = safe_realloc(
+      Fast_conjunction_plan, (size_t) capacity * sizeof(*Fast_conjunction_plan));
+    Fast_conjunction_plan_capacity = capacity;
+  }
+  if (Fast_conjunction_plan_key_count > UINT_MAX - count)
+    fatal_error("fast conjunction plan key overflow");
+  if (Fast_conjunction_plan_key_count + count >
+      Fast_conjunction_plan_key_capacity) {
+    unsigned old = Fast_conjunction_plan_key_capacity;
+    unsigned capacity = old == 0 ? 4096 : old;
+    while (capacity < Fast_conjunction_plan_key_count + count) {
+      unsigned next = capacity + (capacity + 1) / 2;
+      if (next <= capacity)
+        fatal_error("fast conjunction plan key capacity overflow");
+      capacity = next;
+    }
+    Fast_conjunction_plan_keys = safe_realloc(
+      Fast_conjunction_plan_keys,
+      (size_t) capacity * sizeof(*Fast_conjunction_plan_keys));
+    Fast_conjunction_plan_key_capacity = capacity;
+  }
+  record = Fast_conjunction_plan + Fast_conjunction_plan_count++;
+  record->id = id;
+  record->key_offset = Fast_conjunction_plan_key_count;
+  record->sign = sign;
+  record->count = count;
+  memcpy(Fast_conjunction_plan_keys + Fast_conjunction_plan_key_count,
+         keys, (size_t) count * sizeof(*keys));
+  Fast_conjunction_plan_key_count += count;
+}
+
+static void fast_conjunction_plan_hint(unsigned id, BOOL anyconst)
+{
+  if (anyconst)
+    return;
+  fast_conjunction_plan_sign(id, 0);
+  fast_conjunction_plan_sign(id, 1);
 }
 
 static void fast_conjunction_index_hint(
@@ -1091,6 +1365,69 @@ static void fast_conjunction_index_hint(
     return;
   fast_conjunction_index_sign(postings, id, 0);
   fast_conjunction_index_sign(postings, id, 1);
+}
+
+void finalize_hint_conjunction_index(void)
+{
+  struct fast_conjunction_estimator estimator;
+  Hint_postings postings = NULL;
+  unsigned i;
+  BOOL denied = FALSE;
+  BOOL estimator_live = TRUE;
+  if (!Fast_conjunction_planning)
+    return;
+  fast_conjunction_estimator_init(&estimator);
+  for (i = 0; i < Fast_conjunction_plan_count; i++) {
+    struct fast_conjunction_plan_record *record =
+      Fast_conjunction_plan + i;
+    if (record->id < Packed_hint_capacity &&
+        Packed_hint_active[record->id]) {
+      fast_conjunction_for_each_subset(
+        Fast_conjunction_plan_keys + record->key_offset, record->count,
+        fast_conjunction_estimate_subset, &estimator);
+      Fast_conjunction_plan_scans++;
+      Fast_conjunction_projected_bytes =
+        fast_conjunction_estimator_bytes(&estimator);
+      if (Fast_conjunction_projected_bytes >
+          Fast_conjunction_budget_bytes) {
+        denied = TRUE;
+        break;
+      }
+    }
+  }
+  if (!denied) {
+    /* The compact count table is no longer needed once its exact layout has
+       passed the cap.  Release it before allocating the real sidecars so the
+       planner does not inflate construction peak RSS or page-fault cost. */
+    fast_conjunction_estimator_done(&estimator);
+    estimator_live = FALSE;
+    postings = hint_postings_init();
+    for (i = 0; i < Fast_conjunction_plan_count; i++) {
+      struct fast_conjunction_plan_record *record =
+        Fast_conjunction_plan + i;
+      if (record->id < Packed_hint_capacity &&
+          Packed_hint_active[record->id])
+        fast_conjunction_index_profile(
+          postings, record->id, record->sign,
+          Fast_conjunction_plan_keys + record->key_offset, record->count);
+    }
+    if (!fast_conjunction_enforce_budget(&postings))
+      denied = TRUE;
+  }
+  if (denied) {
+    hint_postings_destroy(postings);
+    postings = NULL;
+    fast_conjunction_release_overflow();
+    Fast_conjunction_disabled = TRUE;
+    if (Fast_conjunction_budget_denials == 0)
+      Fast_conjunction_budget_denials = 1;
+  }
+  Fast_conjunction_postings = postings;
+  Fast_conjunction_planned_profiles = Fast_conjunction_plan_count;
+  Fast_conjunction_planning = FALSE;
+  if (estimator_live)
+    fast_conjunction_estimator_done(&estimator);
+  fast_conjunction_release_plan();
 }
 
 static unsigned better_child_path(unsigned path, unsigned depth,
@@ -1208,7 +1545,14 @@ static void better_collect_hint_features(Topform h, BOOL anyconst)
 static void better_rebuild_postings(void)
 {
   Hint_postings postings = hint_postings_init();
-  Hint_postings conjunctions = Fast_packed_index ?
+  Hint_postings conjunctions;
+  if (!Fast_conjunction_planning) {
+    hint_postings_destroy(Fast_conjunction_postings);
+    Fast_conjunction_postings = NULL;
+    fast_conjunction_release_overflow();
+  }
+  conjunctions = Fast_packed_index && !Fast_conjunction_disabled &&
+    !Fast_conjunction_planning ?
     hint_postings_init() : NULL;
   unsigned long long live = 0;
   unsigned long long equivalence_live = 0;
@@ -1243,6 +1587,8 @@ static void better_rebuild_postings(void)
         hint_postings_add(postings, Better_key_scratch[i], id);
       fast_conjunction_index_hint(
         conjunctions, id, Packed_hint_anyconst[id]);
+      if (conjunctions != NULL)
+        fast_conjunction_enforce_budget(&conjunctions);
       equivalence_live += better_equivalence_memberships(id);
       if (Packed_hint_anyconst[id]) {
         better_anyconst_add(id);
@@ -1259,7 +1605,6 @@ static void better_rebuild_postings(void)
   }
   hint_postings_destroy(Better_postings);
   Better_postings = postings;
-  hint_postings_destroy(Fast_conjunction_postings);
   Fast_conjunction_postings = conjunctions;
   if (Fast_packed_index)
     fast_cache_invalidate_all();
@@ -1350,7 +1695,13 @@ static void better_index_hint_terms(Topform h, BOOL anyconst)
     unsigned long long key = Better_key_scratch[i];
     hint_postings_add(Better_postings, key, id);
   }
-  fast_conjunction_index_hint(Fast_conjunction_postings, id, anyconst);
+  if (Fast_conjunction_planning)
+    fast_conjunction_plan_hint(id, anyconst);
+  else {
+    fast_conjunction_index_hint(Fast_conjunction_postings, id, anyconst);
+    if (Fast_conjunction_postings != NULL)
+      fast_conjunction_enforce_budget(&Fast_conjunction_postings);
+  }
   Better_feature_live_count += Better_key_scratch_count;
   if (Fast_packed_index && anyconst)
     fast_cache_invalidate_all();
@@ -1997,6 +2348,8 @@ void init_hints(Uniftype utype,
 		BOOL better_packed_index,
 		BOOL fast_packed_index,
 		unsigned fast_cache_kb,
+		unsigned conjunction_budget_kb,
+		unsigned expected_hints,
 		unsigned rebuild_scan_ratio,
 		void (*demod_proc) (Topform, int, int, BOOL, BOOL))
 {
@@ -2017,6 +2370,17 @@ void init_hints(Uniftype utype,
   Packed_index = packed_index;
   Better_packed_index = better_packed_index;
   Fast_packed_index = fast_packed_index;
+  Fast_conjunction_budget_bytes =
+    (unsigned long long) conjunction_budget_kb * 1024;
+  Fast_conjunction_peak_bytes = 0;
+  Fast_conjunction_budget_denials = 0;
+  Fast_conjunction_expected_hints = expected_hints;
+  Fast_conjunction_projected_bytes = 0;
+  Fast_conjunction_planned_profiles = 0;
+  Fast_conjunction_plan_scans = 0;
+  Fast_conjunction_planning = Fast_packed_index &&
+    conjunction_budget_kb != 0 && expected_hints != 0;
+  Fast_conjunction_disabled = conjunction_budget_kb == 0;
   Better_rebuild_scan_ratio = rebuild_scan_ratio;
   Demod_proc = demod_proc;
   if (Better_packed_index && !Packed_index)
@@ -2030,7 +2394,8 @@ void init_hints(Uniftype utype,
     hint_postings_set_dense_budget(
       Better_postings, Fast_packed_index ? FAST_DENSE_BUDGET_BYTES : 0);
     Better_rebuild_clock = clock_init("packed_hint_rebuild");
-    if (Fast_packed_index)
+    if (Fast_packed_index && !Fast_conjunction_disabled &&
+        !Fast_conjunction_planning)
       Fast_conjunction_postings = hint_postings_init();
   }
   /* Keep an empty Lindex in packed mode so the established lifecycle and
@@ -2099,10 +2464,8 @@ void done_with_hints(void)
   if (Better_equivalence_buckets) safe_free(Better_equivalence_buckets);
   if (Better_equivalence_references) safe_free(Better_equivalence_references);
   if (Better_anyconst_references) safe_free(Better_anyconst_references);
-  if (Fast_conjunction_overflow[0])
-    safe_free(Fast_conjunction_overflow[0]);
-  if (Fast_conjunction_overflow[1])
-    safe_free(Fast_conjunction_overflow[1]);
+  fast_conjunction_release_overflow();
+  fast_conjunction_release_plan();
   Packed_hint_by_id = NULL; Packed_hint_active = NULL;
   Packed_hint_anyconst = NULL; Packed_candidate_mark = NULL;
   Packed_hint_rewrite_symbols = NULL;
@@ -2126,6 +2489,15 @@ void done_with_hints(void)
   Fast_conjunction_posting_candidates = 0;
   Fast_conjunction_overflow_candidates = 0;
   Fast_conjunction_profile_rejects = 0;
+  Fast_conjunction_budget_bytes = 0;
+  Fast_conjunction_peak_bytes = 0;
+  Fast_conjunction_budget_denials = 0;
+  Fast_conjunction_expected_hints = 0;
+  Fast_conjunction_projected_bytes = 0;
+  Fast_conjunction_planned_profiles = 0;
+  Fast_conjunction_plan_scans = 0;
+  Fast_conjunction_planning = FALSE;
+  Fast_conjunction_disabled = FALSE;
   Better_equivalence_bucket_capacity = 0;
   Better_equivalence_reference_count = 0;
   Better_equivalence_reference_capacity = 0;
@@ -3468,12 +3840,23 @@ void fprint_packed_hint_operation_stats(FILE *fp)
     hint_postings_get_stats(
       Fast_conjunction_postings, &conjunction_stats);
     fprintf(fp,
-            "Packed_fast_conjunction: max_keys=%u, keys=%llu, "
+            "Packed_fast_conjunction: enabled=%s, budget_bytes=%llu, "
+            "peak_bytes=%llu, budget_denials=%llu, expected_hints=%llu, "
+            "planned_profiles=%llu, plan_scans=%llu, estimated_bytes=%llu, "
+            "max_keys=%u, keys=%llu, "
             "references=%llu, reference_bytes=%llu, profile_bytes=%llu, "
             "table_bytes=%llu, mask_words=%llu, "
             "negative_overflow=%u, positive_overflow=%u, queries=%llu, "
             "posting_candidates=%llu, profile_rejects=%llu, "
             "overflow_candidates=%llu.\n",
+            Fast_conjunction_postings == NULL ? "no" : "yes",
+            Fast_conjunction_budget_bytes,
+            Fast_conjunction_peak_bytes,
+            Fast_conjunction_budget_denials,
+            Fast_conjunction_expected_hints,
+            Fast_conjunction_planned_profiles,
+            Fast_conjunction_plan_scans,
+            Fast_conjunction_projected_bytes,
             FAST_CONJUNCTION_MAX_KEYS, conjunction_stats.keys,
             conjunction_stats.references,
             conjunction_stats.reference_bytes,

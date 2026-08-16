@@ -42,10 +42,16 @@ void init_hints(Uniftype utype,
 		BOOL better_packed_index,
 		BOOL fast_packed_index,
 		unsigned fast_cache_kb,
+		unsigned conjunction_budget_kb,
+		unsigned expected_hints,
 		unsigned rebuild_scan_ratio,
 		void (*demod_proc) (Topform, int, int, BOOL, BOOL));
 
 void done_with_hints(void);
+
+/* Complete the population-wide packed-fast conjunction plan after all input
+   hints have been indexed and before candidate clauses are processed. */
+void finalize_hint_conjunction_index(void);
 
 int redundant_hints(void);
 

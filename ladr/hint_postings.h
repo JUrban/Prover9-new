@@ -57,6 +57,20 @@ BOOL hint_postings_get_profile(Hint_postings index,
                                unsigned long long key,
                                struct hint_profile_view *view);
 
+/* Complete resident allocation for a profile-only table, maintained in O(1)
+   so callers can enforce a hard construction budget without rescanning it. */
+unsigned long long hint_postings_profile_allocated_bytes(
+  Hint_postings index);
+
+/* Resident bytes that a profile-only table with this exact hash-table,
+   posting-capacity, and mask-block layout will allocate.  This lets a
+   lightweight counter plan a complete index before any large sidecars are
+   committed. */
+unsigned long long hint_postings_profile_layout_bytes(
+  unsigned table_capacity,
+  unsigned long long reference_capacity,
+  unsigned long long mask_blocks);
+
 const unsigned *hint_postings_get(Hint_postings index,
                                   unsigned long long key,
                                   unsigned *count);

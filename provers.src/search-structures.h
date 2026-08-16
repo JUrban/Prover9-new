@@ -283,6 +283,7 @@ struct prover_options {
     hint_expiry_min,       // min match count before hint is eligible for expiry
     hints_fpa_depth,       // FPA index depth for hints (default 10)
     hint_cache_kb,         // packed-fast exact profile cache byte budget
+    hint_conjunction_kb,   // packed-fast subset-conjunction resident cap
     hint_rebuild_scan_ratio, // stale scans/live index before posting rebuild
     rewrite_refresh_hot_ratio, // hinted refresh turns per fair general turn
     rewrite_refresh_raw_budget, // dense records inspected per refresh turn

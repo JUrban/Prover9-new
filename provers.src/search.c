@@ -2169,6 +2169,8 @@ Prover_options init_prover_options(void)
   p->hint_expiry_min =    init_parm("hint_expiry_min",       1,      1,INT_MAX);
   p->hints_fpa_depth =    init_parm("hints_fpa_depth",      10,      1,    100);
   p->hint_cache_kb =      init_parm("hint_cache_kb",      2048,      0,INT_MAX);
+  p->hint_conjunction_kb =
+    init_parm("hint_conjunction_kb", 327680, 0, INT_MAX);
   p->hint_rebuild_scan_ratio =
     init_parm("hint_rebuild_scan_ratio", 8, 0, INT_MAX);
   p->rewrite_refresh_hot_ratio =
@@ -11134,6 +11136,8 @@ void index_and_process_initial_clauses(void)
 	     better_packed_hint_mode(),
 	     fast_packed_hint_mode(),
 	     (unsigned) parm(Opt->hint_cache_kb),
+	     (unsigned) parm(Opt->hint_conjunction_kb),
+	     (unsigned) clist_length(Glob.hints),
 	     (unsigned) parm(Opt->hint_rebuild_scan_ratio),
 	     current_demodulate_clause);
   set_hint_match_stats(flag(Opt->hint_match_stats));
@@ -11280,6 +11284,7 @@ void index_and_process_initial_clauses(void)
       index_hint(h);
     }
   }
+  finalize_hint_conjunction_index();
 
   ////////////////////////////////////////////////////////////////////////////
   // Sos
@@ -15646,6 +15651,8 @@ void load_checkpoint_into_loop(void)
              better_packed_hint_mode(),
              fast_packed_hint_mode(),
              (unsigned) parm(Opt->hint_cache_kb),
+             (unsigned) parm(Opt->hint_conjunction_kb),
+             (unsigned) clist_length(Glob.hints),
              (unsigned) parm(Opt->hint_rebuild_scan_ratio),
              current_demodulate_clause);
   set_hint_match_stats(flag(Opt->hint_match_stats));
@@ -15963,6 +15970,7 @@ void load_checkpoint_into_loop(void)
             unindex_hint(h);
         }
       }
+      finalize_hint_conjunction_index();
       /* Index reconstruction advances the epoch internally; restore the
          logical search-state epoch saved at the checkpoint boundary. */
       set_hint_state_epoch(Resume_hint_epoch);
