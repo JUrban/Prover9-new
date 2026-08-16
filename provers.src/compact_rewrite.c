@@ -497,8 +497,11 @@ static uint32_t new_node(Compact_rewrite_bank bank,
 
 static int32_t first_code(Compact_rewrite_bank bank, uint32_t node)
 {
-  if (compact_term_slice_length(bank->nodes[node].tokens) == 0)
-    fatal_error("compact_rewrite: empty nonroot radix edge");
+  /* Every nonroot node is created from a nonempty slice.  Rechecking the
+     packed length here put a function call in the innermost retrieval loop
+     (about 189 million calls by given 600 on CHAT).  Construction, radix
+     splitting, compaction, and checkpoint rebuilding are the authorities for
+     this invariant; retrieval only needs the cached first token. */
   return bank->node_first_codes[node];
 }
 
@@ -1585,7 +1588,8 @@ static BOOL try_leaf(Compact_rewrite_bank bank, uint32_t node,
   return FALSE;
 }
 
-static BOOL match_rewrite_edge(
+static inline __attribute__((always_inline))
+BOOL match_rewrite_edge(
   Compact_rewrite_bank bank, uint32_t node,
   Flatterm position, Flatterm end,
   Flatterm *bindings, uint64_t *bound, unsigned *binding_trail,
@@ -1634,12 +1638,39 @@ static void undo_rewrite_bindings(uint64_t *bound,
     clear_rewrite_binding(bound, binding_trail[--(*trail_count)]);
 }
 
-static BOOL retrieve_child(Compact_rewrite_bank bank, uint32_t child,
-                           Flatterm position, Flatterm end,
-                           Flatterm *bindings, uint64_t *bound,
-                           unsigned *binding_trail, unsigned *trail_count,
-                           Flatterm target, BOOL lex_order_vars,
-                           struct cr_match_result *result);
+static BOOL retrieve_rec(Compact_rewrite_bank bank, uint32_t node,
+                         Flatterm position, Flatterm end,
+                         Flatterm *bindings, uint64_t *bound,
+                         unsigned *binding_trail, unsigned *trail_count,
+                         Flatterm target,
+                         BOOL lex_order_vars,
+                         struct cr_match_result *result);
+
+/* Keep edge matching in the caller's traversal frame.  This helper used to
+   be the other half of a mutually recursive pair and accounted for roughly
+   59 million calls in a 600-given CHAT profile.  It is not recursively
+   self-calling: after matching one radix edge it enters retrieve_rec(), so
+   forcing this small wrapper inline removes a complete call/return and lets
+   the compiler keep the binding trail in registers. */
+static inline __attribute__((always_inline))
+BOOL retrieve_child(Compact_rewrite_bank bank, uint32_t child,
+                    Flatterm position, Flatterm end,
+                    Flatterm *bindings, uint64_t *bound,
+                    unsigned *binding_trail, unsigned *trail_count,
+                    Flatterm target, BOOL lex_order_vars,
+                    struct cr_match_result *result)
+{
+  unsigned trail_mark = *trail_count;
+  Flatterm next_position = position;
+  BOOL found = FALSE;
+  if (match_rewrite_edge(bank, child, position, end, bindings, bound,
+                         binding_trail, trail_count, &next_position))
+    found = retrieve_rec(bank, child, next_position, end, bindings,
+                         bound, binding_trail, trail_count, target,
+                         lex_order_vars, result);
+  undo_rewrite_bindings(bound, binding_trail, trail_count, trail_mark);
+  return found;
+}
 
 static BOOL retrieve_rec(Compact_rewrite_bank bank, uint32_t node,
                          Flatterm position, Flatterm end,
@@ -1726,25 +1757,6 @@ static BOOL retrieve_rec(Compact_rewrite_bank bank, uint32_t node,
   return FALSE;
 }
 
-static BOOL retrieve_child(Compact_rewrite_bank bank, uint32_t child,
-                           Flatterm position, Flatterm end,
-                           Flatterm *bindings, uint64_t *bound,
-                           unsigned *binding_trail, unsigned *trail_count,
-                           Flatterm target, BOOL lex_order_vars,
-                           struct cr_match_result *result)
-{
-  unsigned trail_mark = *trail_count;
-  Flatterm next_position = position;
-  BOOL found = FALSE;
-  if (match_rewrite_edge(bank, child, position, end, bindings, bound,
-                         binding_trail, trail_count, &next_position))
-    found = retrieve_rec(bank, child, next_position, end, bindings,
-                         bound, binding_trail, trail_count, target,
-                         lex_order_vars, result);
-  undo_rewrite_bindings(bound, binding_trail, trail_count, trail_mark);
-  return found;
-}
-
 static struct cr_match_result find_rewrite(Compact_rewrite_bank bank,
                                            Flatterm target,
                                            BOOL lex_order_vars)
@@ -1759,8 +1771,28 @@ static struct cr_match_result find_rewrite(Compact_rewrite_bank bank,
   bank->query_token_base = compact_term_pool_tokens(bank->term_pool);
   bank->query_logical_base =
     compact_term_pool_logical_base(bank->term_pool);
-  retrieve_rec(bank, 0, target, target->end->next, bindings, bound,
-               binding_trail, &trail_count, target, lex_order_vars, &result);
+  {
+    uint32_t first = bank->nodes[0].first_child;
+    int32_t code = VARIABLE(target) ? INT32_MIN : SYMNUM(target);
+    /* Demodulator sides normally have rigid roots, and index construction
+       maintains an exact direct child for every such root symbol.  Avoid the
+       generic variable-first sibling traversal for this overwhelmingly hot
+       case.  The unusual variable-root case retains the original DFS. */
+    if (code != INT32_MIN &&
+        (first == CR_NONE || bank->node_first_codes[first] >= 0)) {
+      uint32_t child = code >= 0 &&
+        (size_t) code < bank->child_cache_capacity ?
+        bank->child_cache[code] : CR_NONE;
+      if (child != CR_NONE)
+        retrieve_child(bank, child, target, target->end->next,
+                       bindings, bound, binding_trail, &trail_count,
+                       target, lex_order_vars, &result);
+    }
+    else
+      retrieve_rec(bank, 0, target, target->end->next, bindings, bound,
+                   binding_trail, &trail_count, target, lex_order_vars,
+                   &result);
+  }
   return result;
 }
 
