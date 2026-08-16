@@ -511,7 +511,7 @@ struct arg_options get_command_line_args(int argc, char **argv)
 static
 void max_megs_exit(void)
 {
-  fprint_all_stats(stdout, "all");
+  fprint_crash_stats(stdout, "all");
   exit_with_message(stdout, MAX_MEGS_EXIT);
 }  /* max_megs_exit */
 
@@ -645,23 +645,29 @@ void prover_sig_handler(int condition)
   }
   switch (condition) {
   case SIGSEGV:
-    fprint_all_stats(stdout, "all");
+    fprint_crash_stats(stdout, "all");
     exit_with_message(stdout, SIGSEGV_EXIT);
     break;
   case SIGINT:
-    fprint_all_stats(stdout, "all");
+    fprint_crash_stats(stdout, "all");
     exit_with_message(stdout, SIGINT_EXIT);
     break;
   case SIGUSR1:
-    report(stdout, "");
-    report(stderr, "");
+    if (terminal_statistics_frozen()) {
+      fprint_crash_stats(stdout, "");
+      fprint_crash_stats(stderr, "");
+    }
+    else {
+      report(stdout, "");
+      report(stderr, "");
+    }
     break;
   case SIGUSR2:
     Checkpoint_requested = 1;
     break;
 #ifdef SIGXCPU
   case SIGXCPU:
-    fprint_all_stats(stdout, "all");
+    fprint_crash_stats(stdout, "all");
     exit_with_message(stdout, MAX_SECONDS_EXIT);
     break;
 #endif
@@ -2377,4 +2383,3 @@ Prover_input std_prover_from_scan(Prover_scan_result psr,
 
   return pi;
 }  /* std_prover_from_scan */
-

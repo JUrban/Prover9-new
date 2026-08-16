@@ -1792,6 +1792,17 @@ void init_hints(Uniftype utype,
 		unsigned rebuild_scan_ratio,
 		void (*demod_proc) (Topform, int, int, BOOL, BOOL))
 {
+  Hint_id_count = 0;
+  Active_hints_count = 0;
+  Redundant_hints_count = 0;
+  Current_given_for_hints = 0;
+  Hint_state_epoch = 1;
+  Hint_match_stats = FALSE;
+  Hint_match_once = FALSE;
+  memset(Delta_bucket, 0, sizeof(Delta_bucket));
+  Delta_total = 0;
+  Delta_min = Delta_max = 0;
+  Delta_sum = 0;
   Bsub_wt_attr = bsub_wt_attr;
   Collect_labels = collect_labels;
   Back_demod_hints = back_demod_hints;
@@ -1950,6 +1961,10 @@ void done_with_hints(void)
   Packed_index = FALSE;
   Better_packed_index = FALSE;
   Fast_packed_index = FALSE;
+  Hint_id_count = 0;
+  Active_hints_count = 0;
+  Redundant_hints_count = 0;
+  Current_given_for_hints = 0;
 }  /* done_with_hints */
 
 /*************
@@ -1983,6 +1998,12 @@ BOOL hint_is_redundant(Topform c)
   return clist_member(c, Redundant_hints);
 }  /* hint_is_redundant */
 
+/* PUBLIC */
+BOOL hint_is_active(Topform c)
+{
+  return c != NULL && c->hint_indexed;
+}
+
 /*************
  *
  *   index_hint_as_redundant()
@@ -1998,6 +2019,8 @@ redundant/active partition.
 /* PUBLIC */
 void index_hint_as_redundant(Topform c)
 {
+  if (c->hint_indexed || clist_member(c, Redundant_hints))
+    fatal_error("index_hint_as_redundant: hint is already indexed");
   c->weight = 0;
   clist_append(c, Redundant_hints);
   Redundant_hints_count++;
@@ -2360,6 +2383,9 @@ void index_hint(Topform c)
 {
   Topform h;
 
+  if (c->hint_indexed || clist_member(c, Redundant_hints))
+    fatal_error("index_hint: hint is already indexed");
+
   /* Disable _AnyConst matching during redundancy check so that
      hints with _AnyConst are not marked redundant vs concrete hints. */
   AnyConstsEnabled = FALSE;
@@ -2416,6 +2442,7 @@ void index_hint(Topform c)
       else
         index_clause_back_demod(c, Back_demod_idx, INSERT);
     }
+    c->hint_indexed = 1;
   }
   discard_packed_hint_proof(c);
 }  /* index_hint */
@@ -2434,14 +2461,17 @@ void unindex_hint(Topform c)
 {
   if (clist_member(c, Redundant_hints)) {
     clist_remove(c, Redundant_hints);
+    if (Redundant_hints_count <= 0)
+      fatal_error("unindex_hint: redundant hint count underflow");
     Redundant_hints_count--;
   }
-  else {
+  else if (c->hint_indexed) {
     if (Packed_index) {
-      if (c->id < Packed_hint_capacity) {
-        Packed_hint_active[c->id] = 0;
-        better_deactivate_hint((unsigned) c->id);
-      }
+      if (c->id == 0 || c->id >= Packed_hint_capacity ||
+          Packed_hint_by_id[c->id] != c || !Packed_hint_active[c->id])
+        fatal_error("unindex_hint: packed active-state mismatch");
+      Packed_hint_active[c->id] = 0;
+      better_deactivate_hint((unsigned) c->id);
     }
     else
       lindex_update(Hints_idx, c, DELETE);
@@ -2449,10 +2479,46 @@ void unindex_hint(Topform c)
       if (!(MATCH_HINTS_ANYCONST && hint_contains_anyconst(c)))
         index_clause_back_demod(c, Back_demod_idx, DELETE);
     }
+    c->hint_indexed = 0;
+    if (Active_hints_count <= 0)
+      fatal_error("unindex_hint: active hint count underflow");
     Active_hints_count--;
   }
+  else
+    return;  /* Retired/expired hints make ordinary cleanup idempotent. */
   advance_hint_epoch();
 }  /* unindex_hint */
+
+/* PUBLIC */
+void discard_packed_hint_indexes(void)
+{
+  unsigned id;
+  unsigned active = 0;
+
+  if (!Packed_index)
+    fatal_error("discard_packed_hint_indexes: packed hint bank is not active");
+
+  /* This is terminal destruction, not a sequence of logical hint removals.
+     In particular, do not invoke better_maybe_rebuild_postings() once per
+     hint while draining a large bank. */
+  for (id = 1; id < Packed_hint_capacity; id++) {
+    Topform h = Packed_hint_by_id[id];
+    if ((Packed_hint_active[id] != 0) !=
+        (h != NULL && h->hint_indexed != 0))
+      fatal_error("discard_packed_hint_indexes: active-state mismatch");
+    if (Packed_hint_active[id])
+      active++;
+    if (h != NULL)
+      h->hint_indexed = 0;
+  }
+  if (active != (unsigned) Active_hints_count)
+    fatal_error("discard_packed_hint_indexes: active count mismatch");
+  clist_remove_all_clauses(Redundant_hints);
+  Active_hints_count = 0;
+  Redundant_hints_count = 0;
+  advance_hint_epoch();
+  done_with_hints();
+}
 
 /*************
  *
@@ -2718,24 +2784,11 @@ void keep_hint_matcher(Topform c)
   hint->weight++;
   hint->last_matched_given = Current_given_for_hints;
 
-  if (Hint_match_once) {
+  if (Hint_match_once && hint->hint_indexed) {
     /* Remove from index immediately so it can't match again.
        The hint struct stays alive (kept clauses hold matching_hint
        pointers).  It remains in the hints clist for stats. */
-    if (Packed_index) {
-      if (hint->id < Packed_hint_capacity) {
-        Packed_hint_active[hint->id] = 0;
-        better_deactivate_hint((unsigned) hint->id);
-      }
-    }
-    else
-      lindex_update(Hints_idx, hint, DELETE);
-    if (Back_demod_hints && !Packed_index) {
-      if (!(MATCH_HINTS_ANYCONST && hint_contains_anyconst(hint)))
-        index_clause_back_demod(hint, Back_demod_idx, DELETE);
-    }
-    Active_hints_count--;
-    advance_hint_epoch();
+    unindex_hint(hint);
     if (compress_clause(hint) == CLAUSE_COMPRESS_INVALID)
       fatal_error("keep_hint_matcher: cannot compact retired hint");
   }
@@ -2963,19 +3016,20 @@ int expire_old_hints(unsigned long long current_given,
   /* Pass 1: collect expired hints */
   for (p = hint_list->first; p; p = p->next) {
     Topform c = p->c;
-    if (c->weight >= min_matches &&
+    if (c->hint_indexed && c->weight >= min_matches &&
 	current_given - c->last_matched_given > expiry_distance)
       to_expire = plist_prepend(to_expire, c);
   }
 
-  /* Pass 2: unindex and remove from clist.
+  /* Pass 2: unindex, but retain the hint in the owning clist.
      Do NOT zap the topform -- kept clauses hold matching_hint pointers
-     to these hints, and the hint_age AVL tree uses matching_hint->id
-     as a comparison key.  Freeing the hint would create dangling pointers. */
+     to these hints, archived clauses retain its stable ID, and the hint_age
+     AVL tree uses matching_hint->id as a comparison key.  Keeping the owner
+     entry makes later proof-link restoration and checkpointing well-defined;
+     the hint_indexed guard prevents a later sweep from expiring it twice. */
   for (q = to_expire; q; q = q->next) {
     Topform c = q->v;
     unindex_hint(c);
-    clist_remove(c, hint_list);
     if (compress_clause(c) == CLAUSE_COMPRESS_INVALID)
       fatal_error("expire_old_hints: cannot compact expired hint");
     expired_count++;

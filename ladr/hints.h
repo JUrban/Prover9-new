@@ -51,11 +51,19 @@ int redundant_hints(void);
 
 BOOL hint_is_redundant(Topform c);
 
+BOOL hint_is_active(Topform c);
+
 void index_hint_as_redundant(Topform c);
 
 void index_hint(Topform c);
 
 void unindex_hint(Topform c);
+
+/* Terminal packed searches retain the hint Topforms for proof annotations,
+   but no longer need any matching/back-demodulation index.  Discard the
+   complete index in one pass, without replaying ordinary per-hint removal
+   and its posting-maintenance policy. */
+void discard_packed_hint_indexes(void);
 
 void adjust_weight_with_hints(Topform c,
 			      BOOL degrade,

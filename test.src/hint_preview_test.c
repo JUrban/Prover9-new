@@ -230,6 +230,92 @@ static void run_back_fingerprint_case(int bsub)
   delete_clause(exact);
 }
 
+static void run_hint_lifecycle_case(BOOL packed, BOOL better, BOOL fast,
+                                    int bsub)
+{
+  Topform once = parse_clause_from_string("once_probe(f(a)).");
+  Topform first = parse_clause_from_string("once_probe(f(a)).");
+  Topform second = parse_clause_from_string("once_probe(f(a)).");
+  Topform expiring = parse_clause_from_string("expiry_probe(g(b)).");
+  Clist owners = clist_init("hint_lifecycle_owners");
+  unsigned long long retired_epoch;
+
+  clist_append(once, owners);
+  clist_append(expiring, owners);
+  init_hints(ORDINARY_UNIF, bsub, FALSE, FALSE, 2,
+             packed, better, fast, fast ? 64 : 0, 8, NULL);
+  set_hint_match_once(TRUE);
+  index_hint(once);
+  set_hints_given_count(10);
+
+  /* Both clauses may enter limbo before either one is retained.  They then
+     carry the same matching_hint pointer into keep_hint_matcher(). */
+  adjust_weight_with_hints(first, FALSE, FALSE);
+  adjust_weight_with_hints(second, FALSE, FALSE);
+  CHECK(first->matching_hint == once && second->matching_hint == once,
+        "two pending clauses can share one match-once hint");
+  keep_hint_matcher(first);
+  retired_epoch = hint_state_epoch();
+  CHECK(!hint_is_active(once) && active_hints() == 0,
+        "first retained matcher retires a match-once hint");
+  keep_hint_matcher(second);
+  CHECK(!hint_is_active(once) && active_hints() == 0,
+        "second pending matcher does not retire the hint twice");
+  CHECK(hint_state_epoch() == retired_epoch,
+        "duplicate retirement does not publish a false state change");
+  unindex_hint(once);
+  CHECK(active_hints() == 0,
+        "ordinary cleanup is idempotent for a retired match-once hint");
+
+  set_hint_match_once(FALSE);
+  index_hint(expiring);
+  expiring->weight = 1;
+  expiring->last_matched_given = 1;
+  CHECK(expire_old_hints(20, 5, 1, owners) == 1,
+        "expiry retires an active matched hint");
+  CHECK(!hint_is_active(expiring) && owners->length == 2,
+        "expired hint remains owned for stable-ID proof restoration");
+  CHECK(expire_old_hints(40, 5, 1, owners) == 0,
+        "later expiry sweep does not retire the same hint twice");
+
+  if (packed)
+    discard_packed_hint_indexes();
+  else
+    done_with_hints();
+  clist_remove_all_clauses(owners);
+  clist_free(owners);
+  delete_clause(second);
+  delete_clause(first);
+  delete_clause(expiring);
+  delete_clause(once);
+}
+
+static void run_terminal_bulk_discard_case(int bsub)
+{
+  enum { HINTS = 256 };
+  Topform hints[HINTS];
+  char text[80];
+  int i;
+
+  init_hints(ORDINARY_UNIF, bsub, FALSE, FALSE, 2,
+             TRUE, TRUE, TRUE, 64, 8, NULL);
+  for (i = 0; i < HINTS; i++) {
+    snprintf(text, sizeof(text), "terminal_hint_%d(f(a)).", i);
+    hints[i] = parse_clause_from_string(text);
+    index_hint(hints[i]);
+  }
+  CHECK(active_hints() == HINTS,
+        "terminal stress bank is fully active before bulk discard");
+  discard_packed_hint_indexes();
+  CHECK(active_hints() == 0,
+        "terminal bulk discard resets the logical active count");
+  for (i = 0; i < HINTS; i++) {
+    CHECK(!hint_is_active(hints[i]),
+          "terminal bulk discard clears every Topform lifecycle bit");
+    delete_clause(hints[i]);
+  }
+}
+
 int main(void)
 {
   init_standard_ladr();
@@ -242,6 +328,11 @@ int main(void)
   run_variable_cache_case(bsub);
   run_observed_stale_rebuild_case(bsub);
   run_back_fingerprint_case(bsub);
+  run_hint_lifecycle_case(FALSE, FALSE, FALSE, bsub);
+  run_hint_lifecycle_case(TRUE, FALSE, FALSE, bsub);
+  run_hint_lifecycle_case(TRUE, TRUE, FALSE, bsub);
+  run_hint_lifecycle_case(TRUE, TRUE, TRUE, bsub);
+  run_terminal_bulk_discard_case(bsub);
   if (Failures != 0) {
     fprintf(stderr, "hint_preview_test: %d failure(s)\n", Failures);
     return 1;

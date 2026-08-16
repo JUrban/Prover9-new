@@ -52,4 +52,44 @@ for checkpoint_given in 0 2 6; do
   grep -q '^Better_packed_postings:' "$case_dir/resumed.out"
 done
 
+# A matched-once hint remains as a stable proof/checkpoint owner after its
+# active index membership is retired.  Checkpoint that state explicitly:
+# older code silently reactivated it on resume, while duplicate pending
+# matchers could also retire it twice before the checkpoint was reached.
+make_once_input()
+{
+  make_input "$1" | sed '1i set(hint_match_once).'
+}
+
+make_once_input -1 | "$repo_dir/bin/prover9" \
+  > "$test_tmp/once-control.out" 2> "$test_tmp/once-control.err" || true
+grep '^HINT_TRACE ' "$test_tmp/once-control.out" \
+  > "$test_tmp/once-control.trace"
+grep '^Given=' "$test_tmp/once-control.out" | tail -n 1 \
+  > "$test_tmp/once-control.search"
+
+once_case="$test_tmp/once-checkpoint-case"
+mkdir "$once_case"
+(
+  cd "$once_case"
+  make_once_input 2 | "$repo_dir/bin/prover9" \
+    > before.out 2> before.err || true
+)
+once_checkpoint_dir=$(find "$once_case" -maxdepth 1 -type d \
+  -name 'prover9_*_ckpt_2' -print)
+test -n "$once_checkpoint_dir"
+grep -q ' retired_hint' "$once_checkpoint_dir/clause_data.txt"
+"$repo_dir/bin/prover9" -r "$once_checkpoint_dir" < /dev/null \
+  > "$once_case/resumed.out" 2> "$once_case/resumed.err" || true
+grep -Eq '^%   Verification: [0-9]+ passed, 0 failed\.$' \
+  "$once_case/resumed.out"
+{
+  grep '^HINT_TRACE ' "$once_case/before.out" || true
+  grep '^HINT_TRACE ' "$once_case/resumed.out" || true
+} > "$once_case/combined.trace"
+cmp "$test_tmp/once-control.trace" "$once_case/combined.trace"
+grep '^Given=' "$once_case/resumed.out" | tail -n 1 \
+  > "$once_case/resumed.search"
+cmp "$test_tmp/once-control.search" "$once_case/resumed.search"
+
 echo 'hint_checkpoint_test: PASS'

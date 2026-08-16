@@ -5634,6 +5634,34 @@ static void print_deferred_terminal_statistics(FILE *fp)
   fflush(fp);
 }
 
+/* PUBLIC */
+void fprint_crash_stats(FILE *fp, char *stats_level)
+{
+  if (Deferred_terminal_stats != NULL) {
+    char buffer[8192];
+    size_t n;
+    clearerr(Deferred_terminal_stats);
+    rewind(Deferred_terminal_stats);
+    while ((n = fread(buffer, 1, sizeof(buffer),
+                      Deferred_terminal_stats)) != 0)
+      (void) fwrite(buffer, 1, n, fp);
+    clearerr(Deferred_terminal_stats);
+    rewind(Deferred_terminal_stats);
+    fflush(fp);
+  }
+  else if (Terminal_stats_frozen)
+    fprintf(fp, "\n%% Terminal statistics were frozen for TPTP output; "
+                "live search indexes are no longer available.\n");
+  else
+    fprint_all_stats(fp, stats_level);
+}
+
+/* PUBLIC */
+BOOL terminal_statistics_frozen(void)
+{
+  return Terminal_stats_frozen;
+}
+
 static void compact_passive_cache_free(void);
 static void compact_passive_cache_clear_all(void);
 static void discard_compact_otter_passives(void);
@@ -5666,7 +5694,6 @@ static void release_terminal_compact_indexes(void)
 
 static void release_terminal_hint_index(void)
 {
-  Clist_pos p;
   if (Terminal_hint_index_released || Glob.hints == NULL)
     return;
   /* The archive stores a stable matching-hint ID, and the caller has just
@@ -5676,9 +5703,9 @@ static void release_terminal_hint_index(void)
      collection, but discard the search-only index before materializing the
      proof DAG.  collect_prover_results() can restore links again with the
      retained, linear ID lookup and does not require this index. */
-  for (p = Glob.hints->first; p != NULL; p = p->next)
-    unindex_hint(p->c);
-  done_with_hints();
+  if (!packed_hints_enabled())
+    return;
+  discard_packed_hint_indexes();
   memory_release_unused();
   Terminal_hint_index_released = TRUE;
 }
@@ -6837,10 +6864,12 @@ void free_search_memory(void)
   Dense_body_store = NULL;
   Dense_arena_bytes_reclaimed = 0;
 
-  if (Glob.hints->first) {
-    Clist_pos p;
-    for(p = Glob.hints->first; p; p = p->next)
-      unindex_hint(p->c);
+  if (!Terminal_hint_index_released) {
+    if (Glob.hints->first) {
+      Clist_pos p;
+      for(p = Glob.hints->first; p; p = p->next)
+        unindex_hint(p->c);
+    }
     done_with_hints();
   }
   delete_clist(Glob.hints);
@@ -11585,6 +11614,9 @@ BOOL write_bare_clause(FILE *clause_fp, FILE *data_fp, Topform c,
     fprintf(data_fp, " last_matched %llu", c->last_matched_given);
   if (strcmp(list_name, "hints") == 0 && hint_is_redundant(c))
     fprintf(data_fp, " redundant_hint");
+  if (strcmp(list_name, "hints") == 0 &&
+      !hint_is_redundant(c) && !hint_is_active(c))
+    fprintf(data_fp, " retired_hint");
   for (lit = c->literals; lit != NULL; lit = lit->next)
     fprintf(data_fp, " aflags %u", (unsigned)lit->atom->private_flags);
   fprintf(data_fp, "\n");
@@ -11848,7 +11880,12 @@ void write_checkpoint_hashes(const char *dir)
   fprintf(fp, "sos_fpa %llu\n",       dense_passive_mode() ? 0ULL :
           hash_clist_fpa_ids(Glob.sos));
   fprintf(fp, "usable_fpa %llu\n",    hash_clist_fpa_ids(Glob.usable));
-  fprintf(fp, "hints_fpa %llu\n",     hash_clist_fpa_ids(Glob.hints));
+  /* A packed hint bank has no authoritative FPA index.  Its Topforms may be
+     materialized transiently while a checkpoint is written, so hashing their
+     incidental term FPA_ID fields would verify cache timing rather than
+     logical search state. */
+  fprintf(fp, "hints_fpa %llu\n",     packed_hints_enabled() ? 0ULL :
+          hash_clist_fpa_ids(Glob.hints));
   fprintf(fp, "limbo_fpa %llu\n",     hash_clist_fpa_ids(Glob.limbo));
   fprintf(fp, "sos_hints %llu\n",     dense_passive_mode() ?
           hash_dense_hint_matches() : hash_clist_hint_matches(Glob.sos));
@@ -11914,7 +11951,8 @@ void verify_checkpoint_hashes(const char *dir)
     else if (strcmp(key, "usable_fpa") == 0)
       actual = hash_clist_fpa_ids(Glob.usable);
     else if (strcmp(key, "hints_fpa") == 0)
-      actual = hash_clist_fpa_ids(Glob.hints);
+      actual = packed_hints_enabled() ? 0ULL :
+               hash_clist_fpa_ids(Glob.hints);
     else if (strcmp(key, "limbo_fpa") == 0)
       actual = hash_clist_fpa_ids(Glob.limbo);
     else if (strcmp(key, "sos_hints") == 0)
@@ -14274,6 +14312,7 @@ struct clause_meta {
   int rewrite_rule_dirty; /* targeted compact interreduction debt */
   unsigned long long last_matched; /* hint last_matched_given (for expiry) */
   int redundant_hint; /* hint was in Redundant_hints at checkpoint time */
+  int retired_hint; /* active hint was retired/expired before checkpoint */
   unsigned aflags[10]; /* atom private_flags per literal (max 10 lits) */
   int aflags_count;    /* number of aflags entries */
 };
@@ -14306,6 +14345,7 @@ int load_clause_data(const char *dir, struct clause_meta **out)
     m->rewrite_rule_dirty = 0;
     m->last_matched = 0;
     m->redundant_hint = 0;
+    m->retired_hint = 0;
     m->aflags_count = 0;
     if (sscanf(line, "%31s %d %llu %lf %d",
                m->list_name, &m->position,
@@ -14334,6 +14374,8 @@ int load_clause_data(const char *dir, struct clause_meta **out)
         sscanf(p, "last_matched %llu", &m->last_matched);
       if (strstr(line, "redundant_hint") != NULL)
         m->redundant_hint = 1;
+      if (strstr(line, "retired_hint") != NULL)
+        m->retired_hint = 1;
       /* Parse atom private_flags: "aflags N [aflags N ...]" */
       p = strstr(line, "aflags");
       while (p != NULL && m->aflags_count < 10) {
@@ -15889,14 +15931,17 @@ void load_checkpoint_into_loop(void)
       for (p = Glob.hints->first; p != NULL; p = p->next) {
         Topform h = p->c;
         int is_redundant = 0;
+        int is_retired = 0;
 
         /* Find this hint's redundant status from metadata */
         if (Resume_meta != NULL) {
           while (meta_hint_pos < Resume_meta_count &&
                  strcmp(Resume_meta[meta_hint_pos].list_name, "hints") != 0)
             meta_hint_pos++;
-          if (meta_hint_pos < Resume_meta_count)
+          if (meta_hint_pos < Resume_meta_count) {
             is_redundant = Resume_meta[meta_hint_pos].redundant_hint;
+            is_retired = Resume_meta[meta_hint_pos].retired_hint;
+          }
           meta_hint_pos++;
         }
 
@@ -15905,8 +15950,11 @@ void load_checkpoint_into_loop(void)
         renumber_variables(h, MAX_VARS);
         if (is_redundant)
           index_hint_as_redundant(h);
-        else
+        else {
           index_hint(h);  /* NOTE: this zeroes h->weight */
+          if (is_retired)
+            unindex_hint(h);
+        }
       }
       /* Index reconstruction advances the epoch internally; restore the
          logical search-state epoch saved at the checkpoint boundary. */

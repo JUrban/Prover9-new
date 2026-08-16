@@ -95,6 +95,7 @@ struct topform {
   unsigned rewrite_rule_dirty  : 1; /* targeted compact interreduction debt */
   unsigned packed_justification: 1; /* cold payload also owns justification */
   unsigned collective_history : 1; /* body is referenced by collective history */
+  unsigned hint_indexed       : 1; /* live member of the authoritative hint index */
 
 };
 

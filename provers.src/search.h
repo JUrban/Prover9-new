@@ -69,6 +69,11 @@ void fprint_prover_clocks(FILE *fp, struct prover_clocks clks);
 
 void fprint_all_stats(FILE *fp, char *stats_level);
 
+/* Use a frozen terminal snapshot after compact indexes start disappearing. */
+void fprint_crash_stats(FILE *fp, char *stats_level);
+
+BOOL terminal_statistics_frozen(void);
+
 void print_exit_message(FILE *fp, int code);
 
 #include <signal.h>
