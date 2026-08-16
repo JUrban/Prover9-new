@@ -149,6 +149,26 @@ resident-index control.  Set `hint_conjunction_kb` lower (or to zero) when the
 additional CHAT hint-matching speed is less important than that resident
 allowance.
 
+An August 17 same-host control compares the latest release binary directly
+with `/project/Prover9-old-LADR-2026-6A/bin/prover9`, rather than using the
+current binary in legacy-index mode.  Both processes read the same compressed
+Osborn input and stopped after 1,000 selected clauses:
+
+| implementation | user CPU | system CPU | total CPU | peak RSS |
+|---|---:|---:|---:|---:|
+| actual old P9 | 513.53 s | 26.19 s | 539.72 s | 709,760 KiB |
+| latest compact P9 | 204.02 s | 24.39 s | 228.41 s | 295,940 KiB |
+
+The endpoint is `(1001, 1832961, 86890, 0)` in both outputs.  Normalizing the
+printed clause IDs and hashing all 1,000 selected clause bodies gives the same
+SHA-256 digest,
+`ac8521d04af185b683c7a4884925ee29ed97cad925bcf6f5bae829cea1d8a876`.
+The result is therefore a 2.36x CPU speedup and a 58.3% peak-RSS reduction on
+an identical search, not an advantage obtained by changing the trajectory.
+The Osborn conjunction sidecar was correctly rejected at an estimated
+335,545,032 bytes under the 335,544,320-byte cap, so none of the compact
+process's resident result is hidden in that optional acceleration table.
+
 ## August 2026 completed-run verdict and current rerun
 
 The now-complete `chat_test.new.out7` and `chat_test.new.out8` runs have the
