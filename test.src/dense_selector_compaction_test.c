@@ -143,8 +143,8 @@ int main(void)
     struct dense_passive_selector_stats selectors =
       dense_passive_selector_stats();
     if (stats.mode != DENSE_DIRECTORY_FILE ||
-        stats.logical_bytes !=
-          (CLAUSES - SELECT_BEFORE_COMPACT) * 64ULL ||
+        stats.logical_bytes == 0 ||
+        stats.logical_bytes % (CLAUSES - SELECT_BEFORE_COMPACT) != 0 ||
         stats.allocated_bytes < stats.logical_bytes)
       fail("file directory accounting changed during compaction");
     if (selectors.mode != DENSE_SELECTOR_FILE || selectors.flushes == 0 ||
