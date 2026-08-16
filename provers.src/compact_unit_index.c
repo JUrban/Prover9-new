@@ -1764,13 +1764,26 @@ unsigned long long *compact_unit_unifier_ids(
   memset(&choice, 0, sizeof(choice));
   if (index->strategy == COMPACT_UNIT_CODE_TREE) {
     size_t query_count = 0;
+    uint32_t child;
+    uint32_t root = index->roots[sign ? 1 : 0];
     index->code_tree_queries++;
     flatten_query(index, query, &query_count);
     if (query_count > UINT32_MAX)
       fatal_error("compact_unit_index: code-tree query overflow");
-    collect_code_tree_candidates(
-      index, index->roots[sign ? 1 : 0], 0, (uint32_t) query_count, 0,
-      query, exclude_id, &found, &visited, &live, &dead);
+    /* QUERY is rigid at its root.  Prune the synthetic root's ordered
+       children here so every query does not pay an otherwise empty recursive
+       visit.  Stored-variable roots and the equal rigid root are the only
+       compatible branches. */
+    for (child = index->nodes[root].first_child; child != CUI_NONE;
+         child = index->nodes[child].next_sibling) {
+      int32_t code = first_code(index, child);
+      if (code < 0 || code == query_root)
+        collect_code_tree_candidates(
+          index, child, 0, (uint32_t) query_count, 0, query, exclude_id,
+          &found, &visited, &live, &dead);
+      else if (code > query_root)
+        break;
+    }
   }
   else if (index->strategy == COMPACT_UNIT_POSITION) {
     size_t key_at;
