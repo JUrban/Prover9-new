@@ -351,14 +351,18 @@ static void archive_round_trip(Clause_store_archive_mode mode)
   stats = clause_store_get_stats(store);
   CHECK(stats.records == 2 && stats.record_bytes > 0 &&
         stats.handle_bytes <
-          (mode == CLAUSE_STORE_ARCHIVE_FILE ? 8192 : 512) &&
+          (mode == CLAUSE_STORE_ARCHIVE_FILE ? 2U * 1024U * 1024U : 512) &&
         stats.materializations >= 5 &&
         stats.validation_failures >= 4,
         "record, handle, materialization, and validation counters are exact");
   if (mode == CLAUSE_STORE_ARCHIVE_FILE)
     CHECK(stats.io_buffer_bytes > 0 && stats.file_reads > 0 &&
           stats.file_read_bytes > 0 && stats.file_writes > 0 &&
-          stats.file_write_bytes >= stats.record_bytes,
+          stats.file_write_bytes >= stats.record_bytes &&
+          stats.write_buffer_bytes == 1024U * 1024U &&
+          stats.file_write_calls > 0 &&
+          stats.file_write_calls < stats.file_writes &&
+          stats.file_write_call_bytes == stats.file_write_bytes,
           "file archive reports bounded-buffer I/O counters");
 
   zap_topform(expected_a);
@@ -538,7 +542,8 @@ static void detached_archive_scaling_test(Clause_store_archive_mode mode)
         stats.detached_current == RECORDS &&
         stats.handle_bytes_avoided == RECORDS * sizeof(uintptr_t),
         "detached archive accounting reports exact avoided handle bytes");
-  CHECK(stats.handle_bytes < stats.handle_bytes_avoided,
+  CHECK(stats.handle_bytes - stats.write_buffer_bytes <
+          stats.handle_bytes_avoided,
         "store handle memory stays bounded as detached records accumulate");
   if (i == RECORDS) {
     Topform sample = clause_store_materialize_offset(store,

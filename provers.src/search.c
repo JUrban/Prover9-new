@@ -2814,10 +2814,13 @@ void update_memory_stats(void)
   Stats.ancestor_mmap_scan_eviction_passes = as.mmap_scan_eviction_passes;
   Stats.ancestor_mmap_scan_eviction_bytes = as.mmap_scan_eviction_bytes;
   Stats.ancestor_io_buffer_bytes = as.io_buffer_bytes;
+  Stats.ancestor_write_buffer_bytes = as.write_buffer_bytes;
   Stats.ancestor_file_reads = as.file_reads;
   Stats.ancestor_file_read_bytes = as.file_read_bytes;
   Stats.ancestor_file_writes = as.file_writes;
   Stats.ancestor_file_write_bytes = as.file_write_bytes;
+  Stats.ancestor_file_write_calls = as.file_write_calls;
+  Stats.ancestor_file_write_call_bytes = as.file_write_call_bytes;
   Stats.ancestor_file_cache_eviction_passes =
     as.file_cache_eviction_passes;
   Stats.ancestor_file_cache_eviction_bytes = as.file_cache_eviction_bytes;
@@ -3618,8 +3621,9 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
           "handle_bytes=%s, materialized=%s, validation_failures=%s, "
           "mmap_eviction_passes=%s, mmap_eviction_bytes=%s, "
           "mmap_scan_eviction_passes=%s, mmap_scan_eviction_bytes=%s, "
-          "io_buffer=%s, file_reads=%s (%s bytes), "
-          "file_writes=%s (%s bytes), file_cache_evictions=%s "
+          "io_buffer=%s, write_buffer=%s, file_reads=%s (%s bytes), "
+          "file_writes=%s (%s bytes), write_calls=%s (%s bytes), "
+          "file_cache_evictions=%s "
           "(%s bytes), file_syncs=%s, file_cache_eviction_failures=%s, "
           "offset_lookups=%s, "
           "detached_records=%s, detached_current=%s, "
@@ -3635,10 +3639,13 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
           comma_num(s.ancestor_mmap_scan_eviction_passes),
           comma_num(s.ancestor_mmap_scan_eviction_bytes),
           comma_num(s.ancestor_io_buffer_bytes),
+          comma_num(s.ancestor_write_buffer_bytes),
           comma_num(s.ancestor_file_reads),
           comma_num(s.ancestor_file_read_bytes),
           comma_num(s.ancestor_file_writes),
           comma_num(s.ancestor_file_write_bytes),
+          comma_num(s.ancestor_file_write_calls),
+          comma_num(s.ancestor_file_write_call_bytes),
           comma_num(s.ancestor_file_cache_eviction_passes),
           comma_num(s.ancestor_file_cache_eviction_bytes),
           comma_num(s.ancestor_file_syncs),

@@ -26,6 +26,7 @@
 #define MMAP_HOT_WINDOW (8U * 1024U * 1024U)
 #define FILE_EVICT_STEP (64U * 1024U * 1024U)
 #define FILE_HOT_WINDOW (64U * 1024U * 1024U)
+#define FILE_WRITE_BUFFER_BYTES (1024U * 1024U)
 
 #define AF_IS_FORMULA  0x0001U
 #define AF_NORMAL_VARS 0x0002U
@@ -47,6 +48,10 @@ struct clause_store {
   int fd;
   unsigned char *io_buffer;
   size_t io_capacity;
+  unsigned char *write_buffer;
+  size_t write_buffer_start;
+  size_t write_buffer_used;
+  size_t write_buffer_capacity;
   size_t current_records;
   unsigned long long materializations;
   unsigned long long validation_failures;
@@ -63,6 +68,8 @@ struct clause_store {
   unsigned long long file_read_bytes;
   unsigned long long file_writes;
   unsigned long long file_write_bytes;
+  unsigned long long file_write_calls;
+  unsigned long long file_write_call_bytes;
   size_t file_cache_advised_bytes;
   size_t file_last_evict_size;
   unsigned long long file_cache_eviction_passes;
@@ -152,10 +159,27 @@ static uint32_t crc32_bytes(const unsigned char *data, size_t size)
 }
 
 #ifndef __EMSCRIPTEN__
+static BOOL flush_file_write_buffer(Clause_store store);
+
 static BOOL file_read_exact(Clause_store store, void *buffer,
                             size_t size, size_t position)
 {
   size_t done = 0;
+  if (store->write_buffer_used != 0) {
+    size_t pending_begin = store->write_buffer_start;
+    size_t pending_end = pending_begin + store->write_buffer_used;
+    if (position >= pending_begin && position <= pending_end &&
+        size <= pending_end - position) {
+      memcpy(buffer, store->write_buffer + (position - pending_begin), size);
+      store->file_reads++;
+      store->file_read_bytes += size;
+      return TRUE;
+    }
+    if (position < pending_end &&
+        (size > SIZE_MAX - position || position + size > pending_begin) &&
+        !flush_file_write_buffer(store))
+      return FALSE;
+  }
   while (done < size) {
     ssize_t n = pread(store->fd, (unsigned char *) buffer + done,
                       size - done, (off_t) (position + done));
@@ -182,6 +206,52 @@ static BOOL file_write_exact(Clause_store store, const void *buffer,
     if (n <= 0)
       return FALSE;
     done += (size_t) n;
+    store->file_write_calls++;
+    store->file_write_call_bytes += (size_t) n;
+  }
+  return TRUE;
+}
+
+static BOOL flush_file_write_buffer(Clause_store store)
+{
+  if (store == NULL || store->write_buffer_used == 0)
+    return TRUE;
+  if (!file_write_exact(store, store->write_buffer,
+                        store->write_buffer_used,
+                        store->write_buffer_start))
+    return FALSE;
+  store->write_buffer_start += store->write_buffer_used;
+  store->write_buffer_used = 0;
+  return TRUE;
+}
+
+static BOOL file_append_buffered(Clause_store store, const void *buffer,
+                                 size_t size, size_t position)
+{
+  if (store == NULL || position > SIZE_MAX - size)
+    return FALSE;
+  if (store->write_buffer == NULL) {
+    store->write_buffer = safe_malloc(FILE_WRITE_BUFFER_BYTES);
+    store->write_buffer_capacity = FILE_WRITE_BUFFER_BYTES;
+  }
+  if (size > store->write_buffer_capacity) {
+    if (!flush_file_write_buffer(store) ||
+        !file_write_exact(store, buffer, size, position))
+      return FALSE;
+  }
+  else {
+    if (store->write_buffer_used != 0 &&
+        position != store->write_buffer_start + store->write_buffer_used)
+      fatal_error("file_append_buffered: nonsequential append");
+    if (store->write_buffer_used == 0)
+      store->write_buffer_start = position;
+    if (size > store->write_buffer_capacity - store->write_buffer_used) {
+      if (!flush_file_write_buffer(store))
+        return FALSE;
+      store->write_buffer_start = position;
+    }
+    memcpy(store->write_buffer + store->write_buffer_used, buffer, size);
+    store->write_buffer_used += size;
   }
   store->file_writes++;
   store->file_write_bytes += size;
@@ -328,7 +398,7 @@ static void evict_cold_file_pages(Clause_store store)
     store->file_cache_eviction_failures++;
     return;
   }
-  if (fdatasync(store->fd) != 0) {
+  if (!flush_file_write_buffer(store) || fdatasync(store->fd) != 0) {
     store->file_cache_eviction_failures++;
     return;
   }
@@ -485,8 +555,8 @@ static BOOL append_record(Clause_store store, Topform c,
   put32(record + 88, crc32_bytes(record, 88));
 #ifndef __EMSCRIPTEN__
   if (store->mode == CLAUSE_STORE_ARCHIVE_FILE &&
-      !file_write_exact(store, record, (size_t) total_size,
-                        store->backing_size))
+      !file_append_buffered(store, record, (size_t) total_size,
+                            store->backing_size))
     goto done;
 #endif
   store->backing_size += (size_t) total_size;
@@ -709,10 +779,13 @@ static void release_backing(Clause_store store)
     if (store->fd >= 0)
       close(store->fd);
   }
-  else if (store->mode == CLAUSE_STORE_ARCHIVE_FILE && store->fd >= 0)
+  else if (store->mode == CLAUSE_STORE_ARCHIVE_FILE && store->fd >= 0) {
+    flush_file_write_buffer(store);
     close(store->fd);
+  }
 #endif
   safe_free(store->io_buffer);
+  safe_free(store->write_buffer);
   store->backing = NULL;
   store->backing_size = 0;
   store->backing_capacity = 0;
@@ -722,6 +795,10 @@ static void release_backing(Clause_store store)
   store->file_last_evict_size = 0;
   store->io_buffer = NULL;
   store->io_capacity = 0;
+  store->write_buffer = NULL;
+  store->write_buffer_start = 0;
+  store->write_buffer_used = 0;
+  store->write_buffer_capacity = 0;
   store->fd = -1;
   if (Active_archive_store == store)
     Active_archive_store = NULL;
@@ -1363,7 +1440,7 @@ BOOL clause_store_sync(Clause_store store)
   if (store->mode == CLAUSE_STORE_ARCHIVE_MMAP && store->backing != NULL)
     return msync(store->backing, store->backing_size, MS_SYNC) == 0;
   if (store->mode == CLAUSE_STORE_ARCHIVE_FILE) {
-    BOOL ok = fsync(store->fd) == 0;
+    BOOL ok = flush_file_write_buffer(store) && fsync(store->fd) == 0;
     if (ok)
       store->file_syncs++;
     return ok;
@@ -1473,7 +1550,7 @@ struct clause_store_stats clause_store_get_stats(Clause_store store)
 #endif
       stats.physical_bytes = store->backing_size;
     stats.handle_bytes = sizeof(*store) + store->capacity * sizeof(uintptr_t) +
-      store->io_capacity;
+      store->io_capacity + store->write_buffer_capacity;
     stats.materializations = store->materializations;
     stats.validation_failures = store->validation_failures;
     stats.mmap_eviction_passes = store->mmap_eviction_passes;
@@ -1481,10 +1558,13 @@ struct clause_store_stats clause_store_get_stats(Clause_store store)
     stats.mmap_scan_eviction_passes = store->mmap_scan_eviction_passes;
     stats.mmap_scan_eviction_bytes = store->mmap_scan_eviction_bytes;
     stats.io_buffer_bytes = store->io_capacity;
+    stats.write_buffer_bytes = store->write_buffer_capacity;
     stats.file_reads = store->file_reads;
     stats.file_read_bytes = store->file_read_bytes;
     stats.file_writes = store->file_writes;
     stats.file_write_bytes = store->file_write_bytes;
+    stats.file_write_calls = store->file_write_calls;
+    stats.file_write_call_bytes = store->file_write_call_bytes;
     stats.file_cache_eviction_passes =
       store->file_cache_eviction_passes;
     stats.file_cache_eviction_bytes = store->file_cache_eviction_bytes;
@@ -1508,7 +1588,8 @@ unsigned long long clause_store_allocated_bytes(Clause_store store)
   if (store == NULL)
     return 0;
   backing = store->mode == CLAUSE_STORE_ARCHIVE_FILE ?
-    store->io_capacity : store->backing_capacity;
+    store->io_capacity + store->write_buffer_capacity :
+    store->backing_capacity;
   return (unsigned long long) sizeof(struct clause_store) +
     (unsigned long long) store->capacity * sizeof(uintptr_t) + backing;
 }
@@ -1531,6 +1612,14 @@ BOOL clause_store_test_corrupt(Clause_store store,
     return FALSE;
 #ifndef __EMSCRIPTEN__
   if (store->mode == CLAUSE_STORE_ARCHIVE_FILE) {
+    if (store->write_buffer_used != 0 &&
+        absolute_offset >= store->write_buffer_start &&
+        absolute_offset - store->write_buffer_start <
+          store->write_buffer_used) {
+      store->write_buffer[absolute_offset - store->write_buffer_start] ^=
+        mask;
+      return TRUE;
+    }
     if (!file_read_exact(store, &byte, 1, (size_t) absolute_offset))
       return FALSE;
     byte ^= mask;

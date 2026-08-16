@@ -58,6 +58,10 @@ int main(int argc, char **argv)
       return 1;
     }
   }
+  if (mode == CLAUSE_STORE_ARCHIVE_FILE && !clause_store_sync(store)) {
+    fprintf(stderr, "ancestor_store_scale_test: final flush failed\n");
+    return 1;
+  }
   records = clause_store_get_stats(store);
   ids = clause_id_table_get_stats();
   resident = records.handle_bytes + ids.allocated_bytes;
@@ -73,15 +77,19 @@ int main(int argc, char **argv)
          "resident_per_record=%.3f total_per_record=%.3f "
          "legacy_per_record=%.3f mmap_evictions=%llu "
          "mmap_eviction_bytes=%llu io_buffer=%llu "
+         "write_buffer=%llu "
          "file_reads=%llu file_read_bytes=%llu "
-         "file_writes=%llu file_write_bytes=%llu\n",
+         "file_writes=%llu file_write_bytes=%llu "
+         "file_write_calls=%llu file_write_call_bytes=%llu\n",
          records.records, records.record_bytes, records.backing_bytes,
          records.handle_bytes, ids.allocated_bytes, records.physical_bytes,
          resident, total, legacy,
          (double) resident / n, (double) total / n, (double) legacy / n,
          records.mmap_eviction_passes, records.mmap_eviction_bytes,
-         records.io_buffer_bytes, records.file_reads, records.file_read_bytes,
-         records.file_writes, records.file_write_bytes);
+         records.io_buffer_bytes, records.write_buffer_bytes,
+         records.file_reads, records.file_read_bytes,
+         records.file_writes, records.file_write_bytes,
+         records.file_write_calls, records.file_write_call_bytes);
   printf("ancestor_store_file_cache: evictions=%llu eviction_bytes=%llu "
          "syncs=%llu failures=%llu\n",
          records.file_cache_eviction_passes,
@@ -92,8 +100,11 @@ int main(int argc, char **argv)
       (mode == CLAUSE_STORE_ARCHIVE_MMAP && records.record_bytes >=
          16U * 1024U * 1024U && records.mmap_eviction_passes == 0) ||
       (mode == CLAUSE_STORE_ARCHIVE_FILE &&
-       (records.io_buffer_bytes == 0 || records.file_writes != n ||
-        records.file_write_bytes != records.record_bytes))) {
+       (records.io_buffer_bytes == 0 || records.write_buffer_bytes == 0 ||
+        records.file_writes != n ||
+        records.file_write_bytes != records.record_bytes ||
+        records.file_write_calls >= records.file_writes ||
+        records.file_write_call_bytes != records.file_write_bytes))) {
     fprintf(stderr, "ancestor_store_scale_test: accounting check failed\n");
     return 1;
   }
