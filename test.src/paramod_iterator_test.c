@@ -28,7 +28,7 @@ static void clear_results(void)
 {
   unsigned i;
   for (i = 0; i < Result_count; i++)
-    zap_topform(Results[i]);
+    delete_clause(Results[i]);
   Result_count = 0;
 }
 
