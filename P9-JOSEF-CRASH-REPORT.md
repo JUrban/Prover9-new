@@ -6,13 +6,13 @@ The Josef failures are not evidence that the compact implementation can only
 handle the CHAT or Osborn inputs.  They expose two general lifecycle defects
 at boundaries that the short tests did not exercise:
 
-1. Josef 01 and Josef 02 enter the compact terminal-proof teardown and receive
+1. Josef 01 and Josef 02 enter the compact terminal-proof boundary and receive
    `SIGSEGV` after the final live statistics have already been frozen.  The
-   terminal path was replaying ordinary per-hint deletion across a very large
-   bank, including live posting-maintenance rebuilds, after other compact
-   search structures had been destroyed.  The subsequent signal report then
-   dereferenced that partially destroyed live state and itself failed after
-   printing only the `STATISTICS` heading.
+   first repair removed an unsafe per-hint teardown and made crash reporting
+   survive partially released state, but the mature rerun proves that this was
+   not the complete cause.  Terminal proof handling still destroys archive
+   and index owners from inside a nested inference callback, before the
+   producer releases retrieval state and a materialized passive pin.
 2. Josef 03 uses `set(hint_match_once)`.  More than one clause can acquire the
    same `matching_hint` while the clauses are pending in limbo.  Retaining the
    first clause retired the hint; retaining another already-matched pending
@@ -27,8 +27,12 @@ uses a checked bulk destroy for a terminal packed index.  These rules apply to
 legacy, packed, better-packed, and packed-fast hint modes; they are not keyed
 to any Josef formula, symbol, hint count, or search schedule.
 
-The implementation is commit `0bddd18` on `mature-back-index-cpu`.  The two
-test-harness expectation updates described below are commit `4d8d52f`.
+Commit `0bddd18` repairs the independent hint-retirement and bulk hint-index
+lifecycle described below.  It does **not** repair the remaining nested
+terminal-proof ownership defect.  The structural follow-up is specified in
+`P9-TERMINAL-PROOF-LIFECYCLE-PLAN.md`; its implementation and mature replay
+must be recorded separately rather than retroactively attributed to the hint
+fix.
 
 ## Evidence from the supplied outputs
 
@@ -57,15 +61,29 @@ last complete report has 1,592,161,420 generated and 36,047,225 kept at given
 30,749; the missing final statistics are a consequence of the recursive
 failure in crash reporting, not evidence of an earlier search cutoff.
 
-### Josef 02: the same terminal signature
+### Josef 02: deterministic unresolved terminal signature
 
 Josef 02 reaches given 13,006 after at least 121,904,137 generated and
 8,756,754 kept at its last periodic report.  It then has the same output
 signature as Josef 01: `Prover catching signal 11`, followed only by the
 statistics heading.  There is no original-P9 Josef 02 file in the supplied
 set, so its exact proof boundary cannot be compared independently.  The
-signature and code path identify terminal teardown as the strong diagnosis;
-the next full rerun remains the end-to-end confirmation.
+signature and code path identify terminal teardown as the strong diagnosis.
+
+The subsequent `Josef_02.out.new1` and latest-code `Josef_02.out1` runs both
+repeat all 13,006 given-clause bodies exactly (SHA-256
+`ac15b3a8aea930e4b6c67d71a60b28aa2ac37e84977611885ae34247eb7136ea`) and
+crash at the same boundary.  Therefore `0bddd18` did not fix Josef 02 and the
+earlier report was too optimistic.
+
+A focused archive-backed unit-conflict reproducer exposes the remaining
+mechanism without a multi-hour search.  With a nonzero passive cache,
+terminal teardown aborts because it attempts to evict the currently pinned
+conflicting unit.  With cache zero (the Josef setting), the run can reach
+proof output but destroys the archived conflicting parent first, producing an
+open proof that cites a missing clause.  Both outcomes have the same root
+cause: destructive terminal work occurs before the inference callback has
+returned ownership.
 
 ### Josef 03: checked duplicate retirement
 
@@ -279,7 +297,9 @@ Established:
 
 - Josef 03's reported underflow has a direct reproducible state-machine cause
   and an index-independent fix.
-- The terminal path safely destroys each complete supplied Josef hint bank.
+- The packed hint path safely destroys each complete supplied Josef hint
+  bank, but compact passive/inference teardown is not yet safe inside a
+  terminal inference callback.
 - Match-once retirement now composes with limbo batching, expiry, ordinary
   shutdown, and checkpoint/resume.
 - The fix adds no Topform RAM and removes potentially expensive terminal
@@ -289,9 +309,9 @@ Established:
 
 Not yet established without rerunning the expensive jobs:
 
-- Josef 01/02 must still complete their original mature proof reconstruction
-  on the production machine.  The new crash reporter will preserve the frozen
-  report and stderr backtrace if another independent terminal bug remains.
+- Josef 01/02 do not yet complete their original mature proof reconstruction.
+  Their reruns demonstrate the remaining nested callback/archive ownership
+  bug; the general safe-point repair must land before another acceptance run.
 - Josef 03 must still pass its original 460-million-generated boundary to
   demonstrate the repaired transition under the same long-run interleaving.
 - The bounded injected-contradiction runs validate full-bank initialization
