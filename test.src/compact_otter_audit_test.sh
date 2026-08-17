@@ -420,4 +420,42 @@ fi
   > "$test_tmp/terminal-hints.norm"
 grep -q 'label(repeated_anyconst)' "$test_tmp/terminal-hints.norm"
 
+# A generated q(a) discovers the terminal proof while unit_conflict owns a
+# materialized pin on still-passive -q(a).  Terminal handling must cancel the
+# producer, release the pin, snapshot the complete proof (including clause
+# 3), and only then discard the archive.  Exercise both the direct decode and
+# bounded cache-owner paths.
+cp "$repo_dir/test.src/terminal_cold_unit.in" \
+  "$test_tmp/terminal-cold-cache0.in"
+sed 's/assign(compact_passive_cache,0)\./assign(compact_passive_cache,1)./' \
+  "$repo_dir/test.src/terminal_cold_unit.in" \
+  > "$test_tmp/terminal-cold-cache1.in"
+
+for cache in 0 1; do
+  P9_COMPACT_HEAP=1 "$repo_dir/bin/prover9" \
+    < "$test_tmp/terminal-cold-cache$cache.in" \
+    > "$test_tmp/terminal-cold-cache$cache.out" \
+    2> "$test_tmp/terminal-cold-cache$cache.err"
+  grep -q 'THEOREM PROVED' "$test_tmp/terminal-cold-cache$cache.out"
+  grep -q '^3 -q(a)\.  \[assumption\]\.$' \
+    "$test_tmp/terminal-cold-cache$cache.out"
+  grep -q '^5 \$F\.  \[resolve(4,a,3,a)\]\.$' \
+    "$test_tmp/terminal-cold-cache$cache.out"
+  grep -Eq 'Compact_passive_cache: .*misses=1,' \
+    "$test_tmp/terminal-cold-cache$cache.out"
+  if grep -Eq 'Fatal error|closure failure|pinned clause' \
+       "$test_tmp/terminal-cold-cache$cache.err"; then
+    cat "$test_tmp/terminal-cold-cache$cache.err" >&2
+    exit 1
+  fi
+  "$repo_dir/bin/prooftrans" parents_only \
+    < "$test_tmp/terminal-cold-cache$cache.out" \
+    > "$test_tmp/terminal-cold-cache$cache.proof"
+  sed -n '/^% Length of proof:/,/^============================== end of proof/p' \
+    "$test_tmp/terminal-cold-cache$cache.proof" \
+    > "$test_tmp/terminal-cold-cache$cache.norm"
+done
+cmp "$test_tmp/terminal-cold-cache0.norm" \
+    "$test_tmp/terminal-cold-cache1.norm"
+
 echo 'compact_otter_audit_test: PASS'

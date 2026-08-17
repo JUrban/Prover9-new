@@ -215,6 +215,77 @@ static void one_case(
     zap_topform(expected[budget]);
 }
 
+/* The callback contract is shared by all inference producers, not just the
+   two resumable iterators.  Exercise each eager producer that can be active
+   in a given-clause turn, then enumerate again to prove that cancellation
+   released its Mindex positions, contexts, trails, and clash state. */
+static void eager_cancellation_cases(
+  Topform binary_given, Topform ur_nucleus, Lindex idx)
+{
+  Topform factor_parent;
+
+  Cancel_after = 1;
+  Result_count = 0;
+  CHECK(!binary_resolution(binary_given, ANY_RES, idx, collect_result),
+        "binary resolution propagates consumer cancellation");
+  CHECK(Result_count == 1,
+        "binary resolution stops after the cancelling result");
+  clear_results();
+  Cancel_after = 0;
+  CHECK(binary_resolution(binary_given, ANY_RES, idx, collect_result),
+        "binary resolution can restart after cancellation");
+  CHECK(Result_count > 0,
+        "restarted binary resolution produces conclusions");
+  clear_results();
+
+  resolution_options(FALSE, FALSE, FALSE, 100, FALSE);
+  Cancel_after = 1;
+  Result_count = 0;
+  CHECK(!ur_resolution(ur_nucleus, ANY_RES, idx, collect_result),
+        "UR resolution propagates consumer cancellation");
+  CHECK(Result_count == 1,
+        "UR resolution stops after the cancelling result");
+  clear_results();
+  Cancel_after = 0;
+  CHECK(ur_resolution(ur_nucleus, ANY_RES, idx, collect_result),
+        "UR resolution can restart after cancellation");
+  CHECK(Result_count > 0,
+        "restarted UR resolution produces conclusions");
+  clear_results();
+
+  Cancel_after = 1;
+  Result_count = 0;
+  CHECK(!unit_conflict_by_index(binary_given, idx, collect_result),
+        "unit conflict propagates consumer cancellation");
+  CHECK(Result_count == 1,
+        "unit conflict stops after the cancelling result");
+  clear_results();
+  Cancel_after = 0;
+  CHECK(unit_conflict_by_index(binary_given, idx, collect_result),
+        "unit conflict can restart after cancellation");
+  CHECK(Result_count > 0,
+        "restarted unit conflict produces conclusions");
+  clear_results();
+
+  factor_parent = parse_clause_from_string("P(x) | P(a) | P(b) | R(x).");
+  CHECK(factor_parent != NULL, "parse factoring cancellation parent");
+  factor_parent->id = 1000;
+  Cancel_after = 1;
+  Result_count = 0;
+  CHECK(!binary_factors(factor_parent, collect_result),
+        "factoring propagates consumer cancellation");
+  CHECK(Result_count == 1,
+        "factoring stops after the cancelling result");
+  clear_results();
+  Cancel_after = 0;
+  CHECK(binary_factors(factor_parent, collect_result),
+        "factoring can restart after cancellation");
+  CHECK(Result_count > 1,
+        "restarted factoring traverses beyond the cancelled pair");
+  clear_results();
+  zap_topform(factor_parent);
+}
+
 int main(void)
 {
   Hyper_parent_source source;
@@ -248,6 +319,7 @@ int main(void)
   one_case(pos_satellite, POS_RES, idx, &source);
   one_case(neg_nucleus, NEG_RES, idx, &source);
   one_case(neg_satellite, NEG_RES, idx, &source);
+  eager_cancellation_cases(pos_satellite, pos_nucleus, idx);
 
   for (i = 0; i < Parent_count; i++)
     lindex_update(idx, Parents[i], DELETE);

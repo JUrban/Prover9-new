@@ -1,0 +1,27 @@
+clear(auto).
+clear(auto_setup).
+assign(search_loop,otter).
+assign(passive_store,dense).
+assign(passive_directory,file).
+assign(passive_selector_store,file).
+assign(hint_index,packed_fast).
+assign(inference_frontier,clauses).
+assign(ancestor_store,file).
+assign(sos_limit,-1).
+set(process_initial_sos).
+set(binary_resolution).
+set(compact_otter_demodulation).
+set(compact_otter_unit_index).
+set(compact_otter_back_demod_index).
+set(compact_otter_nonunit_index).
+assign(compact_passive_cache,0).
+assign(stats,all).
+
+formulas(usable).
+  -p(x) | q(x).
+end_of_list.
+
+formulas(sos).
+  p(a).
+  -q(a).
+end_of_list.

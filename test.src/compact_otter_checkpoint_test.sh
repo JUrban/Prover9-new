@@ -110,4 +110,41 @@ for checkpoint_given in 0 2; do
   cmp "$test_tmp/control.proof" "$case_dir/resumed.proof"
 done
 
+# Checkpoint at the exact archive-lifetime boundary covered by
+# terminal_cold_unit.in.  The resumed run discovers its proof while compact
+# unit-conflict owns a cold passive candidate.  The safe-point finalizer must
+# preserve the complete proof and release every cache pin after restore too.
+terminal_dir="$test_tmp/terminal-cold"
+mkdir "$terminal_dir"
+(
+  cd "$terminal_dir"
+  sed '1i\
+assign(checkpoint_given,0).\
+set(checkpoint_exit).\
+set(checkpoint_verify).' "$repo_dir/test.src/terminal_cold_unit.in" | \
+    "$prover" > before.out 2> before.err || true
+)
+terminal_checkpoint=$(find "$terminal_dir" -maxdepth 1 -type d \
+  -name 'prover9_*_ckpt_0' -print)
+test -n "$terminal_checkpoint"
+"$prover" -r "$terminal_checkpoint" < /dev/null \
+  > "$terminal_dir/resumed.out" 2> "$terminal_dir/resumed.err"
+grep -q 'THEOREM PROVED' "$terminal_dir/resumed.out"
+grep -Eq '^%   Verification: [0-9]+ passed, 0 failed\.$' \
+  "$terminal_dir/resumed.out"
+grep -q '^3 -q(a)\.  \[assumption\]\.$' "$terminal_dir/resumed.out"
+grep -q '^5 \$F\.  \[resolve(4,a,3,a)\]\.$' "$terminal_dir/resumed.out"
+grep -Eq 'Compact_passive_cache: .*misses=1,' \
+  "$terminal_dir/resumed.out"
+if grep -Eq 'Fatal error|closure failure|pinned clause' \
+     "$terminal_dir/resumed.err"; then
+  cat "$terminal_dir/resumed.err" >&2
+  exit 1
+fi
+"$repo_dir/bin/prooftrans" parents_only < "$terminal_dir/resumed.out" | \
+  sed -n '/^% Length of proof:/,/^============================== end of proof/p' \
+  > "$terminal_dir/resumed.proof"
+grep -q '^3 -q(a)\.  \[\]\.$' "$terminal_dir/resumed.proof"
+grep -q '^5 \$F\.  \[4,3\]\.$' "$terminal_dir/resumed.proof"
+
 echo 'compact_otter_checkpoint_test: PASS'
