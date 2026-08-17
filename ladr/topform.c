@@ -769,8 +769,10 @@ BOOL min_depth(Literals lit)
  *************/
 
 /* DOCUMENTATION
-Is (was) the clause part of the initial sos (after processing input clauses,
-before starting search)/
+Return TRUE iff the Topform variant is a negative clause.  Formula Topforms
+share the body union with clauses, so their Formula pointer must never be
+passed to literal predicates.  This routine is the variant-safe boundary for
+callers that can receive either resident clauses or proof formulas.
 */
 
 /* PUBLIC */
@@ -793,7 +795,9 @@ before starting search)/
 /* PUBLIC */
 BOOL negative_clause_possibly_compressed(Topform c)
 {
-  if (c->compressed)
+  if (c == NULL || c->is_formula)
+    return FALSE;
+  else if (c->compressed)
     return c->neg_compressed;
   else
     return negative_clause(c->literals);

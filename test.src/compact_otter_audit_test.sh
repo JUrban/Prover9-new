@@ -441,6 +441,32 @@ fi
   > "$test_tmp/terminal-hyper.proof"
 grep -q '^4 \$F\.  \[1,2,3\]\.$' "$test_tmp/terminal-hyper.proof"
 
+# Proof ancestry is a Topform DAG, not a clause-only DAG.  Clausification
+# retains non-clausal formula premises, and terminal denial-reuse discovery
+# must skip those formula variants instead of interpreting the shared body
+# union as a Literals chain.  This guards both atomic goal formulas and a
+# compound implication premise before terminal snapshotting begins.
+P9_COMPACT_HEAP=1 "$repo_dir/bin/prover9" \
+  < "$repo_dir/test.src/terminal_mixed_ancestor.in" \
+  > "$test_tmp/terminal-mixed.out" \
+  2> "$test_tmp/terminal-mixed.err"
+grep -q 'THEOREM PROVED' "$test_tmp/terminal-mixed.out"
+grep -q '^1 p & q -> r # label(non_clause)\.  \[assumption\]\.$' \
+  "$test_tmp/terminal-mixed.out"
+grep -q '^9 \$F\.  \[resolve(8,a,6,a)\]\.$' \
+  "$test_tmp/terminal-mixed.out"
+if grep -Eq 'Prover catching signal|Fatal error|AddressSanitizer|runtime error' \
+     "$test_tmp/terminal-mixed.out" "$test_tmp/terminal-mixed.err"; then
+  cat "$test_tmp/terminal-mixed.err" >&2
+  exit 1
+fi
+"$repo_dir/bin/prooftrans" parents_only \
+  < "$test_tmp/terminal-mixed.out" \
+  > "$test_tmp/terminal-mixed.proof"
+grep -q '^1 p & q -> r # label(non_clause)\.  \[\]\.$' \
+  "$test_tmp/terminal-mixed.proof"
+grep -q '^9 \$F\.  \[8,6\]\.$' "$test_tmp/terminal-mixed.proof"
+
 # A generated q(a) discovers the terminal proof while unit_conflict owns a
 # materialized pin on still-passive -q(a).  Terminal handling must cancel the
 # producer, release the pin, snapshot the complete proof (including clause

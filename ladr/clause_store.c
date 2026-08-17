@@ -37,6 +37,14 @@
 #define AF_WAS_GIVEN   0x0040U
 #define AF_GOAL        0x0080U
 
+/* Formula and clause bodies occupy the same Topform union.  Formula records
+   are categorically not negative clauses, even when reading an older record
+   whose writer accidentally set both bits. */
+static BOOL flags_negative_clause(unsigned flags)
+{
+  return (flags & AF_IS_FORMULA) == 0 && (flags & AF_NEGATIVE) != 0;
+}
+
 struct clause_store {
   uintptr_t *refs;              /* Topform pointer or tagged record offset */
   size_t length;
@@ -1072,7 +1080,7 @@ BOOL clause_store_negative(Clause_store store, size_t position)
     return negative_clause_possibly_compressed((Topform) ref);
   if (!record_view(store, ref_offset(ref), &v))
     fatal_error("clause_store_negative: corrupt ancestor record");
-  return (v.flags & AF_NEGATIVE) != 0;
+  return flags_negative_clause(v.flags);
 }
 
 /* PUBLIC */
@@ -1357,7 +1365,7 @@ BOOL clause_negative_by_id(unsigned long long id, BOOL *known)
     if (!record_view(Active_archive_store, offset, &v) || v.id != id)
       fatal_error("clause_negative_by_id: corrupt ancestor record");
     if (known != NULL) *known = TRUE;
-    return (v.flags & AF_NEGATIVE) != 0;
+    return flags_negative_clause(v.flags);
   }
 }
 

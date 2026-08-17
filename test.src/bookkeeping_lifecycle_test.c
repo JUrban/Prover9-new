@@ -79,9 +79,14 @@ int main(int argc, char **argv)
   store = clause_store_init("disabled");
   for (i = 0; i < n; i++) {
     Topform c = get_topform();
-    assign_clause_id(c);
-    if (i == 0 || i == n / 2 || i == n - 1)
+    if (i == 0 || i == n / 2 || i == n - 1) {
+      Term t = parse_term_from_string("proof_formula(a).");
+      CHECK(t != NULL, "proof-formula fixture parses");
       c->is_formula = 1;
+      c->formula = term_to_formula(t);
+      zap_term(t);
+    }
+    assign_clause_id(c);
     clause_store_append(store, c);
   }
 
@@ -108,6 +113,14 @@ int main(int argc, char **argv)
     formula_count++;
   }
   CHECK(formula_count == 3, "proof-formula entries remain discoverable");
+  for (p = formulas; p != NULL; p = p->next) {
+    Topform c = p->v;
+    BOOL known = FALSE;
+    CHECK(!negative_clause_possibly_compressed(c),
+          "formula Topforms are never classified as negative clauses");
+    CHECK(!clause_negative_by_id(c->id, &known) && known,
+          "resident formula IDs have a known non-clause sign");
+  }
   zap_plist(formulas);
 
   sparse = get_topform();

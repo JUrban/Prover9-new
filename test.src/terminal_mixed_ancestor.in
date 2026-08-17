@@ -1,0 +1,13 @@
+assign(max_proofs,1).
+clear(reuse_denials).
+set(binary_resolution).
+
+formulas(assumptions).
+  p.
+  q.
+  p & q -> r.
+end_of_list.
+
+formulas(goals).
+  r.
+end_of_list.

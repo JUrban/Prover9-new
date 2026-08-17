@@ -163,6 +163,7 @@ BOOL min_depth(Literals lit);
 
 BOOL initial_clause(Topform c);
 
+/* Variant-safe: returns FALSE for formula Topforms. */
 BOOL negative_clause_possibly_compressed(Topform c);
 
 Term topform_properties(Topform c);

@@ -60,6 +60,16 @@ static Term term(char *s)
   return t;
 }
 
+static Topform formula_topform(char *s)
+{
+  Term t = term(s);
+  Topform f = term_to_topform(t, TRUE);
+  zap_term(t);
+  CHECK(f != NULL && f->is_formula && f->formula != NULL,
+        "formula Topform parse");
+  return f;
+}
+
 static BOOL term_flags_ident(Term a, Term b)
 {
   int i;
@@ -444,6 +454,54 @@ static void archive_preserve_body_test(Clause_store_archive_mode mode)
         "preserve-body archive teardown removes the tagged ID");
 }
 
+static void archive_formula_sign_test(Clause_store_archive_mode mode)
+{
+  Clause_store store = clause_store_init("ancestor-formula-sign-test");
+  Topform original, materialized;
+  Formula expected;
+  unsigned long long id;
+  BOOL known = FALSE;
+
+  CHECK(clause_store_enable_archive(store, mode),
+        "formula-sign ancestor backing initializes");
+  /* An atomic Formula begins with ATOM_FORM == 0.  Interpreting its union
+     arm as a Literals node therefore misclassifies it as a negative clause,
+     making this a deterministic regression for the variant-boundary bug. */
+  original = formula_topform("p(a).");
+  original->justification = input_just();
+  assign_clause_id(original);
+  id = original->id;
+  expected = formula_copy(original->formula);
+
+  CHECK(!negative_clause_possibly_compressed(original),
+        "resident formula is not a negative clause");
+  CHECK(!clause_negative_by_id(id, &known) && known,
+        "resident formula ID has a known non-clause sign");
+  clause_store_append(store, original);
+  CHECK(!clause_store_negative(store, 0),
+        "resident formula store entry is not negative");
+  CHECK(clause_store_archive_clause(store, original),
+        "formula Topform archives through the generic ancestor format");
+  CHECK(!clause_store_negative(store, 0),
+        "archived formula store entry is not negative");
+  known = FALSE;
+  CHECK(!clause_negative_by_id(id, &known) && known,
+        "archived formula ID has a known non-clause sign");
+
+  materialized = clause_store_materialize_by_id(id);
+  CHECK(materialized != NULL && materialized->is_formula &&
+        formula_ident(materialized->formula, expected),
+        "formula body survives ancestor archive materialization");
+  CHECK(materialized != NULL &&
+        !negative_clause_possibly_compressed(materialized),
+        "materialized formula remains a non-clause for sign queries");
+  clause_store_release_materialized(materialized);
+  zap_formula(expected);
+  clause_store_delete_clauses(store);
+  CHECK(find_clause_by_id(id) == NULL,
+        "formula archive teardown removes the tagged ID");
+}
+
 static void archive_direct_offset_aging_test(Clause_store_archive_mode mode)
 {
   enum { VERSIONS = 4096 };
@@ -587,16 +645,19 @@ int main(void)
   justification_all_types_test();
   justification_codec_test();
   archive_round_trip(CLAUSE_STORE_ARCHIVE_MEMORY);
+  archive_formula_sign_test(CLAUSE_STORE_ARCHIVE_MEMORY);
   archive_preserve_body_test(CLAUSE_STORE_ARCHIVE_MEMORY);
   archive_direct_offset_aging_test(CLAUSE_STORE_ARCHIVE_MEMORY);
   detached_archive_scaling_test(CLAUSE_STORE_ARCHIVE_MEMORY);
 #ifndef __EMSCRIPTEN__
   tmpdir_failure_test();
   archive_round_trip(CLAUSE_STORE_ARCHIVE_MMAP);
+  archive_formula_sign_test(CLAUSE_STORE_ARCHIVE_MMAP);
   archive_preserve_body_test(CLAUSE_STORE_ARCHIVE_MMAP);
   archive_direct_offset_aging_test(CLAUSE_STORE_ARCHIVE_MMAP);
   detached_archive_scaling_test(CLAUSE_STORE_ARCHIVE_MMAP);
   archive_round_trip(CLAUSE_STORE_ARCHIVE_FILE);
+  archive_formula_sign_test(CLAUSE_STORE_ARCHIVE_FILE);
   archive_preserve_body_test(CLAUSE_STORE_ARCHIVE_FILE);
   archive_direct_offset_aging_test(CLAUSE_STORE_ARCHIVE_FILE);
   detached_archive_scaling_test(CLAUSE_STORE_ARCHIVE_FILE);
