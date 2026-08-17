@@ -1,12 +1,28 @@
-# Terminal proof lifecycle: structural repair plan
+# Terminal proof lifecycle: structural repair design and implementation
+
+## Implementation status
+
+The design below is implemented by three reviewable commits:
+
+- `9c3d48a` changes the inference-result callback contract and makes every
+  eager/bounded producer unwind on cancellation;
+- `d81e56b` defers terminal proof work to search safe points and transfers a
+  deep, closed proof snapshot to output/results; and
+- `4f2d287` adds direct, cached, checkpointed, closure, and producer-restart
+  regressions.
+
+Release and ASan+UBSan builds pass the focused matrix and the broader compact,
+DISCOUNT, collective, checkpoint, generalization, scaling, memory, LADR, and
+TPTP suites.  The exact mature Josef 02 replay remains the last acceptance
+gate and is intentionally not replaced by these smaller tests.
 
 ## Problem statement
 
 The compact OTTER search can discover a terminal empty clause while it is
 inside an inference callback and, more specifically, while an archive-backed
-unit candidate is materialized and pinned.  The current callback immediately
-freezes statistics, destroys compact passive and inference indexes, expands
-the proof, and `longjmp`s out of the search.
+unit candidate is materialized and pinned.  The pre-fix callback immediately
+froze statistics, destroyed compact passive and inference indexes, expanded
+the proof, and `longjmp`ed out of the search.
 
 That ordering violates three ownership rules:
 

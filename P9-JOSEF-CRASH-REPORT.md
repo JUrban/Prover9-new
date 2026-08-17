@@ -29,10 +29,12 @@ to any Josef formula, symbol, hint count, or search schedule.
 
 Commit `0bddd18` repairs the independent hint-retirement and bulk hint-index
 lifecycle described below.  It does **not** repair the remaining nested
-terminal-proof ownership defect.  The structural follow-up is specified in
-`P9-TERMINAL-PROOF-LIFECYCLE-PLAN.md`; its implementation and mature replay
-must be recorded separately rather than retroactively attributed to the hint
-fix.
+terminal-proof ownership defect.  That structural follow-up is implemented
+by `9c3d48a` (cancellable inference producers) and `d81e56b` (safe-point
+proof finalization), with the permanent regression matrix in `4f2d287`.
+The exact mature Josef 02 replay is deliberately tracked as a separate final
+acceptance gate; the focused and broad tests below are not presented as a
+substitute for it.
 
 ## Evidence from the supplied outputs
 
@@ -169,6 +171,46 @@ large-run failures:
 
 ## Implemented repair
 
+### Cancellable inference ownership
+
+Inference result callbacks now return a Boolean continuation decision.
+Binary resolution, hyperresolution, UR, factoring, paramodulation, indexed
+unit conflict, and their bounded traversal variants propagate cancellation
+back through every nested producer.  A cancelled producer releases live
+Mindex retrieval positions, contexts, trails, equality flips, paramodulation
+positions, and bounded-iterator state before returning.
+
+The proof consumer no longer tears down search state or `longjmp`s from one
+of those callbacks.  A terminal empty clause is registered, the proof count
+is advanced, and a pending-terminal flag asks the producer to cancel.  If a
+new clause participates in unit conflict before acquiring a search
+container, a terminal-transient owner keeps its official ID and ancestry
+alive during unwinding.
+
+### Safe-point proof snapshots
+
+Search finalizes a pending proof only after preprocessing or the complete
+given-clause inference transaction has returned.  At that point no producer
+is on the C stack.  The finalizer asserts that the compact passive cache has
+no outstanding pins, freezes statistics while their indexes remain live,
+and reconstructs every proof against the still-authoritative ID/archive
+namespace.
+
+Every reconstructed DAG is closure-checked: each justification parent must
+occur in the proof.  It is then deep-copied into detached Topforms owning
+their bodies, attributes, and justifications but no clause-ID, archive,
+container, selector, or compact-index membership.  Closure is checked again
+on the copy.  Only after all archive materializations and terminal
+transients have been released are compact search indexes and packed hint
+indexes discarded.  Proof output, proof actions, and
+`collect_prover_results()` use the detached snapshot, so none can query
+destroyed storage.
+
+The closure check is proportional to proof size: it sorts the IDs in the DAG
+and performs binary membership lookups.  It does not allocate by the largest
+clause ID, which matters for mature runs with tens of millions of retained
+IDs.
+
 ### One authoritative transition
 
 `struct topform` now has a one-bit `hint_indexed` state.  It fits in the
@@ -251,6 +293,27 @@ the `retired_hint` metadata, resumes it without reactivation, obtains 0 failed
 verification fields, and matches the uninterrupted hint trace and final
 search counts.
 
+The terminal regression constructs the archive ownership boundary directly:
+usable `-p(x) | q(x)` and SOS units `p(a)` and `-q(a)` make generated `q(a)`
+find its contradiction while the compact unit index owns a materialized pin
+on still-cold `-q(a)`.  With the old ordering, cache one aborts while trying
+to evict that pinned clause; cache zero prints an open proof omitting the
+conflicting parent.  Both cache configurations now produce the same closed
+five-step proof, and `prooftrans parents_only` verifies both parents.
+
+The same boundary passes after checkpoint/resume with all checkpoint
+verification fields intact.  Consumer cancellation/restart tests cover
+eager and bounded paramodulation and hyperresolution, plus binary
+resolution, UR, factoring, and indexed unit conflict.  Each producer cancels
+after its first result and then completes a fresh traversal, detecting stale
+retrieval or substitution state.
+
+ASan+UBSan builds pass the cache-zero terminal case, the cached terminal
+case, ordinary `x2`, the expanded producer cancellation tests, and compact
+checkpoint/resume.  The sanitizer runs disable only leak reporting because
+the surrounding historical process retains global package state; address
+and undefined-behavior failures remain fatal.
+
 ### Supplied full hint banks at a bounded terminal boundary
 
 For each Josef output, the echoed input was reconstructed, the full hint bank
@@ -278,18 +341,26 @@ The following pass with the repair:
 - `make test1`;
 - hint postings/preview/compressed-unit component suite;
 - compact OTTER proof audit;
-- compact OTTER checkpoint/resume;
-- compact unit, nonunit, rewrite, back-demodulation, ID-map, and cold-store
-  component suites;
-- DISCOUNT loop, eager demodulation, collective frontier, hint trace, hint
-  checkpoint, and dense passive proof comparisons;
-- selector checkpoint/compaction tests;
-- allocator, memory lifecycle, bookkeeping, and ancestor-store tests.
+- compact OTTER checkpoint/resume, including the cold terminal boundary;
+- compact unit, nonunit, rewrite, back-demodulation, ID-map, cold-store, and
+  selector checkpoint/compaction component tests;
+- DISCOUNT, collective-frontier, eager-demodulation, dense-passive, hint
+  trace, and hint checkpoint suites;
+- long-run compact index scaling and its report tests;
+- compact generalization smoke manifest;
+- allocator, bookkeeping, ancestor-store, and memory lifecycle tests;
+- full optimized build of all prover, model, and utility programs; and
+- ordinary LADR and TPTP proof/status smoke tests.
 
-Two stale dense-passive test expectations were repaired while running this
-matrix: report regexes now include the already-reported directory fields, and
-the selector compaction test no longer hard-codes an obsolete 64-byte record
-size.  Those test-only changes do not alter prover behavior.
+### Mature acceptance status
+
+The three supplied Josef 02 failure files establish a deterministic
+13,006-given terminal boundary.  An untouched symbolized pre-fix native run
+and an exact fixed native run are being retained through that complete
+trajectory.  The fixed replay's first 1,019 given lines are byte-identical to
+the supplied failure sequence.  Final theorem/proof closure and the pre-fix
+terminal stack will be added here when those processes reach the boundary;
+until then, mature acceptance remains open.
 
 ## What is and is not established
 
@@ -298,8 +369,10 @@ Established:
 - Josef 03's reported underflow has a direct reproducible state-machine cause
   and an index-independent fix.
 - The packed hint path safely destroys each complete supplied Josef hint
-  bank, but compact passive/inference teardown is not yet safe inside a
-  terminal inference callback.
+  bank.
+- Inference cancellation and safe-point snapshotting repair the nested
+  callback/archive ownership violation in direct, cached, checkpointed, and
+  sanitizer executions.
 - Match-once retirement now composes with limbo batching, expiry, ordinary
   shutdown, and checkpoint/resume.
 - The fix adds no Topform RAM and removes potentially expensive terminal
@@ -309,9 +382,9 @@ Established:
 
 Not yet established without rerunning the expensive jobs:
 
-- Josef 01/02 do not yet complete their original mature proof reconstruction.
-  Their reruns demonstrate the remaining nested callback/archive ownership
-  bug; the general safe-point repair must land before another acceptance run.
+- Josef 01/02 have not yet completed a post-safe-point mature proof
+  reconstruction.  Exact fixed and pre-fix diagnostic replays are currently
+  running through the Josef 02 boundary.
 - Josef 03 must still pass its original 460-million-generated boundary to
   demonstrate the repaired transition under the same long-run interleaving.
 - The bounded injected-contradiction runs validate full-bank initialization
