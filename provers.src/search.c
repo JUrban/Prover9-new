@@ -71,6 +71,14 @@ static FILE *Deferred_terminal_stats = NULL;
 static BOOL Terminal_stats_frozen = FALSE;
 static BOOL Terminal_compact_indexes_released = FALSE;
 static BOOL Terminal_hint_index_released = FALSE;
+static BOOL Terminal_proof_pending = FALSE;
+static BOOL Terminal_proof_finalizing = FALSE;
+static Topform Terminal_empty = NULL;
+static Plist Terminal_transients = NULL;
+/* Plist of proof Plists.  Each inner DAG is a deep, ID-detached snapshot
+   constructed while the ancestor archive is still authoritative. */
+static Plist Terminal_proof_snapshots = NULL;
+static Plist Terminal_print_snapshot = NULL;
 static unsigned Rewrite_epoch = 1;    /* compact rewrite state seen by SOS */
 static size_t Rewrite_refresh_hot_cursor = 0;
 static size_t Rewrite_refresh_general_cursor = 0;
@@ -6209,6 +6217,19 @@ static void compact_passive_cache_clear_all(void)
     compact_passive_cache_clear_entry(&Compact_passive_cache[i]);
 }
 
+static unsigned long long compact_passive_cache_total_pins(void)
+{
+  size_t i;
+  unsigned long long pins = 0;
+  for (i = 0; i < Compact_passive_cache_slots; i++) {
+    unsigned entry_pins = Compact_passive_cache[i].pins;
+    if (pins > ULLONG_MAX - entry_pins)
+      fatal_error("compact passive cache pin-count overflow");
+    pins += entry_pins;
+  }
+  return pins;
+}
+
 static void compact_passive_cache_init(unsigned megs)
 {
   size_t desired, sets = 1;
@@ -6917,49 +6938,66 @@ BOOL handle_proof_and_maybe_exit(Topform empty_clause)
   Plist proof, materialized, p;
   BOOL terminal_proof;
 
-  assign_clause_id(empty_clause);
+  if (!Terminal_proof_finalizing) {
+    assign_clause_id(empty_clause);
 
-  if (!flag(Opt->reuse_denials) && Glob.horn) {
-    unsigned negative_id = first_negative_ancestor_id(empty_clause);
-    if (negative_id == 0)
-      fatal_error("handle_proof_and_maybe_exit: negative ancestor is missing");
-    if (ilist_member(Glob.desc_to_be_disabled, (int) negative_id)) {
-      if (!flag(Opt->quiet)) {
-	printf("%% Redundant proof: ");
-	f_clause(empty_clause);
+    if (!flag(Opt->reuse_denials) && Glob.horn) {
+      unsigned negative_id = first_negative_ancestor_id(empty_clause);
+      if (negative_id == 0)
+        fatal_error("handle_proof_and_maybe_exit: negative ancestor is missing");
+      if (ilist_member(Glob.desc_to_be_disabled, (int) negative_id)) {
+        if (!flag(Opt->quiet)) {
+	  printf("%% Redundant proof: ");
+	  f_clause(empty_clause);
+        }
+        /* The callback transferred the empty result to us.  A rejected
+           duplicate therefore has no remaining owner. */
+        delete_clause(empty_clause);
+        return TRUE;
       }
-      return TRUE;
+      else
+        /* Descendants of this denial will be disabled when it is safe. */
+        Glob.desc_to_be_disabled =
+          ilist_prepend(Glob.desc_to_be_disabled, (int) negative_id);
     }
-    else
-      /* Descendants of this denial will be disabled when it is safe. */
-      Glob.desc_to_be_disabled =
-        ilist_prepend(Glob.desc_to_be_disabled, (int) negative_id);
+
+    /* Mark parents as used only for non-redundant proofs.  If done earlier,
+       parents could be marked as used but then escape forward subsumption
+       (which skips used clauses), leading to back subsumption finding them
+       in limbo. */
+    mark_parents_as_used(empty_clause);
+
+    Glob.empties = plist_append(Glob.empties, empty_clause);
+    Stats.proofs++;
+    terminal_proof = at_parm_limit(Stats.proofs, Opt->max_proofs);
+
+    if (terminal_proof) {
+      if (Terminal_proof_pending)
+        fatal_error("multiple terminal proofs entered one cancellation window");
+      Terminal_proof_pending = TRUE;
+      Terminal_empty = empty_clause;
+      /* Do not inspect or destroy an archive here.  FALSE asks the inference
+         producer to unwind every retrieval, context, and passive pin. */
+      return FALSE;
+    }
+  }
+  else {
+    if (!Terminal_proof_pending || Terminal_empty == NULL ||
+        Terminal_print_snapshot == NULL ||
+        empty_clause->id != Terminal_empty->id)
+      fatal_error("terminal proof finalization has no closed snapshot");
+    terminal_proof = TRUE;
   }
 
-  /* Mark parents as used only for non-redundant proofs.  If done earlier,
-     parents could be marked as used but then escape forward subsumption
-     (which skips used clauses), leading to back subsumption finding them
-     in limbo. */
-  mark_parents_as_used(empty_clause);
-
-  Glob.empties = plist_append(Glob.empties, empty_clause);
-  Stats.proofs++;
-  terminal_proof = at_parm_limit(Stats.proofs, Opt->max_proofs);
-
-  /* A terminal compact proof needs the ancestor archive and hints, but it
-     cannot issue another rewrite/subsumption/redex query.  Preserve the
-     pre-release statistics, then remove search-only compact indexes before
-     materializing the proof DAG. */
-  if (terminal_proof && compact_otter_passive_mode()) {
-    freeze_terminal_statistics();
-    release_terminal_compact_indexes();
+  if (Terminal_proof_finalizing) {
+    proof = Terminal_print_snapshot;
+    materialized = NULL;
   }
-
-  proof = get_clause_ancestors(empty_clause);
-  restore_archive_hint_links(proof);
-  if (terminal_proof && compact_otter_passive_mode())
-    release_terminal_hint_index();
-  materialized = materialize_clauses(proof);
+  else {
+    proof = get_clause_ancestors(empty_clause);
+    restore_archive_hint_links(proof);
+    materialized = materialize_clauses(proof);
+  }
 
   answers = get_term_attributes(empty_clause->attributes, Att.answer);
 
@@ -7234,17 +7272,224 @@ BOOL handle_proof_and_maybe_exit(Topform empty_clause)
   if (answers)
     zap_term(answers);
 
-  recompress_clauses(materialized);
-  zap_plist(materialized);
+  if (!Terminal_proof_finalizing) {
+    recompress_clauses(materialized);
+    zap_plist(materialized);
+  }
   actions_in_proof(proof, &Att);  /* this can exit */
 
-  clause_store_release_materialized_plist(proof);
-  zap_plist(proof);
+  if (!Terminal_proof_finalizing) {
+    clause_store_release_materialized_plist(proof);
+    zap_plist(proof);
+  }
 
   if (terminal_proof)
     done_with_search(MAX_PROOFS_EXIT);  /* does not return */
   return TRUE;
 }  // handle_proof_and_maybe_exit
+
+static int compare_proof_ids(const void *a, const void *b)
+{
+  unsigned long long x = *(const unsigned long long *) a;
+  unsigned long long y = *(const unsigned long long *) b;
+  return x < y ? -1 : x > y ? 1 : 0;
+}
+
+static BOOL sorted_proof_has_id(const unsigned long long *ids, size_t count,
+                                unsigned long long id)
+{
+  size_t low = 0, high = count;
+  while (low < high) {
+    size_t mid = low + (high - low) / 2;
+    if (ids[mid] < id)
+      low = mid + 1;
+    else
+      high = mid;
+  }
+  return low < count && ids[low] == id;
+}
+
+/* get_clause_ancestors() historically tolerates a deleted parent for
+   ancestor-subsumption callers.  A terminal result cannot: every printed
+   justification edge must close over the returned DAG. */
+static void validate_terminal_proof_closure(Plist proof)
+{
+  Plist p;
+  size_t count = 0, at = 0;
+  unsigned long long *ids;
+  for (p = proof; p != NULL; p = p->next)
+    count++;
+  if (count == 0)
+    fatal_error("terminal proof snapshot is empty");
+  if (count > SIZE_MAX / sizeof(*ids))
+    fatal_error("terminal proof snapshot is too large");
+  ids = safe_malloc(count * sizeof(*ids));
+  for (p = proof; p != NULL; p = p->next) {
+    Topform c = p->v;
+    if (c->id == 0)
+      fatal_error("terminal proof contains an unnumbered step");
+    ids[at++] = c->id;
+  }
+  qsort(ids, count, sizeof(*ids), compare_proof_ids);
+  for (at = 1; at < count; at++)
+    if (ids[at-1] == ids[at])
+      fatal_error("terminal proof contains duplicate IDs");
+  for (p = proof; p != NULL; p = p->next) {
+    Topform c = p->v;
+    Ilist parents = get_parents(c->justification, TRUE);
+    Ilist q;
+    for (q = parents; q != NULL; q = q->next) {
+      unsigned long long parent = (unsigned) q->i;
+      if (q->i <= 0 || !sorted_proof_has_id(ids, count, parent)) {
+        fprintf(stderr,
+                "\nTerminal proof closure failure: clause %llu cites "
+                "missing parent %d.\n", c->id, q->i);
+        zap_ilist(parents);
+        safe_free(ids);
+        fatal_error("terminal proof has an open justification edge");
+      }
+    }
+    zap_ilist(parents);
+  }
+  safe_free(ids);
+}
+
+static Topform copy_terminal_proof_step(Topform source)
+{
+  Topform copy;
+  if (source->compressed != NULL)
+    fatal_error("copy_terminal_proof_step: source body is not materialized");
+  if (source->is_formula) {
+    copy = get_topform();
+    copy->is_formula = TRUE;
+    copy->formula = formula_copy(source->formula);
+    copy->id = source->id;
+    copy->justification = copy_justification(source->justification);
+    copy->attributes = copy_attributes(source->attributes);
+  }
+  else
+    copy = copy_clause_ija(source);
+
+  copy->weight = source->weight;
+  copy->matching_hint = source->matching_hint;
+  copy->last_matched_given = source->last_matched_given;
+  copy->uncompressed_body_bytes = source->uncompressed_body_bytes;
+  copy->proof_tree_weight_cache = source->proof_tree_weight_cache;
+  copy->semantics = source->semantics;
+  copy->simplifier_epoch = source->simplifier_epoch;
+  copy->rewrite_epoch = source->rewrite_epoch;
+  copy->normal_vars = source->normal_vars;
+  copy->used = source->used;
+  copy->initial = source->initial;
+  copy->neg_compressed = source->neg_compressed;
+  copy->subsumer = source->subsumer;
+  copy->was_given = source->was_given;
+  copy->goal_derived = source->goal_derived;
+  copy->cac_candidate = source->cac_candidate;
+  copy->delayed_demodulator = source->delayed_demodulator;
+  copy->rewrite_rule_dirty = source->rewrite_rule_dirty;
+  /* A result snapshot owns only its body/attributes/justification. */
+  copy->official_id = FALSE;
+  copy->disabled = FALSE;
+  copy->archive_materialized = FALSE;
+  copy->packed_justification = FALSE;
+  copy->collective_history = FALSE;
+  copy->hint_indexed = FALSE;
+  return copy;
+}
+
+static Plist snapshot_terminal_proof(Topform empty_clause)
+{
+  Plist live = get_clause_ancestors(empty_clause);
+  Plist materialized, p, snapshot = NULL;
+  restore_archive_hint_links(live);
+  materialized = materialize_clauses(live);
+  validate_terminal_proof_closure(live);
+  for (p = live; p != NULL; p = p->next)
+    snapshot = plist_append(snapshot,
+                            copy_terminal_proof_step((Topform) p->v));
+  validate_terminal_proof_closure(snapshot);
+  recompress_clauses(materialized);
+  zap_plist(materialized);
+  clause_store_release_materialized_plist(live);
+  zap_plist(live);
+  return snapshot;
+}
+
+static Topform proof_step_by_id(Plist proof, unsigned long long id)
+{
+  Plist p;
+  for (p = proof; p != NULL; p = p->next) {
+    Topform c = p->v;
+    if (c->id == id)
+      return c;
+  }
+  return NULL;
+}
+
+static void retain_terminal_transient(Topform c)
+{
+  if (c == NULL || c->id == 0 || c->containers != NULL || c->disabled)
+    fatal_error("invalid terminal transient clause ownership");
+  if (!clause_plist_member(Terminal_transients, c, TRUE))
+    Terminal_transients = plist_append(Terminal_transients, c);
+}
+
+static void release_terminal_transients(void)
+{
+  Plist p = Terminal_transients;
+  Terminal_transients = NULL;
+  while (p != NULL) {
+    Plist next = p->next;
+    Topform c = p->v;
+    if (c->containers != NULL || c->disabled)
+      fatal_error("terminal transient acquired a search owner");
+    delete_clause(c);
+    free_plist(p);
+    p = next;
+  }
+}
+
+/* Called only after preprocessing or a main-loop inference turn has returned.
+   No inference producer may be on the C stack at this point. */
+static void finish_terminal_proof_at_safe_point(void)
+{
+  Plist p;
+  unsigned long long empty_id;
+  Topform snapshot_empty;
+  if (!Terminal_proof_pending)
+    return;
+  if (Terminal_proof_finalizing || Terminal_empty == NULL)
+    fatal_error("invalid terminal proof safe-point state");
+  if (compact_passive_cache_total_pins() != 0)
+    fatal_error("terminal proof safe point still has passive cache pins");
+
+  freeze_terminal_statistics();
+  empty_id = Terminal_empty->id;
+  for (p = Glob.empties; p != NULL; p = p->next) {
+    Plist snapshot = snapshot_terminal_proof((Topform) p->v);
+    Terminal_proof_snapshots =
+      plist_append(Terminal_proof_snapshots, snapshot);
+    if (((Topform) p->v)->id == empty_id)
+      Terminal_print_snapshot = snapshot;
+  }
+  if (Terminal_print_snapshot == NULL)
+    fatal_error("terminal empty clause has no proof snapshot");
+  if (compact_passive_cache_total_pins() != 0)
+    fatal_error("terminal proof snapshot leaked passive cache pins");
+
+  release_terminal_transients();
+  if (compact_otter_passive_mode())
+    release_terminal_compact_indexes();
+  release_terminal_hint_index();
+
+  snapshot_empty = proof_step_by_id(Terminal_print_snapshot, empty_id);
+  if (snapshot_empty == NULL)
+    fatal_error("terminal snapshot does not contain its empty clause");
+  Terminal_proof_finalizing = TRUE;
+  handle_proof_and_maybe_exit(snapshot_empty);  /* does not return */
+  fatal_error("terminal proof finalizer returned");
+}
 
 /*************
  *
@@ -7977,15 +8222,20 @@ void cl_process_keep(Topform c)
 }  // cl_process_keep
 
 static
-void cl_process_conflict(Topform c, BOOL denial)
+BOOL cl_process_conflict(Topform c, BOOL denial)
 {
+  (void) denial;
   if (number_of_literals(c->literals) == 1) {
     if (!c->normal_vars)
       renumber_variables(c, MAX_VARS);
     clock_start(Clocks.conflict);
-    unit_conflict(c, handle_proof_and_maybe_exit);
+    if (!unit_conflict(c, handle_proof_and_maybe_exit)) {
+      clock_stop(Clocks.conflict);
+      return FALSE;
+    }
     clock_stop(Clocks.conflict);
   }
+  return TRUE;
 }  // cl_process_conflict
 
 static unsigned long long rewrite_only_clone_bytes(Topform c)
@@ -8376,6 +8626,11 @@ BOOL cl_process(Topform c)
   // If the infer_clock is running, stop it and restart it when done.
 
   BOOL infer_clock_stopped = FALSE;
+  BOOL continue_search = TRUE;
+  if (Terminal_proof_pending) {
+    delete_clause(c);
+    return FALSE;
+  }
   if (clock_running(Clocks.infer)) {
     clock_stop(Clocks.infer);
     infer_clock_stopped = TRUE;
@@ -8403,11 +8658,15 @@ BOOL cl_process(Topform c)
   cl_process_simplify(c);            // all simplification
 
   if (number_of_literals(c->literals) == 0)    // empty clause
-    handle_proof_and_maybe_exit(c);
+    continue_search = handle_proof_and_maybe_exit(c);
   else {
     // Do safe unit conflict before any deletion checks.
-    if (flag(Opt->safe_unit_conflict))
-      cl_process_conflict(c, FALSE);  // marked as used if conflict
+    if (flag(Opt->safe_unit_conflict) &&
+        !cl_process_conflict(c, FALSE)) {  // marked as used if conflict
+      retain_terminal_transient(c);
+      continue_search = FALSE;
+      goto cl_process_done;
+    }
 
     {
       BOOL deleted = cl_process_delete(c);
@@ -8443,8 +8702,12 @@ BOOL cl_process(Topform c)
       else {
         cl_process_keep(c);
         // Ordinary unit conflict.
-        if (!flag(Opt->safe_unit_conflict))
-	  cl_process_conflict(c, FALSE);
+        if (!flag(Opt->safe_unit_conflict) &&
+	    !cl_process_conflict(c, FALSE)) {
+          retain_terminal_transient(c);
+          continue_search = FALSE;
+          goto cl_process_done;
+        }
         cl_process_new_demod(c, FALSE);
         // We insert c into the literal index now so that it will be
         // available for unit conflict and forward subsumption while
@@ -8457,16 +8720,18 @@ BOOL cl_process(Topform c)
     }
   }  // not empty clause
   
+cl_process_done:
   clock_stop(Clocks.preprocess);
   if (infer_clock_stopped)
     clock_start(Clocks.infer);
-  return TRUE;
+  return continue_search;
 }  // cl_process
 
 static BOOL collective_candidate_pool_commit(void)
 {
   struct collective_pool_entry *e;
   enum inference_source saved_source;
+  BOOL continue_search;
   unsigned interval =
     (unsigned) parm(Opt->collective_candidate_fair_interval);
   BOOL fair = interval == 1 ||
@@ -8503,7 +8768,7 @@ static BOOL collective_candidate_pool_commit(void)
   saved_source = Current_inference_source;
   Current_inference_source = e->source;
   Current_collective_commit_entry = e;
-  cl_process(e->clause);
+  continue_search = cl_process(e->clause);
   Current_collective_commit_entry = NULL;
   Current_inference_source = saved_source;
   safe_free(e);
@@ -8517,7 +8782,7 @@ static BOOL collective_candidate_pool_commit(void)
     Collective_pool_commits_since_fair++;
   }
   Collective_pool_expansions_since_commit = 0;
-  return TRUE;
+  return continue_search;
 }
 
 /*************
@@ -8545,7 +8810,11 @@ void back_demod(Topform demod)
   p = results;
   while(p != NULL) {
     Topform old = p->v;
-    if (!clause_store_member(Glob.disabled, old) ||
+    if (Terminal_proof_pending) {
+      if (old->archive_materialized)
+        compact_otter_release_clause(old, NULL);
+    }
+    else if (!clause_store_member(Glob.disabled, old) ||
         dense_passive_contains_id(old->id)) {
       Topform new;
       if (flag(Opt->basic_paramodulation))
@@ -8563,7 +8832,7 @@ void back_demod(Topform demod)
       new->justification = back_demod_just(old);
       new->attributes = inheritable_att_instances(old->attributes, NULL);
       disable_clause(old);
-      cl_process(new);
+      (void) cl_process(new);
     }
     else
       compact_otter_release_clause(old, NULL);
@@ -8594,7 +8863,8 @@ void back_unit_deletion(Topform unit)
   p = results;
   while(p != NULL) {
     Topform old = p->v;
-    if (!clause_store_member(Glob.disabled, old)) {
+    if (!Terminal_proof_pending &&
+        !clause_store_member(Glob.disabled, old)) {
       Topform new;
       if (flag(Opt->basic_paramodulation))
 	new = copy_clause_with_flag(old, nonbasic_flag());
@@ -8606,7 +8876,7 @@ void back_unit_deletion(Topform unit)
       new->justification = back_unit_deletion_just(old);
       new->attributes = inheritable_att_instances(old->attributes, NULL);
       disable_clause(old);
-      cl_process(new);
+      (void) cl_process(new);
     }
     prev = p;
     p = p->next;
@@ -8738,7 +9008,7 @@ void limbo_process(BOOL pre_search)
   int lp_count = 0;
   double lp_next = preprocessing_report_starting();
 
-  while (Glob.limbo->first) {
+  while (Glob.limbo->first && !Terminal_proof_pending) {
     Topform c = Glob.limbo->first->c;
     BOOL discount_activation = discount_mode() && c->was_given;
     double iter_start = (lp_next > 0) ? user_seconds() : 0;
@@ -8792,6 +9062,8 @@ void limbo_process(BOOL pre_search)
         }
         else
           back_demod(owner);
+        if (Terminal_proof_pending)
+          return;
       }
       insert_into_sos2(c, Glob.sos);
       continue;
@@ -8799,8 +9071,8 @@ void limbo_process(BOOL pre_search)
 
     // factoring
 
-    if (flag(Opt->factor))
-      binary_factors(c, cl_process);
+    if (flag(Opt->factor) && !binary_factors(c, cl_process))
+      return;
 
     // Try to apply new_constant rule.
 
@@ -8816,7 +9088,8 @@ void limbo_process(BOOL pre_search)
 	}
 	if (Glob.interps)
 	  update_semantics_new_constant(new);
-	cl_process(new);
+	if (!cl_process(new))
+          return;
       }
     }
 
@@ -8830,7 +9103,8 @@ void limbo_process(BOOL pre_search)
 	  printf("\nNOTE: Fold denial: ");
 	  f_clause(new);
 	}
-	cl_process(new);
+	if (!cl_process(new))
+          return;
       }
     }
 
@@ -8946,18 +9220,24 @@ void limbo_process(BOOL pre_search)
       if (flag(Opt->print_kept))
 	printf("%s    starting back demodulation with %llu.\n", TPTP_PFX, c->id);
       back_demod(c);  // This calls cl_process on rewritable clauses.
+      if (Terminal_proof_pending)
+        return;
     }
 
     // If unit, use it to simplify other clauses (back unit_deletion)
 
     if (flag(Opt->unit_deletion) && unit_clause(c->literals)) {
       back_unit_deletion(c);  // This calls cl_process on rewritable clauses.
+      if (Terminal_proof_pending)
+        return;
     }
 
     // Check if we should do back CAC simplification.
 
     if (ilist_member(Glob.cac_clauses, (int) c->id)) {
       back_cac_simplify();
+      if (Terminal_proof_pending)
+        return;
     }
 
     // Remove from limbo
@@ -9019,7 +9299,8 @@ void limbo_process(BOOL pre_search)
     }
   }
   // Now it is safe to disable descendants of desc_to_be_disabled clauses.
-  disable_to_be_disabled();
+  if (!Terminal_proof_pending)
+    disable_to_be_disabled();
 
   if (pre_search && lp_count > 0) {
 #ifdef DEBUG
@@ -9044,20 +9325,22 @@ void infer_outside_loop(Topform c)
    like  [assumption,rewrite[...],...]. */
   Topform copy = copy_inference(c);  /* Note: c has no ID yet. */
   cl_process_simplify(copy);
+  BOOL complete;
   if (copy->justification->next == NULL) {
     /* Simplification does nothing, so we can just process the original. */
     delete_clause(copy);
-    cl_process(c);
+    complete = cl_process(c);
   }
   else {
     if (c->id == 0)   /* see the guard note in the Usable loop */
       assign_clause_id(c);
     copy->justification->u.id = c->id;
     retain_disabled_clause(c);
-    cl_process(copy);  /* This re-simplifies, but that's ok. */
+    complete = cl_process(copy);  /* This re-simplifies, but that's ok. */
   }
 
-  limbo_process(FALSE);
+  if (complete)
+    limbo_process(FALSE);
 }  /* infer_outside_loop */
 
 struct collective_history_filter {
@@ -9212,7 +9495,7 @@ static void collective_promising_insert(
    Discard the already-committed prefix before it reaches clause IDs, hints,
    or passive storage, commit at most one bounded chunk, and discard the
    remainder so the descriptor can revisit it on a later fair turn. */
-static void collective_chunk_process(Topform c, void *data)
+static BOOL collective_chunk_process(Topform c, void *data)
 {
   struct collective_candidate_chunk *chunk = data;
   unsigned long long ordinal = chunk->seen++;
@@ -9241,7 +9524,7 @@ static void collective_chunk_process(Topform c, void *data)
       chunk->eligible++;
       collective_promising_insert(chunk, c, weight, ordinal);
     }
-    return;
+    return TRUE;
   }
 
   if (ordinal < chunk->skip)
@@ -9252,10 +9535,12 @@ static void collective_chunk_process(Topform c, void *data)
       chunk->committed_prefix_hash = chunk->rolling_hash;
       chunk->committed_prefix_captured = TRUE;
     }
-    cl_process(c);
+    if (!cl_process(c))
+      return FALSE;
   }
   else
     delete_clause(c);
+  return TRUE;
 }
 
 static void collective_reset_conclusion_state(struct collective_batch *b)
@@ -9351,8 +9636,16 @@ static BOOL collective_chunk_finish(
       last_weight = chunk->buffer[chunk->emitted - 1].weight;
       last_ordinal = chunk->buffer[chunk->emitted - 1].ordinal;
     }
-    for (i = 0; i < chunk->emitted; i++)
-      cl_process(chunk->buffer[i].clause);
+    for (i = 0; i < chunk->emitted; i++) {
+      if (!cl_process(chunk->buffer[i].clause)) {
+        unsigned long long j;
+        for (j = i + 1; j < chunk->emitted; j++)
+          delete_clause(chunk->buffer[j].clause);
+        safe_free(chunk->buffer);
+        chunk->buffer = NULL;
+        return TRUE;
+      }
+    }
 
     complete = chunk->eligible == chunk->emitted;
     Stats.collective_promising_scans++;
@@ -9397,8 +9690,7 @@ BOOL collective_chunk_cl_process(Topform c)
 {
   if (Current_collective_chunk == NULL)
     fatal_error("collective chunk callback has no active context");
-  collective_chunk_process(c, Current_collective_chunk);
-  return TRUE;
+  return collective_chunk_process(c, Current_collective_chunk);
 }
 
 /* The persistent index contains every historically clashable activation.
@@ -9716,9 +10008,17 @@ BOOL collective_expand_one_batch(void)
       clock_start(Clocks.infer);
       Current_inference_source = INFER_SOURCE_HYPER;
       Current_collective_chunk = &chunk;
-      hyper_resolution_with_clause_test(
+      {
+        BOOL enumeration_complete = hyper_resolution_with_clause_test(
         given, direction, Collective_historical_idx,
         collective_history_clause_test, &filter, collective_chunk_cl_process);
+        if (!enumeration_complete && Terminal_proof_pending) {
+          Current_collective_chunk = NULL;
+          Current_inference_source = INFER_SOURCE_OTHER;
+          clock_stop(Clocks.infer);
+          return TRUE;
+        }
+      }
       complete = collective_chunk_finish(
         &chunk, b, "collective hyper replay order changed");
       Current_collective_chunk = NULL;
@@ -9865,14 +10165,30 @@ BOOL collective_expand_one_batch(void)
         Current_collective_chunk = &chunk;
         if ((b->kind &
              (COLLECTIVE_PARAMOD | COLLECTIVE_PARAMOD_FROM)) != 0) {
-          para_from_into(given, cf, partner, ci, FALSE,
-                         collective_chunk_cl_process);
+          if (!para_from_into(given, cf, partner, ci, FALSE,
+                              collective_chunk_cl_process) &&
+              Terminal_proof_pending) {
+            Current_collective_chunk = NULL;
+            Current_inference_source = INFER_SOURCE_OTHER;
+            clock_stop(Clocks.infer);
+            free_context(cf);
+            free_context(ci);
+            return TRUE;
+          }
           Stats.collective_paramod_from_turns++;
         }
         if ((b->kind &
              (COLLECTIVE_PARAMOD | COLLECTIVE_PARAMOD_INTO)) != 0) {
-          para_from_into(partner, cf, given, ci, TRUE,
-                         collective_chunk_cl_process);
+          if (!para_from_into(partner, cf, given, ci, TRUE,
+                              collective_chunk_cl_process) &&
+              Terminal_proof_pending) {
+            Current_collective_chunk = NULL;
+            Current_inference_source = INFER_SOURCE_OTHER;
+            clock_stop(Clocks.infer);
+            free_context(cf);
+            free_context(ci);
+            return TRUE;
+          }
           Stats.collective_paramod_into_turns++;
         }
         complete = collective_chunk_finish(
@@ -9933,7 +10249,7 @@ BOOL collective_expand_one_batch(void)
  *************/
 
 static
-void given_infer(Topform given)
+BOOL given_infer(Topform given)
 {
   struct collective_batch *tail_before =
     collective_frontier_mode() ? Collective_batch_tail : NULL;
@@ -9942,18 +10258,20 @@ void given_infer(Topform given)
 
   if (flag(Opt->binary_resolution)) {
     Current_inference_source = INFER_SOURCE_BINARY;
-    binary_resolution(given,
+    if (!binary_resolution(given,
 		      ANY_RES,
 		      Glob.clashable_idx,
-		      cl_process);
+		      cl_process))
+      goto cancelled;
   }
 
   if (flag(Opt->neg_binary_resolution)) {
     Current_inference_source = INFER_SOURCE_BINARY;
-    binary_resolution(given,
+    if (!binary_resolution(given,
 		      NEG_RES,
 		      Glob.clashable_idx,
-		      cl_process);
+		      cl_process))
+      goto cancelled;
   }
 
   if (flag(Opt->pos_hyper_resolution)) {
@@ -9961,7 +10279,8 @@ void given_infer(Topform given)
       collective_enqueue_hyper_batch(given, COLLECTIVE_POS_HYPER);
     else {
       Current_inference_source = INFER_SOURCE_HYPER;
-      hyper_resolution(given, POS_RES, Glob.clashable_idx, cl_process);
+      if (!hyper_resolution(given, POS_RES, Glob.clashable_idx, cl_process))
+        goto cancelled;
     }
   }
 
@@ -9970,18 +10289,21 @@ void given_infer(Topform given)
       collective_enqueue_hyper_batch(given, COLLECTIVE_NEG_HYPER);
     else {
       Current_inference_source = INFER_SOURCE_HYPER;
-      hyper_resolution(given, NEG_RES, Glob.clashable_idx, cl_process);
+      if (!hyper_resolution(given, NEG_RES, Glob.clashable_idx, cl_process))
+        goto cancelled;
     }
   }
 
   if (flag(Opt->pos_ur_resolution)) {
     Current_inference_source = INFER_SOURCE_UR;
-    ur_resolution(given, POS_RES, Glob.clashable_idx, cl_process);
+    if (!ur_resolution(given, POS_RES, Glob.clashable_idx, cl_process))
+      goto cancelled;
   }
 
   if (flag(Opt->neg_ur_resolution)) {
     Current_inference_source = INFER_SOURCE_UR;
-    ur_resolution(given, NEG_RES, Glob.clashable_idx, cl_process);
+    if (!ur_resolution(given, NEG_RES, Glob.clashable_idx, cl_process))
+      goto cancelled;
   }
 
   if (flag(Opt->paramodulation) &&
@@ -10007,8 +10329,12 @@ void given_infer(Topform given)
 	     p->c->id > (unsigned long long) parm(Opt->para_restr_end));
 	  if (good_pair) {
 	    Current_inference_source = INFER_SOURCE_PARAMOD;
-	    para_from_into(given, cf, p->c, ci, FALSE, cl_process);
-	    para_from_into(p->c, cf, given, ci, TRUE, cl_process);
+	    if (!para_from_into(given, cf, p->c, ci, FALSE, cl_process) ||
+	        !para_from_into(p->c, cf, given, ci, TRUE, cl_process)) {
+              free_context(cf);
+              free_context(ci);
+              goto cancelled;
+            }
 	  }
 	}
       }
@@ -10023,6 +10349,12 @@ void given_infer(Topform given)
   Current_inference_source = INFER_SOURCE_OTHER;
 
   clock_stop(Clocks.infer);
+  return TRUE;
+
+cancelled:
+  Current_inference_source = INFER_SOURCE_OTHER;
+  clock_stop(Clocks.infer);
+  return FALSE;
 }  // given_infer
 
 /* Refresh a cold clause only if the active set has changed since it entered
@@ -10284,6 +10616,11 @@ static BOOL rewrite_refresh_turn(void)
         Stats.rewrite_interreduce_collapsed++;
     }
   }
+  /* discount_refresh_selected() can discover a terminal proof through
+     cl_process().  Return to search() immediately; the proof safe point is
+     intentionally outside this refresh transaction. */
+  if (Terminal_proof_pending)
+    return TRUE;
   if (compact_rewrite_compaction_needed(Compact_rewrite_rules)) {
     compact_rewrite_compact(Compact_rewrite_rules);
     update_rewrite_only_stats();
@@ -10559,13 +10896,15 @@ void make_inferences(void)
 	collective_note_activation(
 	  activated,
 	  collective_hyper_enabled() && !restricted_denial(activated));
-	given_infer(activated);
+	if (!given_infer(activated))
+          return;
       }
     }
     else {
       clist_append(given_clause, Glob.usable);
       index_clashable(given_clause, INSERT);
-      given_infer(given_clause);
+      if (!given_infer(given_clause))
+        return;
     }
 
     if (collective_frontier_mode()) {
@@ -11328,7 +11667,7 @@ void index_and_process_initial_clauses(void)
     if (flag(Opt->print_initial_clauses))
       printf("\n");
 
-    while (temp_sos->first) {
+    while (temp_sos->first && !Terminal_proof_pending) {
       Topform c = temp_sos->first->c;
       Topform new;
       clist_remove(c, temp_sos);
@@ -11358,7 +11697,7 @@ void index_and_process_initial_clauses(void)
 	}
       }
       retain_disabled_clause(c);
-      cl_process(new);  // This re-simplifies, but that's ok.
+      (void) cl_process(new);  // This re-simplifies, but that's ok.
 
       rp_count++;
       if (rp_next > 0 && (rp_count % 1000) == 0) {
@@ -11393,7 +11732,7 @@ void index_and_process_initial_clauses(void)
 
       if (number_of_literals(c->literals) == 0)
 	/* in case $F is in input, or if predicate elimination finds proof */
-	handle_proof_and_maybe_exit(c);
+	(void) handle_proof_and_maybe_exit(c);
       else {
 	assign_clause_id(c);
 	if (flag(Opt->dont_flip_input))
@@ -11423,6 +11762,8 @@ void index_and_process_initial_clauses(void)
 	  index_back_demod(c, INSERT, Clocks.index, flag(Opt->back_demod));
 	}
       }
+      if (Terminal_proof_pending)
+        break;
     }
   }
 
@@ -11510,18 +11851,29 @@ Prover_results collect_prover_results(BOOL xproofs)
   Plist p;
   Prover_results results = safe_calloc(1, sizeof(struct prover_results));
 
-  for (p = Glob.empties; p; p = p->next) {
-    Plist proof = get_clause_ancestors(p->v);
-    Plist materialized;
-    /* Results own a printable proof DAG, so materialization is intentional
-       here and lasts until zap_prover_results(). */
-    restore_archive_hint_links(proof);
-    materialized = materialize_clauses(proof);
-    zap_plist(materialized);
-    results->proofs = plist_append(results->proofs, proof);
-    if (xproofs) {
-      Plist xproof = proof_to_xproof(proof);
-      results->xproofs = plist_append(results->xproofs, xproof);
+  if (Terminal_proof_snapshots != NULL) {
+    results->proofs = Terminal_proof_snapshots;
+    Terminal_proof_snapshots = NULL;
+    Terminal_print_snapshot = NULL;
+    if (xproofs)
+      for (p = results->proofs; p != NULL; p = p->next)
+        results->xproofs =
+          plist_append(results->xproofs, proof_to_xproof((Plist) p->v));
+  }
+  else {
+    for (p = Glob.empties; p; p = p->next) {
+      Plist proof = get_clause_ancestors(p->v);
+      Plist materialized;
+      /* Results own a printable proof DAG, so materialization is intentional
+         here and lasts until zap_prover_results(). */
+      restore_archive_hint_links(proof);
+      materialized = materialize_clauses(proof);
+      zap_plist(materialized);
+      results->proofs = plist_append(results->proofs, proof);
+      if (xproofs) {
+        Plist xproof = proof_to_xproof(proof);
+        results->xproofs = plist_append(results->xproofs, xproof);
+      }
     }
   }
   if (!Terminal_stats_frozen)
@@ -11546,18 +11898,32 @@ Free the dynamically allocated memory associated with a Prover_result.
 /* PUBLIC */
 void zap_prover_results(Prover_results results)
 {
-  Plist a, b;  /* results->proofs is a Plist of Plist of clauses */
-  for (a = results->proofs; a; a = a->next) {
-    for (b = a->v; b; b = b->next) {
-      Topform c = b->v;
+  Plist outer;
+  Plist collections[2];
+  int i;
+  collections[0] = results->proofs;
+  collections[1] = results->xproofs;
+  for (i = 0; i < 2; i++) {
+    outer = collections[i];
+    while (outer != NULL) {
+      Plist next_outer = outer->next;
+      Plist inner = outer->v;
+      while (inner != NULL) {
+        Plist next_inner = inner->next;
+        Topform c = inner->v;
       /* There is a tricky thing going on with the ID.  If you try
 	 to delete a clause with an ID not in the clause ID table,
 	 a fatal error occurs.  If IDs in these clauses came from
 	 a child process, they will not be in the table.  Setting
 	 the ID to 0 gets around that problem.
-       */
-      c->id = 0;
-      delete_clause(c);  /* zaps justification, attributes */
+      */
+        c->id = 0;
+        delete_clause(c);  /* zaps justification, attributes */
+        free_plist(inner);
+        inner = next_inner;
+      }
+      free_plist(outer);
+      outer = next_outer;
     }
   }
   safe_free(results);
@@ -16186,6 +16552,12 @@ Prover_results search(Prover_input p)
     Terminal_stats_frozen = FALSE;
     Terminal_compact_indexes_released = FALSE;
     Terminal_hint_index_released = FALSE;
+    if (Terminal_proof_snapshots != NULL || Terminal_transients != NULL)
+      fatal_error("previous search left terminal proof ownership behind");
+    Terminal_proof_pending = FALSE;
+    Terminal_proof_finalizing = FALSE;
+    Terminal_empty = NULL;
+    Terminal_print_snapshot = NULL;
     Current_inference_source = INFER_SOURCE_OTHER;
     collective_reset_state();
     Simplifier_epoch = 1;
@@ -16574,6 +16946,7 @@ Prover_results search(Prover_input p)
                           (int) megs_malloced());
 
       index_and_process_initial_clauses();
+      finish_terminal_proof_at_safe_point();
       if (flag(Opt->print_derivations))
 	get_hit_list();
     }
@@ -16738,6 +17111,8 @@ Prover_results search(Prover_input p)
 
       make_inferences();
 
+      finish_terminal_proof_at_safe_point();
+
 #ifdef __EMSCRIPTEN__
       if (Wasm_deadline_ms > 0 && emscripten_get_now() > Wasm_deadline_ms)
         done_with_search(MAX_SECONDS_EXIT);
@@ -16769,6 +17144,7 @@ Prover_results search(Prover_input p)
       // are moved to the Sos list.
 
       limbo_process(FALSE);
+      finish_terminal_proof_at_safe_point();
       collective_note_candidate_cache_peak();
 
     }  // ************************ end of main loop ************************
