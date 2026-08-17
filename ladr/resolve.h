@@ -52,13 +52,13 @@ void resolution_options(BOOL ordered,
 
 unsigned long long res_instance_prunes();
 
-void hyper_resolution(Topform c, int pos_or_neg, Lindex idx,
-		      void (*proc_proc) (Topform));
+BOOL hyper_resolution(Topform c, int pos_or_neg, Lindex idx,
+                      Topform_proc proc_proc);
 
-void hyper_resolution_with_clause_test(Topform c, int pos_or_neg, Lindex idx,
-				       Clash_clause_test clause_test,
-				       void *clause_test_data,
-				       void (*proc_proc) (Topform));
+BOOL hyper_resolution_with_clause_test(Topform c, int pos_or_neg, Lindex idx,
+                                       Clash_clause_test clause_test,
+                                       void *clause_test_data,
+                                       Topform_proc proc_proc);
 
 typedef unsigned long long (*Hyper_parent_count_proc)(void *);
 typedef Topform (*Hyper_parent_clause_proc)(unsigned long long, void *);
@@ -110,20 +110,20 @@ BOOL hyper_iterator_at_start(const Hyper_iterator *it);
 BOOL hyper_resolution_bounded(
   Topform given, int pos_or_neg, const Hyper_parent_source *source,
   Hyper_iterator *it, unsigned long long raw_budget,
-  unsigned long long yield_budget, void (*proc_proc) (Topform),
+  unsigned long long yield_budget, Topform_proc proc_proc,
   unsigned long long *raw_steps, unsigned long long *yielded);
 
-void ur_resolution(Topform c, int target_constraint, Lindex idx,
-		   void (*proc_proc) (Topform));
+BOOL ur_resolution(Topform c, int target_constraint, Lindex idx,
+                   Topform_proc proc_proc);
 
 Topform instantiate_clause(Topform c, Context subst);
 
-void binary_resolution(Topform c,
-		       int res_type,  /* POS_RES, NEG_RES, ANY_RES */
-		       Lindex idx,
-		       void (*proc_proc) (Topform));
+BOOL binary_resolution(Topform c,
+                       int res_type,  /* POS_RES, NEG_RES, ANY_RES */
+                       Lindex idx,
+                       Topform_proc proc_proc);
 
-void binary_factors(Topform c, void (*proc_proc) (Topform));
+BOOL binary_factors(Topform c, Topform_proc proc_proc);
 
 void merge_literals(Topform c);
 

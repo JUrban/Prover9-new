@@ -6911,7 +6911,7 @@ void free_search_memory(void)
  *************/
 
 static
-void handle_proof_and_maybe_exit(Topform empty_clause)
+BOOL handle_proof_and_maybe_exit(Topform empty_clause)
 {
   Term answers;
   Plist proof, materialized, p;
@@ -6928,7 +6928,7 @@ void handle_proof_and_maybe_exit(Topform empty_clause)
 	printf("%% Redundant proof: ");
 	f_clause(empty_clause);
       }
-      return;
+      return TRUE;
     }
     else
       /* Descendants of this denial will be disabled when it is safe. */
@@ -7243,6 +7243,7 @@ void handle_proof_and_maybe_exit(Topform empty_clause)
 
   if (terminal_proof)
     done_with_search(MAX_PROOFS_EXIT);  /* does not return */
+  return TRUE;
 }  // handle_proof_and_maybe_exit
 
 /*************
@@ -7812,7 +7813,7 @@ static void collective_candidate_pool_push_at(
       collective_candidate_pool_allocated_bytes();
 }
 
-static void collective_candidate_pool_push(Topform c)
+static BOOL collective_candidate_pool_push(Topform c)
 {
   struct collective_batch *b = Current_collective_pool_batch;
   unsigned long long ordinal;
@@ -7821,9 +7822,10 @@ static void collective_candidate_pool_push(Topform c)
   ordinal = b->candidate_ordinal++;
   if (!collective_consume_if_promoted(b, ordinal, c))
     collective_candidate_pool_push_at(c, b, ordinal);
+  return TRUE;
 }
 
-static void collective_discovery_candidate(Topform c)
+static BOOL collective_discovery_candidate(Topform c)
 {
   struct collective_batch *b = Current_collective_pool_batch;
   struct collective_pool_entry *e;
@@ -7874,6 +7876,7 @@ static void collective_discovery_candidate(Topform c)
     delete_clause(c);
     safe_free(e);
   }
+  return TRUE;
 }
 
 static void collective_candidate_pool_clear(void)
@@ -8368,7 +8371,7 @@ BOOL cl_process_delete(Topform c)
 }  // cl_process_delete
 
 static
-void cl_process(Topform c)
+BOOL cl_process(Topform c)
 {
   // If the infer_clock is running, stop it and restart it when done.
 
@@ -8457,6 +8460,7 @@ void cl_process(Topform c)
   clock_stop(Clocks.preprocess);
   if (infer_clock_stopped)
     clock_start(Clocks.infer);
+  return TRUE;
 }  // cl_process
 
 static BOOL collective_candidate_pool_commit(void)
@@ -9389,11 +9393,12 @@ static BOOL collective_chunk_finish(
 static struct collective_candidate_chunk *Current_collective_chunk = NULL;
 
 static
-void collective_chunk_cl_process(Topform c)
+BOOL collective_chunk_cl_process(Topform c)
 {
   if (Current_collective_chunk == NULL)
     fatal_error("collective chunk callback has no active context");
   collective_chunk_process(c, Current_collective_chunk);
+  return TRUE;
 }
 
 /* The persistent index contains every historically clashable activation.

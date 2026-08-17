@@ -66,17 +66,17 @@ Literals atom_to_literal(Term atom);
 
 Literals apply_lit(Literals lit, Context c);
 
-void clash(Clash c,
-	   BOOL (*sat_test) (Literals),
-	   Just_type rule,
-	   void (*proc_proc) (Topform));
+BOOL clash(Clash c,
+           BOOL (*sat_test) (Literals),
+           Just_type rule,
+           Topform_proc proc_proc);
 
-void clash_with_clause_test(Clash c,
-			    BOOL (*sat_test) (Literals),
-			    Clash_clause_test clause_test,
-			    void *clause_test_data,
-			    Just_type rule,
-			    void (*proc_proc) (Topform));
+BOOL clash_with_clause_test(Clash c,
+                            BOOL (*sat_test) (Literals),
+                            Clash_clause_test clause_test,
+                            void *clause_test_data,
+                            Just_type rule,
+                            Topform_proc proc_proc);
 
 Topform clash_resolve(Clash first, Just_type rule);
 

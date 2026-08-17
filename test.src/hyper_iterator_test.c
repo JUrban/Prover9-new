@@ -10,6 +10,7 @@ static Topform Parents[MAX_PARENTS];
 static unsigned Parent_count;
 static Topform Results[MAX_RESULTS];
 static unsigned Result_count;
+static unsigned Cancel_after;
 
 #define CHECK(test, message) do {                                        \
   if (!(test)) {                                                         \
@@ -18,11 +19,12 @@ static unsigned Result_count;
   }                                                                      \
 } while (0)
 
-static void collect_result(Topform c)
+static BOOL collect_result(Topform c)
 {
   if (Result_count >= MAX_RESULTS)
     fatal_error("hyper iterator test result capacity exceeded");
   Results[Result_count++] = c;
+  return Cancel_after == 0 || Result_count < Cancel_after;
 }
 
 static void clear_results(void)
@@ -139,6 +141,33 @@ static void one_case(
   unsigned expected_count = eager_results(given, direction, idx, expected);
   unsigned budget;
   CHECK(expected_count > 0, "hyper fixture produces conclusions");
+
+  Cancel_after = 1;
+  Result_count = 0;
+  CHECK(!hyper_resolution_with_clause_test(
+          given, direction, idx, eager_test, NULL, collect_result),
+        "eager hyperresolution propagates consumer cancellation");
+  CHECK(Result_count == 1,
+        "eager hyperresolution stops after the cancelling result");
+  clear_results();
+  Cancel_after = 0;
+
+  {
+    Hyper_iterator it;
+    unsigned long long steps, yielded;
+    hyper_iterator_init(&it);
+    Cancel_after = 1;
+    Result_count = 0;
+    CHECK(hyper_resolution_bounded(
+            given, direction, source, &it, 1000000, 1000000,
+            collect_result, &steps, &yielded),
+          "bounded hyperresolution becomes complete on cancellation");
+    CHECK(it.complete && Result_count == 1 && yielded == 1,
+          "bounded hyperresolution records one cancelling result");
+    clear_results();
+    Cancel_after = 0;
+    hyper_iterator_zap(&it);
+  }
 
   for (budget = 1; budget <= 64; budget++) {
     Hyper_iterator it;

@@ -70,10 +70,10 @@ unsigned long long basic_paramodulation_prunes(void);
 Topform paramodulate(Literals from_lit, int from_side, Context from_subst,
 		     Topform into_clause, Ilist into_pos, Context into_subst);
 
-void para_from_into(Topform from, Context cf,
-		    Topform into, Context ci,
-		    BOOL check_top,
-		    void (*proc_proc) (Topform));
+BOOL para_from_into(Topform from, Context cf,
+                    Topform into, Context ci,
+                    BOOL check_top,
+                    Topform_proc proc_proc);
 
 void para_iterator_init(Para_iterator *it);
 
@@ -84,12 +84,12 @@ void para_iterator_zap(Para_iterator *it);
 BOOL para_iterator_at_start(const Para_iterator *it);
 
 BOOL para_from_into_bounded(Topform from, Topform into, BOOL check_top,
-			    Para_iterator *it,
-			    unsigned long long raw_budget,
-			    unsigned long long yield_budget,
-			    void (*proc_proc) (Topform),
-			    unsigned long long *raw_steps,
-			    unsigned long long *yielded);
+                            Para_iterator *it,
+                            unsigned long long raw_budget,
+                            unsigned long long yield_budget,
+                            Topform_proc proc_proc,
+                            unsigned long long *raw_steps,
+                            unsigned long long *yielded);
 
 Topform para_pos(Topform from_clause, Ilist from_pos,
 		 Topform into_clause, Ilist into_pos);

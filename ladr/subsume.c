@@ -544,8 +544,8 @@ Topform back_subsume_one(Topform c, Lindex idx)
  *************/
 
 static
-void atom_conflict(BOOL flipped, Topform c, BOOL sign,
-		    Term a, Lindex idx, void (*empty_proc) (Topform))
+BOOL atom_conflict(BOOL flipped, Topform c, BOOL sign,
+		    Term a, Lindex idx, Topform_proc empty_proc)
 {
   Context subst1 = get_context();
   Context subst2 = get_context();
@@ -566,7 +566,12 @@ void atom_conflict(BOOL flipped, Topform c, BOOL sign,
       empty->justification = binary_res_just(c, 1, conflictor,
 					     flipped ? -1 : 1);
       inherit_attributes(c, subst1, conflictor, subst2, empty);
-      (*empty_proc)(empty);
+      if (!(*empty_proc)(empty)) {
+        mindex_retrieve_cancel(pos);
+        free_context(subst1);
+        free_context(subst2);
+        return FALSE;
+      }
       b = mindex_retrieve_next(pos);
     }
     else 
@@ -574,6 +579,7 @@ void atom_conflict(BOOL flipped, Topform c, BOOL sign,
   }
   free_context(subst1);
   free_context(subst2);
+  return TRUE;
 }  /* atom_conflict */
 
 /*************
@@ -587,19 +593,24 @@ Look in idx for unit conflicts
 */
 
 /* PUBLIC */
-void unit_conflict_by_index(Topform c, Lindex idx, void (*empty_proc) (Topform))
+BOOL unit_conflict_by_index(Topform c, Lindex idx, Topform_proc empty_proc)
 {
   if (number_of_literals(c->literals) == 1) {
     Literals lit = c->literals;
     Term atom = lit->atom;
-    atom_conflict(FALSE, c, lit->sign, atom, idx, empty_proc);
+    if (!atom_conflict(FALSE, c, lit->sign, atom, idx, empty_proc))
+      return FALSE;
     /* maybe try the flip */
     if (eq_term(atom) && !renamable_flip_eq(atom)) {
       Term flip = top_flip(atom);
-      atom_conflict(TRUE, c, lit->sign, flip, idx, empty_proc);
+      BOOL complete = atom_conflict(TRUE, c, lit->sign, flip, idx,
+                                    empty_proc);
       zap_top_flip(flip);
+      if (!complete)
+        return FALSE;
     }
   }
+  return TRUE;
 }  /* unit_conflict_by_index */
 
 static void append_atom_conflict_candidates(BOOL sign, Term atom, Lindex idx,

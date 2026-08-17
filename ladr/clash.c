@@ -349,13 +349,13 @@ Topform clash_resolve(Clash first, Just_type rule)
  *************/
 
 static
-void clash_recurse(Clash first,
+BOOL clash_recurse(Clash first,
 		   Clash p,
 		   BOOL (*sat_test) (Literals),
 		   Clash_clause_test clause_test,
 		   void *clause_test_data,
 		   Just_type rule,
-		   void (*proc_proc) (Topform))
+		   Topform_proc proc_proc)
 {
   /* Iterative backtracking search over the clash list.
      Each stack frame represents one clashable literal being resolved.
@@ -375,6 +375,7 @@ void clash_recurse(Clash first,
   } stack[500];
   int top = -1;
   Clash cur;
+  BOOL cancelled = FALSE;
 
   /* Advance p past non-clashable / already-clashed entries. */
   cur = p;
@@ -384,8 +385,7 @@ void clash_recurse(Clash first,
   if (cur == NULL) {
     /* All clashable literals mated. */
     Topform resolvent = resolve(first, rule);
-    (*proc_proc)(resolvent);
-    return;
+    return (*proc_proc)(resolvent);
   }
 
   /* Push initial frame. */
@@ -425,8 +425,11 @@ void clash_recurse(Clash first,
             nxt = nxt->next;
           if (nxt == NULL) {
             Topform resolvent = resolve(first, rule);
-            (*proc_proc)(resolvent);
+            if (!(*proc_proc)(resolvent))
+              cancelled = TRUE;
             cp->clashed = FALSE;
+            if (cancelled)
+              break;
           }
           else {
             top++;
@@ -462,8 +465,11 @@ void clash_recurse(Clash first,
             nxt = nxt->next;
           if (nxt == NULL) {
             Topform resolvent = resolve(first, rule);
-            (*proc_proc)(resolvent);
+            if (!(*proc_proc)(resolvent))
+              cancelled = TRUE;
             cp->clashed = FALSE;
+            if (cancelled)
+              break;
           }
           else {
             top++;
@@ -505,8 +511,11 @@ void clash_recurse(Clash first,
               nxt = nxt->next;
             if (nxt == NULL) {
               Topform resolvent = resolve(first, rule);
-              (*proc_proc)(resolvent);
+              if (!(*proc_proc)(resolvent))
+                cancelled = TRUE;
               cp->clashed = FALSE;
+              if (cancelled)
+                break;
             }
             else {
               top++;
@@ -547,8 +556,11 @@ void clash_recurse(Clash first,
             nxt = nxt->next;
           if (nxt == NULL) {
             Topform resolvent = resolve(first, rule);
-            (*proc_proc)(resolvent);
+            if (!(*proc_proc)(resolvent))
+              cancelled = TRUE;
             cp->clashed = FALSE;
+            if (cancelled)
+              break;
           }
           else {
             top++;
@@ -585,11 +597,14 @@ void clash_recurse(Clash first,
             nxt = nxt->next;
           if (nxt == NULL) {
             Topform resolvent = resolve(first, rule);
-            (*proc_proc)(resolvent);
+            if (!(*proc_proc)(resolvent))
+              cancelled = TRUE;
             cp->clashed = FALSE;
             undo_subst(tr);
             stack[top].tr = NULL;  /* prevent double-free in phase 5 */
             stack[top].phase = 5;
+            if (cancelled)
+              break;
           }
           else {
             top++;
@@ -621,6 +636,22 @@ void clash_recurse(Clash first,
       continue;
     }
   }
+  /* A false consumer result and a deadline can both leave several nested
+     retrievals positioned on live matches.  Unwind from the innermost frame
+     so substitutions are restored in the reverse order in which they were
+     established. */
+  while (top >= 0) {
+    Clash cp = stack[top].cp;
+    if (stack[top].phase == 1 || stack[top].phase == 3)
+      mindex_retrieve_cancel(cp->mate_pos);
+    if (stack[top].tr != NULL)
+      undo_subst(stack[top].tr);
+    if (stack[top].flip != NULL)
+      zap_top_flip(stack[top].flip);
+    cp->clashed = FALSE;
+    top--;
+  }
+  return !cancelled;
 }  /* clash_recurse */
 
 /*************
@@ -643,22 +674,22 @@ potential satellites (e.g., positive clauses for hyperresolution).
 */
 
 /* PUBLIC */
-void clash(Clash c,
+BOOL clash(Clash c,
 	   BOOL (*sat_test) (Literals),
 	   Just_type rule,
-	   void (*proc_proc) (Topform))
+	   Topform_proc proc_proc)
 {
-  clash_recurse(c, c, sat_test, NULL, NULL, rule, proc_proc);
+  return clash_recurse(c, c, sat_test, NULL, NULL, rule, proc_proc);
 }  /* clash */
 
 /* PUBLIC */
-void clash_with_clause_test(Clash c,
+BOOL clash_with_clause_test(Clash c,
 			    BOOL (*sat_test) (Literals),
 			    Clash_clause_test clause_test,
 			    void *clause_test_data,
 			    Just_type rule,
-			    void (*proc_proc) (Topform))
+			    Topform_proc proc_proc)
 {
-  clash_recurse(c, c, sat_test, clause_test, clause_test_data,
-                rule, proc_proc);
+  return clash_recurse(c, c, sat_test, clause_test, clause_test_data,
+                       rule, proc_proc);
 }  /* clash_with_clause_test */

@@ -50,6 +50,12 @@ be a good place to use it.
 
 typedef struct topform * Topform;
 
+/* Inference producers transfer ownership of each freshly constructed result
+   to a consumer.  TRUE asks the producer to continue enumeration; FALSE asks
+   it to cancel the current enumeration after releasing all retrieval,
+   substitution, and traversal state. */
+typedef BOOL (*Topform_proc)(Topform);
+
 struct topform {
 
   /* for both clauses and formulas */

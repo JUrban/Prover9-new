@@ -7,6 +7,7 @@
 static int Failures;
 static Topform Results[MAX_RESULTS];
 static unsigned Result_count;
+static unsigned Cancel_after;
 
 #define CHECK(test, message) do {                                        \
   if (!(test)) {                                                         \
@@ -15,11 +16,12 @@ static unsigned Result_count;
   }                                                                      \
 } while (0)
 
-static void collect_result(Topform c)
+static BOOL collect_result(Topform c)
 {
   if (Result_count >= MAX_RESULTS)
     fatal_error("paramod iterator test result capacity exceeded");
   Results[Result_count++] = c;
+  return Cancel_after == 0 || Result_count < Cancel_after;
 }
 
 static void clear_results(void)
@@ -107,6 +109,39 @@ static void one_case(Topform from, Topform into, BOOL check_top)
   unsigned expected_count = eager_results(from, into, check_top, expected);
   unsigned budget;
   CHECK(expected_count > 0, "fixture produces at least one conclusion");
+
+  /* A consumer cancellation must stop immediately and leave contexts and
+     traversal positions clean enough for a fresh complete enumeration. */
+  {
+    Context cf = get_context();
+    Context ci = get_context();
+    Cancel_after = 1;
+    Result_count = 0;
+    CHECK(!para_from_into(from, cf, into, ci, check_top, collect_result),
+          "eager paramodulation propagates consumer cancellation");
+    CHECK(Result_count == 1,
+          "eager paramodulation stops after the cancelling result");
+    clear_results();
+    Cancel_after = 0;
+    free_context(cf);
+    free_context(ci);
+  }
+
+  {
+    Para_iterator it;
+    unsigned long long steps, yielded;
+    para_iterator_init(&it);
+    Cancel_after = 1;
+    Result_count = 0;
+    CHECK(para_from_into_bounded(from, into, check_top, &it, 64, 64,
+                                 collect_result, &steps, &yielded),
+          "bounded paramodulation becomes complete on cancellation");
+    CHECK(it.complete && Result_count == 1 && yielded == 1,
+          "bounded paramodulation records one cancelling result");
+    clear_results();
+    Cancel_after = 0;
+    para_iterator_zap(&it);
+  }
 
   for (budget = 1; budget <= 64; budget++) {
     Para_iterator it;

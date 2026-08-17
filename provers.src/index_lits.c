@@ -761,7 +761,7 @@ Look for conflicting units.  Send any that are found to empty_proc().
 */
 
 /* PUBLIC */
-void unit_conflict(Topform c, void (*empty_proc) (Topform))
+BOOL unit_conflict(Topform c, Topform_proc empty_proc)
 {
   if (Compact_unit_subsumption_audit &&
       number_of_literals(c->literals) == 1) {
@@ -822,14 +822,20 @@ void unit_conflict(Topform c, void (*empty_proc) (Topform))
                      try_unit_conflict(c, candidate);
       if (empty == NULL)
         fatal_error("unit_conflict: compact candidate no longer unifies");
-      (*empty_proc)(empty);
+      if (!(*empty_proc)(empty)) {
+        release_compact_index_clause(candidate);
+        safe_free(direct);
+        safe_free(flipped);
+        return FALSE;
+      }
       release_compact_index_clause(candidate);
     }
     safe_free(direct);
     safe_free(flipped);
+    return TRUE;
   }
   else
-    unit_conflict_by_index(c, Unit_fpa_idx, empty_proc);
+    return unit_conflict_by_index(c, Unit_fpa_idx, empty_proc);
 }  /* unit_conflict */
 
 /*************

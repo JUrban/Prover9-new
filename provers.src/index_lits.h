@@ -65,7 +65,7 @@ void index_literals(Topform c, Indexop op, Clock clock, BOOL no_fapl);
 
 void index_denial(Topform c, Indexop op, Clock clock);
 
-void unit_conflict(Topform c, void (*empty_proc) (Topform));
+BOOL unit_conflict(Topform c, Topform_proc empty_proc);
 
 void unit_deletion(Topform c);
 

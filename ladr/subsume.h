@@ -59,7 +59,7 @@ Plist back_subsume(Topform c, Lindex idx);
 
 Topform back_subsume_one(Topform c, Lindex idx);
 
-void unit_conflict_by_index(Topform c, Lindex idx, void (*empty_proc) (Topform));
+BOOL unit_conflict_by_index(Topform c, Lindex idx, Topform_proc empty_proc);
 
 /* Read-only unit-conflict candidate sequence, including the equality-flip
    wave, in the same FPA retrieval order as unit_conflict_by_index().  The

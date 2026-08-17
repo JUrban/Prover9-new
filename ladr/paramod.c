@@ -338,18 +338,18 @@ BOOL check_instances(Literals from_lit, int from_side, Context cf,
  *************/
 
 static
-void para_into(Literals from_lit, int from_side, Context cf, Ilist from_pos,
+BOOL para_into(Literals from_lit, int from_side, Context cf, Ilist from_pos,
 	       Topform into_clause, Literals into_lit, Term into, Context ci,
 	       Ilist into_pos,
 	       BOOL skip_top,
-	       void (*proc_proc) (Topform))
+	       Topform_proc proc_proc)
 {
   /* Iterative subterm traversal for paramodulation-into. */
   struct { Term node; int child; Ilist pos_node; BOOL skip; } stack[1000];
   int top;
 
   if (!(((!VARIABLE(into)) | Para_into_vars) && basic_check(into)))
-    return;
+    return TRUE;
 
   top = 0;
   stack[0].node = into;
@@ -427,7 +427,13 @@ void para_into(Literals from_lit, int from_side, Context cf, Ilist from_pos,
                                         copy_ilist(from_pos),
                                         into_clause,
                                         copy_ilist(into_pos));
-          (*proc_proc)(p);
+          if (!(*proc_proc)(p)) {
+            Ilist dynamic_positions = into_pos->next->next;
+            into_pos->next->next = NULL;
+            undo_subst(tr);
+            zap_ilist(dynamic_positions);
+            return FALSE;
+          }
         }
         undo_subst(tr);
       }
@@ -435,6 +441,7 @@ void para_into(Literals from_lit, int from_side, Context cf, Ilist from_pos,
 
     top--;
   }
+  return TRUE;
 }  /* para_into */
 
 /*************
@@ -444,10 +451,10 @@ void para_into(Literals from_lit, int from_side, Context cf, Ilist from_pos,
  *************/
 
 static
-void para_into_lit(Literals from_lit, int from_side, Context cf,
+BOOL para_into_lit(Literals from_lit, int from_side, Context cf,
 		   Literals into_lit, Context ci,
 		   BOOL check_top,
-		   void (*proc_proc) (Topform))
+		   Topform_proc proc_proc)
 {
   Term alpha = ARG(from_lit->atom, from_side);
   if (!VARIABLE(alpha) || Para_from_vars) {
@@ -471,13 +478,18 @@ void para_into_lit(Literals from_lit, int from_side, Context cf,
 			(i == 1 && para_from_right(into_lit->atom))));
 
       into_pos->next->i += 1;  /* increment arg number */
-      para_into(from_lit, from_side, cf, from_pos,
-		into_clause, into_lit, ARG(into_atom,i), ci, into_pos,
-		skip_top, proc_proc);
+      if (!para_into(from_lit, from_side, cf, from_pos,
+		     into_clause, into_lit, ARG(into_atom,i), ci, into_pos,
+		     skip_top, proc_proc)) {
+        zap_ilist(from_pos);
+        zap_ilist(into_pos);
+        return FALSE;
+      }
     }
     zap_ilist(from_pos);
     zap_ilist(into_pos);
   }
+  return TRUE;
 }  /* para_into_lit */
 
 /*************
@@ -495,13 +507,13 @@ For nonoriented equality atoms, we go from and into both sides.
 */
 
 /* PUBLIC */
-void para_from_into(Topform from, Context cf,
+BOOL para_from_into(Topform from, Context cf,
 		    Topform into, Context ci,
 		    BOOL check_top,
-		    void (*proc_proc) (Topform))
+		    Topform_proc proc_proc)
 {
   if (exists_selected_literal(from->literals))
-    return;  /* cannot para from clause with selected literals */
+    return TRUE;  /* cannot para from clause with selected literals */
   else {
     Literals from_lit;
     for (from_lit = from->literals; from_lit; from_lit = from_lit->next) {
@@ -509,14 +521,17 @@ void para_from_into(Topform from, Context cf,
 	Literals into_lit;
 	for (into_lit = into->literals; into_lit; into_lit = into_lit->next) {
 	  if (into_parent_test(into_lit, FLAG_CHECK)) {
-	    para_into_lit(from_lit,0,cf,into_lit,ci,check_top,proc_proc);  /* from L */
+	    if (!para_into_lit(from_lit,0,cf,into_lit,ci,check_top,proc_proc))
+              return FALSE;  /* from L */
 	    if (para_from_right(from_lit->atom))
-	      para_into_lit(from_lit,1,cf,into_lit,ci,check_top,proc_proc); /* from R */
+	      if (!para_into_lit(from_lit,1,cf,into_lit,ci,check_top,proc_proc))
+                return FALSE; /* from R */
 	  }
 	}
       }
     }
   }
+  return TRUE;
 }  /* para_from_into */
 
 static Literals para_iterator_literal(Literals lits, unsigned position)
@@ -762,7 +777,7 @@ BOOL para_from_into_bounded(Topform from, Topform into, BOOL check_top,
 			    Para_iterator *it,
 			    unsigned long long raw_budget,
 			    unsigned long long yield_budget,
-			    void (*proc_proc) (Topform),
+			    Topform_proc proc_proc,
 			    unsigned long long *raw_steps,
 			    unsigned long long *yielded)
 {
@@ -811,7 +826,12 @@ BOOL para_from_into_bounded(Topform from, Topform into, BOOL check_top,
     zap_ilist(into_pos);
     if (result != NULL) {
       (*yielded)++;
-      (*proc_proc)(result);
+      if (!(*proc_proc)(result)) {
+        it->complete = TRUE;
+        free_context(cf);
+        free_context(ci);
+        return TRUE;
+      }
     }
   }
   if (!it->complete)

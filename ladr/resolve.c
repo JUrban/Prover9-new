@@ -124,10 +124,10 @@ BOOL neg_hyper_sat_test(Literals lit)
  *************/
 
 static
-void hyper_sat_atom(BOOL flipped, Literals slit, Term atom, int pos_or_neg,
+BOOL hyper_sat_atom(BOOL flipped, Literals slit, Term atom, int pos_or_neg,
 		    Lindex idx, Clash_clause_test clause_test,
 		    void *clause_test_data,
-		    void (*proc_proc) (Topform))
+		    Topform_proc proc_proc)
 {
   BOOL positive = (pos_or_neg == POS_RES);
   Context sat_subst = get_context();
@@ -177,15 +177,22 @@ void hyper_sat_atom(BOOL flipped, Literals slit, Term atom, int pos_or_neg,
 	}
       }
     }  /* for each literal of nucleus */
-    clash_with_clause_test(
+    if (!clash_with_clause_test(
       first,
       positive ? pos_hyper_sat_test : neg_hyper_sat_test,
-      clause_test, clause_test_data, HYPER_RES_JUST, proc_proc);
+      clause_test, clause_test_data, HYPER_RES_JUST, proc_proc)) {
+      zap_clash(first);
+      mindex_retrieve_cancel(mate_pos);
+      free_context(sat_subst);
+      free_context(nuc_subst);
+      return FALSE;
+    }
     zap_clash(first);
     fnd_atom = mindex_retrieve_next(mate_pos);
   }  /* for each found nucleus atom */
   free_context(sat_subst);
   free_context(nuc_subst);
+  return TRUE;
 }  /* hyper_sat_atom */
 
 /*************
@@ -195,23 +202,28 @@ void hyper_sat_atom(BOOL flipped, Literals slit, Term atom, int pos_or_neg,
  *************/
 
 static
-void hyper_satellite(Topform c, int pos_or_neg, Lindex idx,
+BOOL hyper_satellite(Topform c, int pos_or_neg, Lindex idx,
 		     Clash_clause_test clause_test, void *clause_test_data,
-		     void (*proc_proc) (Topform))
+		     Topform_proc proc_proc)
 {
   Literals slit;
   for (slit = c->literals; slit; slit = slit->next) {
     if (!Ordered || maximal_literal(c->literals, slit, FLAG_CHECK)) {
-      hyper_sat_atom(FALSE, slit, slit->atom, pos_or_neg, idx,
-                     clause_test, clause_test_data, proc_proc);
+      if (!hyper_sat_atom(FALSE, slit, slit->atom, pos_or_neg, idx,
+                          clause_test, clause_test_data, proc_proc))
+        return FALSE;
       if (pos_eq(slit)) {
 	Term flip = top_flip(slit->atom);
-	hyper_sat_atom(TRUE, slit, flip, pos_or_neg, idx,
-                       clause_test, clause_test_data, proc_proc);
+	BOOL complete = hyper_sat_atom(TRUE, slit, flip, pos_or_neg, idx,
+                                       clause_test, clause_test_data,
+                                       proc_proc);
 	zap_top_flip(flip);
+	if (!complete)
+          return FALSE;
       }
     }  /* if sat is ok */
   }  /* for each literal of satellite */
+  return TRUE;
 }  /* hyper_satellite */
 
 /*************
@@ -221,9 +233,9 @@ void hyper_satellite(Topform c, int pos_or_neg, Lindex idx,
  *************/
 
 static
-void hyper_nucleus(Topform c, int pos_or_neg, Lindex idx,
+BOOL hyper_nucleus(Topform c, int pos_or_neg, Lindex idx,
 		   Clash_clause_test clause_test, void *clause_test_data,
-		   void (*proc_proc) (Topform))
+		   Topform_proc proc_proc)
 {
   BOOL positive = (pos_or_neg == POS_RES);
   Clash p = NULL;
@@ -247,12 +259,13 @@ void hyper_nucleus(Topform c, int pos_or_neg, Lindex idx,
       p->sat_subst = get_context();
     }
   }
-  clash_with_clause_test(
+  BOOL complete = clash_with_clause_test(
     first,
     positive ? pos_hyper_sat_test : neg_hyper_sat_test,
     clause_test, clause_test_data, HYPER_RES_JUST, proc_proc);
   free_context(nuc_subst);
   zap_clash(first);  /* This also frees satellite contexts. */
+  return complete;
 }  /* hyper_nucleus */
 
 /*************
@@ -266,27 +279,27 @@ Hyperresolution.
 */
 
 /* PUBLIC */
-void hyper_resolution(Topform c, int pos_or_neg, Lindex idx,
-		      void (*proc_proc) (Topform))
+BOOL hyper_resolution(Topform c, int pos_or_neg, Lindex idx,
+		      Topform_proc proc_proc)
 {
-  hyper_resolution_with_clause_test(c, pos_or_neg, idx, NULL, NULL,
-                                    proc_proc);
+  return hyper_resolution_with_clause_test(c, pos_or_neg, idx, NULL, NULL,
+                                           proc_proc);
 }  /* hyper_resolution */
 
 /* PUBLIC */
-void hyper_resolution_with_clause_test(Topform c, int pos_or_neg, Lindex idx,
-				       Clash_clause_test clause_test,
-				       void *clause_test_data,
-				       void (*proc_proc) (Topform))
+BOOL hyper_resolution_with_clause_test(Topform c, int pos_or_neg, Lindex idx,
+			       Clash_clause_test clause_test,
+			       void *clause_test_data,
+			       Topform_proc proc_proc)
 {
   if (pos_or_neg == POS_RES ?
       positive_clause(c->literals) :
       negative_clause(c->literals))
-    hyper_satellite(c, pos_or_neg, idx, clause_test, clause_test_data,
-                    proc_proc);
+    return hyper_satellite(c, pos_or_neg, idx, clause_test, clause_test_data,
+                           proc_proc);
   else
-    hyper_nucleus(c, pos_or_neg, idx, clause_test, clause_test_data,
-                  proc_proc);
+    return hyper_nucleus(c, pos_or_neg, idx, clause_test, clause_test_data,
+                         proc_proc);
 }  /* hyper_resolution_with_clause_test */
 
 enum hyper_scan_result {
@@ -536,7 +549,8 @@ static void hyper_iterator_reconstruct_choices(
 
 enum hyper_inner_result {
   HYPER_INNER_COMPLETE,
-  HYPER_INNER_BUDGET
+  HYPER_INNER_BUDGET,
+  HYPER_INNER_CANCELLED
 };
 
 static enum hyper_inner_result hyper_iterator_run_inner(
@@ -544,7 +558,7 @@ static enum hyper_inner_result hyper_iterator_run_inner(
   Literals given_satellite, BOOL given_flipped,
   const Hyper_parent_source *source, Hyper_iterator *it,
   unsigned long long raw_budget, unsigned long long yield_budget,
-  void (*proc_proc) (Topform), unsigned long long *raw_steps,
+  Topform_proc proc_proc, unsigned long long *raw_steps,
   unsigned long long *yielded)
 {
   Clash *frames, first;
@@ -592,8 +606,14 @@ static enum hyper_inner_result hyper_iterator_run_inner(
     if (it->depth == frame_count) {
       if (frame_count == 0 && it->mate_phase >= 3)
         break;
-      (*proc_proc)(clash_resolve(first, HYPER_RES_JUST));
       (*yielded)++;
+      if (!(*proc_proc)(clash_resolve(first, HYPER_RES_JUST))) {
+        it->complete = TRUE;
+        hyper_iterator_cleanup_clash(
+          first, nuc_subst, frames, trails, flips, it->depth,
+          preselected_trail, preselected_flip);
+        return HYPER_INNER_CANCELLED;
+      }
       if (frame_count == 0)
         it->mate_phase = 3;
       else
@@ -766,7 +786,7 @@ BOOL hyper_iterator_at_start(const Hyper_iterator *it)
 BOOL hyper_resolution_bounded(
   Topform given, int pos_or_neg, const Hyper_parent_source *source,
   Hyper_iterator *it, unsigned long long raw_budget,
-  unsigned long long yield_budget, void (*proc_proc) (Topform),
+  unsigned long long yield_budget, Topform_proc proc_proc,
   unsigned long long *raw_steps, unsigned long long *yielded)
 {
   BOOL positive = pos_or_neg == POS_RES;
@@ -791,7 +811,8 @@ BOOL hyper_resolution_bounded(
     enum hyper_inner_result result = hyper_iterator_run_inner(
       given, positive, -1, NULL, FALSE, source, it,
       raw_budget, yield_budget, proc_proc, raw_steps, yielded);
-    if (result == HYPER_INNER_COMPLETE) {
+    if (result == HYPER_INNER_COMPLETE ||
+        result == HYPER_INNER_CANCELLED) {
       it->complete = TRUE;
       return TRUE;
     }
@@ -807,6 +828,10 @@ BOOL hyper_resolution_bounded(
         hyper_iterator_literal(given->literals, it->given_literal),
         it->given_phase == 1, source, it,
         raw_budget, yield_budget, proc_proc, raw_steps, yielded);
+      if (result == HYPER_INNER_CANCELLED) {
+        it->complete = TRUE;
+        return TRUE;
+      }
       if (result == HYPER_INNER_BUDGET)
         return FALSE;
       it->nucleus_selected = FALSE;
@@ -895,9 +920,9 @@ BOOL target_check(Literals lit, int target_constraint)
  *************/
 
 static
-void ur_sat_atom(BOOL flipped, Topform c, int target_constraint,
+BOOL ur_sat_atom(BOOL flipped, Topform c, int target_constraint,
 		 Term sat_atom, Lindex idx,
-		 void (*proc_proc) (Topform))
+		 Topform_proc proc_proc)
 
 {
   /* Assume C is a unit. */
@@ -944,7 +969,13 @@ void ur_sat_atom(BOOL flipped, Topform c, int target_constraint,
 	      }
 	    }
 	  }  /* for each literal of nucleus */
-	  clash(first, unit_check, UR_RES_JUST, proc_proc);
+	  if (!clash(first, unit_check, UR_RES_JUST, proc_proc)) {
+	    zap_clash(first);
+	    mindex_retrieve_cancel(mate_pos);
+	    free_context(sat_subst);
+	    free_context(nuc_subst);
+	    return FALSE;
+	  }
 	  zap_clash(first);
 	}  
       }  /* for each target */
@@ -953,6 +984,7 @@ void ur_sat_atom(BOOL flipped, Topform c, int target_constraint,
   }  /* for each mate */
   free_context(sat_subst);
   free_context(nuc_subst);
+  return TRUE;
 }  /* ur_sat_atom */
 
 /*************
@@ -962,18 +994,23 @@ void ur_sat_atom(BOOL flipped, Topform c, int target_constraint,
  *************/
 
 static
-void ur_satellite(Topform c, int target_constraint, Lindex idx,
-		  void (*proc_proc) (Topform))
+BOOL ur_satellite(Topform c, int target_constraint, Lindex idx,
+		  Topform_proc proc_proc)
 
 {
   Term atom = c->literals->atom;
-  ur_sat_atom(FALSE, c, target_constraint, atom, idx, proc_proc);
+  if (!ur_sat_atom(FALSE, c, target_constraint, atom, idx, proc_proc))
+    return FALSE;
   /* if equality, try with the flip */
   if (eq_term(atom)) {
     Term flip = top_flip(atom);
-    ur_sat_atom(TRUE, c, target_constraint, flip, idx, proc_proc);
+    BOOL complete = ur_sat_atom(TRUE, c, target_constraint, flip, idx,
+                                proc_proc);
     zap_top_flip(flip);
+    if (!complete)
+      return FALSE;
   }
+  return TRUE;
 }  /* ur_satellite */
 
 /*************
@@ -983,12 +1020,12 @@ void ur_satellite(Topform c, int target_constraint, Lindex idx,
  *************/
 
 static
-void ur_nucleus(Topform c, int target_constraint, Lindex idx,
-		 void (*proc_proc) (Topform))
+BOOL ur_nucleus(Topform c, int target_constraint, Lindex idx,
+		 Topform_proc proc_proc)
 {
   if (number_of_literals(c->literals) > Ur_nucleus_limit ||
       (Initial_nuclei && !c->initial))
-    return;
+    return TRUE;
   else {
     Literals target;
     for (target = c->literals; target; target = target->next) {
@@ -1009,12 +1046,15 @@ void ur_nucleus(Topform c, int target_constraint, Lindex idx,
 	    p->sat_subst = get_context();
 	  }
 	}
-	clash(first, unit_check, UR_RES_JUST, proc_proc);
+	BOOL complete = clash(first, unit_check, UR_RES_JUST, proc_proc);
 	free_context(nuc_subst);
 	zap_clash(first);  /* This also frees satellite contexts. */
+	if (!complete)
+	  return FALSE;
       }
     }
   }
+  return TRUE;
 }  /* ur_nucleus */
 
 /*************
@@ -1028,13 +1068,13 @@ Unit-resulting resolution.
 */
 
 /* PUBLIC */
-void ur_resolution(Topform c, int target_constraint, Lindex idx,
-		   void (*proc_proc) (Topform))
+BOOL ur_resolution(Topform c, int target_constraint, Lindex idx,
+		   Topform_proc proc_proc)
 {
   if (unit_clause(c->literals))
-    ur_satellite(c, target_constraint, idx, proc_proc);
+    return ur_satellite(c, target_constraint, idx, proc_proc);
   else
-    ur_nucleus(c, target_constraint, idx, proc_proc);
+    return ur_nucleus(c, target_constraint, idx, proc_proc);
 }  /* ur_resolution */
 
 /*************
@@ -1044,7 +1084,7 @@ void ur_resolution(Topform c, int target_constraint, Lindex idx,
  *************/
 
 static
-void xx_res(Literals lit, void (*proc_proc) (Topform))
+BOOL xx_res(Literals lit, Topform_proc proc_proc)
 {
   Term alpha = ARG(lit->atom,0);
   Term beta  = ARG(lit->atom,1);
@@ -1065,9 +1105,13 @@ void xx_res(Literals lit, void (*proc_proc) (Topform))
     upward_clause_links(c);
     c->attributes = inheritable_att_instances(parent->attributes, subst);
     
-    (*proc_proc)(c);
+    if (!(*proc_proc)(c)) {
+      free_context(subst);
+      return FALSE;
+    }
   }
   free_context(subst);
+  return TRUE;
 }  /* xx_res */
 
 /*************
@@ -1077,10 +1121,10 @@ void xx_res(Literals lit, void (*proc_proc) (Topform))
  *************/
 
 static
-void binary_resolvent(BOOL flipped,
+BOOL binary_resolvent(BOOL flipped,
 	     Literals l1, Context s1,
 	     Literals l2, Context s2,
-	     void (*proc_proc) (Topform))
+	     Topform_proc proc_proc)
 {
   Topform r = get_topform();
   Topform nuc =  l1->atom->container;
@@ -1115,7 +1159,7 @@ void binary_resolvent(BOOL flipped,
 
   r->justification = resolve_just(j, BINARY_RES_JUST);
   upward_clause_links(r);
-  (*proc_proc)(r);
+  return (*proc_proc)(r);
 }  /* binary_resolvent */
 
 /*************
@@ -1245,8 +1289,8 @@ BOOL check_instances(Literals lit1, Context subst1,
  *************/
 
 static
-void bin_res_lit(Topform giv, Literals lit, Term atom,
-		 int res_type, Lindex idx, void (*proc_proc) (Topform))
+BOOL bin_res_lit(Topform giv, Literals lit, Term atom,
+		 int res_type, Lindex idx, Topform_proc proc_proc)
 {
   BOOL flipped = (lit->atom != atom);
   Context nuc_subst = get_context();
@@ -1260,12 +1304,19 @@ void bin_res_lit(Topform giv, Literals lit, Term atom,
   while (sat_atom) {
     Literals slit = atom_to_literal(sat_atom);
     if (binary_parent_test(slit, res_type, FLAG_CHECK) &&
-	check_instances(lit, nuc_subst, slit, sat_subst, res_type))
-      binary_resolvent(flipped, lit, nuc_subst, slit, sat_subst, proc_proc);
+	check_instances(lit, nuc_subst, slit, sat_subst, res_type) &&
+        !binary_resolvent(flipped, lit, nuc_subst, slit, sat_subst,
+                          proc_proc)) {
+      mindex_retrieve_cancel(mate_pos);
+      free_context(nuc_subst);
+      free_context(sat_subst);
+      return FALSE;
+    }
     sat_atom = mindex_retrieve_next(mate_pos);
   }
   free_context(nuc_subst);
   free_context(sat_subst);
+  return TRUE;
 }  /* bin_res_lit */
 
 /*************
@@ -1279,29 +1330,34 @@ Binary resolution.
 */
 
 /* PUBLIC */
-void binary_resolution(Topform c,
+BOOL binary_resolution(Topform c,
 		       int res_type,  /* POS_RES, NEG_RES, ANY_RES */
 		       Lindex idx,
-		       void (*proc_proc) (Topform))
+		       Topform_proc proc_proc)
 {
   Literals lit;
   for (lit = c->literals; lit; lit = lit->next) {
     if (binary_parent_test(lit, res_type, FLAG_CHECK)) {
-      bin_res_lit(c, lit, lit->atom, res_type, idx, proc_proc);
+      if (!bin_res_lit(c, lit, lit->atom, res_type, idx, proc_proc))
+        return FALSE;
 
       /* If equality, try for resolution with the flip. */
       if (eq_term(lit->atom)) {
 	Term flip = top_flip(lit->atom);
-	bin_res_lit(c, lit, flip, res_type, idx, proc_proc);
+	BOOL complete = bin_res_lit(c, lit, flip, res_type, idx, proc_proc);
 	zap_top_flip(flip);
+	if (!complete)
+          return FALSE;
       }
 
       /* Try for resolution with x=x. */
       if (neg_eq(lit)) {
-	xx_res(lit, proc_proc);
+	if (!xx_res(lit, proc_proc))
+          return FALSE;
       }
     }
   }
+  return TRUE;
 }  /* binary_resolution */
 
 /*************
@@ -1314,7 +1370,7 @@ void binary_resolution(Topform c,
 */
 
 /* PUBLIC */
-void binary_factors(Topform c, void (*proc_proc) (Topform))
+BOOL binary_factors(Topform c, Topform_proc proc_proc)
 {
   Literals l1;
   int i = 1;
@@ -1340,11 +1396,15 @@ void binary_factors(Topform c, void (*proc_proc) (Topform))
 	f->attributes = cat_att(f->attributes,
 				inheritable_att_instances(c->attributes,
 							  subst));
-	(*proc_proc)(f);
+	if (!(*proc_proc)(f)) {
+	  free_context(subst);
+	  return FALSE;
+	}
       }
     }
   }
   free_context(subst);
+  return TRUE;
 }  /* binary_factors */
 
 /*************
