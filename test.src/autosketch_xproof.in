@@ -1,0 +1,14 @@
+clear(auto).
+clear(auto_setup).
+clear(auto_inference).
+set(binary_resolution).
+set(use_expanded_proofs).
+assign(max_seconds,5).
+
+formulas(extra_assumptions).
+  p.
+end_of_list.
+
+formulas(goals).
+  p.
+end_of_list.

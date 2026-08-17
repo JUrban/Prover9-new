@@ -479,4 +479,33 @@ done
 cmp "$test_tmp/terminal-cold-cache0.norm" \
     "$test_tmp/terminal-cold-cache1.norm"
 
+# A terminal snapshot returned through forking_search must remain a mixed
+# formula/clause proof DAG: xproof expansion copies formula premises instead
+# of interpreting their union member as Literals.  The second case also
+# destroys the first result, derives clause-only sketch hints, and starts a
+# second child search, covering result/xproof ownership end to end.
+sed '1i\
+set(use_expanded_proofs).\
+assign(max_seconds,30).' "$repo_dir/prover9.examples/x2.in" | \
+  "$repo_dir/bin/autosketches4" \
+    > "$test_tmp/autosketch-x2.out" \
+    2> "$test_tmp/autosketch-x2.err"
+grep -q 'The preceding proof was found with no extra assumptions' \
+  "$test_tmp/autosketch-x2.out"
+
+autosketch_status=0
+"$repo_dir/bin/autosketches4" \
+  < "$repo_dir/test.src/autosketch_xproof.in" \
+  > "$test_tmp/autosketch-owner.out" \
+  2> "$test_tmp/autosketch-owner.err" || autosketch_status=$?
+test "$autosketch_status" -eq 2
+grep -q 'The preceding proof uses the following extra_assmumptions' \
+  "$test_tmp/autosketch-owner.out"
+grep -q 'Process .* exit (sos_empty)' "$test_tmp/autosketch-owner.out"
+if grep -Eq 'Prover catching signal|Fatal error|AddressSanitizer|runtime error' \
+     "$test_tmp"/autosketch-*.out "$test_tmp"/autosketch-*.err; then
+  cat "$test_tmp"/autosketch-*.err >&2
+  exit 1
+fi
+
 echo 'compact_otter_audit_test: PASS'
