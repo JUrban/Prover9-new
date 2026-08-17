@@ -2,14 +2,18 @@
 
 ## Implementation status
 
-The design below is implemented by three reviewable commits:
+The design below is implemented by five reviewable commits:
 
 - `9c3d48a` changes the inference-result callback contract and makes every
   eager/bounded producer unwind on cancellation;
 - `d81e56b` defers terminal proof work to search safe points and transfers a
-  deep, closed proof snapshot to output/results; and
+  deep, closed proof snapshot to output/results;
 - `4f2d287` adds direct, cached, checkpointed, closure, and producer-restart
-  regressions.
+  regressions;
+- `9878358` preserves the formula/clause `Topform` variant throughout copied
+  and expanded result DAGs; and
+- `1d443bd` exercises expanded results, destruction, hint derivation, and a
+  subsequent autosketch child search.
 
 Release and ASan+UBSan builds pass the focused matrix and the broader compact,
 DISCOUNT, collective, checkpoint, generalization, scaling, memory, LADR, and
@@ -101,6 +105,13 @@ normal-variable state, input/given/goal metadata, semantics, and stable hint
 annotations needed by proof output.  It has no search-container, official-ID,
 archive-materialization, selector, or compact-index ownership.
 
+Proof DAGs are intentionally heterogeneous.  Non-clausal formula premises
+must be copied through the Formula arm of the `Topform` union, while inference
+clauses use the Literals arm.  Expanded-proof replay applies only to clause
+nodes.  Consumers with a clause-only contract, such as the autosketch hint
+bank, filter formula nodes at their boundary instead of weakening the proof
+result representation.
+
 Closure validation uses the sorted proof IDs and binary lookup rather than a
 bitmap sized by the maximum clause ID; this keeps validation proportional to
 proof size even after tens of millions of generated clauses.
@@ -116,6 +127,8 @@ The repair is not accepted on a single Josef replay.  Tests must cover:
   producers, including cleanup under ASan/UBSan;
 - proof closure and presence of both unit-conflict parents;
 - native, expanded, and `prooftrans parents_only` output;
+- expanded results containing formula premises, followed by destruction and
+  another child search;
 - preprocessing and main-loop terminal proofs;
 - checkpoint/resume followed by the same terminal conflict; and
 - the existing compact OTTER, collective, eager-demodulation, hint,

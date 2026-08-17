@@ -32,6 +32,10 @@ lifecycle described below.  It does **not** repair the remaining nested
 terminal-proof ownership defect.  That structural follow-up is implemented
 by `9c3d48a` (cancellable inference producers) and `d81e56b` (safe-point
 proof finalization), with the permanent regression matrix in `4f2d287`.
+The result-ownership audit also found that expanded proofs were copying
+non-clausal formula premises through the clause arm of the `Topform` union;
+`9878358` makes proof copying variant-aware and keeps autosketch hints
+clause-only, with the multi-search regressions in `1d443bd`.
 The exact mature Josef 02 replay is deliberately tracked as a separate final
 acceptance gate; the focused and broad tests below are not presented as a
 substitute for it.
@@ -206,6 +210,27 @@ indexes discarded.  Proof output, proof actions, and
 `collect_prover_results()` use the detached snapshot, so none can query
 destroyed storage.
 
+### Result ownership preserves the `Topform` variant
+
+A returned proof is not a list of clauses only.  Its input premises can
+include original goals and other non-clausal formulas.  `Topform` stores a
+formula and a literal list in different arms of a union, selected by
+`is_formula`.  The first expanded-proof integration run exposed an old API
+assumption: `copy_clause_ija()` treated every returned node as a literal list,
+so copying the goal premise traversed its Formula pointer as Literals.
+
+The shared deep-copy operation is now `copy_topform_ija()`.  It copies the
+selected body variant plus ID, justification, and attributes; clause bodies
+retain term flags.  Terminal snapshots and whole-proof copies use this
+operation.  Expanded-proof construction preserves formula premises directly
+and performs clause replay and literal-uplink checks only on clause nodes.
+
+The inverse mistake is prevented at the real type boundary.  Proof and
+expanded-proof results remain complete mixed DAGs, but autosketch copies only
+clause nodes when deriving the next search's hints.  Thus formulas are neither
+misread as clauses nor passed to the clause-only hint index.  Result cleanup
+deep-frees both ordinary and expanded snapshots before the next child search.
+
 The closure check is proportional to proof size: it sorts the IDs in the DAG
 and performs binary membership lookups.  It does not allocate by the largest
 clause ID, which matters for mature runs with tens of millions of retained
@@ -319,6 +344,14 @@ checkpoint/resume.  The sanitizer runs disable only leak reporting because
 the surrounding historical process retains global package state; address
 and undefined-behavior failures remain fatal.
 
+The result-ownership matrix also passes under ASan+UBSan.  One autosketch run
+returns an expanded `x2` proof containing its non-clausal goal premise.  A
+second run proves a goal from an extra assumption, converts the first mixed
+proof to clause-only sketch hints, frees both returned DAGs, and starts a
+second child search that exits normally with `sos_empty`.  This covers copy,
+expansion, consumer filtering, destruction, and reuse rather than merely
+printing one proof.
+
 ### Supplied full hint banks at a bounded terminal boundary
 
 For each Josef output, the echoed input was reconstructed, the full hint bank
@@ -355,7 +388,8 @@ The following pass with the repair:
 - compact generalization smoke manifest;
 - allocator, bookkeeping, ancestor-store, and memory lifecycle tests;
 - full optimized build of all prover, model, and utility programs; and
-- ordinary LADR and TPTP proof/status smoke tests.
+- ordinary LADR and TPTP proof/status smoke tests; and
+- expanded-proof autosketch result ownership across two child searches.
 
 ### Mature acceptance status
 
