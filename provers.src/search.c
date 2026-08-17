@@ -7359,16 +7359,7 @@ static Topform copy_terminal_proof_step(Topform source)
   Topform copy;
   if (source->compressed != NULL)
     fatal_error("copy_terminal_proof_step: source body is not materialized");
-  if (source->is_formula) {
-    copy = get_topform();
-    copy->is_formula = TRUE;
-    copy->formula = formula_copy(source->formula);
-    copy->id = source->id;
-    copy->justification = copy_justification(source->justification);
-    copy->attributes = copy_attributes(source->attributes);
-  }
-  else
-    copy = copy_clause_ija(source);
+  copy = copy_topform_ija(source);
 
   copy->weight = source->weight;
   copy->matching_hint = source->matching_hint;

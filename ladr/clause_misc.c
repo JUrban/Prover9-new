@@ -188,6 +188,37 @@ void delete_clist(Clist l)
 
 /*************
  *
+ *   copy_topform_ija()
+ *
+ *************/
+
+/* DOCUMENTATION
+Copy a clause or formula Topform, including ID, justification, attributes,
+and clause termflags.  Formula proof steps have no literal/termflag body;
+their Formula tree is copied instead.  Topforms constructed with this
+routine should be deallocated with delete_clause().
+*/
+
+/* PUBLIC */
+Topform copy_topform_ija(Topform c)
+{
+  Topform d;
+  if (c->is_formula) {
+    d = get_topform();
+    d->is_formula = TRUE;
+    d->formula = formula_copy(c->formula);
+    d->goal_derived = c->goal_derived;
+  }
+  else
+    d = copy_clause_with_flags(c);
+  d->id = c->id;
+  d->justification = copy_justification(c->justification);
+  d->attributes = copy_attributes(c->attributes);
+  return d;
+}  /* copy_topform_ija */
+
+/*************
+ *
  *   copy_clause_ija()
  *
  *************/
@@ -202,11 +233,7 @@ with delete_clause().
 /* PUBLIC */
 Topform copy_clause_ija(Topform c)
 {
-  Topform d = copy_clause_with_flags(c);
-  d->id = c->id;
-  d->justification = copy_justification(c->justification);
-  d->attributes = copy_attributes(c->attributes);
-  return d;
+  return copy_topform_ija(c);
 }  /* copy_clause_ija */
 
 /*************
@@ -216,8 +243,9 @@ Topform copy_clause_ija(Topform c)
  *************/
 
 /* DOCUMENTATION
-Copy a Plist of clauses.  Clauses are coped with copy_clause_ija(),
-which copies ID, justification, attributes, and termflags.
+Copy a Plist of clause/formula Topforms.  Steps are copied with
+copy_topform_ija(), which copies ID, justification, attributes, and clause
+termflags.
 */
 
 /* PUBLIC */
@@ -228,7 +256,7 @@ Plist copy_clauses_ija(Plist p)
 
   for (a = p; a; a = a->next) {
     Topform old = a->v;
-    Topform new = copy_clause_ija(old);
+    Topform new = copy_topform_ija(old);
     b = plist_prepend(b, new);  /* build it backward */
   }
   return reverse_plist(b);

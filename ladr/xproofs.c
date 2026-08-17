@@ -40,7 +40,7 @@ void check_parents_and_uplinks_in_proof(Plist proof)
   for (p = proof; p; p = p->next) {
     Topform c = p->v;
     Ilist parents = get_parents(c->justification, FALSE);
-    if (!check_upward_clause_links(c)) {
+    if (!c->is_formula && !check_upward_clause_links(c)) {
       printf("bad uplinks: "); fprint_clause(stdout, c);
       fatal_error("check_parents_and_uplinks_in_proof, bad uplinks");
     }
@@ -275,6 +275,16 @@ Plist expand_proof(Plist proof, I3list *pmap)
     Topform c = p->v;         /* the clause we're expanding */
     Topform current = NULL;   /* by substeps, this becomes identical to c */
     Just j;
+
+    /* Formula premises are proof nodes, but they are not inference clauses
+       and have no Literals union member to replay.  Preserve them verbatim
+       in the expanded proof.  Treating the Formula pointer as Literals made
+       copy_clause_with_flags() walk invalid memory when search returned an
+       xproof for a goal-bearing terminal snapshot. */
+    if (c->is_formula) {
+      new_proof = plist_prepend(new_proof, copy_topform_ija(c));
+      continue;
+    }
 
     j = c->justification;
     old_id = c->id;
@@ -672,4 +682,3 @@ Plist proof_to_xproof(Plist proof)
   Plist xproof = expand_proof(proof, &map);
   return xproof;
 }  /* proof_to_xproof */
-

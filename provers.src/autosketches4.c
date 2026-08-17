@@ -45,6 +45,29 @@ void attach_sketch_hint_labels(int sketch_count, Plist hints)
   }
 }  /* attach_sketch_hint_labels */
 
+/* Proof DAGs can contain formula premises (for example the original goal,
+   labeled non_clause) as well as clausified inference steps.  The hints
+   interface accepts clauses only.  Preserve formula nodes in returned proof
+   and xproof results, but deliberately omit them when deriving the next
+   sketch's clause hints. */
+static Plist copy_proof_clause_hints(Plist proof)
+{
+  Plist result = NULL;
+  Plist *tail = &result;
+  Plist p;
+  for (p = proof; p != NULL; p = p->next) {
+    Topform c = p->v;
+    if (!c->is_formula) {
+      Plist node = get_plist();
+      node->v = copy_clause_ija(c);
+      node->next = NULL;
+      *tail = node;
+      tail = &node->next;
+    }
+  }
+  return result;
+}
+
 /*************
  *
  *    main -- autosketches4
@@ -142,9 +165,9 @@ int main(int argc, char **argv)
 	sketch_count++;
 
 	if (flag(use_expanded_proofs_flag))
-	  new_hints = copy_clauses_ija(results->xproofs->v); // deep copy
+	  new_hints = copy_proof_clause_hints(results->xproofs->v);
 	else
-	  new_hints = copy_clauses_ija(results->proofs->v);  // deep copy
+	  new_hints = copy_proof_clause_hints(results->proofs->v);
 
 	attach_sketch_hint_labels(sketch_count, new_hints);  // label(S3_H45)
 

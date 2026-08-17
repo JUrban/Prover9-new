@@ -45,6 +45,8 @@ void delete_clause(Topform c);
 
 void delete_clist(Clist l);
 
+Topform copy_topform_ija(Topform c);
+
 Topform copy_clause_ija(Topform c);
 
 Plist copy_clauses_ija(Plist p);
