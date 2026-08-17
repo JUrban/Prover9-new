@@ -2,7 +2,7 @@
 
 ## Implementation status
 
-The design below is implemented by five reviewable commits:
+The design below is implemented by six reviewable commits:
 
 - `9c3d48a` changes the inference-result callback contract and makes every
   eager/bounded producer unwind on cancellation;
@@ -13,12 +13,16 @@ The design below is implemented by five reviewable commits:
 - `9878358` preserves the formula/clause `Topform` variant throughout copied
   and expanded result DAGs; and
 - `1d443bd` exercises expanded results, destruction, hint derivation, and a
-  subsequent autosketch child search.
+  subsequent autosketch child search; and
+- `da4abdc` makes resident/archive sign queries respect the formula/clause
+  `Topform` variant and adds mixed-ancestor terminal regressions.
 
 Release and ASan+UBSan builds pass the focused matrix and the broader compact,
 DISCOUNT, collective, checkpoint, generalization, scaling, memory, LADR, and
-TPTP suites.  The exact mature Josef 02 replay remains the last acceptance
-gate and is intentionally not replaced by these smaller tests.
+TPTP suites.  The first exact mature Josef 02 replay matched all 13,006 givens
+but found a formula-as-literals bug in the new metadata-only denial walker;
+`da4abdc` repairs that boundary.  A post-`da4abdc` exact replay remains the
+last acceptance gate and is intentionally not replaced by the smaller tests.
 
 ## Problem statement
 
@@ -47,6 +51,13 @@ parent.  The latter is the production Josef configuration.
 
 This is not a hint-count or Josef-symbol problem.  It is an invalid nested
 callback/owner transition.
+
+The ownership repair's first mature replay exposed one additional invariant.
+Proof ancestry is heterogeneous: original non-clausal formula premises and
+derived clauses share a `Topform` union.  Metadata-only denial discovery must
+treat formulas as known non-clauses, never as literal lists.  Violating that
+rule faults before safe-point snapshotting and is independent of producer
+cancellation.
 
 ## Required invariants
 
@@ -94,6 +105,15 @@ It then:
 7. prints/runs proof actions from the closed snapshot; and
 8. exits the search only from that safe point.
 
+### Ancestor metadata respects the body variant
+
+Every sign query checks the `Topform` kind before inspecting its body.  A
+formula ID is known but never denotes a negative clause.  Persistent ancestor
+records apply the same rule, with the formula bit taking precedence over a
+negative bit even in older records.  This lets metadata-only proof walks
+traverse mixed formula/clause ancestry without materializing bodies or
+crossing the union arm.
+
 `collect_prover_results()` transfers those snapshots.  It must never query a
 destroyed ancestor archive.
 
@@ -129,6 +149,8 @@ The repair is not accepted on a single Josef replay.  Tests must cover:
 - native, expanded, and `prooftrans parents_only` output;
 - expanded results containing formula premises, followed by destruction and
   another child search;
+- resident and archived atomic-formula sign queries through memory, mmap, and
+  file stores, plus a terminal proof with a compound formula premise;
 - preprocessing and main-loop terminal proofs;
 - checkpoint/resume followed by the same terminal conflict; and
 - the existing compact OTTER, collective, eager-demodulation, hint,

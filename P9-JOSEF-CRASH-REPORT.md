@@ -3,8 +3,8 @@
 ## Executive result
 
 The Josef failures are not evidence that the compact implementation can only
-handle the CHAT or Osborn inputs.  They expose two general lifecycle defects
-at boundaries that the short tests did not exercise:
+handle the CHAT or Osborn inputs.  They expose general lifecycle defects at
+boundaries that the short tests did not exercise:
 
 1. Josef 01 and Josef 02 enter the compact terminal-proof boundary and receive
    `SIGSEGV` after the final live statistics have already been frozen.  The
@@ -19,6 +19,12 @@ at boundaries that the short tests did not exercise:
    clause retired it again.  The second retirement subtracted equivalence
    memberships from the packed sidecar twice and ended with the explicit
    `better_deactivate_hint: equivalence count underflow` failure.
+3. The first exact Josef 02 replay of the safe-point repair exposed a separate
+   variant error in the replacement denial-ancestry walker.  Proof ancestry
+   contains both clause and formula `Topform`s, but the metadata-only sign
+   query passed the Formula arm of the shared body union to
+   `negative_clause()`.  It reproduced all 13,006 givens and then faulted in
+   that query before it could register or snapshot the terminal proof.
 
 The repair makes active hint membership an explicit Topform invariant, makes
 the active-to-retired transition idempotent, retains retired hints as stable
@@ -36,9 +42,13 @@ The result-ownership audit also found that expanded proofs were copying
 non-clausal formula premises through the clause arm of the `Topform` union;
 `9878358` makes proof copying variant-aware and keeps autosketch hints
 clause-only, with the multi-search regressions in `1d443bd`.
+The exact mature replay then found the analogous read-side violation;
+`da4abdc` makes resident and archived sign metadata variant-safe and adds
+mixed-ancestor terminal and all-backend archive regressions.
 The exact mature Josef 02 replay is deliberately tracked as a separate final
-acceptance gate; the focused and broad tests below are not presented as a
-substitute for it.
+acceptance gate.  The pre-`da4abdc` replay is diagnostic evidence, not a
+successful acceptance run, and the focused tests below are not presented as
+a substitute for rerunning it.
 
 ## Evidence from the supplied outputs
 
@@ -90,6 +100,46 @@ proof output but destroys the archived conflicting parent first, producing an
 open proof that cites a missing clause.  Both outcomes have the same root
 cause: destructive terminal work occurs before the inference callback has
 returned ownership.
+
+The first from-start replay of the safe-point implementation reached the
+same complete 13,006-given trajectory.  All printed given lines compare
+byte-for-byte with `Josef_02.out1`; the SHA-256 of those complete lines in
+both files is:
+
+```
+f5e0dfa2cbbaf6865656e2db16fd53e7827d4a0f1ff011da166b68abb5d3417a
+```
+
+It nevertheless received `SIGSEGV` before incrementing `proofs` or entering
+safe-point finalization.  The symbolized native stack is:
+
+```
+negative_clause
+handle_proof_and_maybe_exit
+unit_conflict
+cl_process
+back_demod
+limbo_process
+search
+```
+
+The faulting instruction dereferences the fake `Literals` pointer supplied by
+`clause_negative_by_id()`.  Josef's proof ancestry includes original
+non-clausal conjunction/implication assumptions, so this is a deterministic
+mixed-Topform boundary, not an index parameter or clause-number effect.  The
+metadata-only ancestor walker was introduced by the safe-point repair; the
+older materialized-proof `first_negative_clause()` explicitly skipped
+formula nodes.  Thus this stack identifies a new general regression in the
+replacement walker rather than disproving producer cancellation.
+
+That diagnostic replay took 8:40:44 wall time (28,129.07 user and 2,109.61
+system seconds) and peaked at 5,005,296 KiB RSS.  It had `VmSwap: 0` throughout
+the monitored final interval.  A supplementary checkpoint-resume process was
+stopped after aggregate machine pressure became unsafe; only the exact
+from-start replay was retained, and it finished with about 6.3 GiB available
+and memory PSI 0.00.  The checkpoint resume was not trajectory-equivalent
+because the current checkpoint boundary records a selected given before its
+inference transaction, so it is not acceptance evidence.
 
 ### Josef 03: checked duplicate retirement
 
@@ -173,6 +223,23 @@ large-run failures:
   Topforms, although the packed hint bank has no authoritative FPA index.
   The result depended on materialization timing rather than logical state.
 
+### Metadata-only sign lookup crossed the `Topform` union
+
+The safe-point repair must identify the first negative denial ancestor before
+materializing a potentially enormous proof.  Its new ID/record walker called
+`clause_negative_by_id()`.  The archived branch read a sign bit, but the
+resident branch called `negative_clause_possibly_compressed()` without first
+checking `is_formula`.  Because formula and clause bodies occupy the same
+union, atomic formulas were deterministically misclassified as negative
+clauses and compound formulas could be traversed as invalid literal lists.
+
+The same helper was also used when writing and querying generic ancestor
+records.  An atomic formula could therefore acquire `AF_NEGATIVE`, preserving
+the wrong classification after archival.  The invariant must live at the
+Topform/record boundary: a formula is a known Topform but is categorically not
+a negative clause.  Filtering a particular Josef ID, formula shape, or proof
+position would merely hide the representation error.
+
 ## Implemented repair
 
 ### Cancellable inference ownership
@@ -235,6 +302,20 @@ The closure check is proportional to proof size: it sorts the IDs in the DAG
 and performs binary membership lookups.  It does not allocate by the largest
 clause ID, which matters for mature runs with tens of millions of retained
 IDs.
+
+### Sign metadata preserves the `Topform` variant
+
+`negative_clause_possibly_compressed()` is now the variant-safe sign boundary.
+It returns false for a null or formula Topform and only inspects compressed
+sign metadata or literals for a clause.  Consequently resident ID queries,
+disabled-store queries, and new ancestor records all share the same rule.
+
+Archived readers additionally require `AF_IS_FORMULA` to be clear before
+honoring `AF_NEGATIVE`.  Formula-kind metadata therefore dominates even for
+an older record whose writer set both bits.  `clause_negative_by_id()` still
+reports such an existing formula ID as known, but returns false for its clause
+sign.  This is a representation invariant with no Josef symbols, IDs, search
+limits, or scheduling conditions.
 
 ### One authoritative transition
 
@@ -352,6 +433,17 @@ second child search that exits normally with `sos_empty`.  This covers copy,
 expansion, consumer filtering, destruction, and reuse rather than merely
 printing one proof.
 
+The sign-query regression is deterministic without a large search: a valid
+atomic Formula begins with `ATOM_FORM == 0`, which the old literal walker
+classified as a negative clause.  The bookkeeping test now checks resident
+formula Topforms and ID-table queries.  The ancestor test archives,
+rematerializes, and queries a formula through memory, mmap, and file backends.
+All of those assertions fail before `da4abdc` and pass afterward.  A compact
+terminal integration proof retains a compound implication premise and an
+atomic goal in its mixed proof DAG, completes normally, and passes
+`prooftrans parents_only`.  The component tests and the complete compact audit
+also pass under ASan+UBSan.
+
 ### Supplied full hint banks at a bounded terminal boundary
 
 For each Josef output, the echoed input was reconstructed, the full hint bank
@@ -393,13 +485,19 @@ The following pass with the repair:
 
 ### Mature acceptance status
 
-The three supplied Josef 02 failure files establish a deterministic
-13,006-given terminal boundary.  An untouched symbolized pre-fix native run
-and an exact fixed native run are being retained through that complete
-trajectory.  The fixed replay's first 1,019 given lines are byte-identical to
-the supplied failure sequence.  Final theorem/proof closure and the pre-fix
-terminal stack will be added here when those processes reach the boundary;
-until then, mature acceptance remains open.
+The first exact from-start safe-point replay completed the full 13,006-given
+trajectory and supplied the symbolized formula-as-literals stack above.  It
+did not prove the theorem, so mature acceptance remains open.  The older
+pre-fix control was stopped near given 11,327 when running it concurrently
+with a supplementary resume caused unsafe aggregate RAM pressure; it cannot
+provide a terminal stack.
+
+Commit `da4abdc` repairs the exact fault site with a representation-wide
+invariant and passes release plus sanitizer validation.  A new exact
+from-start replay of `da4abdc` is still required to establish normal theorem
+output and proof closure at given 13,006.  Given the measured 8:40:44 runtime
+and 4.8-GiB peak RSS, it should be run alone while monitoring system-wide
+available RAM, PSI, and per-process `VmSwap`.
 
 ## What is and is not established
 
@@ -418,12 +516,15 @@ Established:
   maintenance work.
 - Josef 01's 30,827-given compact trajectory is identical to original P9;
   its failure is not search divergence.
+- The first safe-point Josef 02 replay exactly matches all 13,006 supplied
+  givens and localizes its remaining failure to a mixed-Topform sign query.
+- Resident and archived formula sign queries now obey one tested invariant
+  across memory, mmap, and file backends.
 
 Not yet established without rerunning the expensive jobs:
 
-- Josef 01/02 have not yet completed a post-safe-point mature proof
-  reconstruction.  Exact fixed and pre-fix diagnostic replays are currently
-  running through the Josef 02 boundary.
+- Josef 01/02 have not yet completed a post-`da4abdc` mature proof
+  reconstruction.  The completed pre-`da4abdc` replay is diagnostic only.
 - Josef 03 must still pass its original 460-million-generated boundary to
   demonstrate the repaired transition under the same long-run interleaving.
 - The bounded injected-contradiction runs validate full-bank initialization
