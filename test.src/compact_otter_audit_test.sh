@@ -420,6 +420,27 @@ fi
   > "$test_tmp/terminal-hints.norm"
 grep -q 'label(repeated_anyconst)' "$test_tmp/terminal-hints.norm"
 
+# Hyperresolution can deliver an already-empty conclusion directly to
+# cl_process(), rather than discovering a conflict while preprocessing a
+# nonempty result.  Its nested clash/Mindex producer must receive the same
+# cancellation request and unwind before proof output or index destruction.
+P9_COMPACT_HEAP=1 "$repo_dir/bin/prover9" \
+  < "$repo_dir/test.src/terminal_hyper_empty.in" \
+  > "$test_tmp/terminal-hyper.out" \
+  2> "$test_tmp/terminal-hyper.err"
+grep -q 'THEOREM PROVED' "$test_tmp/terminal-hyper.out"
+grep -q '^4 \$F\.  \[hyper(1,a,2,a,b,3,a)\]\.$' \
+  "$test_tmp/terminal-hyper.out"
+if grep -Eq 'Fatal error|closure failure|pinned clause' \
+     "$test_tmp/terminal-hyper.err"; then
+  cat "$test_tmp/terminal-hyper.err" >&2
+  exit 1
+fi
+"$repo_dir/bin/prooftrans" parents_only \
+  < "$test_tmp/terminal-hyper.out" \
+  > "$test_tmp/terminal-hyper.proof"
+grep -q '^4 \$F\.  \[1,2,3\]\.$' "$test_tmp/terminal-hyper.proof"
+
 # A generated q(a) discovers the terminal proof while unit_conflict owns a
 # materialized pin on still-passive -q(a).  Terminal handling must cancel the
 # producer, release the pin, snapshot the complete proof (including clause

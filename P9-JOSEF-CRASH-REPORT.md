@@ -301,6 +301,11 @@ to evict that pinned clause; cache zero prints an open proof omitting the
 conflicting parent.  Both cache configurations now produce the same closed
 five-step proof, and `prooftrans parents_only` verifies both parents.
 
+A second fixture makes hyperresolution return an empty conclusion directly
+from a nested clash traversal.  It produces a closed four-step proof with the
+nucleus and both satellites, proving that the safe-point protocol is not
+limited to the unit-conflict entry path.
+
 The same boundary passes after checkpoint/resume with all checkpoint
 verification fields intact.  Consumer cancellation/restart tests cover
 eager and bounded paramodulation and hyperresolution, plus binary
