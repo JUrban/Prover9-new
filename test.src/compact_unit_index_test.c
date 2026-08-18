@@ -215,10 +215,12 @@ int main(void)
     unsigned long long *root_ids, *position_ids, *tree_ids;
     unsigned long long *adaptive_ids, *adaptive_repeat_ids;
     unsigned long long *root_instances, *tree_instances;
+    unsigned long long *adaptive_instances;
     unsigned long long *tree_variable_ids;
     size_t root_count, position_count, tree_count;
     size_t adaptive_count, adaptive_repeat_count;
     size_t root_instance_count, tree_instance_count;
+    size_t adaptive_instance_count;
     size_t tree_variable_count;
     char text[128];
     int i;
@@ -286,11 +288,17 @@ int main(void)
       root_index, query->literals->atom, TRUE, 0, &root_instance_count);
     tree_instances = compact_unit_instance_ids(
       tree_index, query->literals->atom, TRUE, 0, &tree_instance_count);
+    adaptive_instances = compact_unit_instance_ids(
+      adaptive_index, query->literals->atom, TRUE, 0,
+      &adaptive_instance_count);
     CHECK(root_instance_count == 1 &&
           tree_instance_count == root_instance_count &&
           memcmp(root_instances, tree_instances,
+                 root_instance_count * sizeof(*root_instances)) == 0 &&
+          adaptive_instance_count == root_instance_count &&
+          memcmp(root_instances, adaptive_instances,
                  root_instance_count * sizeof(*root_instances)) == 0,
-          "instance-tree retrieval preserves the exact rigid answer");
+          "tree-backed strategies preserve the exact rigid instance answer");
     compact_unit_index_get_stats(root_index, &root_stats);
     compact_unit_index_get_stats(position_index, &position_stats);
     compact_unit_index_get_stats(tree_index, &tree_stats);
@@ -312,6 +320,10 @@ int main(void)
           tree_stats.instance_exact_tests == 1 &&
           tree_stats.instance_tree_postings_examined == 1,
           "instance-tree retrieval reaches only the compatible posting");
+    CHECK(adaptive_stats.instance_tree_queries == 1 &&
+          adaptive_stats.instance_exact_tests == 1 &&
+          adaptive_stats.instance_tree_postings_examined == 1,
+          "adaptive instance retrieval uses its code tree");
     variable_query = parse_clause_from_string("u(x).");
     tree_variable_ids = compact_unit_unifier_ids(
       tree_index, variable_query->literals->atom, TRUE, 0,
@@ -355,6 +367,7 @@ int main(void)
     safe_free(tree_ids);
     safe_free(root_instances);
     safe_free(tree_instances);
+    safe_free(adaptive_instances);
     safe_free(tree_variable_ids);
     delete_clause(query);
     delete_clause(variable_query);

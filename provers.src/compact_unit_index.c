@@ -94,6 +94,8 @@ struct compact_unit_index {
   size_t feature_chunk_capacity;
   size_t feature_posting_count;
   Compact_term_pool term_pool;
+  const int32_t *query_token_base;
+  unsigned long long query_logical_base;
   BOOL owns_term_pool;
   Compact_id_map id_map;
   struct cui_query_term *query;
@@ -428,6 +430,36 @@ static void update_peak(Compact_unit_index index)
     index->peak_bytes = bytes;
   if (index->active > index->peak)
     index->peak = index->active;
+}
+
+/* A compact term pool cannot grow or rebase while an index query is active.
+   Resolve its storage once per public query so the node hot paths only decode
+   the packed offset and length instead of calling the validating public slice
+   resolver for every visited radix edge. */
+static void prepare_query_term_access(Compact_unit_index index)
+{
+  index->query_token_base = compact_term_pool_tokens(index->term_pool);
+  index->query_logical_base =
+    compact_term_pool_logical_base(index->term_pool);
+}
+
+static inline uint32_t query_slice_length(Compact_term_slice slice)
+{
+  return (uint32_t) (slice >> COMPACT_TERM_SLICE_OFFSET_BITS);
+}
+
+static inline const int32_t *query_slice_tokens(
+  Compact_unit_index index, Compact_term_slice slice)
+{
+  unsigned long long offset = slice & COMPACT_TERM_SLICE_OFFSET_MAX;
+  return index->query_token_base +
+    (size_t) (offset - index->query_logical_base);
+}
+
+static inline int32_t query_first_code(Compact_unit_index index,
+                                       uint32_t node)
+{
+  return query_slice_tokens(index, index->nodes[node].tokens)[0];
 }
 
 #define ENSURE_ARRAY(index, field, count, capacity, message) do {       \
@@ -1035,9 +1067,8 @@ static BOOL match_generalization_edge(
   uint32_t *next_position)
 {
   struct cui_node *edge = &index->nodes[node];
-  const int32_t *tokens = compact_term_pool_slice_tokens(
-    index->term_pool, edge->tokens);
-  uint32_t length = compact_term_slice_length(edge->tokens);
+  const int32_t *tokens = query_slice_tokens(index, edge->tokens);
+  uint32_t length = query_slice_length(edge->tokens);
   uint32_t i;
   *new_count = 0;
   for (i = 0; i < length; i++) {
@@ -1130,6 +1161,7 @@ unsigned long long compact_unit_generalization_first(
   memset(&work, 0, sizeof(work));
   compact_query_timer_start(&index->generalization_timer);
   index->generalization_queries++;
+  prepare_query_term_access(index);
   memset(bindings, 0, sizeof(bindings));
   flatten_query(index, target, &count);
   result = count == 0 ? 0 : generalization_rec(
@@ -1251,9 +1283,9 @@ static void collect_instance_tree_candidates(
   unsigned long long *dead)
 {
   struct cui_node *edge = &index->nodes[node];
-  uint32_t edge_length = compact_term_slice_length(edge->tokens);
+  uint32_t edge_length = query_slice_length(edge->tokens);
   const int32_t *edge_tokens = edge_length == 0 ? NULL :
-    compact_term_pool_slice_tokens(index->term_pool, edge->tokens);
+    query_slice_tokens(index, edge->tokens);
   uint32_t at;
   uint32_t child;
 
@@ -1317,9 +1349,8 @@ static void collect_instance_tree_candidates(
       index->instance_exact_tests++;
       for (variable = 0; variable < MAX_VARS; variable++)
         starts[variable] = UINT32_MAX;
-      record_tokens = compact_term_pool_slice_tokens(
-        index->term_pool, record->tokens);
-      record_length = compact_term_slice_length(record->tokens);
+      record_tokens = query_slice_tokens(index, record->tokens);
+      record_length = query_slice_length(record->tokens);
       position = 0;
       if (pattern_matches_tokens(record_tokens, pattern, &position,
                                  record_length, starts, ends) &&
@@ -1351,8 +1382,10 @@ unsigned long long *compact_unit_instance_ids(
     return NULL;
   compact_query_timer_start(&index->instance_timer);
   index->instance_queries++;
+  prepare_query_term_access(index);
   tests_before = index->instance_exact_tests;
-  if (index->strategy == COMPACT_UNIT_CODE_TREE) {
+  if (index->strategy == COMPACT_UNIT_CODE_TREE ||
+      index->strategy == COMPACT_UNIT_ADAPTIVE) {
     size_t query_count = 0;
     uint32_t child;
     index->instance_tree_queries++;
@@ -1386,9 +1419,8 @@ unsigned long long *compact_unit_instance_ids(
       index->instance_exact_tests++;
       for (j = 0; j < MAX_VARS; j++)
         starts[j] = UINT32_MAX;
-      record_tokens = compact_term_pool_slice_tokens(
-        index->term_pool, record->tokens);
-      record_length = compact_term_slice_length(record->tokens);
+      record_tokens = query_slice_tokens(index, record->tokens);
+      record_length = query_slice_length(record->tokens);
       position = 0;
       if (pattern_matches_tokens(record_tokens, pattern, &position,
                                  record_length, starts, ends) &&
@@ -1406,7 +1438,9 @@ unsigned long long *compact_unit_instance_ids(
   compact_profile_note(
     &index->instance_profile,
     index->instance_exact_tests - tests_before,
-    visited + (index->strategy == COMPACT_UNIT_CODE_TREE ? live + dead : 0),
+    visited +
+      ((index->strategy == COMPACT_UNIT_CODE_TREE ||
+        index->strategy == COMPACT_UNIT_ADAPTIVE) ? live + dead : 0),
     live, dead, 0, found, 0);
   compact_profile_note_exact(
     &index->instance_profile,
@@ -1587,14 +1621,13 @@ static BOOL resident_unifies_record(Compact_unit_index index, Term query,
   struct cui_unify_state state;
   struct cui_expr resident, token;
   memset(&state, 0, sizeof(state));
-  state.tokens = compact_term_pool_slice_tokens(index->term_pool,
-                                                 record->tokens);
+  state.tokens = query_slice_tokens(index, record->tokens);
   resident.token = FALSE;
   resident.value.resident = query;
   resident.token_end = 0;
   token.token = TRUE;
   token.value.position = 0;
-  token.token_end = compact_term_slice_length(record->tokens);
+  token.token_end = query_slice_length(record->tokens);
   return unify_exprs(&state, resident, token);
 }
 
@@ -1622,9 +1655,9 @@ static void collect_code_tree_candidates(
   unsigned long long *dead)
 {
   struct cui_node *edge = &index->nodes[node];
-  uint32_t edge_length = compact_term_slice_length(edge->tokens);
+  uint32_t edge_length = query_slice_length(edge->tokens);
   const int32_t *edge_tokens = edge_length == 0 ? NULL :
-    compact_term_pool_slice_tokens(index->term_pool, edge->tokens);
+    query_slice_tokens(index, edge->tokens);
   uint32_t at;
   uint32_t child;
 
@@ -1717,7 +1750,7 @@ static void collect_code_tree_candidates(
     work->rigid_parents++;
     for (child = edge->first_child; child != CUI_NONE;
          child = index->nodes[child].next_sibling) {
-      int32_t code = first_code(index, child);
+      int32_t code = query_first_code(index, child);
       work->rigid_sibling_checks++;
       if (code < 0 || code == wanted) {
         work->rigid_children++;
@@ -1863,7 +1896,7 @@ static void collect_position_bucket(
       (*live)++;
       if (record->sign != (unsigned char) sign ||
           record->proof_id == exclude_id ||
-          compact_term_slice_length(record->tokens) == 0 ||
+          query_slice_length(record->tokens) == 0 ||
           record->root_symbol != (unsigned) SYMNUM(query))
         continue;
       index->unifier_exact_tests++;
@@ -1925,6 +1958,7 @@ unsigned long long *compact_unit_unifier_ids(
     compact_query_timer_stop(&index->unifier_timer);
     return NULL;
   }
+  prepare_query_term_access(index);
   memset(&choice, 0, sizeof(choice));
   memset(&tree_work, 0, sizeof(tree_work));
   use_tree = index->strategy == COMPACT_UNIT_CODE_TREE;
@@ -1972,7 +2006,7 @@ unsigned long long *compact_unit_unifier_ids(
        compatible branches. */
     for (child = index->nodes[root].first_child; child != CUI_NONE;
          child = index->nodes[child].next_sibling) {
-      int32_t code = first_code(index, child);
+      int32_t code = query_first_code(index, child);
       if (code < 0 || code == query_root)
         collect_code_tree_candidates(
           index, child, 0, (uint32_t) query_count, 0, query, exclude_id,
@@ -2020,7 +2054,7 @@ unsigned long long *compact_unit_unifier_ids(
         dead++;
       if (!record->active || record->sign != (unsigned char) sign ||
           record->proof_id == exclude_id ||
-          compact_term_slice_length(record->tokens) == 0 ||
+          query_slice_length(record->tokens) == 0 ||
           record->root_symbol != (unsigned) query_root)
         continue;
       index->unifier_exact_tests++;
