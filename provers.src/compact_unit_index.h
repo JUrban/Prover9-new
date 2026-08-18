@@ -36,6 +36,13 @@ struct compact_unit_index_stats {
   unsigned long long code_tree_queries;
   unsigned long long code_tree_nodes_examined;
   unsigned long long code_tree_postings_examined;
+  unsigned long long code_tree_variable_parents;
+  unsigned long long code_tree_variable_children;
+  unsigned long long code_tree_pending_parents;
+  unsigned long long code_tree_pending_children;
+  unsigned long long code_tree_rigid_parents;
+  unsigned long long code_tree_rigid_children;
+  unsigned long long code_tree_rigid_sibling_checks;
   unsigned long long feature_items;
   unsigned long long feature_posting_items;
   struct compact_query_profile generalization_profile;

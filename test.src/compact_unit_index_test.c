@@ -206,13 +206,17 @@ int main(void)
     enum { FAMILY = 256 };
     Compact_unit_index root_index, position_index, tree_index;
     struct compact_unit_index_stats root_stats, position_stats, tree_stats;
+    struct compact_unit_index_stats tree_variable_stats;
     Topform *family = safe_malloc(FAMILY * sizeof(*family));
     Topform broad;
     Topform query;
+    Topform variable_query;
     unsigned long long *root_ids, *position_ids, *tree_ids;
     unsigned long long *root_instances, *tree_instances;
+    unsigned long long *tree_variable_ids;
     size_t root_count, position_count, tree_count;
     size_t root_instance_count, tree_instance_count;
+    size_t tree_variable_count;
     char text[128];
     int i;
 
@@ -286,6 +290,19 @@ int main(void)
           tree_stats.instance_exact_tests == 1 &&
           tree_stats.instance_tree_postings_examined == 1,
           "instance-tree retrieval reaches only the compatible posting");
+    variable_query = parse_clause_from_string("u(x).");
+    tree_variable_ids = compact_unit_unifier_ids(
+      tree_index, variable_query->literals->atom, TRUE, 0,
+      &tree_variable_count);
+    compact_unit_index_get_stats(tree_index, &tree_variable_stats);
+    CHECK(tree_variable_count == FAMILY + 1 && tree_variable_ids != NULL,
+          "code-tree variable expansion preserves every unifier");
+    CHECK(tree_variable_stats.code_tree_variable_parents > 0 &&
+          tree_variable_stats.code_tree_variable_children > 0 &&
+          tree_variable_stats.code_tree_rigid_parents > 0 &&
+          tree_variable_stats.code_tree_rigid_sibling_checks >=
+            tree_variable_stats.code_tree_rigid_children,
+          "code-tree fanout counters distinguish variable and rigid work");
     CHECK(compact_unit_index_remove(position_index, family[137]->id),
           "remove a position-index answer");
     compact_unit_index_compact_all_stale(position_index);
@@ -308,7 +325,9 @@ int main(void)
     safe_free(tree_ids);
     safe_free(root_instances);
     safe_free(tree_instances);
+    safe_free(tree_variable_ids);
     delete_clause(query);
+    delete_clause(variable_query);
     compact_unit_index_free(root_index);
     compact_unit_index_free(position_index);
     compact_unit_index_free(tree_index);

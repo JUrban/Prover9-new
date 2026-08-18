@@ -300,6 +300,10 @@ void fprint_compact_unit_index(FILE *fp)
           "position_fallbacks=%llu, position_postings=%llu, "
           "position_duplicates=%llu, code_tree_queries=%llu, "
           "code_tree_nodes=%llu, code_tree_postings=%llu, "
+          "code_tree_variable_parents=%llu, code_tree_variable_children=%llu, "
+          "code_tree_pending_parents=%llu, code_tree_pending_children=%llu, "
+          "code_tree_rigid_parents=%llu, code_tree_rigid_children=%llu, "
+          "code_tree_rigid_sibling_checks=%llu, "
           "node_items=%llu, posting_items=%llu, "
           "feature_items=%llu, feature_posting_items=%llu, "
           "nodes=%llu, postings=%llu, "
@@ -321,6 +325,13 @@ void fprint_compact_unit_index(FILE *fp)
           stats.position_duplicate_postings,
           stats.code_tree_queries, stats.code_tree_nodes_examined,
           stats.code_tree_postings_examined,
+          stats.code_tree_variable_parents,
+          stats.code_tree_variable_children,
+          stats.code_tree_pending_parents,
+          stats.code_tree_pending_children,
+          stats.code_tree_rigid_parents,
+          stats.code_tree_rigid_children,
+          stats.code_tree_rigid_sibling_checks,
           stats.node_items, stats.posting_items,
           stats.feature_items, stats.feature_posting_items,
           stats.node_bytes,

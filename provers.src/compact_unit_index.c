@@ -110,6 +110,13 @@ struct compact_unit_index {
   unsigned long long code_tree_queries;
   unsigned long long code_tree_nodes_examined;
   unsigned long long code_tree_postings_examined;
+  unsigned long long code_tree_variable_parents;
+  unsigned long long code_tree_variable_children;
+  unsigned long long code_tree_pending_parents;
+  unsigned long long code_tree_pending_children;
+  unsigned long long code_tree_rigid_parents;
+  unsigned long long code_tree_rigid_children;
+  unsigned long long code_tree_rigid_sibling_checks;
   struct compact_query_profile generalization_profile;
   struct compact_query_profile instance_profile;
   struct compact_query_profile unifier_profile;
@@ -861,6 +868,14 @@ static void compact_unit_index_compact_internal(Compact_unit_index index,
   index->code_tree_queries = old.code_tree_queries;
   index->code_tree_nodes_examined = old.code_tree_nodes_examined;
   index->code_tree_postings_examined = old.code_tree_postings_examined;
+  index->code_tree_variable_parents = old.code_tree_variable_parents;
+  index->code_tree_variable_children = old.code_tree_variable_children;
+  index->code_tree_pending_parents = old.code_tree_pending_parents;
+  index->code_tree_pending_children = old.code_tree_pending_children;
+  index->code_tree_rigid_parents = old.code_tree_rigid_parents;
+  index->code_tree_rigid_children = old.code_tree_rigid_children;
+  index->code_tree_rigid_sibling_checks =
+    old.code_tree_rigid_sibling_checks;
   index->generalization_profile = old.generalization_profile;
   index->instance_profile = old.instance_profile;
   index->unifier_profile = old.unifier_profile;
@@ -1515,6 +1530,17 @@ static BOOL resident_unifies_record(Compact_unit_index index, Term query,
   return unify_exprs(&state, resident, token);
 }
 
+struct cui_code_tree_work {
+  unsigned long long nodes;
+  unsigned long long variable_parents;
+  unsigned long long variable_children;
+  unsigned long long pending_parents;
+  unsigned long long pending_children;
+  unsigned long long rigid_parents;
+  unsigned long long rigid_children;
+  unsigned long long rigid_sibling_checks;
+};
+
 /* Traverse the existing radix-compressed term-code tree as a safe unification
    filter.  Repeated-variable and occurs-check constraints are deliberately
    deferred to resident_unifies_record(); ignoring them can add candidates but
@@ -1524,7 +1550,7 @@ static void collect_code_tree_candidates(
   Compact_unit_index index, uint32_t node, uint32_t query_position,
   uint32_t query_end, size_t pending, Term query,
   unsigned long long exclude_id, size_t *found,
-  unsigned long long *visited, unsigned long long *live,
+  struct cui_code_tree_work *work, unsigned long long *live,
   unsigned long long *dead)
 {
   struct cui_node *edge = &index->nodes[node];
@@ -1534,8 +1560,7 @@ static void collect_code_tree_candidates(
   uint32_t at;
   uint32_t child;
 
-  (*visited)++;
-  index->code_tree_nodes_examined++;
+  work->nodes++;
   for (at = 0; at < edge_length; at++) {
     int32_t code = edge_tokens[at];
     if (pending != 0) {
@@ -1598,24 +1623,40 @@ static void collect_code_tree_candidates(
      per conflict query merely to reject most at their first token.  A
      resident variable (or a stored subtree currently covered by one) still
      visits every child, preserving the complete unification answer set. */
-  if (pending != 0 ||
-      (query_position < query_end &&
-       VARIABLE(index->query[query_position].term))) {
+  if (pending != 0) {
+    work->pending_parents++;
     for (child = edge->first_child; child != CUI_NONE;
-         child = index->nodes[child].next_sibling)
+         child = index->nodes[child].next_sibling) {
+      work->pending_children++;
       collect_code_tree_candidates(index, child, query_position, query_end,
-                                   pending, query, exclude_id, found, visited,
+                                   pending, query, exclude_id, found, work,
                                    live, dead);
+    }
+  }
+  else if (query_position < query_end &&
+           VARIABLE(index->query[query_position].term)) {
+    work->variable_parents++;
+    for (child = edge->first_child; child != CUI_NONE;
+         child = index->nodes[child].next_sibling) {
+      work->variable_children++;
+      collect_code_tree_candidates(index, child, query_position, query_end,
+                                   pending, query, exclude_id, found, work,
+                                   live, dead);
+    }
   }
   else if (query_position < query_end) {
     int wanted = SYMNUM(index->query[query_position].term);
+    work->rigid_parents++;
     for (child = edge->first_child; child != CUI_NONE;
          child = index->nodes[child].next_sibling) {
       int32_t code = first_code(index, child);
-      if (code < 0 || code == wanted)
+      work->rigid_sibling_checks++;
+      if (code < 0 || code == wanted) {
+        work->rigid_children++;
         collect_code_tree_candidates(
           index, child, query_position, query_end, pending, query,
-          exclude_id, found, visited, live, dead);
+          exclude_id, found, work, live, dead);
+      }
       else if (code > wanted)
         break;
     }
@@ -1750,6 +1791,7 @@ unsigned long long *compact_unit_unifier_ids(
   int query_root;
   unsigned long long tests_before, visited = 0, live = 0, dead = 0;
   unsigned long long duplicates = 0;
+  struct cui_code_tree_work tree_work;
   struct cui_feature_choice choice;
   if (count == NULL)
     return NULL;
@@ -1767,6 +1809,7 @@ unsigned long long *compact_unit_unifier_ids(
     return NULL;
   }
   memset(&choice, 0, sizeof(choice));
+  memset(&tree_work, 0, sizeof(tree_work));
   if (index->strategy == COMPACT_UNIT_CODE_TREE) {
     size_t query_count = 0;
     uint32_t child;
@@ -1785,10 +1828,19 @@ unsigned long long *compact_unit_unifier_ids(
       if (code < 0 || code == query_root)
         collect_code_tree_candidates(
           index, child, 0, (uint32_t) query_count, 0, query, exclude_id,
-          &found, &visited, &live, &dead);
+          &found, &tree_work, &live, &dead);
       else if (code > query_root)
         break;
     }
+    visited = tree_work.nodes;
+    index->code_tree_nodes_examined += tree_work.nodes;
+    index->code_tree_variable_parents += tree_work.variable_parents;
+    index->code_tree_variable_children += tree_work.variable_children;
+    index->code_tree_pending_parents += tree_work.pending_parents;
+    index->code_tree_pending_children += tree_work.pending_children;
+    index->code_tree_rigid_parents += tree_work.rigid_parents;
+    index->code_tree_rigid_children += tree_work.rigid_children;
+    index->code_tree_rigid_sibling_checks += tree_work.rigid_sibling_checks;
   }
   else if (index->strategy == COMPACT_UNIT_POSITION) {
     size_t key_at;
@@ -1888,6 +1940,14 @@ void compact_unit_index_get_stats(Compact_unit_index index,
   stats->code_tree_queries = index->code_tree_queries;
   stats->code_tree_nodes_examined = index->code_tree_nodes_examined;
   stats->code_tree_postings_examined = index->code_tree_postings_examined;
+  stats->code_tree_variable_parents = index->code_tree_variable_parents;
+  stats->code_tree_variable_children = index->code_tree_variable_children;
+  stats->code_tree_pending_parents = index->code_tree_pending_parents;
+  stats->code_tree_pending_children = index->code_tree_pending_children;
+  stats->code_tree_rigid_parents = index->code_tree_rigid_parents;
+  stats->code_tree_rigid_children = index->code_tree_rigid_children;
+  stats->code_tree_rigid_sibling_checks =
+    index->code_tree_rigid_sibling_checks;
   stats->feature_items = index->feature_bucket_count == 0 ? 0 :
     index->feature_bucket_count - 1;
   stats->feature_posting_items = index->feature_posting_count == 0 ? 0 :
