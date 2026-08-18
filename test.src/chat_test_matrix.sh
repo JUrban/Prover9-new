@@ -22,6 +22,8 @@ compact_back_tree_budget_kb=${CHAT_COMPACT_BACK_TREE_BUDGET_KB:-65536}
 compact_back_tree_budget_pct=${CHAT_COMPACT_BACK_TREE_BUDGET_PCT:-200}
 passive_selector_buffer=${CHAT_PASSIVE_SELECTOR_BUFFER:-65536}
 production_passive_selector_buffer=${CHAT_PRODUCTION_PASSIVE_SELECTOR_BUFFER:-1048576}
+hint_conjunction_kb=${CHAT_HINT_CONJUNCTION_KB:-}
+compact_rewrite_deep_cache_kb=${CHAT_COMPACT_REWRITE_DEEP_CACHE_KB:-0}
 new_prover=${CHAT_NEW_PROVER:-"$repo_dir/bin/prover9"}
 old_prover=${CHAT_OLD_PROVER:-/project/Prover9-old-LADR-2026-6A/bin/prover9}
 all_cases='old_otter new_otter_fpa new_otter_packed new_otter_packed_fast new_otter_compact_full new_otter_compact_packed_fast new_otter_compact_file_mask new_otter_compact_file_mask32 new_otter_compact_file_adaptive new_otter_compact_file_adaptive32 new_otter_compact_file_production new_otter_compact_file_signature new_otter_compact_file_heap new_otter_compact_file_runs new_otter_compact_file_linear discount_clauses_selected discount_clauses_eager collective_balanced_selected collective_balanced_legacy collective_balanced_eager'
@@ -96,6 +98,8 @@ esac
   echo "compact_back_tree_budget_pct=$compact_back_tree_budget_pct"
   echo "passive_selector_buffer=$passive_selector_buffer"
   echo "production_passive_selector_buffer=$production_passive_selector_buffer"
+  echo "hint_conjunction_kb=${hint_conjunction_kb:-default}"
+  echo "compact_rewrite_deep_cache_kb=$compact_rewrite_deep_cache_kb"
   echo "cases=$selected_cases"
   echo "reference_output=${reference_output:-none}"
   echo "compare_max_cpu_ratio=$compare_max_cpu_ratio"
@@ -113,6 +117,7 @@ base_input="$output_dir/base-filtered.in"
 awk '
   /^assign\((max_given|max_seconds|max_minutes|max_hours|max_days|max_megs|report|stats),/ { next }
   /^assign\((search_loop|passive_store|passive_directory|passive_selector_store|discount_demodulation|hint_index|inference_frontier|collective_scheduler|ancestor_store),/ { next }
+  /^assign\(hint_conjunction_kb,/ { next }
   /^assign\(passive_selector_buffer,/ { next }
   /^assign\(compact_term_reclaim_kb,/ { next }
   /^assign\(compact_index_stale_pct,/ { next }
@@ -161,6 +166,10 @@ write_case()
     echo "assign(max_seconds,$max_seconds)."
     echo "assign(max_megs,$max_megs)."
     printf '%s\n' "$policy"
+    if test "$name" = new_otter_compact_file_production &&
+       test -n "$hint_conjunction_kb"; then
+      echo "assign(hint_conjunction_kb,$hint_conjunction_kb)."
+    fi
     case "$name" in
       new_otter_compact_file_linear|new_otter_compact_file_adaptive|new_otter_compact_file_adaptive32|new_otter_compact_file_production)
         echo "assign(compact_term_reclaim_kb,$compact_term_reclaim_kb)."
@@ -323,7 +332,7 @@ set(compact_nonunit_path_filter).
 assign(compact_back_demod_strategy,adaptive32).
 set(compact_back_sparse_positions).
 assign(compact_passive_cache,0).
-assign(compact_rewrite_deep_cache_kb,0).'
+assign(compact_rewrite_deep_cache_kb,'"$compact_rewrite_deep_cache_kb"').'
 
 write_case new_otter_compact_file_signature '
 assign(search_loop,otter).
