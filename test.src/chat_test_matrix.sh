@@ -286,7 +286,7 @@ set(compact_otter_back_demod_index).
 set(compact_otter_nonunit_index).
 assign(compact_unit_strategy,code_tree).
 set(compact_nonunit_path_filter).
-assign(compact_back_demod_strategy,'"$compact_back_demod_strategy"').
+assign(compact_back_demod_strategy,adaptive32).
 set(compact_back_sparse_positions).'
 
 write_case new_otter_compact_file_adaptive '
@@ -331,7 +331,7 @@ set(compact_otter_back_demod_index).
 set(compact_otter_nonunit_index).
 assign(compact_unit_strategy,code_tree).
 set(compact_nonunit_path_filter).
-assign(compact_back_demod_strategy,adaptive32).
+assign(compact_back_demod_strategy,'"$compact_back_demod_strategy"').
 set(compact_back_sparse_positions).
 assign(compact_passive_cache,0).
 assign(compact_rewrite_deep_cache_kb,'"$compact_rewrite_deep_cache_kb"').'
