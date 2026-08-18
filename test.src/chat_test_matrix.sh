@@ -20,6 +20,7 @@ compact_back_eager_position_depth=${CHAT_COMPACT_BACK_EAGER_POSITION_DEPTH:-4}
 compact_back_edge_filter=${CHAT_COMPACT_BACK_EDGE_FILTER:-0}
 compact_back_tree_budget_kb=${CHAT_COMPACT_BACK_TREE_BUDGET_KB:-65536}
 compact_back_tree_budget_pct=${CHAT_COMPACT_BACK_TREE_BUDGET_PCT:-200}
+compact_back_demod_strategy=${CHAT_COMPACT_BACK_DEMOD_STRATEGY:-adaptive32}
 passive_selector_buffer=${CHAT_PASSIVE_SELECTOR_BUFFER:-65536}
 production_passive_selector_buffer=${CHAT_PRODUCTION_PASSIVE_SELECTOR_BUFFER:-1048576}
 hint_conjunction_kb=${CHAT_HINT_CONJUNCTION_KB:-}
@@ -96,6 +97,7 @@ esac
   echo "compact_back_edge_filter=$compact_back_edge_filter"
   echo "compact_back_tree_budget_kb=$compact_back_tree_budget_kb"
   echo "compact_back_tree_budget_pct=$compact_back_tree_budget_pct"
+  echo "compact_back_demod_strategy=$compact_back_demod_strategy"
   echo "passive_selector_buffer=$passive_selector_buffer"
   echo "production_passive_selector_buffer=$production_passive_selector_buffer"
   echo "hint_conjunction_kb=${hint_conjunction_kb:-default}"
@@ -284,7 +286,7 @@ set(compact_otter_back_demod_index).
 set(compact_otter_nonunit_index).
 assign(compact_unit_strategy,code_tree).
 set(compact_nonunit_path_filter).
-assign(compact_back_demod_strategy,adaptive32).
+assign(compact_back_demod_strategy,'"$compact_back_demod_strategy"').
 set(compact_back_sparse_positions).'
 
 write_case new_otter_compact_file_adaptive '
