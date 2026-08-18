@@ -312,6 +312,14 @@ BOOL compact_back_demod_read_adaptive_state(
 void compact_back_demod_get_stats(Compact_back_demod_index index,
                                   struct compact_back_demod_stats *stats);
 
+/* Hot lifecycle checks need only these scalar populations.  Keep them
+   separate from get_stats(), which intentionally walks position buckets to
+   assemble a complete diagnostic report. */
+unsigned long long compact_back_demod_active_records(
+  Compact_back_demod_index index);
+unsigned long long compact_back_demod_physical_records(
+  Compact_back_demod_index index);
+
 void compact_back_demod_free(Compact_back_demod_index index);
 
 #endif

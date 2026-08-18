@@ -150,16 +150,12 @@ static void compact_back_demod_advise_materialized_batch(
 
 unsigned long long compact_back_demod_active_count(void)
 {
-  struct compact_back_demod_stats stats;
-  compact_back_demod_get_stats(Compact_back_demod_idx, &stats);
-  return stats.active;
+  return compact_back_demod_active_records(Compact_back_demod_idx);
 }
 
 unsigned long long compact_back_demod_physical_count(void)
 {
-  struct compact_back_demod_stats stats;
-  compact_back_demod_get_stats(Compact_back_demod_idx, &stats);
-  return stats.physical;
+  return compact_back_demod_physical_records(Compact_back_demod_idx);
 }
 
 void compact_back_demod_compact_all_stale_records(void)

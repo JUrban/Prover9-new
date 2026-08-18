@@ -7920,6 +7920,19 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->peak_bytes = index->peak_bytes;
 }
 
+unsigned long long compact_back_demod_active_records(
+  Compact_back_demod_index index)
+{
+  return index == NULL ? 0 : index->active;
+}
+
+unsigned long long compact_back_demod_physical_records(
+  Compact_back_demod_index index)
+{
+  return index == NULL || index->record_count == 0 ? 0 :
+    index->record_count - 1;
+}
+
 void compact_back_demod_free(Compact_back_demod_index index)
 {
   if (index == NULL)

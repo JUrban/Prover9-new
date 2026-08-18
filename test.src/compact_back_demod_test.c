@@ -149,6 +149,10 @@ int main(void)
   compact_back_demod_get_stats(index, &stats);
   CHECK(stats.active == 4 && stats.retired == 1 && stats.physical == 5,
         "lifecycle counters are exact");
+  CHECK(compact_back_demod_active_records(index) == stats.active,
+        "constant-time active population agrees with full statistics");
+  CHECK(compact_back_demod_physical_records(index) == stats.physical,
+        "constant-time physical population agrees with full statistics");
   CHECK(stats.queries == 5 && stats.exact_tests == 7,
         "query accounting is exact");
   CHECK(stats.query_profile.queries == stats.queries &&
