@@ -21,9 +21,10 @@ compact_back_edge_filter=${CHAT_COMPACT_BACK_EDGE_FILTER:-0}
 compact_back_tree_budget_kb=${CHAT_COMPACT_BACK_TREE_BUDGET_KB:-65536}
 compact_back_tree_budget_pct=${CHAT_COMPACT_BACK_TREE_BUDGET_PCT:-200}
 passive_selector_buffer=${CHAT_PASSIVE_SELECTOR_BUFFER:-65536}
+production_passive_selector_buffer=${CHAT_PRODUCTION_PASSIVE_SELECTOR_BUFFER:-1048576}
 new_prover=${CHAT_NEW_PROVER:-"$repo_dir/bin/prover9"}
 old_prover=${CHAT_OLD_PROVER:-/project/Prover9-old-LADR-2026-6A/bin/prover9}
-all_cases='old_otter new_otter_fpa new_otter_packed new_otter_packed_fast new_otter_compact_full new_otter_compact_packed_fast new_otter_compact_file_mask new_otter_compact_file_mask32 new_otter_compact_file_adaptive new_otter_compact_file_adaptive32 new_otter_compact_file_signature new_otter_compact_file_heap new_otter_compact_file_runs new_otter_compact_file_linear discount_clauses_selected discount_clauses_eager collective_balanced_selected collective_balanced_legacy collective_balanced_eager'
+all_cases='old_otter new_otter_fpa new_otter_packed new_otter_packed_fast new_otter_compact_full new_otter_compact_packed_fast new_otter_compact_file_mask new_otter_compact_file_mask32 new_otter_compact_file_adaptive new_otter_compact_file_adaptive32 new_otter_compact_file_production new_otter_compact_file_signature new_otter_compact_file_heap new_otter_compact_file_runs new_otter_compact_file_linear discount_clauses_selected discount_clauses_eager collective_balanced_selected collective_balanced_legacy collective_balanced_eager'
 selected_cases=${CHAT_CASES:-$all_cases}
 reference_output=${CHAT_REFERENCE_OUTPUT:-}
 compare_max_cpu_ratio=${CHAT_COMPARE_MAX_CPU_RATIO:-1.25}
@@ -94,6 +95,7 @@ esac
   echo "compact_back_tree_budget_kb=$compact_back_tree_budget_kb"
   echo "compact_back_tree_budget_pct=$compact_back_tree_budget_pct"
   echo "passive_selector_buffer=$passive_selector_buffer"
+  echo "production_passive_selector_buffer=$production_passive_selector_buffer"
   echo "cases=$selected_cases"
   echo "reference_output=${reference_output:-none}"
   echo "compare_max_cpu_ratio=$compare_max_cpu_ratio"
@@ -158,7 +160,7 @@ write_case()
     echo "assign(max_megs,$max_megs)."
     printf '%s\n' "$policy"
     case "$name" in
-      new_otter_compact_file_linear|new_otter_compact_file_adaptive|new_otter_compact_file_adaptive32)
+      new_otter_compact_file_linear|new_otter_compact_file_adaptive|new_otter_compact_file_adaptive32|new_otter_compact_file_production)
         echo "assign(compact_term_reclaim_kb,$compact_term_reclaim_kb)."
         echo "assign(compact_index_stale_pct,$compact_index_stale_pct)."
         echo "assign(compact_back_position_build_factor,$compact_back_position_build_factor)."
@@ -290,6 +292,36 @@ assign(compact_unit_strategy,code_tree).
 set(compact_nonunit_path_filter).
 assign(compact_back_demod_strategy,adaptive).
 set(compact_back_sparse_positions).'
+
+# Current low-RAM OTTER release candidate.  Keep this separate from the
+# historical adaptive/adaptive32 cases: archived experiments rely on those
+# names retaining their original heap-selector policies.
+write_case new_otter_compact_file_production '
+assign(search_loop,otter).
+assign(passive_store,dense).
+assign(passive_directory,file).
+assign(passive_selector_store,file).
+assign(passive_selector_buffer,'"$production_passive_selector_buffer"').
+assign(hint_index,packed_fast).
+assign(inference_frontier,clauses).
+assign(ancestor_store,file).
+set(process_initial_sos).
+set(back_demod).
+set(back_demod_hints).
+clear(unit_deletion).
+clear(ancestor_subsume).
+clear(eval_rewrite).
+clear(compress_disabled).
+set(compact_otter_demodulation).
+set(compact_otter_unit_index).
+set(compact_otter_back_demod_index).
+set(compact_otter_nonunit_index).
+assign(compact_unit_strategy,code_tree).
+set(compact_nonunit_path_filter).
+assign(compact_back_demod_strategy,adaptive32).
+set(compact_back_sparse_positions).
+assign(compact_passive_cache,0).
+assign(compact_rewrite_deep_cache_kb,0).'
 
 write_case new_otter_compact_file_signature '
 assign(search_loop,otter).
