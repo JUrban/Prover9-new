@@ -304,6 +304,11 @@ void fprint_compact_unit_index(FILE *fp)
           "code_tree_pending_parents=%llu, code_tree_pending_children=%llu, "
           "code_tree_rigid_parents=%llu, code_tree_rigid_children=%llu, "
           "code_tree_rigid_sibling_checks=%llu, "
+          "adaptive_queries=%llu, adaptive_tree_choices=%llu, "
+          "adaptive_position_choices=%llu, "
+          "adaptive_position_empty_choices=%llu, "
+          "adaptive_route_hits=%llu, adaptive_route_misses=%llu, "
+          "adaptive_route_replacements=%llu, adaptive_route_bytes=%llu, "
           "node_items=%llu, posting_items=%llu, "
           "feature_items=%llu, feature_posting_items=%llu, "
           "nodes=%llu, postings=%llu, "
@@ -312,6 +317,7 @@ void fprint_compact_unit_index(FILE *fp)
           Compact_unit_authoritative ? "authoritative" : "audit",
           stats.strategy == COMPACT_UNIT_POSITION ? "position" :
           stats.strategy == COMPACT_UNIT_CODE_TREE ? "code_tree" :
+          stats.strategy == COMPACT_UNIT_ADAPTIVE ? "adaptive" :
           "root_scan",
           Compact_unit_audit_failures, stats.active, stats.peak,
           stats.retired, stats.physical, stats.compactions,
@@ -332,6 +338,14 @@ void fprint_compact_unit_index(FILE *fp)
           stats.code_tree_rigid_parents,
           stats.code_tree_rigid_children,
           stats.code_tree_rigid_sibling_checks,
+          stats.adaptive_queries,
+          stats.adaptive_tree_choices,
+          stats.adaptive_position_choices,
+          stats.adaptive_position_empty_choices,
+          stats.adaptive_route_hits,
+          stats.adaptive_route_misses,
+          stats.adaptive_route_replacements,
+          stats.adaptive_route_bytes,
           stats.node_items, stats.posting_items,
           stats.feature_items, stats.feature_posting_items,
           stats.node_bytes,

@@ -306,7 +306,7 @@ struct prover_options {
     passive_store,       // full, compressed
     passive_directory,   // memory, file
     passive_selector_store, // heap, file
-    compact_unit_strategy, // root_scan, position, code_tree
+    compact_unit_strategy, // root_scan, position, code_tree, adaptive
     compact_back_demod_strategy, // mask8/mask32, signature32, trees, position, adaptive
     discount_demodulation, // selected, eager_legacy, eager_interreduced
     hint_index,          // fpa, compact, shallow, packed/hybrid, packed_legacy

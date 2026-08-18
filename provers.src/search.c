@@ -2252,10 +2252,11 @@ Prover_options init_prover_options(void)
                                               "file");
 
   p->compact_unit_strategy =
-    init_stringparm("compact_unit_strategy", 3,
+    init_stringparm("compact_unit_strategy", 4,
                     "root_scan",
                     "position",
-                    "code_tree");
+                    "code_tree",
+                    "adaptive");
 
   p->compact_back_demod_strategy =
     init_stringparm("compact_back_demod_strategy", 9,
@@ -11387,7 +11388,9 @@ static void configure_search_indexes(void)
     str_ident(stringparm1(Opt->compact_unit_strategy), "position") ?
       COMPACT_UNIT_POSITION :
     str_ident(stringparm1(Opt->compact_unit_strategy), "code_tree") ?
-      COMPACT_UNIT_CODE_TREE : COMPACT_UNIT_ROOT_SCAN);
+      COMPACT_UNIT_CODE_TREE :
+    str_ident(stringparm1(Opt->compact_unit_strategy), "adaptive") ?
+      COMPACT_UNIT_ADAPTIVE : COMPACT_UNIT_ROOT_SCAN);
   configure_compact_back_demod_stale_pct(
     (unsigned) parm(Opt->compact_index_stale_pct));
   configure_compact_back_demod_strategy(

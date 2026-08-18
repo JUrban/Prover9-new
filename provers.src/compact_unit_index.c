@@ -6,6 +6,9 @@
 
 #define CUI_NONE 0U
 #define CUI_GROWTH_STALE_FLOOR 16384ULL
+#define CUI_ADAPTIVE_ROUTE_CAPACITY 65536U
+#define CUI_ADAPTIVE_POSITION_FACTOR 12ULL
+#define CUI_FEATURE_CHUNK_DATA 248U
 
 static unsigned Compaction_stale_pct = 25;
 static Compact_unit_strategy Unit_strategy = COMPACT_UNIT_ROOT_SCAN;
@@ -41,19 +44,30 @@ typedef char compact_unit_record_must_remain_40_bytes[
 
 struct cui_feature_bucket {
   uint64_t key;
-  uint32_t first_posting;
-  uint32_t last_posting;
+  uint32_t first_chunk;
+  uint32_t last_chunk;
   uint32_t count;
+  uint32_t last_record;
 };
 
-struct cui_feature_posting {
-  uint32_t record;
+struct cui_feature_chunk {
   uint32_t next;
+  uint16_t used;
+  uint16_t reserved;
+  unsigned char data[CUI_FEATURE_CHUNK_DATA];
 };
+
+typedef char compact_unit_feature_chunk_must_remain_256_bytes[
+  sizeof(struct cui_feature_chunk) == 256 ? 1 : -1];
 
 struct cui_query_term {
   Term term;
   uint32_t end;
+};
+
+struct cui_adaptive_route {
+  uint64_t key;
+  unsigned long long tree_nodes;
 };
 
 struct compact_unit_index {
@@ -75,9 +89,10 @@ struct compact_unit_index {
   size_t feature_bucket_capacity;
   uint32_t *feature_hash;
   size_t feature_hash_capacity;
-  struct cui_feature_posting *feature_postings;
+  struct cui_feature_chunk *feature_chunks;
+  size_t feature_chunk_count;
+  size_t feature_chunk_capacity;
   size_t feature_posting_count;
-  size_t feature_posting_capacity;
   Compact_term_pool term_pool;
   BOOL owns_term_pool;
   Compact_id_map id_map;
@@ -89,6 +104,7 @@ struct compact_unit_index {
   size_t path_capacity;
   uint64_t *selected_variable_keys;
   size_t selected_variable_capacity;
+  struct cui_adaptive_route *adaptive_routes;
   uint32_t query_stamp;
   unsigned long long active;
   unsigned long long peak;
@@ -117,6 +133,13 @@ struct compact_unit_index {
   unsigned long long code_tree_rigid_parents;
   unsigned long long code_tree_rigid_children;
   unsigned long long code_tree_rigid_sibling_checks;
+  unsigned long long adaptive_queries;
+  unsigned long long adaptive_tree_choices;
+  unsigned long long adaptive_position_choices;
+  unsigned long long adaptive_position_empty_choices;
+  unsigned long long adaptive_route_hits;
+  unsigned long long adaptive_route_misses;
+  unsigned long long adaptive_route_replacements;
   struct compact_query_profile generalization_profile;
   struct compact_query_profile instance_profile;
   struct compact_query_profile unifier_profile;
@@ -288,27 +311,55 @@ static void append_feature_posting(Compact_unit_index index, uint64_t key,
                                    uint32_t record)
 {
   uint32_t bucket = find_or_add_feature_bucket(index, key);
-  uint32_t posting;
+  uint32_t delta;
+  unsigned char encoded[5];
+  size_t encoded_length = 0;
+  uint32_t chunk;
   struct cui_feature_bucket *b = &index->feature_buckets[bucket];
-  if (index->feature_posting_count == index->feature_posting_capacity) {
-    index->feature_posting_capacity = grow_dense_capacity(
-      index->feature_posting_capacity, sizeof(*index->feature_postings),
-      "compact_unit_index: feature posting overflow");
-    index->feature_postings = safe_realloc(
-      index->feature_postings,
-      index->feature_posting_capacity * sizeof(*index->feature_postings));
+  if (b->count != 0 && record <= b->last_record)
+    fatal_error("compact_unit_index: feature postings are not monotone");
+  delta = b->count == 0 ? record : record - b->last_record;
+  do {
+    unsigned char byte = (unsigned char) (delta & 0x7fU);
+    delta >>= 7;
+    if (delta != 0)
+      byte |= 0x80U;
+    encoded[encoded_length++] = byte;
+  } while (delta != 0);
+  chunk = b->last_chunk;
+  if (chunk == CUI_NONE ||
+      index->feature_chunks[chunk].used + encoded_length >
+        CUI_FEATURE_CHUNK_DATA) {
+    uint32_t added;
+    if (index->feature_chunk_count == index->feature_chunk_capacity) {
+      index->feature_chunk_capacity = grow_dense_capacity(
+        index->feature_chunk_capacity, sizeof(*index->feature_chunks),
+        "compact_unit_index: feature chunk overflow");
+      index->feature_chunks = safe_realloc(
+        index->feature_chunks,
+        index->feature_chunk_capacity * sizeof(*index->feature_chunks));
+    }
+    if (index->feature_chunk_count > UINT32_MAX)
+      fatal_error("compact_unit_index: feature chunk offsets exceed 32 bits");
+    added = (uint32_t) index->feature_chunk_count++;
+    memset(&index->feature_chunks[added], 0,
+           sizeof(index->feature_chunks[added]));
+    if (b->first_chunk == CUI_NONE)
+      b->first_chunk = added;
+    else
+      index->feature_chunks[b->last_chunk].next = added;
+    b->last_chunk = added;
+    chunk = added;
   }
-  if (index->feature_posting_count > UINT32_MAX || b->count == UINT32_MAX)
+  memcpy(index->feature_chunks[chunk].data +
+           index->feature_chunks[chunk].used,
+         encoded, encoded_length);
+  index->feature_chunks[chunk].used += (uint16_t) encoded_length;
+  if (index->feature_posting_count == SIZE_MAX || b->count == UINT32_MAX)
     fatal_error("compact_unit_index: feature postings exceed 32 bits");
-  posting = (uint32_t) index->feature_posting_count++;
-  index->feature_postings[posting].record = record;
-  index->feature_postings[posting].next = CUI_NONE;
-  if (b->first_posting == CUI_NONE)
-    b->first_posting = posting;
-  else
-    index->feature_postings[b->last_posting].next = posting;
-  b->last_posting = posting;
+  index->feature_posting_count++;
   b->count++;
+  b->last_record = record;
 }
 
 static uint32_t index_token_features(Compact_unit_index index,
@@ -358,14 +409,16 @@ static unsigned long long index_bytes(Compact_unit_index index)
        sizeof(*index->unifier_heads[1])) +
     index->feature_bucket_capacity * sizeof(*index->feature_buckets) +
     index->feature_hash_capacity * sizeof(*index->feature_hash) +
-    index->feature_posting_capacity * sizeof(*index->feature_postings) +
+    index->feature_chunk_capacity * sizeof(*index->feature_chunks) +
     (index->owns_term_pool ? terms.total_bytes : 0) +
     compact_id_map_bytes(index->id_map) +
     index->query_capacity * sizeof(*index->query) +
     index->result_capacity * sizeof(*index->result_ids) +
     index->path_capacity * sizeof(*index->path_stack) +
     index->selected_variable_capacity *
-      sizeof(*index->selected_variable_keys);
+      sizeof(*index->selected_variable_keys) +
+    (index->adaptive_routes == NULL ? 0 :
+     CUI_ADAPTIVE_ROUTE_CAPACITY * sizeof(*index->adaptive_routes));
 }
 
 static void update_peak(Compact_unit_index index)
@@ -590,7 +643,8 @@ static void index_record(Compact_unit_index index, uint32_t record)
   else
     index->postings[index->nodes[node].last_posting].next = posting;
   index->nodes[node].last_posting = posting;
-  if (index->strategy == COMPACT_UNIT_POSITION &&
+  if ((index->strategy == COMPACT_UNIT_POSITION ||
+       index->strategy == COMPACT_UNIT_ADAPTIVE) &&
       index_token_features(index, tokens, record, 0, length,
                            UINT64_C(0x726f6f745f706174), 0) !=
         length)
@@ -619,20 +673,24 @@ static Compact_unit_index compact_unit_index_init_with_pool_strategy(
                "compact_unit_index: record overflow");
   memset(&index->records[0], 0, sizeof(index->records[0]));
   index->record_count = 1;
-  if (index->strategy == COMPACT_UNIT_POSITION) {
+  if (index->strategy == COMPACT_UNIT_POSITION ||
+      index->strategy == COMPACT_UNIT_ADAPTIVE) {
     ENSURE_ARRAY(index, feature_buckets, feature_bucket_count,
                  feature_bucket_capacity,
                  "compact_unit_index: feature bucket overflow");
     memset(&index->feature_buckets[0], 0,
            sizeof(index->feature_buckets[0]));
     index->feature_bucket_count = 1;
-    ENSURE_ARRAY(index, feature_postings, feature_posting_count,
-                 feature_posting_capacity,
-                 "compact_unit_index: feature posting overflow");
-    memset(&index->feature_postings[0], 0,
-           sizeof(index->feature_postings[0]));
-    index->feature_posting_count = 1;
+    ENSURE_ARRAY(index, feature_chunks, feature_chunk_count,
+                 feature_chunk_capacity,
+                 "compact_unit_index: feature chunk overflow");
+    memset(&index->feature_chunks[0], 0,
+           sizeof(index->feature_chunks[0]));
+    index->feature_chunk_count = 1;
   }
+  if (index->strategy == COMPACT_UNIT_ADAPTIVE)
+    index->adaptive_routes = safe_calloc(
+      CUI_ADAPTIVE_ROUTE_CAPACITY, sizeof(*index->adaptive_routes));
   update_peak(index);
   return index;
 }
@@ -768,7 +826,8 @@ void compact_unit_index_set_strategy(Compact_unit_strategy strategy)
 {
   if (strategy != COMPACT_UNIT_ROOT_SCAN &&
       strategy != COMPACT_UNIT_POSITION &&
-      strategy != COMPACT_UNIT_CODE_TREE)
+      strategy != COMPACT_UNIT_CODE_TREE &&
+      strategy != COMPACT_UNIT_ADAPTIVE)
     fatal_error("compact_unit_index: invalid strategy");
   Unit_strategy = strategy;
 }
@@ -820,12 +879,13 @@ static void compact_unit_index_compact_internal(Compact_unit_index index,
   safe_free(old.unifier_heads[1]);
   safe_free(old.feature_buckets);
   safe_free(old.feature_hash);
-  safe_free(old.feature_postings);
+  safe_free(old.feature_chunks);
   compact_id_map_free(old.id_map);
   safe_free(old.query);
   safe_free(old.result_ids);
   safe_free(old.path_stack);
   safe_free(old.selected_variable_keys);
+  safe_free(old.adaptive_routes);
   old.records = safe_realloc(
     old.records, packed * sizeof(*old.records));
   old.record_capacity = packed;
@@ -876,6 +936,14 @@ static void compact_unit_index_compact_internal(Compact_unit_index index,
   index->code_tree_rigid_children = old.code_tree_rigid_children;
   index->code_tree_rigid_sibling_checks =
     old.code_tree_rigid_sibling_checks;
+  index->adaptive_queries = old.adaptive_queries;
+  index->adaptive_tree_choices = old.adaptive_tree_choices;
+  index->adaptive_position_choices = old.adaptive_position_choices;
+  index->adaptive_position_empty_choices =
+    old.adaptive_position_empty_choices;
+  index->adaptive_route_hits = old.adaptive_route_hits;
+  index->adaptive_route_misses = old.adaptive_route_misses;
+  index->adaptive_route_replacements = old.adaptive_route_replacements;
   index->generalization_profile = old.generalization_profile;
   index->instance_profile = old.instance_profile;
   index->unifier_profile = old.unifier_profile;
@@ -1665,6 +1733,7 @@ static void collect_code_tree_candidates(
 
 struct cui_feature_choice {
   uint64_t exact_key;
+  uint64_t variable_shape;
   unsigned long long score;
   size_t variable_count;
   BOOL found;
@@ -1698,8 +1767,11 @@ static void select_unifier_feature(Compact_unit_index index, Term term,
   ensure_u64_scratch(&index->path_stack, &index->path_capacity, depth + 1,
                      "compact_unit_index: query path overflow");
   index->path_stack[depth] = path;
-  if (VARIABLE(term))
+  if (VARIABLE(term)) {
+    choice->variable_shape ^= mix64(
+      path ^ UINT64_C(0x71756572795f7661));
     return;
+  }
   if (depth != 0) {
     size_t ancestor;
     exact_key = exact_feature_key(path, (unsigned) SYMNUM(term), sign);
@@ -1749,37 +1821,79 @@ static void collect_position_bucket(
   unsigned long long *dead, unsigned long long *duplicates)
 {
   uint32_t bucket = find_feature_bucket(index, key);
-  uint32_t posting;
+  uint32_t chunk;
+  uint32_t record_index = 0;
   if (bucket == CUI_NONE)
     return;
-  for (posting = index->feature_buckets[bucket].first_posting;
-       posting != CUI_NONE;
-       posting = index->feature_postings[posting].next) {
-    struct cui_record *record =
-      &index->records[index->feature_postings[posting].record];
-    (*visited)++;
-    index->position_postings_examined++;
-    if (record->query_stamp == index->query_stamp) {
-      (*duplicates)++;
-      index->position_duplicate_postings++;
-      continue;
-    }
-    record->query_stamp = index->query_stamp;
-    if (!record->active) {
-      (*dead)++;
-      continue;
-    }
-    (*live)++;
-    if (record->sign != (unsigned char) sign ||
-        record->proof_id == exclude_id ||
-        compact_term_slice_length(record->tokens) == 0 ||
-        record->root_symbol != (unsigned) SYMNUM(query))
-      continue;
-    index->unifier_exact_tests++;
-    if (resident_unifies_record(index, query, record)) {
-      append_result_id(index, record->proof_id, found);
+  for (chunk = index->feature_buckets[bucket].first_chunk;
+       chunk != CUI_NONE; chunk = index->feature_chunks[chunk].next) {
+    const struct cui_feature_chunk *c = &index->feature_chunks[chunk];
+    size_t at = 0;
+    while (at < c->used) {
+      uint32_t delta = 0;
+      unsigned shift = 0;
+      unsigned char byte;
+      struct cui_record *record;
+      do {
+        if (at >= c->used || shift >= 35)
+          fatal_error("compact_unit_index: malformed feature posting");
+        byte = c->data[at++];
+        delta |= (uint32_t) (byte & 0x7fU) << shift;
+        shift += 7;
+      } while ((byte & 0x80U) != 0);
+      if (delta > UINT32_MAX - record_index)
+        fatal_error("compact_unit_index: feature posting overflow");
+      record_index += delta;
+      if (record_index == CUI_NONE ||
+          record_index >= index->record_count)
+        fatal_error("compact_unit_index: invalid feature posting");
+      record = &index->records[record_index];
+      (*visited)++;
+      index->position_postings_examined++;
+      if (record->query_stamp == index->query_stamp) {
+        (*duplicates)++;
+        index->position_duplicate_postings++;
+        continue;
+      }
+      record->query_stamp = index->query_stamp;
+      if (!record->active) {
+        (*dead)++;
+        continue;
+      }
+      (*live)++;
+      if (record->sign != (unsigned char) sign ||
+          record->proof_id == exclude_id ||
+          compact_term_slice_length(record->tokens) == 0 ||
+          record->root_symbol != (unsigned) SYMNUM(query))
+        continue;
+      index->unifier_exact_tests++;
+      if (resident_unifies_record(index, query, record))
+        append_result_id(index, record->proof_id, found);
     }
   }
+}
+
+static struct cui_adaptive_route *adaptive_route(
+  Compact_unit_index index, Term query, BOOL sign,
+  const struct cui_feature_choice *choice, BOOL *hit)
+{
+  uint64_t key = mix64(choice->exact_key ^ choice->variable_shape ^
+                       ((uint64_t) (unsigned) SYMNUM(query) << 1) ^
+                       (sign ? UINT64_C(1) : UINT64_C(0)));
+  size_t slot;
+  struct cui_adaptive_route *route;
+  if (key == 0)
+    key = 1;
+  slot = (size_t) key & (CUI_ADAPTIVE_ROUTE_CAPACITY - 1);
+  route = &index->adaptive_routes[slot];
+  *hit = route->key == key;
+  if (!*hit) {
+    if (route->key != 0)
+      index->adaptive_route_replacements++;
+    route->key = key;
+    route->tree_nodes = 0;
+  }
+  return route;
 }
 
 unsigned long long *compact_unit_unifier_ids(
@@ -1793,6 +1907,9 @@ unsigned long long *compact_unit_unifier_ids(
   unsigned long long duplicates = 0;
   struct cui_code_tree_work tree_work;
   struct cui_feature_choice choice;
+  struct cui_adaptive_route *route = NULL;
+  BOOL route_hit = FALSE;
+  BOOL use_tree, use_position;
   if (count == NULL)
     return NULL;
   *count = 0;
@@ -1810,7 +1927,38 @@ unsigned long long *compact_unit_unifier_ids(
   }
   memset(&choice, 0, sizeof(choice));
   memset(&tree_work, 0, sizeof(tree_work));
-  if (index->strategy == COMPACT_UNIT_CODE_TREE) {
+  use_tree = index->strategy == COMPACT_UNIT_CODE_TREE;
+  use_position = index->strategy == COMPACT_UNIT_POSITION;
+  if (index->strategy == COMPACT_UNIT_POSITION ||
+      index->strategy == COMPACT_UNIT_ADAPTIVE)
+    select_unifier_feature(index, query, sign,
+                           UINT64_C(0x726f6f745f706174), 0, &choice);
+  if (index->strategy == COMPACT_UNIT_ADAPTIVE) {
+    index->adaptive_queries++;
+    route = choice.found ?
+      adaptive_route(index, query, sign, &choice, &route_hit) : NULL;
+    if (route != NULL) {
+      if (route_hit)
+        index->adaptive_route_hits++;
+      else
+        index->adaptive_route_misses++;
+    }
+    use_position = choice.found &&
+      (choice.score == 0 ||
+       (route_hit && route->tree_nodes != 0 &&
+        choice.score <=
+          ULLONG_MAX / CUI_ADAPTIVE_POSITION_FACTOR &&
+        choice.score * CUI_ADAPTIVE_POSITION_FACTOR < route->tree_nodes));
+    use_tree = !use_position;
+    if (use_position) {
+      index->adaptive_position_choices++;
+      if (choice.score == 0)
+        index->adaptive_position_empty_choices++;
+    }
+    else
+      index->adaptive_tree_choices++;
+  }
+  if (use_tree) {
     size_t query_count = 0;
     uint32_t child;
     uint32_t root = index->roots[sign ? 1 : 0];
@@ -1841,12 +1989,12 @@ unsigned long long *compact_unit_unifier_ids(
     index->code_tree_rigid_parents += tree_work.rigid_parents;
     index->code_tree_rigid_children += tree_work.rigid_children;
     index->code_tree_rigid_sibling_checks += tree_work.rigid_sibling_checks;
+    if (route != NULL)
+      route->tree_nodes = tree_work.nodes;
   }
-  else if (index->strategy == COMPACT_UNIT_POSITION) {
+  else if (use_position) {
     size_t key_at;
     index->position_queries++;
-    select_unifier_feature(index, query, sign,
-                           UINT64_C(0x726f6f745f706174), 0, &choice);
     if (choice.found) {
       begin_position_query(index);
       collect_position_bucket(index, choice.exact_key, query, sign,
@@ -1948,10 +2096,19 @@ void compact_unit_index_get_stats(Compact_unit_index index,
   stats->code_tree_rigid_children = index->code_tree_rigid_children;
   stats->code_tree_rigid_sibling_checks =
     index->code_tree_rigid_sibling_checks;
+  stats->adaptive_queries = index->adaptive_queries;
+  stats->adaptive_tree_choices = index->adaptive_tree_choices;
+  stats->adaptive_position_choices = index->adaptive_position_choices;
+  stats->adaptive_position_empty_choices =
+    index->adaptive_position_empty_choices;
+  stats->adaptive_route_hits = index->adaptive_route_hits;
+  stats->adaptive_route_misses = index->adaptive_route_misses;
+  stats->adaptive_route_replacements = index->adaptive_route_replacements;
+  stats->adaptive_route_bytes = index->adaptive_routes == NULL ? 0 :
+    CUI_ADAPTIVE_ROUTE_CAPACITY * sizeof(*index->adaptive_routes);
   stats->feature_items = index->feature_bucket_count == 0 ? 0 :
     index->feature_bucket_count - 1;
-  stats->feature_posting_items = index->feature_posting_count == 0 ? 0 :
-    index->feature_posting_count - 1;
+  stats->feature_posting_items = index->feature_posting_count;
   stats->generalization_profile = index->generalization_profile;
   stats->instance_profile = index->instance_profile;
   stats->unifier_profile = index->unifier_profile;
@@ -1981,7 +2138,7 @@ void compact_unit_index_get_stats(Compact_unit_index index,
   stats->feature_bytes =
     index->feature_bucket_capacity * sizeof(*index->feature_buckets) +
     index->feature_hash_capacity * sizeof(*index->feature_hash) +
-    index->feature_posting_capacity * sizeof(*index->feature_postings);
+    index->feature_chunk_capacity * sizeof(*index->feature_chunks);
   stats->token_bytes = index->owns_term_pool ? terms.token_bytes : 0;
   stats->hash_bytes = compact_id_map_bytes(index->id_map);
   stats->scratch_bytes =
@@ -2005,7 +2162,7 @@ void compact_unit_index_free(Compact_unit_index index)
   safe_free(index->unifier_heads[1]);
   safe_free(index->feature_buckets);
   safe_free(index->feature_hash);
-  safe_free(index->feature_postings);
+  safe_free(index->feature_chunks);
   if (index->owns_term_pool)
     compact_term_pool_free(index->term_pool);
   compact_id_map_free(index->id_map);
@@ -2013,6 +2170,7 @@ void compact_unit_index_free(Compact_unit_index index)
   safe_free(index->result_ids);
   safe_free(index->path_stack);
   safe_free(index->selected_variable_keys);
+  safe_free(index->adaptive_routes);
   free_clock(index->sort_clock);
   free_clock(index->maintenance_clock);
   safe_free(index);

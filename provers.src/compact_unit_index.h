@@ -10,7 +10,8 @@ typedef struct compact_unit_index * Compact_unit_index;
 typedef enum {
   COMPACT_UNIT_ROOT_SCAN,
   COMPACT_UNIT_POSITION,
-  COMPACT_UNIT_CODE_TREE
+  COMPACT_UNIT_CODE_TREE,
+  COMPACT_UNIT_ADAPTIVE
 } Compact_unit_strategy;
 
 struct compact_unit_index_stats {
@@ -43,6 +44,14 @@ struct compact_unit_index_stats {
   unsigned long long code_tree_rigid_parents;
   unsigned long long code_tree_rigid_children;
   unsigned long long code_tree_rigid_sibling_checks;
+  unsigned long long adaptive_queries;
+  unsigned long long adaptive_tree_choices;
+  unsigned long long adaptive_position_choices;
+  unsigned long long adaptive_position_empty_choices;
+  unsigned long long adaptive_route_hits;
+  unsigned long long adaptive_route_misses;
+  unsigned long long adaptive_route_replacements;
+  unsigned long long adaptive_route_bytes;
   unsigned long long feature_items;
   unsigned long long feature_posting_items;
   struct compact_query_profile generalization_profile;

@@ -204,17 +204,20 @@ int main(void)
 
   {
     enum { FAMILY = 256 };
-    Compact_unit_index root_index, position_index, tree_index;
+    Compact_unit_index root_index, position_index, tree_index, adaptive_index;
     struct compact_unit_index_stats root_stats, position_stats, tree_stats;
     struct compact_unit_index_stats tree_variable_stats;
+    struct compact_unit_index_stats adaptive_stats;
     Topform *family = safe_malloc(FAMILY * sizeof(*family));
     Topform broad;
     Topform query;
     Topform variable_query;
     unsigned long long *root_ids, *position_ids, *tree_ids;
+    unsigned long long *adaptive_ids, *adaptive_repeat_ids;
     unsigned long long *root_instances, *tree_instances;
     unsigned long long *tree_variable_ids;
     size_t root_count, position_count, tree_count;
+    size_t adaptive_count, adaptive_repeat_count;
     size_t root_instance_count, tree_instance_count;
     size_t tree_variable_count;
     char text[128];
@@ -226,6 +229,8 @@ int main(void)
     position_index = compact_unit_index_init();
     compact_unit_index_set_strategy(COMPACT_UNIT_CODE_TREE);
     tree_index = compact_unit_index_init();
+    compact_unit_index_set_strategy(COMPACT_UNIT_ADAPTIVE);
+    adaptive_index = compact_unit_index_init();
     for (i = 0; i < FAMILY; i++) {
       (void) snprintf(text, sizeof(text),
                       "u(f(c%d,g(h(c%d)))).", i, i);
@@ -236,6 +241,8 @@ int main(void)
             "add same-root family to position index");
       CHECK(compact_unit_index_add(tree_index, family[i]),
             "add same-root family to code-tree index");
+      CHECK(compact_unit_index_add(adaptive_index, family[i]),
+            "add same-root family to adaptive index");
     }
     broad = indexed_unit("u(x).");
     CHECK(compact_unit_index_add(root_index, broad),
@@ -244,6 +251,8 @@ int main(void)
           "add variable-cover unit to position index");
     CHECK(compact_unit_index_add(tree_index, broad),
           "add variable-cover unit to code-tree index");
+    CHECK(compact_unit_index_add(adaptive_index, broad),
+          "add variable-cover unit to adaptive index");
     query = parse_clause_from_string("u(f(c137,g(h(c137)))).");
     root_ids = compact_unit_unifier_ids(
       root_index, query->literals->atom, TRUE, 0, &root_count);
@@ -251,6 +260,11 @@ int main(void)
       position_index, query->literals->atom, TRUE, 0, &position_count);
     tree_ids = compact_unit_unifier_ids(
       tree_index, query->literals->atom, TRUE, 0, &tree_count);
+    adaptive_ids = compact_unit_unifier_ids(
+      adaptive_index, query->literals->atom, TRUE, 0, &adaptive_count);
+    adaptive_repeat_ids = compact_unit_unifier_ids(
+      adaptive_index, query->literals->atom, TRUE, 0,
+      &adaptive_repeat_count);
     CHECK(root_count == 2 && position_count == root_count &&
           tree_count == root_count,
           "selective retrieval retains exact and variable-cover answers");
@@ -259,6 +273,13 @@ int main(void)
                  root_count * sizeof(*root_ids)) == 0 &&
           tree_ids != NULL &&
           memcmp(root_ids, tree_ids,
+                 root_count * sizeof(*root_ids)) == 0 &&
+          adaptive_count == root_count &&
+          adaptive_repeat_count == root_count &&
+          adaptive_ids != NULL && adaptive_repeat_ids != NULL &&
+          memcmp(root_ids, adaptive_ids,
+                 root_count * sizeof(*root_ids)) == 0 &&
+          memcmp(root_ids, adaptive_repeat_ids,
                  root_count * sizeof(*root_ids)) == 0,
           "selective retrieval preserves canonical answer order");
     root_instances = compact_unit_instance_ids(
@@ -273,6 +294,7 @@ int main(void)
     compact_unit_index_get_stats(root_index, &root_stats);
     compact_unit_index_get_stats(position_index, &position_stats);
     compact_unit_index_get_stats(tree_index, &tree_stats);
+    compact_unit_index_get_stats(adaptive_index, &adaptive_stats);
     CHECK(root_stats.unifier_exact_tests == FAMILY + 1 &&
           position_stats.unifier_exact_tests <= 2 &&
           tree_stats.unifier_exact_tests <= 2,
@@ -303,6 +325,12 @@ int main(void)
           tree_variable_stats.code_tree_rigid_sibling_checks >=
             tree_variable_stats.code_tree_rigid_children,
           "code-tree fanout counters distinguish variable and rigid work");
+    CHECK(adaptive_stats.adaptive_queries == 2 &&
+          adaptive_stats.adaptive_tree_choices >= 1 &&
+          adaptive_stats.adaptive_route_misses == 1 &&
+          adaptive_stats.adaptive_route_hits == 1 &&
+          adaptive_stats.adaptive_route_bytes > 0,
+          "adaptive unit routing learns without changing repeated answers");
     CHECK(compact_unit_index_remove(position_index, family[137]->id),
           "remove a position-index answer");
     compact_unit_index_compact_all_stale(position_index);
@@ -315,6 +343,8 @@ int main(void)
           "remove a code-tree answer");
     compact_unit_index_compact_all_stale(tree_index);
     safe_free(tree_ids);
+    safe_free(adaptive_ids);
+    safe_free(adaptive_repeat_ids);
     tree_ids = compact_unit_unifier_ids(
       tree_index, query->literals->atom, TRUE, 0, &tree_count);
     CHECK(tree_count == 1 && tree_ids[0] == broad->id,
@@ -331,6 +361,7 @@ int main(void)
     compact_unit_index_free(root_index);
     compact_unit_index_free(position_index);
     compact_unit_index_free(tree_index);
+    compact_unit_index_free(adaptive_index);
     for (i = 0; i < FAMILY; i++)
       delete_clause(family[i]);
     safe_free(family);
