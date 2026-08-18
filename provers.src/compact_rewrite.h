@@ -110,6 +110,12 @@ void compact_rewrite_clause(Compact_rewrite_bank bank, Topform clause,
 void compact_rewrite_get_stats(Compact_rewrite_bank bank,
                                struct compact_rewrite_stats *stats);
 
+/* Hot search/lifecycle predicates need only maintained populations; avoid
+   constructing the complete diagnostic snapshot for those scalar reads. */
+unsigned long long compact_rewrite_active_rules(Compact_rewrite_bank bank);
+
+unsigned long long compact_rewrite_physical_rules(Compact_rewrite_bank bank);
+
 BOOL compact_rewrite_compaction_needed(Compact_rewrite_bank bank);
 
 void compact_rewrite_compact(Compact_rewrite_bank bank);

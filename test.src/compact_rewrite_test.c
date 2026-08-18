@@ -151,6 +151,9 @@ int main(void)
 
   compact_rewrite_get_stats(bank, &stats);
   CHECK(stats.rules_current == 6, "compact rule count");
+  CHECK(compact_rewrite_active_rules(bank) == stats.rules_current &&
+        compact_rewrite_physical_rules(bank) == stats.rules_physical,
+        "constant-time rewrite populations agree with full statistics");
   CHECK(stats.attempts > 0 && stats.rewrites > 0,
         "compact rewrite accounting");
   CHECK(stats.node_bytes > 0 && stats.posting_bytes > 0 &&

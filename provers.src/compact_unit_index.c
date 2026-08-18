@@ -2207,6 +2207,18 @@ void compact_unit_index_get_stats(Compact_unit_index index,
   stats->peak_bytes = index->peak_bytes;
 }
 
+unsigned long long compact_unit_index_active_records(Compact_unit_index index)
+{
+  return index == NULL ? 0 : index->active;
+}
+
+unsigned long long compact_unit_index_physical_records(
+  Compact_unit_index index)
+{
+  return index == NULL || index->record_count == 0 ? 0 :
+    index->record_count - 1;
+}
+
 void compact_unit_index_free(Compact_unit_index index)
 {
   if (index == NULL)

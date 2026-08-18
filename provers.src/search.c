@@ -581,11 +581,9 @@ static struct {
 
 static BOOL demodulation_rules_available(void)
 {
-  struct compact_rewrite_stats compact;
-  compact_rewrite_get_stats(Compact_rewrite_rules, &compact);
   return (Glob.demods != NULL && !clist_empty(Glob.demods)) ||
     rewrite_only_store_count(Rewrite_only_rules) != 0 ||
-    compact.rules_current != 0;
+    compact_rewrite_active_rules(Compact_rewrite_rules) != 0;
 }
 
 /* Keep one demodulation callback at every consumer boundary.  In compact
@@ -6644,8 +6642,7 @@ void compress_retained_store(Clause_store store)
 static void maybe_compact_shared_term_pool(void)
 {
   struct compact_term_pool_stats terms;
-  struct compact_rewrite_stats rewrite;
-  unsigned long long retained, stale;
+  unsigned long long retained, physical, stale;
   unsigned long long stale_tokens, estimated_reclaimable_bytes;
   unsigned long long configured_reclaim_bytes, predicted_reclaim_bytes;
   Compact_term_rebase_map map;
@@ -6658,16 +6655,17 @@ static void maybe_compact_shared_term_pool(void)
     Compact_term_reclaim_cooldown_skips++;
     return;
   }
-  compact_rewrite_get_stats(Compact_rewrite_rules, &rewrite);
   /* Every physical record still owns a valid term slice even when it is
      inactive.  The index-specific 25%-stale policies rebuild those records
      independently; count the physical populations here so a pool reclaim is
      delayed until it can drop clauses absent from every current index. */
   retained = compact_back_demod_physical_count();
-  if (compact_unit_physical_count() > retained)
-    retained = compact_unit_physical_count();
-  if (rewrite.rules_physical > retained)
-    retained = rewrite.rules_physical;
+  physical = compact_unit_physical_count();
+  if (physical > retained)
+    retained = physical;
+  physical = compact_rewrite_physical_rules(Compact_rewrite_rules);
+  if (physical > retained)
+    retained = physical;
   if (terms.clause_entries <= retained)
     return;
   stale = terms.clause_entries - retained;

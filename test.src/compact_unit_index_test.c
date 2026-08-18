@@ -156,6 +156,9 @@ int main(void)
   compact_unit_index_get_stats(index, &stats);
   CHECK(stats.active == 5 && stats.retired == 1 && stats.physical == 6,
         "lifecycle counters are exact");
+  CHECK(compact_unit_index_active_records(index) == stats.active &&
+        compact_unit_index_physical_records(index) == stats.physical,
+        "constant-time unit populations agree with full statistics");
   CHECK(stats.total_bytes > 0 && stats.peak_bytes >= stats.total_bytes,
         "resident byte accounting is present");
   CHECK(stats.generalization_profile.queries ==

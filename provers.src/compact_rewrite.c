@@ -1975,6 +1975,16 @@ void compact_rewrite_get_stats(Compact_rewrite_bank bank,
   stats->peak_bytes = bank->peak_bytes;
 }
 
+unsigned long long compact_rewrite_active_rules(Compact_rewrite_bank bank)
+{
+  return bank == NULL ? 0 : bank->active_rules;
+}
+
+unsigned long long compact_rewrite_physical_rules(Compact_rewrite_bank bank)
+{
+  return bank == NULL || bank->rule_count == 0 ? 0 : bank->rule_count - 1;
+}
+
 void compact_rewrite_free(Compact_rewrite_bank bank)
 {
   if (bank == NULL)

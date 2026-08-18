@@ -138,6 +138,13 @@ unsigned long long *compact_unit_unifier_ids(
 void compact_unit_index_get_stats(Compact_unit_index index,
                                   struct compact_unit_index_stats *stats);
 
+/* Constant-time population reads for hot lifecycle checks. */
+unsigned long long compact_unit_index_active_records(
+  Compact_unit_index index);
+
+unsigned long long compact_unit_index_physical_records(
+  Compact_unit_index index);
+
 void compact_unit_index_free(Compact_unit_index index);
 
 #endif

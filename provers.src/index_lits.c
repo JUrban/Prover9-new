@@ -129,16 +129,12 @@ static BOOL compact_unit_index_mode(void)
 
 unsigned long long compact_unit_active_count(void)
 {
-  struct compact_unit_index_stats stats;
-  compact_unit_index_get_stats(Compact_units, &stats);
-  return stats.active;
+  return compact_unit_index_active_records(Compact_units);
 }
 
 unsigned long long compact_unit_physical_count(void)
 {
-  struct compact_unit_index_stats stats;
-  compact_unit_index_get_stats(Compact_units, &stats);
-  return stats.physical;
+  return compact_unit_index_physical_records(Compact_units);
 }
 
 void compact_unit_compact_all_stale(void)
