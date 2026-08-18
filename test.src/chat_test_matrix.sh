@@ -117,6 +117,7 @@ awk '
   /^assign\(compact_term_reclaim_kb,/ { next }
   /^assign\(compact_index_stale_pct,/ { next }
   /^assign\(compact_rewrite_deep_cache_kb,/ { next }
+  /^assign\(compact_passive_cache,/ { next }
   /^assign\(compact_(unit_strategy|back_demod_strategy),/ { next }
   /^assign\(compact_back_(position_(build_factor|budget_kb|budget_pct)|eager_position_depth),/ { next }
   /^assign\(compact_back_tree_(budget_kb|budget_pct),/ { next }
@@ -126,6 +127,7 @@ awk '
   /^(set|clear)\(compact_back_sparse_positions\)\./ { next }
   /^(set|clear)\(compact_back_edge_filter\)\./ { next }
   /^(set|clear)\(compact_nonunit_path_filter\)\./ { next }
+  /^(set|clear)\(compress_disabled\)\./ { next }
   /^(set|clear)\(print_(gen|kept|given|initial_clauses)\)\./ { next }
   { print }
 ' "$input" > "$base_input"
