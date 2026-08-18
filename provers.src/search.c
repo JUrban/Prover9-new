@@ -16828,6 +16828,13 @@ Prover_results search(Prover_input p)
       compact_term_pool_enable_sharing_profile(Compact_terms);
     if (Compact_rewrite_rules != NULL)
       fatal_error("search: previous compact rewrite bank was not released");
+    /* The bank copies this bounded-cache allowance at construction time.
+       configure_search_indexes() normally runs later, immediately before
+       the legacy index shells are initialized, which is too late for this
+       one construction property.  Apply it here as well so ordinary and
+       checkpoint startup both honor the input option. */
+    compact_rewrite_set_deep_child_cache_kb(
+      (unsigned) parm(Opt->compact_rewrite_deep_cache_kb));
     Compact_rewrite_rules =
       (eager_interreduced_demod_mode() || compact_otter_bank_mode()) ?
       compact_rewrite_init_with_pool(Compact_terms) : NULL;

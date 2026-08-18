@@ -15,6 +15,7 @@ assign(stats,all).' "$repo_dir/prover9.examples/x2.in" | \
   "$repo_dir/bin/prover9" > "$test_tmp/audit.out" 2> "$test_tmp/audit.err"
 
 sed '1i\
+assign(compact_rewrite_deep_cache_kb,8192).\
 set(compact_otter_demodulation).\
 assign(stats,all).' "$repo_dir/prover9.examples/x2.in" | \
   "$repo_dir/bin/prover9" > "$test_tmp/compact.out" 2> "$test_tmp/compact.err"
@@ -133,6 +134,8 @@ grep -q 'THEOREM PROVED' "$test_tmp/back-demod-compact.out"
 grep -Eq 'Compact_otter_audit: queries=[1-9][0-9]*, failures=0, current_rules=[1-9][0-9]*,' \
   "$test_tmp/audit.out"
 grep -Eq 'Compact_otter_demodulation: current_rules=[1-9][0-9]*, peak_rules=[1-9][0-9]*,' \
+  "$test_tmp/compact.out"
+grep -Eq 'Compact_rewrite_deep_cache: budget_bytes=8388608,' \
   "$test_tmp/compact.out"
 grep -Eq 'Compact_unit_index: mode=audit, strategy=root_scan, failures=0, active=[1-9][0-9]*, peak=[1-9][0-9]*,' \
   "$test_tmp/unit-audit.out"
