@@ -19,6 +19,7 @@
 #include "symbols.h"
 #include "memory.h"
 #include "parse.h"
+#include <stdint.h>
 
 /* Private definitions and types*/
 
@@ -48,6 +49,16 @@ struct symbol {
 
 static Plist By_id[SYM_TAB_SIZE];   /* for access by symnum (ID) */
 static Plist By_sym[SYM_TAB_SIZE];  /* for access by string/arity */
+
+/*
+ * Symbol numbers are dense, monotonically increasing positive integers.
+ * Keep the historical hash table for enumeration and compatibility, but
+ * use this side table for the very frequent ID-to-symbol lookup.  Pointing
+ * at the authoritative Symbol (instead of copying fields such as arity or
+ * KB weight) means subsequent property updates cannot make the cache stale.
+ */
+static Symbol *By_id_direct;
+static size_t By_id_direct_capacity;
 
 static unsigned Symbol_count;
 
@@ -502,6 +513,37 @@ unsigned hash_id(int id)
 
 /*************
  *
+ *   ensure_direct_id_capacity()
+ *
+ *************/
+
+static
+void ensure_direct_id_capacity(unsigned symnum)
+{
+  size_t required = (size_t) symnum + 1;
+
+  if (required > By_id_direct_capacity) {
+    size_t old_capacity = By_id_direct_capacity;
+    size_t new_capacity = old_capacity == 0 ? 256 : old_capacity;
+
+    while (new_capacity < required) {
+      if (new_capacity > SIZE_MAX / 2)
+        fatal_error("symbol direct index capacity overflow");
+      new_capacity *= 2;
+    }
+    if (new_capacity > SIZE_MAX / sizeof(*By_id_direct))
+      fatal_error("symbol direct index allocation overflow");
+
+    By_id_direct = safe_realloc(By_id_direct,
+                                new_capacity * sizeof(*By_id_direct));
+    memset(By_id_direct + old_capacity, 0,
+           (new_capacity - old_capacity) * sizeof(*By_id_direct));
+    By_id_direct_capacity = new_capacity;
+  }
+}  /* ensure_direct_id_capacity */
+
+/*************
+ *
  *   lookup_by_id()
  *
  *************/
@@ -509,13 +551,10 @@ unsigned hash_id(int id)
 static
 Symbol lookup_by_id(int symnum)
 {
-  Plist p;
-  for (p = By_id[hash_id(symnum)]; p; p = p->next) {
-    Symbol s = p->v;
-    if (s->symnum == symnum)
-      return s;
-  }
-  return NULL;
+  if (symnum <= 0 || (unsigned) symnum > Symbol_count)
+    return NULL;
+  else
+    return By_id_direct[symnum];
 }  /* lookup_by_id */
 
 /*************
@@ -568,6 +607,8 @@ int str_to_sn(char *str, int arity)
     s->name_len = len;
     s->arity = arity;
     s->symnum = new_symnum();
+    ensure_direct_id_capacity((unsigned) s->symnum);
+    By_id_direct[s->symnum] = s;
 
     /* printf("New Symbol: %s/%d, sn=%d\n", str, arity, s->symnum); */
 
@@ -3150,4 +3191,3 @@ Ilist symnums_of_arity(Ilist p, int arity)
   }
   return p;
 }  /* symnums_of_arity */
-
