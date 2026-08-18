@@ -1262,7 +1262,7 @@ int main(void)
     int j;
     compact_back_demod_set_position_options(1, 4, 1, 0, 50, TRUE, TRUE);
     compact_back_demod_set_eager_position_depth(2);
-    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_ADAPTIVE);
+    compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_ADAPTIVE32);
     eager = compact_back_demod_init();
     multi = indexed_clause("q(a,a) | r(f(c),a).");
     CHECK(compact_back_demod_add(eager, multi),
@@ -1285,8 +1285,9 @@ int main(void)
           eager_stats.position_eager_features > 0 &&
           eager_stats.position_admissions == 0 &&
           eager_stats.position_queries == 1 &&
+          eager_stats.mask_directory_queries == 0 &&
           eager_stats.position_bitmap_bytes == 0,
-          "eager sparse paths need no demand census or record bitmap");
+          "eager sparse paths need no mask/demand census or record bitmap");
     before_empty = eager_stats;
     missing = indexed_clause(
       "eager_root(x,eager_branch(eager_missing)) = eager_done.");

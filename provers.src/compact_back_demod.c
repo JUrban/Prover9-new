@@ -5699,6 +5699,26 @@ static unsigned long long route_mask_population(
   return population;
 }
 
+/* The exact required-mask bucket is one member of the mask directory's
+   compatible-superset answer.  Its posting population is therefore a cheap
+   lower bound on the complete mask census.  When a complete position route
+   already beats this bound, the ordinary full census cannot change the
+   router's decision and would be pure duplicate work. */
+static unsigned long long route_mask_population_lower_bound(
+  Compact_back_demod_index index, Term pattern)
+{
+  uint32_t symbol, bucket;
+  cbd_path_mask required;
+  size_t slot;
+  if (VARIABLE(pattern) || index->path_bucket_hash_capacity == 0)
+    return 0;
+  symbol = (uint32_t) SYMNUM(pattern);
+  required = term_path_mask(index, pattern);
+  slot = path_bucket_hash_slot(index, symbol, required);
+  bucket = index->path_bucket_hash[slot];
+  return bucket == CBD_NONE ? 0 : index->path_buckets[bucket].posting_count;
+}
+
 static unsigned long long route_root_population(
   Compact_back_demod_index index, Term pattern)
 {
@@ -6123,6 +6143,7 @@ static void collect_pattern(Compact_back_demod_index index, Term pattern,
     unsigned long long observed;
     enum cbd_route route;
     BOOL probe;
+    BOOL position_proven = FALSE;
     size_t count_before = *count;
     available[CBD_ROUTE_TREE] = use_tree_for_pattern(index, pattern);
     population[CBD_ROUTE_MASK] = route_root_population(index, pattern);
@@ -6143,17 +6164,28 @@ static void collect_pattern(Compact_back_demod_index index, Term pattern,
           population[CBD_ROUTE_MASK])) {
       /* Root population is a cheap scale-class hint, not a safe comparison
          with the mask path filter.  Pay the exact bucket census only after an
-         admitted position passes that coarse screen. */
+         admitted position passes that coarse screen.  First use the exact
+         required-mask bucket as a lower bound: if the position is already no
+         larger, the full compatible-superset census cannot alter the choice. */
       if (!mask_population_known) {
-        mask_population = route_mask_population(index, pattern);
-        mask_population_known = TRUE;
+        unsigned long long lower_bound =
+          route_mask_population_lower_bound(index, pattern);
+        if (position_route_beats_baseline(
+              index, population[CBD_ROUTE_POSITION], lower_bound))
+          position_proven = TRUE;
+        else {
+          mask_population = route_mask_population(index, pattern);
+          mask_population_known = TRUE;
+        }
       }
-      population[CBD_ROUTE_MASK] = mask_population;
-      population[CBD_ROUTE_TREE] = population[CBD_ROUTE_MASK];
-      if (!position_route_beats_baseline(
-            index, population[CBD_ROUTE_POSITION],
-            population[CBD_ROUTE_MASK]))
-        goto adaptive_nonposition;
+      if (!position_proven) {
+        population[CBD_ROUTE_MASK] = mask_population;
+        population[CBD_ROUTE_TREE] = population[CBD_ROUTE_MASK];
+        if (!position_route_beats_baseline(
+              index, population[CBD_ROUTE_POSITION],
+              population[CBD_ROUTE_MASK]))
+          goto adaptive_nonposition;
+      }
       work_before = route_work_snapshot(index);
       if (selected_positions > 1 && index->position_sparse)
         collect_sparse_position_intersection(
