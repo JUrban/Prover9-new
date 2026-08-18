@@ -1129,21 +1129,43 @@ static unsigned long long generalization_rec(
     }
     return 0;
   }
+
+  /*
+   * Siblings use code_compare() order: every stored-variable edge first,
+   * followed by rigid symbols in numeric order.  A stored pattern can
+   * generalize the target at POSITION only through a variable edge, or
+   * (when the target is rigid) through the one edge with the same symbol.
+   * Trying every other sibling used to dominate mature unit indexes even
+   * though match_generalization_edge() rejected each at its first token.
+   * Repeated stored variables still require visiting every variable edge;
+   * their bindings remain authoritative in match_generalization_edge().
+   */
+  {
+    Term target = index->query[position].term;
+    BOOL target_variable = VARIABLE(target);
+    int32_t wanted = target_variable ? 0 : (int32_t) SYMNUM(target);
+
   for (child = index->nodes[node].first_child; child != CUI_NONE;
        child = index->nodes[child].next_sibling) {
-    unsigned new_bindings[MAX_VARS];
-    unsigned new_count = 0;
-    uint32_t next_position = position;
-    unsigned long long found = 0;
-    work->nodes++;
-    if (match_generalization_edge(index, child, position, end, bindings,
-                                  new_bindings, &new_count,
-                                  &next_position))
-      found = generalization_rec(index, child, next_position, end,
-                                 bindings, exclude_id, work);
-    undo_generalization_bindings(bindings, new_bindings, new_count);
-    if (found != 0)
-      return found;
+      int32_t code = query_first_code(index, child);
+      if (code < 0 || (!target_variable && code == wanted)) {
+        unsigned new_bindings[MAX_VARS];
+        unsigned new_count = 0;
+        uint32_t next_position = position;
+        unsigned long long found = 0;
+        work->nodes++;
+        if (match_generalization_edge(index, child, position, end, bindings,
+                                      new_bindings, &new_count,
+                                      &next_position))
+          found = generalization_rec(index, child, next_position, end,
+                                     bindings, exclude_id, work);
+        undo_generalization_bindings(bindings, new_bindings, new_count);
+        if (found != 0)
+          return found;
+      }
+      else if (target_variable || code > wanted)
+        break;
+    }
   }
   return 0;
 }

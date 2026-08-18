@@ -267,6 +267,10 @@ int main(void)
     adaptive_repeat_ids = compact_unit_unifier_ids(
       adaptive_index, query->literals->atom, TRUE, 0,
       &adaptive_repeat_count);
+    CHECK(compact_unit_generalization_first(
+            tree_index, query->literals->atom, TRUE, broad->id) ==
+          family[137]->id,
+          "ordered generalization finds the matching rigid sibling");
     CHECK(root_count == 2 && position_count == root_count &&
           tree_count == root_count,
           "selective retrieval retains exact and variable-cover answers");
@@ -316,6 +320,10 @@ int main(void)
           tree_stats.code_tree_postings_examined <= 2 &&
           tree_stats.feature_bytes == 0,
           "code-tree retrieval prunes incompatible siblings without features");
+    CHECK(tree_stats.generalization_profile.queries == 1 &&
+          tree_stats.generalization_profile.successes == 1 &&
+          tree_stats.generalization_profile.work < FAMILY / 4,
+          "generalization prunes ordered incompatible rigid siblings");
     CHECK(tree_stats.instance_tree_queries == 1 &&
           tree_stats.instance_exact_tests == 1 &&
           tree_stats.instance_tree_postings_examined == 1,
