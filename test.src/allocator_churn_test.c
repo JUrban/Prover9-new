@@ -35,8 +35,11 @@ static void mixed_class_churn(unsigned long long baseline_live,
   struct churn_entry *entries = safe_malloc(sizeof(*entries) * ENTRIES);
   unsigned state = 0x9e3779b9U;
   struct memory_stats stats;
+  unsigned long long reused_before;
   int round, i;
 
+  memory_get_stats(&stats);
+  reused_before = stats.reused_slabs;
   for (round = 0; round < ROUNDS; round++) {
     for (i = 0; i < ENTRIES; i++) {
       unsigned n = sizes[(i + round) %
@@ -73,7 +76,11 @@ static void mixed_class_churn(unsigned long long baseline_live,
     memory_get_stats(&stats);
     CHECK(stats.logical_live_bytes == baseline_live,
           "mixed-class round returns logical live bytes to baseline");
+    CHECK(stats.cached_slabs > 0,
+          "mixed-class round retains a bounded recycle pool");
   }
+  CHECK(stats.reused_slabs > reused_before,
+        "mixed-class rounds reuse slab mappings across bursts");
   safe_free(entries);
   memory_release_unused();
   memory_get_stats(&stats);
@@ -142,18 +149,26 @@ int main(int argc, char **argv)
   CHECK(almost_freed.logical_live_bytes == before.logical_live_bytes +
         OBJECT_PTRS * BYTES_POINTER,
         "one retained object has exact logical accounting");
-  CHECK(almost_freed.reserved_bytes < allocated.reserved_bytes,
-        "wholly free slabs return their mappings before class teardown");
+  CHECK(almost_freed.cached_slabs <= memory_slab_cache_limit(),
+        "wholly free slabs stay within the recycle bound");
+  if (allocated.slab_count - before.slab_count >
+      memory_slab_cache_limit())
+    CHECK(almost_freed.reserved_bytes < allocated.reserved_bytes,
+          "slabs beyond the recycle bound return their mappings");
 
   free_mem(objects[count-1], OBJECT_PTRS);
   safe_free(objects);
   memory_get_stats(&freed);
   CHECK(freed.logical_live_bytes == before.logical_live_bytes,
         "logical live bytes return to baseline with a warm slab");
-  CHECK(freed.slab_count == before.slab_count + 1,
-        "one empty size-class slab remains warm");
-  CHECK(freed.reserved_bytes == before.reserved_bytes + memory_slab_bytes(),
-        "warm slab reservation is explicit in accounting");
+  CHECK(freed.cached_slabs > before.cached_slabs &&
+        freed.slab_count - before.slab_count ==
+          freed.cached_slabs - before.cached_slabs + 1,
+        "empty mappings remain in the recycle pool and one class warm slab");
+  CHECK(freed.reserved_bytes == before.reserved_bytes +
+        (freed.cached_slabs - before.cached_slabs + 1) *
+          memory_slab_bytes(),
+        "cached slab reservations are explicit in accounting");
   memory_release_unused();
   memory_get_stats(&freed);
   rss_freed = memory_current_rss_kbytes();

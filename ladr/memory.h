@@ -55,6 +55,10 @@ struct memory_stats {
   unsigned long long permanent_live_bytes;
   unsigned long long slab_count;
   unsigned long long peak_slab_count;
+  unsigned long long cached_slabs;
+  unsigned long long peak_cached_slabs;
+  unsigned long long reused_slabs;
+  unsigned long long slab_cache_evictions;
   unsigned long long reclaimed_slabs;
   unsigned long long reclaimed_bytes;
   unsigned long long cumulative_bytes;
@@ -103,6 +107,8 @@ BOOL memory_compact_system_heap_enabled(void);
 void memory_release_unused(void);
 
 unsigned long long memory_slab_bytes(void);
+
+unsigned long long memory_slab_cache_limit(void);
 
 unsigned long long memory_current_rss_kbytes(void);
 

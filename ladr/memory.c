@@ -39,6 +39,7 @@
 #define DEFAULT_MAX_MEGS  49152  /* 48 GB; change with set_max_megs(n) */
 #define MAX_SLAB_LISTS      128  /* larger requests use direct allocation */
 #define SLAB_BYTES      (256 * 1024)
+#define MAX_CACHED_SLABS     256  /* 64 MiB cross-class recycle pool */
 #define SLAB_MAGIC ((uintptr_t) 0x51ab51abU)
 
 struct memory_slab {
@@ -62,6 +63,8 @@ struct memory_class {
 };
 
 static struct memory_class Classes[MAX_SLAB_LISTS];
+static struct memory_slab *Cached_slabs;
+static unsigned Cached_slab_count;
 static struct memory_stats Memory_stats;
 
 static BOOL Max_megs_check = TRUE;
@@ -202,16 +205,28 @@ void slab_mapping_free(struct memory_slab *s)
 }  /* slab_mapping_free */
 
 static
-void release_slab(struct memory_class *c, struct memory_slab *s)
+void detach_slab(struct memory_class *c, struct memory_slab *s)
 {
   available_remove(c, s);
   all_remove(c, s);
   s->magic = 0;
+}  /* detach_slab */
+
+static
+void unmap_detached_slab(struct memory_slab *s)
+{
   Memory_stats.slab_count--;
   Memory_stats.reserved_bytes -= SLAB_BYTES;
   Memory_stats.reclaimed_slabs++;
   Memory_stats.reclaimed_bytes += SLAB_BYTES;
   slab_mapping_free(s);
+}  /* unmap_detached_slab */
+
+static
+void release_slab(struct memory_class *c, struct memory_slab *s)
+{
+  detach_slab(c, s);
+  unmap_detached_slab(s);
 }  /* release_slab */
 
 static
@@ -228,7 +243,36 @@ void release_empty_slabs(void)
       s = next;
     }
   }
+  while (Cached_slabs != NULL) {
+    struct memory_slab *s = Cached_slabs;
+    Cached_slabs = s->all_next;
+    Cached_slab_count--;
+    Memory_stats.cached_slabs--;
+    unmap_detached_slab(s);
+  }
 }  /* release_empty_slabs */
+
+/* Josef 01's compact search freed and remapped nearly twelve million
+   256-KiB slabs.  Retain a bounded pool of empty aligned mappings and allow
+   any size class to reinitialize them, avoiding kernel churn without
+   restoring the old append-only allocator's unbounded resident growth. */
+static
+void cache_empty_slab(struct memory_class *c, struct memory_slab *s)
+{
+  detach_slab(c, s);
+  if (Cached_slab_count < MAX_CACHED_SLABS) {
+    s->all_next = Cached_slabs;
+    Cached_slabs = s;
+    Cached_slab_count++;
+    Memory_stats.cached_slabs++;
+    if (Memory_stats.cached_slabs > Memory_stats.peak_cached_slabs)
+      Memory_stats.peak_cached_slabs = Memory_stats.cached_slabs;
+  }
+  else {
+    Memory_stats.slab_cache_evictions++;
+    unmap_detached_slab(s);
+  }
+}  /* cache_empty_slab */
 
 static
 struct memory_slab *new_slab(unsigned n)
@@ -238,8 +282,21 @@ struct memory_slab *new_slab(unsigned n)
   size_t header = CEILING(sizeof(struct memory_slab), BYTES_POINTER) *
                   BYTES_POINTER;
 
-  max_megs_check(SLAB_BYTES);
-  s = slab_mapping_alloc();
+  if (Cached_slabs != NULL) {
+    s = Cached_slabs;
+    Cached_slabs = s->all_next;
+    Cached_slab_count--;
+    Memory_stats.cached_slabs--;
+    Memory_stats.reused_slabs++;
+  }
+  else {
+    max_megs_check(SLAB_BYTES);
+    s = slab_mapping_alloc();
+    Memory_stats.slab_count++;
+    if (Memory_stats.slab_count > Memory_stats.peak_slab_count)
+      Memory_stats.peak_slab_count = Memory_stats.slab_count;
+    record_reservation(SLAB_BYTES);
+  }
   memset(s, 0, sizeof(*s));
   s->magic = SLAB_MAGIC;
   s->class_index = n;
@@ -249,10 +306,6 @@ struct memory_slab *new_slab(unsigned n)
     fatal_error("memory allocator, empty slab class");
   all_add(c, s);
   available_add(c, s);
-  Memory_stats.slab_count++;
-  if (Memory_stats.slab_count > Memory_stats.peak_slab_count)
-    Memory_stats.peak_slab_count = Memory_stats.slab_count;
-  record_reservation(SLAB_BYTES);
   return s;
 }  /* new_slab */
 
@@ -321,9 +374,10 @@ void slab_free(void *p, unsigned n)
 
   if (s->live_count == 0) {
     if (s->all_prev != NULL || s->all_next != NULL)
-      release_slab(c, s);
-    /* Otherwise keep one empty slab warm for this size class.  Its freelist
-       is slab-local, and memory_release_unused() can purge the mapping. */
+      cache_empty_slab(c, s);
+    /* Preserve the original per-class warm slab.  Reusing its local free
+       list is cheaper than detaching and reinitializing it through the
+       cross-class pool on every short-lived allocation. */
   }
 }  /* slab_free */
 
@@ -440,13 +494,19 @@ void memory_report(FILE *fp)
   memory_get_stats(&stats);
   fprintf(fp,
           "\nMemory report: live=%s, reserved=%s, peak_reserved=%s, "
-          "reclaimed=%s bytes in %s slabs, cumulative=%s.\n",
+          "reclaimed=%s bytes in %s slabs, cumulative=%s, "
+          "cached=%s/%u slabs, peak_cached=%s, reused=%s, "
+          "cache_evictions=%s.\n",
           comma_num(stats.logical_live_bytes),
           comma_num(stats.reserved_bytes),
           comma_num(stats.peak_reserved_bytes),
           comma_num(stats.reclaimed_bytes),
           comma_num(stats.reclaimed_slabs),
-          comma_num(stats.cumulative_bytes));
+          comma_num(stats.cumulative_bytes),
+          comma_num(stats.cached_slabs), MAX_CACHED_SLABS,
+          comma_num(stats.peak_cached_slabs),
+          comma_num(stats.reused_slabs),
+          comma_num(stats.slab_cache_evictions));
   for (i = 1; i < MAX_SLAB_LISTS; i++) {
     struct memory_slab *s;
     unsigned slabs = 0, live = 0, reusable = 0;
@@ -474,7 +534,7 @@ void memory_get_stats(struct memory_stats *stats)
   unsigned i;
   *stats = Memory_stats;
   stats->reusable_bytes = 0;
-  stats->unallocated_bytes = 0;
+  stats->unallocated_bytes = stats->cached_slabs * SLAB_BYTES;
   stats->metadata_bytes = 0;
   for (i = 1; i < MAX_SLAB_LISTS; i++) {
     struct memory_slab *s;
@@ -578,6 +638,12 @@ unsigned long long memory_slab_bytes(void)
 {
   return SLAB_BYTES;
 }  /* memory_slab_bytes */
+
+/* PUBLIC */
+unsigned long long memory_slab_cache_limit(void)
+{
+  return MAX_CACHED_SLABS;
+}  /* memory_slab_cache_limit */
 
 /*************
  *

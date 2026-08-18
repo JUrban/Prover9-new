@@ -19,8 +19,8 @@ The required invariants are:
 - a live allocation never moves;
 - an empty slab contains no live caller pointer before it is unmapped;
 - no free-list link outside a slab points into that slab;
-- each slab belongs to exactly one pointer-count class and has an exact live
-  count;
+- each active slab belongs to exactly one pointer-count class and has an exact
+  live count; an empty cached slab belongs to no class;
 - the last free makes a slab reclaimable without scanning or changing any
   other live pointer;
 - the `max_megs` check counts current reservations and purges cached empty
@@ -53,11 +53,16 @@ Each slab header owns:
 
 Allocation uses a free slot from the first available slab or carves its next
 slot.  A full slab leaves the available list.  Freeing a slot in a formerly
-full slab makes it available again.  When live count reaches zero, the mapping
-is unmapped immediately if its class has another slab.  One empty slab per
-class is retained as a warm cache to avoid map/unmap churn for short-lived
-objects.  `memory_release_unused()` purges those warm mappings as well.  Memory
-pressure through `max_megs` performs that purge automatically before failing.
+full slab makes it available again.  Each class retains one wholly empty warm
+slab so repeated short-lived allocations continue to reuse its local free list
+without reinitialization.  An additional empty slab leaves its class and enters
+a bounded cross-class recycle pool.  The pool holds at most 256 256-KiB
+mappings (64 MiB); a later allocation can reinitialize one for any
+pointer-count class.  This avoids repeated aligned `mmap`/`munmap` cycles across
+changing transient object mixes without restoring the old allocator's
+unbounded retention.  `memory_release_unused()` purges both the class-warm
+slabs and the pool.  Memory pressure through `max_megs` performs that purge
+automatically before failing.
 
 This local-free-list rule is what makes reclamation pointer-safe: unmapping a
 slab cannot leave a global free-list node pointing into returned storage.
@@ -77,7 +82,8 @@ slab cannot leave a global free-list node pointing into returned storage.
 - `fragmentation_bytes`: reserved minus logical live, exactly decomposed by
   reusable, unallocated, and metadata bytes for the slab path;
 - direct and permanent live bytes;
-- current/peak slab counts and cumulative unmapped slabs/bytes;
+- current/peak slab counts, current/peak cached slabs, mapping reuses and
+  cache evictions, and cumulative unmapped slabs/bytes;
 - cumulative requested allocation traffic.
 
 The direct-path reservation excludes allocator-private libc headers because
@@ -220,6 +226,41 @@ takes 833.73 user seconds on the slower validation run, and it peaks at
 152,904 KiB.  The 288-KiB peak difference is measurement noise at this scale;
 both controls save about 18 MiB from the preceding 170,968-KiB proof.  The P9
 switch is therefore the accepted invocation for later comparisons.
+
+## Mature allocator CPU follow-up (2026-08-18)
+
+The complete Josef 01 compact proof exposed a scaling failure that short
+prefixes could not show.  It returned 11,942,479 256-KiB slabs to the kernel,
+or 3.13 TB cumulatively, and used 8,532 system-CPU seconds.  The old P9 run of
+the exact same 30,827-given trajectory used only 288 system-CPU seconds.  The
+compact run's buffered archive traffic is far too small to explain that gap by
+itself; millions of aligned mapping creations and releases are a direct,
+measured kernel-work source.
+
+The bounded cross-class recycle pool described above addresses that source.
+An initial implementation routed even a class's sole warm slab through the
+pool.  It was rejected: at the exact 2,000-given Josef boundary it performed
+4.55 million needless detach/reinitialize cycles and took 242.79 CPU seconds,
+versus 237.98 for the same unit-index code without the pool.  The accepted
+hybrid retains one local warm slab per class and pools only excess slabs that
+the previous allocator would have unmapped.
+
+At 1,001 givens the hybrid run has the exact reference state (1,628,048
+generated and 320,239 kept).  Of the 564 excess-slab releases reported by the
+old allocator, the hybrid has reused 171 mappings, retained 252 for later
+reuse, and evicted/unmapped 141.  Its allocator reservation rises from about
+52 MiB to 118 MiB and external peak RSS from about 540 MiB to 606 MiB; the
+increase is bounded by the 64-MiB pool plus measurement noise.  On the full
+compact proof this bound is less than one percent of the measured 9.08-GiB
+PSS, so it does not materially weaken the roughly 80-percent resident-memory
+reduction.
+
+This prefix validates exactness, accounting, and the absence of an early-run
+hot-path regression.  It does not establish the full CPU saving: only a new
+30,827-given proof can measure how many of the 11.94 million mature releases
+are reused rather than evicted.  The final report must therefore treat that
+full run as an acceptance gate, not extrapolate all 8,244 excess system-CPU
+seconds as already recovered.
 
 Compact OTTER's shared term pool uses
 `assign(compact_term_reclaim_kb,8192)` by default.  This is the conservative
