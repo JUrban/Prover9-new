@@ -21,8 +21,10 @@ Release and ASan+UBSan builds pass the focused matrix and the broader compact,
 DISCOUNT, collective, checkpoint, generalization, scaling, memory, LADR, and
 TPTP suites.  The first exact mature Josef 02 replay matched all 13,006 givens
 but found a formula-as-literals bug in the new metadata-only denial walker;
-`da4abdc` repairs that boundary.  A post-`da4abdc` exact replay remains the
-last acceptance gate and is intentionally not replaced by the smaller tests.
+`da4abdc` repairs that boundary.  The post-`da4abdc` exact replay has now
+matched the same complete trajectory, produced a closed proof, reported one
+theorem, and exited normally.  The mature acceptance gate is complete; it was
+not replaced by the smaller tests.
 
 ## Problem statement
 
@@ -159,6 +161,12 @@ The repair is not accepted on a single Josef replay.  Tests must cover:
 The mature Josef 02 replay remains the end-to-end acceptance test.  Josef 01
 is a second terminal-boundary check, and Josef 03 protects the independent
 match-once retirement repair.
+
+The accepted Josef 02 run reproduced all 13,006 reference givens with
+SHA-256 `f5e0dfa2cbbaf6865656e2db16fd53e7827d4a0f1ff011da166b68abb5d3417a`,
+then exited 0 with `proofs=1`.  `prooftrans parents_only` independently
+validated a closed proof ending in `$F`.  Peak RSS was 5,124,928 KiB, with
+zero swaps and no memory-PSI event while it ran alone under a watchdog.
 
 ## Non-goals
 

@@ -45,10 +45,11 @@ clause-only, with the multi-search regressions in `1d443bd`.
 The exact mature replay then found the analogous read-side violation;
 `da4abdc` makes resident and archived sign metadata variant-safe and adds
 mixed-ancestor terminal and all-backend archive regressions.
-The exact mature Josef 02 replay is deliberately tracked as a separate final
-acceptance gate.  The pre-`da4abdc` replay is diagnostic evidence, not a
-successful acceptance run, and the focused tests below are not presented as
-a substitute for rerunning it.
+The separate exact mature Josef 02 acceptance replay has now passed on
+`da4abdc`: it reproduced all 13,006 givens byte-for-byte, produced a closed
+proof, and exited normally.  The pre-`da4abdc` replay remains diagnostic
+evidence; the successful post-fix replay and its resource audit are recorded
+below rather than inferred from the focused tests.
 
 ## Evidence from the supplied outputs
 
@@ -140,6 +141,53 @@ from-start replay was retained, and it finished with about 6.3 GiB available
 and memory PSI 0.00.  The checkpoint resume was not trajectory-equivalent
 because the current checkpoint boundary records a selected given before its
 inference transaction, so it is not acceptance evidence.
+
+### Josef 02: post-fix mature acceptance
+
+The sole post-`da4abdc` from-start replay used an optimized native/LTO build
+and the unchanged reconstructed Josef 02 input.  Its complete 13,006 printed
+given lines are byte-for-byte identical to `Josef_02.out1`, with the same
+SHA-256 shown above.  Unlike the reference and diagnostic runs, it then
+reported:
+
+```
+Given=13006. Generated=129776312. Kept=9226457. proofs=1.
+Max_Clause_ID=9226479.
+THEOREM PROVED
+Exiting with 1 proof.
+```
+
+The process exited with status 0 and had no signal, fatal, sanitizer, or
+buffer-overflow diagnostic.  Running `prooftrans parents_only` over the
+completed output also exited 0, produced a 30,795-line closed ancestor proof,
+and ended in clause 9226479, `$F`; no parent was missing.
+
+The acceptance run took 23,202.61 user and 1,886.83 system seconds, or
+6:58:21 wall time.  `/usr/bin/time -v` measured 5,124,928 KiB peak RSS and
+zero swaps.  A 30-second watchdog independently sampled the prover's RSS,
+`VmSwap`, system `MemAvailable`, swap availability, and memory PSI.  Prover
+`VmSwap` and PSI remained zero, the watchdog recorded no pressure hit, and no
+other Prover9 process was run concurrently.  Therefore this is both the exact
+search-path reproduction and the terminal proof/ownership acceptance run,
+not a shorter proxy.
+
+### Additional supplied `new2` evidence
+
+The later supplied outputs add two independent checks of scope and identify
+one duplicate artifact:
+
+- `Josef_01.out.new2` contains all 30,827 given clauses byte-for-byte
+  identical to `Josef_01.out.old`, then the previous binary faults exactly
+  where old P9 records `proofs=1`.  This confirms a second instance reaches
+  the same terminal boundary without search divergence.
+- `Josef_02.out.new2` is byte-for-byte identical to `Josef_02.out1`; it is a
+  duplicate artifact, not another independent experiment.
+- `Josef_03.out.new2` follows all 15,634 old given clauses exactly and exits
+  normally with one proof after 460,797,485 generated and 17,344,322 kept.
+  It therefore crosses the original duplicate-retirement boundary without
+  the former equivalence-count underflow.  It used 25,993.93 user and
+  2,737.82 system seconds (28,809 seconds wall); its final PSS report is
+  8,829,502 KiB.
 
 ### Josef 03: checked duplicate retirement
 
@@ -487,17 +535,16 @@ The following pass with the repair:
 
 The first exact from-start safe-point replay completed the full 13,006-given
 trajectory and supplied the symbolized formula-as-literals stack above.  It
-did not prove the theorem, so mature acceptance remains open.  The older
-pre-fix control was stopped near given 11,327 when running it concurrently
-with a supplementary resume caused unsafe aggregate RAM pressure; it cannot
-provide a terminal stack.
+did not prove the theorem.  Commit `da4abdc` repaired that exact fault with a
+representation-wide invariant.  The subsequent exact from-start replay now
+establishes normal theorem output, proof closure, and exit status 0 after the
+same complete trajectory.  Mature Josef 02 acceptance is therefore closed.
 
-Commit `da4abdc` repairs the exact fault site with a representation-wide
-invariant and passes release plus sanitizer validation.  A new exact
-from-start replay of `da4abdc` is still required to establish normal theorem
-output and proof closure at given 13,006.  Given the measured 8:40:44 runtime
-and 4.8-GiB peak RSS, it should be run alone while monitoring system-wide
-available RAM, PSI, and per-process `VmSwap`.
+The older pre-fix control was stopped near given 11,327 when running it
+concurrently with a supplementary resume caused unsafe aggregate RAM
+pressure; it cannot provide a terminal stack and is not used as acceptance
+evidence.  The accepted replay was instead run alone under the RAM/PSI/swap
+watchdog described above.
 
 ## What is and is not established
 
@@ -520,13 +567,17 @@ Established:
   givens and localizes its remaining failure to a mixed-Topform sign query.
 - Resident and archived formula sign queries now obey one tested invariant
   across memory, mmap, and file backends.
+- The post-`da4abdc` Josef 02 replay exactly matches all 13,006 givens, exits
+  normally with one theorem, and yields a closed `prooftrans parents_only`
+  proof.
+- The supplied Josef 03 `new2` run passes the original 460-million-generated
+  duplicate-retirement boundary and completes the same 15,634-given proof.
 
 Not yet established without rerunning the expensive jobs:
 
-- Josef 01/02 have not yet completed a post-`da4abdc` mature proof
-  reconstruction.  The completed pre-`da4abdc` replay is diagnostic only.
-- Josef 03 must still pass its original 460-million-generated boundary to
-  demonstrate the repaired transition under the same long-run interleaving.
+- Josef 01 has not yet completed a post-`da4abdc` mature proof
+  reconstruction.  Its exact previous-code `new2` trajectory localizes the
+  failure but is diagnostic only.
 - The bounded injected-contradiction runs validate full-bank initialization
   and destruction, not the CPU/RAM curve of the complete searches.
 
@@ -549,8 +600,9 @@ Capture stderr as well as stdout so any native backtrace is retained:
 ```
 
 Acceptance for Josef 01 should include the old-P9 proof boundary (30,827
-givens, clauses 36195463/36195464) and a normalized proof comparison.  For
-Josef 02, require a normal theorem/limit exit and complete final statistics.
-For Josef 03, require progress beyond the old 15,634-given boundary with no
-underflow, and compare hint totals, matched identities/trace if enabled, and
-the final proof/search outcome rather than only elapsed time.
+givens, clauses 36195463/36195464) and a normalized proof comparison.  Josef
+02 has met its normal theorem, complete-statistics, exact-trajectory, and
+closed-proof gates above.  Josef 03 has also passed its original full-search
+boundary; future repetitions should compare hint totals, matched
+identities/trace if enabled, and the final proof/search outcome rather than
+only elapsed time.
