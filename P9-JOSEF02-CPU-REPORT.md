@@ -70,13 +70,17 @@ feeding the preserved old binary.
 |---:|---:|---:|---:|---:|---:|
 | 300 | 90.88 s | 16.85 s | 5.39x | 271,744 KiB | 179,744 KiB |
 | 600 | 137.36 s | 35.08 s mean | 3.92x | 305,408 KiB | 206,482 KiB mean |
+| 600, current balanced PGO | 137.36 s | 30.04 s mean | 4.57x | 305,408 KiB | 206,324 KiB mean |
 
 Both comparisons preserve the exact generated/kept state; the 600 endpoint is
 `(601, 524799, 26671, 0)`.  The 600 old-P9 number was rerun on the current host
 after `3846b92`; the compact number is the mean of two reversed candidate
 runs.  The current compact binary is therefore 3.92 times faster and uses
-about 32% less RSS at that exact endpoint.  These results establish current
-prefix competitiveness, not the missing full old-P9 proof time.
+about 32% less RSS at that exact endpoint.  The freshly retrained balanced
+PGO build improves the same exact endpoint to 4.57 times the old-P9 user-CPU
+rate; including system CPU, it needs 37.83 versus 146.73 seconds (3.88x).
+These results establish current prefix competitiveness, not the missing full
+old-P9 proof time.
 
 ## Accepted changes
 
