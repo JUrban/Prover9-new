@@ -469,6 +469,39 @@ long-run, hint, compact-OTTER audit/checkpoint, dense-passive and generalization
 tests all pass.  PGO profiles made before `acb1c63` must be discarded because
 the compact disable call graph changed.
 
+### Fresh post-retention balanced PGO validation
+
+The balanced GCC profile was regenerated from the current `acb1c63` source,
+not reused from the pre-retention call graph.  Training ran exactly three
+bounded trajectories, sequentially on one core: Josef 02/600, CHAT/600 and
+Josef 01/1,000.  All reached their expected generated/kept endpoints without
+swap.  GCC accumulated 103 `.gcda` files; the PGO-use build reported no
+coverage mismatch and no missing profile for search or compact-index code.
+Only unused `pindex.c`, `random.c`, and `tstp_proof.c` lacked counts.
+
+The resulting host-specific binary SHA-256 is
+`d23453c192e0657cddf0e9fd8dd57f29a72360539c1b63e215d1fb4b457cf51e`.
+It is retained in the isolated worktree `/tmp/prover9-josef02-pgo2`; it must
+not be copied to a different CPU.  The complete build audit is
+`josef02-pgo2-build/build.log`, and raw training/measurement outputs are in
+the corresponding `*-pgo2-*` directories.
+
+| gate | current comparison | PGO result | interpretation |
+|---|---:|---:|---|
+| Josef 02/600 | native 43.18 s / 206,724 KiB | 35.60 s / 206,168 KiB | -17.6% total CPU, exact |
+| Josef 02/1,000, adjacent reverse | release 92.69 s / 233,960 KiB | 91.28 s / 233,848 KiB | -1.5% total, -5.3% user CPU, exact |
+| CHAT/600 | release 62.88 s / 469,596 KiB | 52.35 s / 467,652 KiB | -16.7% total CPU, exact |
+| Josef 01/1,000 | recent release observations 83.66--95.01 s | 73.68 s / 620,760 KiB | positive CPU gate; RSS within prior 596--618 MiB spread plus 2.9 MiB |
+
+The Josef 02 endpoints retain the exact back-query semantic fingerprints and
+all direct-retention/archive counters.  The 600 result confirms that current
+profiles remain useful, but the decisive 1,000-given narrowing prevents a
+mature 17% claim.  PGO is therefore still the recommended external authority
+build, with a same-host unprofiled native control, but it does not replace the
+need to remove work whose cost grows through the 13,006-given phase.  Any
+subsequent source change in a trained search/index object invalidates this
+profile and requires the same bounded retraining sequence.
+
 ## Rejected options and experiments
 
 - Raising `hint_conjunction_kb` to 384 MiB is rejected.  Rewritten hints grew
@@ -717,11 +750,13 @@ A cautious planning range for the next same-machine **release** total is
 **6,200--7,500 CPU seconds** (about 15--30% below the compact baseline), with
 roughly 5.0--5.2 GiB process PSS.  The bounded `-O3`/LTO result supports a
 separate, wider **5,900--7,200 CPU-second** planning range for the recommended
-`NATIVE=1` authority run.  Balanced PGO supports a still provisional
-**5,400--6,900 CPU-second** planning range.  These are deliberately ranges,
-not measured full claims; neither the 2.37--12.08% compiler benefit nor the
-12.14--18.04% bounded Josef PGO benefit can be assumed constant through the
-mature 13,006-given phase.  A simple per-attempt extrapolation of only the
+`NATIVE=1` authority run.  The fresh post-retention balanced profile supports
+only a still provisional **5,800--7,200 CPU-second** planning range: its
+adjacent 1,000-given Josef 02 gate improved total CPU by just 1.5%, despite
+larger 600-given gains.  These are deliberately ranges, not measured full
+claims; neither the 2.37--12.08% compiler benefit nor any bounded PGO benefit
+can be assumed constant through the mature 13,006-given phase.  A simple
+per-attempt extrapolation of only the
 clause-snapshot delta
 from the reversed 600-given mean and the adjacent 1,000-given pair spans about
 120--530 user seconds at the proof's 3.678 billion attempts.  That range is
