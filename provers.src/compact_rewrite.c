@@ -1777,9 +1777,6 @@ static struct cr_match_result find_rewrite(Compact_rewrite_bank bank,
   unsigned trail_count = 0;
   memset(&result, 0, sizeof(result));
   memset(bound, 0, sizeof(bound));
-  bank->query_token_base = compact_term_pool_tokens(bank->term_pool);
-  bank->query_logical_base =
-    compact_term_pool_logical_base(bank->term_pool);
   {
     uint32_t first = bank->nodes[0].first_child;
     int32_t code = VARIABLE(target) ? INT32_MIN : SYMNUM(target);
@@ -1875,6 +1872,13 @@ void compact_rewrite_clause(Compact_rewrite_bank bank, Topform clause,
   int sequence = 0;
   if (bank == NULL || bank->active_rules == 0 || clause == NULL)
     return;
+  /* The shared term pool can move between clauses as passive bodies and new
+     rules are serialized, but compact normalization itself never mutates it.
+     Snapshot its addressing once for the whole clause instead of making two
+     external accessor calls for every rigid-subterm rewrite attempt. */
+  bank->query_token_base = compact_term_pool_tokens(bank->term_pool);
+  bank->query_logical_base =
+    compact_term_pool_logical_base(bank->term_pool);
   step_limit = step_limit == -1 ? INT_MAX : step_limit;
   increase_limit = increase_limit == -1 ? INT_MAX : increase_limit;
   for (literal = clause->literals; literal != NULL; literal = literal->next) {
