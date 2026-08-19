@@ -1,7 +1,7 @@
 # Josef 02 compact-P9 CPU investigation
 
 Status: source changes implemented and bounded-validated on branch
-`josef02-cpu` through `0210069`, with the portable PGO workflow fixed through
+`josef02-cpu` through `0516e7b`, with the portable PGO workflow fixed through
 `0b281d5`.  The current compact prover is already 3.9--5.4 times faster than
 the preserved old-P9 binary on exact 300/600-given Josef 02 prefixes.  A full
 old-P9 Josef 02 proof output was not supplied, so this report does not claim a
@@ -25,6 +25,7 @@ something attempted on the low-RAM development machine.
 | release binary at `c40a81d` | `94d16148e6bf3a13170712c54fb09cbb6f1d30cdc846f148667489db722ff52c` |
 | release binary at `acb1c63` | `86821508f732be3bc9b8e35cc9e3cc1272eb86817b0938d1852887e15d04f0e4` |
 | release binary at `0210069` | `a1a0a06e7e15375ea20eb592bb9f4407c70243277c8b1fa1edc6c57eb89c153c` |
+| release binary at `0516e7b` | `848960a34f5516ee39217ec7ab17cc481c8f96815df7808ac726fac4304dd1bf` |
 
 The reconstructed input is
 `josef02-debug.heNOIJ/Josef_02-uninterrupted.in`.  It retains every formula,
@@ -522,6 +523,38 @@ needed: the optimization is automatic whenever the compact position index is
 active.  The focused back-index test, compact long-run test and compact-OTTER
 audit all pass on the committed source.
 
+### Batch mature mask-selection state
+
+Commit `0516e7b` removes object-state publication from the compatible-bucket
+loop in the mask directory.  A directory answer's bucket count and saturated
+posting population are not authoritative until its complete scan finishes.
+They are now accumulated in two query-local values; the result fields and the
+two cumulative selection diagnostics are published once at the end.  Bucket
+order, capacity growth, result-cache admission, saturation and every final
+counter remain unchanged.
+
+This is a scale fix rather than a new query policy.  The completed baseline
+selected 2,201,872,627 compatible buckets.  The old loop updated both
+`mask_directory_buckets_selected` and `path_filter_checks`, as well as result
+count/population state, along that path.  The new loop removes those repeated
+index-object updates without a cache, heuristic, input option or persistent
+allocation.  Broader batching of block/word diagnostics was explicitly not
+accepted because the additional live state caused register pressure.
+
+| gate | candidate | control | interpretation |
+|---|---:|---:|---|
+| Josef 02/600, two reversed pairs | 51.43 s mean | 51.80 s mean | -0.7%; exact/neutral |
+| Josef 02/1,000, control sandwich | 99.08 s | 99.23, 100.55 s | -0.8% versus control mean; exact/neutral |
+| CHAT/600, two reversed pairs | 62.59 s mean | 63.93 s mean | -2.1%; exact under large host spread |
+
+Every endpoint retains the exact block, word, bucket and path-check totals as
+well as query-input, ordered-output and semantic-answer fingerprints.  RSS is
+unchanged within run variance.  These bounded gates establish no regression;
+they do not turn the 2.20-billion-operation mature saving into an asserted
+proof-time percentage.  The focused back-index test, compact long-run test
+and compact-OTTER audit all pass.  PGO profiles made before `0516e7b` must be
+discarded because the hot directory loop changed.
+
 ### Fresh post-retention balanced PGO validation
 
 The balanced GCC profile was regenerated from the current `acb1c63` source,
@@ -665,6 +698,26 @@ before an authority run of the current source.
   total CPU (+5.6%); RSS was 238,080 versus 238,288 KiB.  The original
   block-local `ctz` loop is cheaper than the extra array indexing and live
   state.  This candidate added no persistent memory and was never merged.
+- Grouping four 64-mask lanes into one plane-major physical directory block
+  was rejected.  It reduced physical block traversal by about fourfold and
+  preserved every logical word check, selected bucket and fingerprint, but
+  two reversed Josef 02/600 pairs averaged 43.90 versus 42.11 seconds
+  (+4.25%).  The two-order Josef 02/1,000 means were neutral (88.07 versus
+  88.40 seconds), so the first apparent 6.1% win did not reproduce.  A fixed
+  branchless full-block kernel raised word checks by 18% and took 89.66
+  seconds.  Better locality did not repay the more complex lane loop at the
+  permitted gates, so neither representation was merged.
+- Reserving mask-query scratch once to a root's exact distinct-mask count was
+  also rejected.  It safely removed the inner capacity check and added only
+  one root population counter, but regressed Josef 02/600 from 45.45 to 46.29
+  seconds and Josef 02/1,000 from 91.73 to 94.82 seconds (+3.4%).  Capacity
+  growth was already rare; early over-reservation and changed loop layout did
+  not improve whole-search CPU.
+- Batching *all* mask-directory diagnostic state in query locals was too
+  broad.  Although final counters and fingerprints were exact, the extra live
+  block and word accumulators increased register pressure and regressed Josef
+  02/1,000 from 99.23 to 104.98 seconds (+5.8%).  Only the narrower selected-
+  bucket/result-state batching in `0516e7b` survived the CPU gates.
 - Table-driven archive CRC implementations improved the isolated one-million
   record store benchmark by roughly 14--40%, but worsened Josef 02/600.  The
   clean 1-KiB byte table took 47.99 seconds and the compact nibble table 48.52
