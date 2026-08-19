@@ -1,7 +1,7 @@
 # Josef 02 compact-P9 CPU investigation
 
 Status: implemented and bounded-validated on branch `josef02-cpu` through
-`10b6abd`.  The current compact prover is already 3.6--5.4 times faster than
+`3846b92`.  The current compact prover is already 3.9--5.4 times faster than
 the preserved old-P9 binary on exact 300/600-given Josef 02 prefixes.  A full
 old-P9 Josef 02 proof output was not supplied, so this report does not claim a
 measured proof-to-proof old/new CPU ratio.  The existing compact proof is the
@@ -15,7 +15,8 @@ something attempted on the low-RAM development machine.
 | reconstructed uninterrupted Josef 02 input | `8961d86efd2163010117cbba0fd9c6085d3d71751f2d6f2675406f84c57634ba` |
 | completed compact output, `/project/bob/Josef_02.out.new3` | `eaf22c2bda54fbe5eb0d487aca91f4ad27dabe1cb656111f97b74fc9930a1d29` |
 | preserved old-P9 binary | `bcdf6bafbf608fde463fd43ef541891813f5c49a2d5153711c54925e98d76bcc` |
-| release binary at `10b6abd` | `d13973d3311ba8e31590f139e48f6560ec24af845fc60acb4b2e342dfd001ddc` |
+| accepted parent binary at `10b6abd` | `d13973d3311ba8e31590f139e48f6560ec24af845fc60acb4b2e342dfd001ddc` |
+| release binary at `3846b92` | `25fd1849ea8ac898dd45af9ce96397f61465cfdfb7ab8baacda2b1803010bc73` |
 
 The reconstructed input is
 `josef02-debug.heNOIJ/Josef_02-uninterrupted.in`.  It retains every formula,
@@ -59,11 +60,14 @@ feeding the preserved old binary.
 | max given | old-P9 user | compact user | speedup | old RSS | compact RSS |
 |---:|---:|---:|---:|---:|---:|
 | 300 | 90.88 s | 16.85 s | 5.39x | 271,744 KiB | 179,744 KiB |
-| 600 | 179.20 s | 49.92 s | 3.59x | 305,408 KiB | 206,940 KiB |
+| 600 | 137.36 s | 35.08 s mean | 3.92x | 305,408 KiB | 206,482 KiB mean |
 
 Both comparisons preserve the exact generated/kept state; the 600 endpoint is
-`(601, 524799, 26671, 0)`.  These results establish current prefix
-competitiveness, not the missing full old-P9 proof time.
+`(601, 524799, 26671, 0)`.  The 600 old-P9 number was rerun on the current host
+after `3846b92`; the compact number is the mean of two reversed candidate
+runs.  The current compact binary is therefore 3.92 times faster and uses
+about 32% less RSS at that exact endpoint.  These results establish current
+prefix competitiveness, not the missing full old-P9 proof time.
 
 ## Accepted changes
 
@@ -147,6 +151,32 @@ earlier Josef 01 candidate observation of 68.10 s did not repeat after the
 adjacent 60.77 s control and is retained as host-load noise, not discarded
 from the interpretation.
 
+### Carry recursive rewrite state through one query context (`3846b92`)
+
+The radix retrieval function formerly passed eleven arguments at every
+recursive edge.  On x86-64, five invariant arguments were rebuilt on the
+stack for each call.  A clause-local query context now owns the same target,
+end pointer, bindings, binding trail, ordering flag and result; recursion
+passes only the context pointer, node and current subject position.  Binding
+creation, undo order, radix traversal and first-success order are unchanged.
+
+This is a representation-only hot-path change: it adds no persistent memory,
+cache or tuning option.  In the release object, `retrieve_rec` shrinks from
+3,517 to 3,219 bytes (8.5%) and `find_rewrite` from 807 to 677 bytes (16.1%).
+
+| gate | parent user | candidate user | CPU change | parent/candidate RSS |
+|---|---:|---:|---:|---:|
+| Josef 02, 600 given, two reversed pairs | 39.81 s mean | 35.08 s mean | -11.87% | 206,446 / 206,482 KiB mean |
+| Josef 02, 1,000 given, adjacent | 79.55 s | 74.58 s | -6.25% | 230,848 / 230,908 KiB |
+| CHAT, 600 given, two reversed pairs | 48.59 s mean | 48.87 s mean | +0.58% | 467,422 / 467,502 KiB mean |
+
+Both Josef endpoints and CHAT preserve generated/kept counts, rewrite
+attempts, and the back-demod input, output and answer fingerprints.  CHAT is
+properly classified as neutral: its 45--52 s host spread is much larger than
+the 0.28 s mean difference.  The accepted result is therefore a strong Josef
+02 improvement without a demonstrated cross-workload regression, not a claim
+that every rewrite population benefits equally.
+
 ## Rejected options and experiments
 
 - Raising `hint_conjunction_kb` to 384 MiB is rejected.  Rewritten hints grew
@@ -180,11 +210,13 @@ from the interpretation.
   `(601, 497430, 16974, 0)` endpoint and 3,775 back-demod candidates.  The
   conjunction table is admitted for this different hint population, so its
   467,464 KiB peak RSS is expected and is not Josef 02 back-index growth.
-  The new rewrite snapshot is 5.81% faster than its adjacent parent while
-  preserving the rewrite and back-demod fingerprints.
+  The clause-level address snapshot was 5.81% faster than its adjacent parent;
+  the subsequent query-context refactor is neutral in two reversed pairs.
+  Both preserve the rewrite and back-demod fingerprints.
 - Josef 01 at 1,000 givens exactly reproduces
   `(1001, 1628048, 320239, 0)` and every compact unit-index counter.  Current
-  reverse-adjacent user CPU is 60.56 s versus 60.77 s for the parent.  That
+  final user CPU is 59.85 s; the preceding reverse-adjacent gate was 60.56 s
+  versus 60.77 s for the parent.  That
   input clears back demodulation and records zero compact rewrite attempts,
   independently checking that the changed path does not perturb the search.
   No bounded validation process swapped.
@@ -252,16 +284,18 @@ at 1,500 givens but targets a directory sixteen times wider at the proof.
 Inherited slab recycling and direct symbol/term hot-path work also postdate the
 baseline output.
 
-A cautious planning range for the next same-machine total is **7,400--8,300
-CPU seconds** (about 6--16% below the compact baseline), with roughly
+A cautious planning range for the next same-machine total is **7,000--8,000
+CPU seconds** (about 10--21% below the compact baseline), with roughly
 5.0--5.2 GiB process PSS.  This is deliberately a range, not a measured
 claim.  A simple per-attempt extrapolation of only the clause-snapshot delta
 from the reversed 600-given mean and the adjacent 1,000-given pair spans about
 120--530 user seconds at the proof's 3.678 billion attempts.  That range is
 useful for planning but too load-sensitive to add mechanically to the other
-unmeasured long-run changes.  The back-index optimization likewise cannot be
-extrapolated linearly from the 1,500-given prefix, and no full old-P9 Josef 02
-time exists.
+unmeasured long-run changes.  The later query-context refactor removes another
+6.25--11.87% of bounded Josef 02 user CPU, but the different mature rule and
+subject mix makes that percentage equally unsafe to apply directly to the
+full baseline.  The back-index optimization likewise cannot be extrapolated
+linearly from the 1,500-given prefix, and no full old-P9 Josef 02 time exists.
 
 Accept the external run only if it:
 
