@@ -972,6 +972,22 @@ short prefixes, is the next authority test.
   clearing a 100-entry table merely replaced cheap recycled-slab work with
   other hot-loop work.  Both forms were fully reverted; the release binary
   hash returned exactly to the accepted value.
+- Splitting rare slab creation out of `slab_get` was also rejected after a
+  whole-search gate.  The profile attributes 5.14% self time and 165,390,617
+  calls to `slab_get` by given 600, while the completed proof reports 16.7
+  billion allocator calls.  Native LTO had inlined mapping, limit and recycle
+  setup into an 846-byte function, forcing the universal path to save five
+  registers.  A portable noinline helper shrank it to 235 bytes and two saved
+  registers, but two reversed Josef 02/1,000 pairs averaged 79.25 seconds
+  candidate versus 74.49 control (+6.4%).  Marking the helper cold reduced the
+  hot body to 219 bytes plus a 10-byte unlikely thunk and placed the 536-byte
+  helper in the cold region.  Its orientations disagreed: 74.60 versus 76.91
+  seconds in the first pair, then 74.29 versus 72.04 in reverse.  Means were
+  74.45 candidate and 74.48 control--exactly neutral.  All endpoints,
+  fingerprints, final allocator live/peak/cumulative counters and RSS were
+  unchanged; allocator churn, memory lifecycle, bookkeeping lifecycle and
+  ancestor-store tests passed.  Function size alone did not improve complete
+  CPU, so neither annotation was merged and `memory.c` remains unchanged.
 - Turning deterministic rigid radix descent into a loop reduced the compiled
   `retrieve_rec` body from 3,219 to 2,716 bytes, but the changed live-state and
   undo behavior cost total CPU.  It took 42.34 versus 41.59 user seconds at
