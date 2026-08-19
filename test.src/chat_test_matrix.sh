@@ -9,6 +9,7 @@ max_seconds=${4:-120}
 max_megs=${5:-2048}
 wall_seconds=${6:-$((max_seconds + 60))}
 report_seconds=${CHAT_REPORT_SECONDS:-30}
+clock_sample_rate=${CHAT_CLOCK_SAMPLE_RATE:-1}
 cpu=${CHAT_CPU:-0}
 trace=${CHAT_TRACE:-0}
 compact_term_reclaim_kb=${CHAT_COMPACT_TERM_RECLAIM_KB:-8192}
@@ -86,6 +87,7 @@ esac
   echo "max_megs=$max_megs"
   echo "wall_seconds=$wall_seconds"
   echo "report_seconds=$report_seconds"
+  echo "clock_sample_rate=$clock_sample_rate"
   echo "cpu=$cpu"
   echo "trace=$trace"
   echo "compact_term_reclaim_kb=$compact_term_reclaim_kb"
@@ -160,6 +162,9 @@ write_case()
     fi
     echo 'clear(print_initial_clauses).'
     echo 'set(clocks).'
+    if test "$name" != old_otter; then
+      echo "assign(clock_sample_rate,$clock_sample_rate)."
+    fi
     echo 'set(hint_match_stats).'
     echo 'set(back_demod_hints).'
     echo 'assign(stats,all).'

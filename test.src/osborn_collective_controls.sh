@@ -11,6 +11,7 @@ prover="$repo_dir/bin/prover9"
 all_cases='otter_fpa discount_clauses collective_conservative collective_aids balanced_hint balanced_hint_packed'
 selected_cases=${OSBORN_CASES:-$all_cases}
 balanced_options=${OSBORN_BALANCED_OPTIONS:-}
+clock_sample_rate=${OSBORN_CLOCK_SAMPLE_RATE:-1}
 
 if test ! -f "$input"; then
   echo "input not found: $input" >&2
@@ -28,6 +29,7 @@ sha256sum "$input" "$prover" > "$output_dir/hashes.txt"
   echo "max_seconds=$max_seconds"
   echo "max_megs=$max_megs"
   echo "cases=$selected_cases"
+  echo "clock_sample_rate=$clock_sample_rate"
   echo 'balanced_options_begin'
   printf '%s\n' "$balanced_options"
   echo 'balanced_options_end'
@@ -39,6 +41,7 @@ awk '
   /^assign\(sos_limit,/ { next }
   /^(set|clear)\(print_(gen|kept|given|initial_clauses)\)\./ { next }
   /^assign\((search_loop|passive_store|hint_index|inference_frontier|ancestor_store|collective_[a-z_]+),/ { next }
+  /^assign\(clock_sample_rate,/ { next }
   /^(set|clear)\(collective_[a-z_]+\)\./ { next }
   { print }
 ' "$input" > "$filtered_input"
@@ -58,6 +61,7 @@ make_case()
     echo 'clear(print_given).'
     echo 'clear(print_initial_clauses).'
     echo 'set(clocks).'
+    echo "assign(clock_sample_rate,$clock_sample_rate)."
     echo 'assign(stats,all).'
     echo 'assign(report,60).'
     echo "assign(max_given,$max_given)."

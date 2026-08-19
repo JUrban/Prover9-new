@@ -3789,6 +3789,7 @@ void fprint_prover_clocks(FILE *fp, struct prover_clocks clks)
 {
   if (clocks_enabled()) {
     fprintf(fp, "\n");
+    fprint_clock_sampling(fp);
     fprint_clock(fp, clks.pick_given);
     fprint_clock(fp, clks.infer);
     fprint_clock(fp, clks.preprocess);

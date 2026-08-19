@@ -21,6 +21,7 @@ back_position_admission=${P9_MATRIX_BACK_POSITION_ADMISSION:-1}
 hint_cache_kb=${P9_MATRIX_HINT_CACHE_KB:-2048}
 hint_rebuild_scan_ratio=${P9_MATRIX_HINT_REBUILD_SCAN_RATIO:-8}
 clocks=${P9_MATRIX_CLOCKS:-1}
+clock_sample_rate=${P9_MATRIX_CLOCK_SAMPLE_RATE:-1}
 detected_cpu=$(taskset -pc $$ 2>/dev/null | sed 's/^.*: //;s/,.*//;s/-.*//' || true)
 cpu=${P9_MATRIX_CPU:-${detected_cpu:-0}}
 allow_holdout=${P9_MATRIX_ALLOW_HOLDOUT:-0}
@@ -127,6 +128,7 @@ prepare_input()
     /^assign\((max_given|max_seconds|max_minutes|max_hours|max_days|max_megs|report|stats),/ { next }
     /^assign\((search_loop|passive_store|hint_index|inference_frontier|ancestor_store),/ { next }
     /^assign\((compact_term_reclaim_kb|compact_index_stale_pct|compact_rewrite_deep_cache_kb|compact_passive_cache|compact_back_tree_min_tokens|compact_back_tree_budget_kb|compact_back_tree_budget_pct|compact_back_tree_admit_work|compact_back_position_budget_kb|compact_back_position_budget_pct|compact_back_position_build_factor|compact_back_eager_position_depth|hint_cache_kb|hint_rebuild_scan_ratio),/ { next }
+    /^assign\(clock_sample_rate,/ { next }
     /^assign\(compact_unit_strategy,/ { next }
     /^assign\(compact_back_demod_strategy,/ { next }
     /^(set|clear)\(compact_back_position_admission\)\./ { next }
@@ -159,6 +161,7 @@ emit_common()
   echo "assign(max_seconds,$max_seconds)."
   echo "assign(max_megs,$max_megs)."
   if test "$variant" != old_p9; then
+    echo "assign(clock_sample_rate,$clock_sample_rate)."
     echo "assign(hint_cache_kb,$hint_cache_kb)."
     echo "assign(hint_rebuild_scan_ratio,$hint_rebuild_scan_ratio)."
   fi

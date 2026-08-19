@@ -22,29 +22,94 @@
 
 struct clock {
   char       *name;                 /* name of clock */
-  unsigned   accum_msec;            /* accumulated time */
-  unsigned   curr_msec;             /* time since clock has been turned on */
+  unsigned long long exact_usec;    /* exactly timed intervals */
+  unsigned long long sample_usec;   /* timed post-warmup samples */
+  unsigned long long exact_intervals;
+  unsigned long long sample_intervals;
+  unsigned long long post_intervals;
+  unsigned long long curr_usec;     /* start of current sampled interval */
+  unsigned   sample_state;
+  BOOL       curr_sampled;
+  BOOL       curr_exact;
   int        level;                 /* STARTs - STOPs */
 };
 
 static BOOL Clocks_enabled = TRUE;   /* getrusage can be slow */
+static unsigned Clock_sample_rate = 1;
+static unsigned Clock_sample_threshold = UINT_MAX;
 static double User_seconds_offset = 0.0;  /* added to user_seconds for resume */
-static unsigned Clock_starts = 0;    /* Keep a count */
+static unsigned long long Clock_starts = 0;    /* Keep a count */
+static unsigned long long Clock_samples = 0;
+static unsigned long long Clock_time_reads = 0;
+
+#define CLOCK_SAMPLE_WARMUP 1024
 
 static unsigned Wall_start;          /* for measuring wall-clock time */
 
-/* Macro to get the number of user CPU milliseconds since the start of
-   the process.  Getrusage() can be VERY slow on some systems.  So I tried
-   clock() instead (ignoring the rollover problem), but that didn't seem
-   to help on Linux.
-*/
+/* Return user CPU microseconds for a detailed clock sample.  This remains
+   getrusage-based so exact mode has the same user-time semantics as before.
+   On Linux the call enters the kernel, which is why high-frequency clients
+   can opt into deterministic interval sampling. */
 
-#if 1
-#define CPU_TIME(msec) { struct rusage r; getrusage(RUSAGE_SELF, &r);\
-       msec = r.ru_utime.tv_sec * 1000 + r.ru_utime.tv_usec / 1000; }
+static
+unsigned long long clock_user_usec(void)
+{
+  Clock_time_reads++;
+#ifdef PRIMITIVE_ENVIRONMENT
+  return ((unsigned long long) clock() * 1000000) / CLOCKS_PER_SEC;
 #else
-#define CPU_TIME(msec) { msec = clock() / 1000; }
+  {
+    struct rusage r;
+    getrusage(RUSAGE_SELF, &r);
+    return (unsigned long long) r.ru_utime.tv_sec * 1000000 +
+      (unsigned long long) r.ru_utime.tv_usec;
+  }
 #endif
+}  /* clock_user_usec */
+
+static
+double clock_value_usec(Clock p)
+{
+  unsigned long long exact = p->exact_usec;
+  unsigned long long sampled = p->sample_usec;
+
+  if (p->level > 0 && p->curr_sampled) {
+    unsigned long long delta = clock_user_usec() - p->curr_usec;
+    if (p->curr_exact)
+      exact += delta;
+    else
+      sampled += delta;
+  }
+
+  if (p->post_intervals == 0 || p->sample_intervals == 0)
+    return (double) exact;
+  else
+    return (double) exact +
+      ((double) sampled * (double) p->post_intervals /
+       (double) p->sample_intervals);
+}  /* clock_value_usec */
+
+static
+unsigned clock_name_seed(const char *s)
+{
+  unsigned seed = 2166136261U;
+  while (*s) {
+    seed ^= (unsigned char) *s++;
+    seed *= 16777619U;
+  }
+  return seed == 0 ? 1 : seed;
+}  /* clock_name_seed */
+
+static
+BOOL clock_choose_sample(Clock p)
+{
+  unsigned x = p->sample_state;
+  x ^= x << 13;
+  x ^= x >> 17;
+  x ^= x << 5;
+  p->sample_state = x == 0 ? 1 : x;
+  return p->sample_intervals == 0 || x <= Clock_sample_threshold;
+}  /* clock_choose_sample */
 
 /*
  * memory management
@@ -110,7 +175,15 @@ Clock clock_init(char *str)
   Clock p = get_clock();
   p->name = str;
   p->level = 0;
-  p->accum_msec = 0;
+  p->exact_usec = 0;
+  p->sample_usec = 0;
+  p->exact_intervals = 0;
+  p->sample_intervals = 0;
+  p->post_intervals = 0;
+  p->curr_usec = 0;
+  p->sample_state = clock_name_seed(str);
+  p->curr_sampled = FALSE;
+  p->curr_exact = FALSE;
   return p;
 }  /* clock_init */
 
@@ -130,8 +203,27 @@ void clock_start(Clock p)
   if (Clocks_enabled) {
     p->level++;
     if (p->level == 1) {
-      CPU_TIME(p->curr_msec);
       Clock_starts++;
+      if (Clock_sample_rate == 1 ||
+          p->exact_intervals < CLOCK_SAMPLE_WARMUP) {
+        p->exact_intervals++;
+        p->curr_sampled = TRUE;
+        p->curr_exact = TRUE;
+      }
+      else {
+        p->post_intervals++;
+        p->curr_exact = FALSE;
+        if (clock_choose_sample(p)) {
+          p->sample_intervals++;
+          p->curr_sampled = TRUE;
+        }
+        else
+          p->curr_sampled = FALSE;
+      }
+      if (p->curr_sampled) {
+        p->curr_usec = clock_user_usec();
+        Clock_samples++;
+      }
     }
   }
 }  /* clock_start */
@@ -157,9 +249,13 @@ void clock_stop(Clock p)
     else {
       p->level--;
       if (p->level == 0) {
-	unsigned msec;
-	CPU_TIME(msec);
-	p->accum_msec += msec - p->curr_msec;
+	if (p->curr_sampled) {
+	  unsigned long long usec = clock_user_usec();
+	  if (p->curr_exact)
+	    p->exact_usec += usec - p->curr_usec;
+	  else
+	    p->sample_usec += usec - p->curr_usec;
+	}
       }
     }
   }
@@ -181,16 +277,8 @@ unsigned clock_milliseconds(Clock p)
 {
   if (p == NULL)
     return 0;
-  else {
-    int i = p->accum_msec;
-    if (p->level == 0)
-      return i;
-    else {
-      int msec;
-      CPU_TIME(msec);
-      return i + (msec - p->curr_msec);
-    }
-  }
+  else
+    return (unsigned) (clock_value_usec(p) / 1000.0);
 }  /* clock_milliseconds */
 
 /*************
@@ -209,16 +297,8 @@ double clock_seconds(Clock p)
 {
   if (p == NULL)
     return 0.0;
-  else {
-    int i = p->accum_msec;
-    if (p->level == 0)
-      return (i / 1000.0);
-    else {
-      int msec;
-      CPU_TIME(msec);
-      return (i + (msec - p->curr_msec)) / 1000.0;
-    }
-  }
+  else
+    return clock_value_usec(p) / 1000000.0;
 }  /* clock_seconds */
 
 /*************
@@ -253,7 +333,15 @@ void clock_reset(Clock p)
 {
   if (p != NULL) {
     p->level = 0;
-    p->accum_msec = 0;
+    p->exact_usec = 0;
+    p->sample_usec = 0;
+    p->exact_intervals = 0;
+    p->sample_intervals = 0;
+    p->post_intervals = 0;
+    p->curr_usec = 0;
+    p->sample_state = clock_name_seed(p->name);
+    p->curr_sampled = FALSE;
+    p->curr_exact = FALSE;
   }
 }  /* clock_reset */
 
@@ -270,9 +358,46 @@ This routine
 /* PUBLIC */
 void fprint_clock(FILE *fp, Clock p)
 {
-  if (p != NULL)
-    fprintf(fp, "clock %-15s: %6.2f seconds.\n", p->name, clock_seconds(p));
+  if (p != NULL) {
+    fprintf(fp, "clock %-15s: %6.2f seconds.",
+            p->name, clock_seconds(p));
+    if (Clock_sample_rate > 1)
+      fprintf(fp, " [estimated: intervals=%llu, timed=%llu]",
+              p->exact_intervals + p->post_intervals,
+              p->exact_intervals + p->sample_intervals);
+    fprintf(fp, "\n");
+  }
 }  /* fprint_clock */
+
+/*************
+ *
+ *   sampled detailed clocks
+ *
+ *************/
+
+/* PUBLIC */
+void set_clock_sample_rate(unsigned rate)
+{
+  Clock_sample_rate = rate == 0 ? 1 : rate;
+  Clock_sample_threshold = UINT_MAX / Clock_sample_rate;
+}  /* set_clock_sample_rate */
+
+/* PUBLIC */
+unsigned clock_sample_rate(void)
+{
+  return Clock_sample_rate;
+}  /* clock_sample_rate */
+
+/* PUBLIC */
+void fprint_clock_sampling(FILE *fp)
+{
+  if (Clocks_enabled && Clock_sample_rate > 1)
+    fprintf(fp,
+            "Clock_sampling: rate=1/%u, warmup=%u, intervals=%llu, "
+            "samples=%llu, cpu_time_reads=%llu, values=estimated.\n",
+            Clock_sample_rate, CLOCK_SAMPLE_WARMUP, Clock_starts,
+            Clock_samples, Clock_time_reads);
+}  /* fprint_clock_sampling */
 
 /*************
  *
@@ -523,5 +648,3 @@ BOOL clocks_enabled(void)
 {
   return Clocks_enabled;
 }  /* clocks_enabled */
-
-

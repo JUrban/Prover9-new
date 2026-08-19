@@ -72,6 +72,12 @@ void clock_reset(Clock p);
 
 void fprint_clock(FILE *fp, Clock p);
 
+void set_clock_sample_rate(unsigned rate);
+
+unsigned clock_sample_rate(void);
+
+void fprint_clock_sampling(FILE *fp);
+
 char * get_date(void);
 
 unsigned user_time();
