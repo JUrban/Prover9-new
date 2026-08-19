@@ -1,7 +1,7 @@
 # Josef 02 compact-P9 CPU investigation
 
 Status: source changes implemented and bounded-validated on branch
-`josef02-cpu` through `2d6779d`, with the portable PGO workflow and
+`josef02-cpu` through `7e06aaa`, with the portable PGO workflow and
 low-overhead detailed-clock mode implemented through that commit.  The
 current compact prover is already 3.9--5.4 times faster than
 the preserved old-P9 binary on exact 300/600-given Josef 02 prefixes.  A full
@@ -28,6 +28,8 @@ something attempted on the low-RAM development machine.
 | release binary at `0210069` | `a1a0a06e7e15375ea20eb592bb9f4407c70243277c8b1fa1edc6c57eb89c153c` |
 | release binary at `0516e7b` | `848960a34f5516ee39217ec7ab17cc481c8f96815df7808ac726fac4304dd1bf` |
 | host-native sampled-clock candidate at `2d6779d` | `f789e006696c6185f33ecf7b5053ed51180435dfd21a6092aa00d45d8ad5bfe3` |
+| sampled-clock PGO generator at `7e06aaa` | `63a711fc882f140ad92814c96ea325daeabcb013400f9cc94040beaa03f37de7` |
+| sampled-clock balanced PGO-use prover at `7e06aaa` | `eca26b2b6858d1c110bed3fd4e3ff40aa6de1da61b4c0c8103eb8ab1aa211097` |
 
 The reconstructed input is
 `josef02-debug.heNOIJ/Josef_02-uninterrupted.in`.  It retains every formula,
@@ -709,6 +711,63 @@ fast path and exact clocks retain the original accumulator and timing
 implementation.  Since `clock.c`, the standard option table and the search
 report changed after the retained PGO build, that profile is now a comparison
 artifact only: an authority binary must be retrained from empty profile data.
+
+### Production-matched sampled-clock PGO validation
+
+The authority candidate was consequently retrained from empty profile data at
+`7e06aaa`.  This was a core-only build of `libladr.a` and `prover9`, which is
+sufficient for the prover binary and avoids serial LTO work on unrelated
+front ends.  Training used the intended production diagnostic mode
+`assign(clock_sample_rate,16)` and ran sequentially on one core with hard
+search and memory limits:
+
+| training trajectory | total CPU | peak RSS | result |
+|---|---:|---:|---|
+| Josef 02/600 | 47.00 s | 208,804 KiB | exact `(601,524799,26671,0)` endpoint; zero swap |
+| CHAT/600 | 56.62 s | 470,604 KiB | exact `(601,497430,16974,0)` endpoint; zero swap |
+| Josef 01/1,000 | 82.54 s | 602,052 KiB | exact `(1001,1628048,320239,0)` endpoint; zero swap |
+
+The generator SHA-256 is
+`63a711fc882f140ad92814c96ea325daeabcb013400f9cc94040beaa03f37de7`.
+Training produced 103 GCC `.gcda` files (584 KiB).  The PGO-use build has no
+coverage mismatch and no missing profile in search, compact indexes,
+rewriting, hints, term ordering or allocation.  Its only missing profiles are
+the unexercised `pindex.c`, `random.c`, and `tstp_proof.c` utility paths.
+
+The PGO-use prover SHA-256 is
+`eca26b2b6858d1c110bed3fd4e3ff40aa6de1da61b4c0c8103eb8ab1aa211097`;
+the identical-source, identical-flag native control is
+`f789e006696c6185f33ecf7b5053ed51180435dfd21a6092aa00d45d8ad5bfe3`.
+Only profile use differs.  The host-local authority candidate is retained at
+`/tmp/prover9-josef02-pgo4/prover9-pgo4-use` and installed as
+`bin/prover9`.  It is compiled with `-march=native` and must not be copied to
+a machine with a different CPU.  The build logs are in
+`josef02-pgo4-build/`; raw measurements use the `*-pgo4-*` directory names.
+
+All validation processes ran one at a time.  Josef 02/600 used reversed
+ordering; the other workload pairs were adjacent.  `/usr/bin/time -v` is the
+total-CPU authority because the internal rate-16 phase clocks are estimates:
+
+| exact gate | sampled-clock PGO | matched native | change | PGO/native RSS |
+|---|---:|---:|---:|---:|
+| Josef 02/600, two reversed pairs | 36.35 s mean | 39.57 s mean | -8.1% | 206,380 / 206,882 KiB |
+| Josef 02/1,000 | 62.64 s | 70.76 s | -11.5% | 234,276 / 234,852 KiB |
+| CHAT/600 | 42.86 s | 49.46 s | -13.3% | 466,736 / 466,968 KiB |
+| Josef 01/1,000 | 50.95 s | 54.09 s | -5.8% | 604,336 / 604,752 KiB |
+
+Every PGO/native pair has the exact endpoint shown in the training table;
+Josef 02/1,000 ends at `(1001,1310234,65416,0)`.  Josef 02 and CHAT preserve
+their query-input, ordered-output and semantic-answer fingerprints and all
+direct-retention/archive counters.  Josef 01 preserves every compact-unit
+counter.  No run swapped.  The compact-OTTER equivalence audit and the
+checkpoint/resume audit both pass with the retained PGO binary.
+
+At Josef 02/600, the current PGO candidate is 4.04 times faster in total CPU
+than the preserved old-P9 observation (36.35 versus 146.73 seconds), and 4.21
+times faster in user CPU.  Its roughly 8--12% bounded PGO advantage is useful,
+but must not be extrapolated as a guaranteed full-proof percentage.  The
+1,000-given gate is the longest new Josef 02 run attempted locally; the
+13,006-given proof remains the external acceptance test.
 
 ## Rejected options and experiments
 
