@@ -1,8 +1,9 @@
 # Josef 02 compact-P9 CPU investigation
 
 Status: source changes implemented and bounded-validated on branch
-`josef02-cpu` through `c3947a5`, with the portable PGO workflow fixed through
-that commit.  The current compact prover is already 3.9--5.4 times faster than
+`josef02-cpu` through `2d6779d`, with the portable PGO workflow and
+low-overhead detailed-clock mode implemented through that commit.  The
+current compact prover is already 3.9--5.4 times faster than
 the preserved old-P9 binary on exact 300/600-given Josef 02 prefixes.  A full
 old-P9 Josef 02 proof output was not supplied, so this report does not claim a
 measured proof-to-proof old/new CPU ratio.  The existing compact proof is the
@@ -26,6 +27,7 @@ something attempted on the low-RAM development machine.
 | release binary at `acb1c63` | `86821508f732be3bc9b8e35cc9e3cc1272eb86817b0938d1852887e15d04f0e4` |
 | release binary at `0210069` | `a1a0a06e7e15375ea20eb592bb9f4407c70243277c8b1fa1edc6c57eb89c153c` |
 | release binary at `0516e7b` | `848960a34f5516ee39217ec7ab17cc481c8f96815df7808ac726fac4304dd1bf` |
+| host-native sampled-clock candidate at `2d6779d` | `f789e006696c6185f33ecf7b5053ed51180435dfd21a6092aa00d45d8ad5bfe3` |
 
 The reconstructed input is
 `josef02-debug.heNOIJ/Josef_02-uninterrupted.in`.  It retains every formula,
@@ -650,9 +652,63 @@ The PGO binary is retained at
 `/tmp/prover9-josef02-native3/provers.src/prover9`.  They are host-specific
 and must not be copied to another CPU.  Complete logs are in
 `josef02-pgo3-build/`; raw outputs use the `*-pgo3-*` directory names.  This
-is now the recommended external authority build, but the 5.9% gain at the
-untrained 1,000-given extension remains bounded evidence, not a promised
-percentage for the mature 13,006-given proof.
+was the recommended external authority build through `c3947a5`; after the
+clock changes it is a retained comparison artifact and must be regenerated.
+Its 5.9% gain at the untrained 1,000-given extension remains bounded evidence,
+not a promised percentage for the mature 13,006-given proof.
+
+### Low-overhead detailed clocks (`8a6dbb8`, `2d6779d`)
+
+The input explicitly enables Prover9's detailed phase clocks.  Each outermost
+`clock_start` and `clock_stop` used `getrusage`, so diagnostics entered the
+kernel twice per interval.  Josef 02 has already accumulated 2,159,448 timed
+intervals by given 600: exact clocks therefore perform about 4.32 million
+CPU-time reads at that small prefix.  An exact on/off experiment with the
+retained balanced PGO binary preserved every search and index fingerprint but
+averaged 40.67 total CPU seconds with clocks and 33.23 without them.  Detailed
+timing alone was an 18.3% total-CPU tax on that gate.
+
+`assign(clock_sample_rate,N)` is now a standard option.  Its behavior is:
+
+- `N=1` is the compatibility default and retains the original exact,
+  millisecond, inlined `getrusage` path;
+- `N>1` exactly times the first 1,024 intervals of each clock, then uses a
+  deterministic pseudo-random sample with probability `1/N` and estimates
+  the remaining total from the sampled mean;
+- sampled output is visibly marked `values=estimated`, and every phase line
+  gives its interval and timed counts; and
+- clock state is observational only.  It cannot change clause admission,
+  ordering, hint matching, indexes or proof search.
+
+Rate 16 is the measured production compromise.  At Josef 02/600 it timed
+147,187 of 2,159,448 intervals and made 294,374 CPU-time reads, about 93.2%
+fewer than exact timing after accounting for both interval endpoints.
+
+| gate | exact clocks | rate 16 | effect |
+|---|---:|---:|---|
+| Josef 02/600, adjacent O2 | 42.14 s total | 35.81 s total | -15.0%; exact search/fingerprints |
+| Josef 02/600, adjacent native | 46.88 s total | 41.51 s total | -11.5%; exact search/fingerprints |
+| CHAT/300 | 34.40 s total, 4.13 s system | 34.31 s total, 2.31 s system | total neutral; system -44.1%; exact search/fingerprints |
+
+RSS was unchanged (about 206--207 MiB for Josef 02 and 464 MiB for CHAT), and
+none of these runs swapped.  CHAT is also the important accuracy warning: its
+sampled preprocessing estimate was 8.45 seconds versus 22.35 seconds under
+exact timing.  Clause costs are heavy-tailed, so a short sampled phase report
+can be substantially wrong even with thousands of samples.  The exact total
+authority is `/usr/bin/time -v`, not the sum of sampled phase clocks.  Use
+rate 1 for a diagnostic run whose per-phase values must be exact, rate 16 for
+a long production proof that should retain approximate phase attribution, or
+`clear(clocks)` for maximum speed when external total-CPU accounting is
+sufficient.
+
+The benchmark drivers expose the choice as `CHAT_CLOCK_SAMPLE_RATE`,
+`P9_MATRIX_CLOCK_SAMPLE_RATE`, and `OSBORN_CLOCK_SAMPLE_RATE`.  Their defaults
+remain 1, and the new-only command is never sent to an old-P9 case.  The
+sampled helpers are kept out of line so disabled clocks retain the original
+fast path and exact clocks retain the original accumulator and timing
+implementation.  Since `clock.c`, the standard option table and the search
+report changed after the retained PGO build, that profile is now a comparison
+artifact only: an authority binary must be retrained from empty profile data.
 
 ## Rejected options and experiments
 
@@ -797,6 +853,12 @@ percentage for the mature 13,006-given proof.
   600 givens and decisively regressed the exact 1,000-given endpoint from
   100.00 to 107.25 total CPU seconds (+7.25%).  Packed matching is not the only
   matcher consumer, so the eager initialization remains.
+- A proposed exact `clock_switch(old,new)` operation reused one timestamp for
+  adjacent inference/preprocess boundaries.  It reduced system CPU by 1.03
+  seconds at Josef 02/600, but increased user CPU by 1.50 seconds and regressed
+  total CPU from 44.06 to 44.53 seconds in the paired gate.  Its added hot-path
+  bookkeeping was more expensive than the saved syscall, so it was reverted;
+  sampled clocks skip the timing operation entirely on most intervals.
 
 ## Cross-workload gates
 
@@ -812,6 +874,11 @@ percentage for the mature 13,006-given proof.
   neutral-to-slightly-negative at this short prefix (60.21 versus 59.57 s in
   the reverse adjacent observation), while eliminating at least 38.1 million
   list visits.  All preserve the rewrite and back-demod fingerprints.
+  The separate sampled-clock CHAT/300 gate likewise preserves
+  `(301,120793,5737,0)` and all back-query fingerprints.  Rate 16 reduces
+  system CPU from 4.13 to 2.31 seconds but leaves total CPU neutral at 34.31
+  versus 34.40 seconds; its poor short-run preprocess estimate is why sampled
+  clock values are explicitly non-authoritative.
 - Josef 01 at 1,000 givens exactly reproduces
   `(1001, 1628048, 320239, 0)` and every compact unit-index counter.  Current
   host observations span 59.85--70.30 s; the controlled reverse-adjacent gate
@@ -850,7 +917,8 @@ For the strongest CPU candidate, regenerate a balanced PGO profile on the
 same host, compiler and checkout that will run the proof.  Do not copy this
 report's binary or profile files to another CPU.  First create bounded copies
 of the three training inputs with explicit 600/600/1,000 `max_given` limits,
-reasonable `max_seconds`, and a hard `max_megs`; then run:
+reasonable `max_seconds`, a hard `max_megs`, and the same
+`assign(clock_sample_rate,16)` intended for production; then run:
 
 ```sh
 make pgo-clean
@@ -877,6 +945,9 @@ control.
 Use the following input block unchanged for the external Josef 02 rerun:
 
 ```prolog
+set(clocks).
+assign(clock_sample_rate,16).
+
 assign(search_loop,otter).
 assign(passive_store,dense).
 assign(passive_directory,file).
@@ -932,6 +1003,11 @@ ancestor-store configuration.  Its coverage appears as `direct_retentions`,
 `retention_fallbacks`, and `payload_bytes_avoided` in
 `Disabled_compression:`.  Do not add the experiment-only environment variable
 used for the same-binary A/B measurement; it is not part of the product.
+The repeated original `set(clocks)` is harmless; the assigned rate remains
+16.  Treat detailed phase seconds as estimates and use `/usr/bin/time -v` for
+exact user, system and total CPU.  If exact per-phase attribution is more
+important than proof speed, use rate 1; if phase attribution is unnecessary,
+replace both clock commands with `clear(clocks)`.
 
 ## Expected full result and acceptance gate
 
@@ -954,7 +1030,11 @@ reversed 1,000-given Josef 02 pairs by 5.9% and two reversed 600-given pairs
 by 14.0%, while also improving both generalization workloads.  These are
 deliberately ranges, not measured full claims; neither the 2.37--12.08%
 compiler benefit nor any bounded PGO benefit can be assumed constant through
-the mature 13,006-given phase.  A simple
+the mature 13,006-given phase.  The range is deliberately not lowered again
+by the sampled-clock result: Josef 02 saved 11.5--15.0% at 600 givens, but
+CHAT total CPU was neutral and the mature interval mix is unknown.  A rate-16
+run should plausibly land toward the lower part of the range, but that is an
+acceptance hypothesis rather than advance credit.  A simple
 per-attempt extrapolation of only the
 clause-snapshot delta
 from the reversed 600-given mean and the adjacent 1,000-given pair spans about
@@ -1004,7 +1084,10 @@ Accept the external run only if it:
    with the structural 4,115,023-record target and explain any substantial
    fallback count.  When the trajectory is exact and fallbacks remain near
    zero, ancestor records should be close to 9.22 million rather than the old
-   13.34 million.
+   13.34 million; and
+9. reports `Clock_sampling: rate=1/16`, its interval/sample/read totals, and
+   the exact `/usr/bin/time -v` user and system CPU.  Do not use estimated
+   phase-clock sums as the total-CPU acceptance number.
 
 Until that run exists, the precise conclusion is: current compact P9 is
 decisively faster than old P9 on exact Josef 02 prefixes, and the identified
