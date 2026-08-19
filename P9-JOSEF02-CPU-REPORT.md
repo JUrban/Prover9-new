@@ -206,6 +206,16 @@ kept counts, and back-demod input/output/answer fingerprints match.  Periodic
 reports can occur at different given counts when host speed differs, so only
 the final cumulative reports are equality authorities.
 
+A second isolated profile of the accepted `92009ad` binary, stored in
+`josef02-gprof-hint-600/`, reproduced the exact 600-given endpoint and every
+final packed-dense counter.  Host load made its absolute profiled user time
+84.46 s, so percentages rather than elapsed time are the useful comparison:
+`retrieve_rec` accounted for 14.93% of samples, the batched dense intersection
+6.13%, and `slab_get` 5.14% across 165,390,617 calls.  The earlier profile had
+dense intersection at 7.00%; this confirms the intended local work reduction
+without pretending that two separate `gprof` runs are a controlled timing
+pair.
+
 ## Rejected options and experiments
 
 - Raising `hint_conjunction_kb` to 384 MiB is rejected.  Rewritten hints grew
@@ -249,6 +259,22 @@ the final cumulative reports are equality authorities.
   order: two reversed 600-given pairs regressed from 36.62 to 41.33 s mean
   (+12.9%).  Candidate sets and counters were exact, and the code was fully
   reverted.
+- Replacing KBO's transient variable-multiset lists with a stack table removed
+  the main source of the allocator profile: 51.60 million `multiset_add`
+  allocations by given 600.  The first implementation averaged 44.13 s versus
+  45.02 s control across reversed 600-given pairs, only a noisy 2.0% apparent
+  gain whose individual pairs disagreed.  A direct-indexed refinement then
+  took 44.98 s after a 41.69 s adjacent control (+7.9%).  Linear lookup or
+  clearing a 100-entry table merely replaced cheap recycled-slab work with
+  other hot-loop work.  Both forms were fully reverted; the release binary
+  hash returned exactly to the accepted value.
+- Turning deterministic rigid radix descent into a loop reduced the compiled
+  `retrieve_rec` body from 3,219 to 2,716 bytes, but the changed live-state and
+  undo behavior cost total CPU.  It took 42.34 versus 41.59 user seconds at
+  600 givens (+1.8%) and 97.62 versus 94.41 at 1,000 (+3.4%).  Both endpoints,
+  all hint counters and RSS were unchanged.  The experiment was fully
+  reverted; recursive rigid descent remains faster on the tested compiler and
+  host.
 
 ## Cross-workload gates
 
