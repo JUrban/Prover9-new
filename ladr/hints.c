@@ -2057,8 +2057,14 @@ static BOOL fast_dense_collect_candidates(
   unsigned minimum = UINT_MAX;
   unsigned seed = 0;
   unsigned i, summary_word;
-  BOOL create = !Hint_preview_active;
-  if (!Hint_preview_active)
+  unsigned long long posting_candidates = 0;
+  unsigned long long sparse_feature_tests = 0;
+  unsigned long long sparse_rejects = 0;
+  unsigned long long dense_data_words = 0;
+  unsigned long long dense_result_ids = 0;
+  BOOL record_stats = !Hint_preview_active;
+  BOOL create = record_stats;
+  if (record_stats)
     Fast_dense_queries++;
   if (key_count < 2 || key_count > FAST_DENSE_MAX_KEYS)
     return FALSE;
@@ -2093,12 +2099,11 @@ static BOOL fast_dense_collect_candidates(
     for (j = 0; j < count; j++) {
       unsigned id = ids[j];
       BOOL keep = TRUE;
-      if (!Hint_preview_active)
-        Packed_operation_stats[op].posting_candidates++;
+      posting_candidates++;
       if (id == 0 || id >= Packed_hint_capacity ||
           !Packed_hint_active[id] ||
           (exclude_anyconst && Packed_hint_anyconst[id])) {
-        if (!Hint_preview_active)
+        if (record_stats)
           packed_note_stale_skip(op);
         continue;
       }
@@ -2107,15 +2112,19 @@ static BOOL fast_dense_collect_candidates(
         if (i == seed)
           continue;
         word = id / 64;
-        if (!Hint_preview_active)
-          Fast_sparse_feature_tests++;
+        sparse_feature_tests++;
         keep = word < views[i].words &&
                (views[i].bits[word] & (1ULL << (id % 64))) != 0;
       }
       if (keep)
         packed_add_candidate(id);
-      else if (!Hint_preview_active)
-        Fast_sparse_rejects++;
+      else
+        sparse_rejects++;
+    }
+    if (record_stats) {
+      Packed_operation_stats[op].posting_candidates += posting_candidates;
+      Fast_sparse_feature_tests += sparse_feature_tests;
+      Fast_sparse_rejects += sparse_rejects;
     }
     return TRUE;
   }
@@ -2135,8 +2144,6 @@ static BOOL fast_dense_collect_candidates(
     unsigned j;
     for (j = 1; j < key_count && common != 0; j++)
       common &= views[j].summary[summary_word];
-    if (!Hint_preview_active)
-      Fast_dense_summary_words++;
     while (common != 0) {
       unsigned summary_bit = (unsigned) __builtin_ctzll(common);
       unsigned word = summary_word * 64 + summary_bit;
@@ -2146,28 +2153,31 @@ static BOOL fast_dense_collect_candidates(
       bits = views[0].bits[word];
       for (j = 1; j < key_count && bits != 0; j++)
         bits &= views[j].bits[word];
-      if (!Hint_preview_active)
-        Fast_dense_data_words++;
+      dense_data_words++;
       while (bits != 0) {
         unsigned bit = (unsigned) __builtin_ctzll(bits);
         unsigned id = word * 64 + bit;
-        if (!Hint_preview_active)
-          Packed_operation_stats[op].posting_candidates++;
+        posting_candidates++;
         if (id == 0 || id >= Packed_hint_capacity ||
             !Packed_hint_active[id] ||
             (exclude_anyconst && Packed_hint_anyconst[id])) {
-          if (!Hint_preview_active)
+          if (record_stats)
             packed_note_stale_skip(op);
         }
         else {
           packed_add_candidate(id);
-          if (!Hint_preview_active)
-            Fast_dense_result_ids++;
+          dense_result_ids++;
         }
         bits &= bits - 1;
       }
       common &= common - 1;
     }
+  }
+  if (record_stats) {
+    Packed_operation_stats[op].posting_candidates += posting_candidates;
+    Fast_dense_summary_words += views[0].summary_words;
+    Fast_dense_data_words += dense_data_words;
+    Fast_dense_result_ids += dense_result_ids;
   }
   return TRUE;
 }
