@@ -199,6 +199,11 @@ struct compact_back_demod_stats {
   unsigned long long mask_result_cache_budget_denials;
   unsigned long long mask_result_cache_incremental_slots;
   unsigned long long mask_result_cache_bucket_copies;
+  unsigned long long mask_result_frequency_capacity;
+  unsigned long long mask_result_frequency_bytes;
+  unsigned long long mask_result_frequency_updates;
+  unsigned long long mask_result_frequency_decays;
+  unsigned long long mask_result_frequency_cold_rejections;
   unsigned mask_result_cache_min_blocks;
   unsigned long long inactive_groups_examined;
   unsigned long long duplicate_groups_examined;

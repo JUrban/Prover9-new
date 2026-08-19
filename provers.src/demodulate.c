@@ -692,7 +692,11 @@ void fprint_compact_back_demod(FILE *fp)
           "mask_cache_aged_evictions=%llu, "
           "mask_cache_budget_denials=%llu, "
           "mask_cache_incremental_slots=%llu, "
-          "mask_cache_bucket_copies=%llu, mask_cache_min_blocks=%u, "
+          "mask_cache_bucket_copies=%llu, "
+          "mask_frequency_capacity=%llu, mask_frequency_bytes=%llu, "
+          "mask_frequency_updates=%llu, mask_frequency_decays=%llu, "
+          "mask_frequency_cold_rejections=%llu, "
+          "mask_cache_min_blocks=%u, "
           "tree_nodes=%llu, tree_terminals=%llu, "
           "tree_queries=%llu, tree_nodes_examined=%llu, "
           "tree_sibling_checks=%llu, "
@@ -793,6 +797,11 @@ void fprint_compact_back_demod(FILE *fp)
           stats.mask_result_cache_budget_denials,
           stats.mask_result_cache_incremental_slots,
           stats.mask_result_cache_bucket_copies,
+          stats.mask_result_frequency_capacity,
+          stats.mask_result_frequency_bytes,
+          stats.mask_result_frequency_updates,
+          stats.mask_result_frequency_decays,
+          stats.mask_result_frequency_cold_rejections,
           stats.mask_result_cache_min_blocks,
           stats.tree_nodes, stats.tree_terminals, stats.tree_queries,
           stats.tree_nodes_examined,

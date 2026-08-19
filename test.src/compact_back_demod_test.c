@@ -484,8 +484,14 @@ int main(void)
     compact_back_demod_get_stats(mask32_index, &cache_stats);
     CHECK(cache_stats.mask_result_cache_admissions >= 1 &&
           cache_stats.mask_result_cache_hits >= 1 &&
-          cache_stats.mask_result_cache_bytes > 0,
-          "repeated mask query admits and reuses one bounded result vector");
+          cache_stats.mask_result_cache_bytes > 0 &&
+          cache_stats.mask_result_cache_occupied == 1 &&
+          cache_stats.mask_result_frequency_capacity > 0 &&
+          cache_stats.mask_result_frequency_bytes > 0 &&
+          cache_stats.mask_result_frequency_updates == 6 &&
+          cache_stats.mask_result_frequency_cold_rejections >= 3,
+          "frequency gate keeps singleton keys out and reuses one hot "
+          "result vector");
     later = indexed_clause(
       "u(f(shallow_later_a,g(h(shallow_later_b)))).");
     CHECK(compact_back_demod_add(mask32_index, later),

@@ -19,10 +19,13 @@
 #define CBD_EDGE_ROOT_MARKER UINT32_MAX
 #define CBD_MASK_DIRECTORY_BUCKETS 64
 #define CBD_MASK_RESULT_CACHE_CAPACITY 2048
-#define CBD_MASK_RESULT_CACHE_ADMIT_HITS 4
+#define CBD_MASK_RESULT_CACHE_ADMIT_HITS 3
 #define CBD_MASK_RESULT_CACHE_DEFAULT_MIN_BLOCKS 64
 #define CBD_MASK_RESULT_CACHE_BUDGET_BYTES \
   (UINT64_C(16) * 1024 * 1024)
+#define CBD_MASK_RESULT_FREQUENCY_CAPACITY 16384
+#define CBD_MASK_RESULT_FREQUENCY_DECAY_INTERVAL \
+  (CBD_MASK_RESULT_FREQUENCY_CAPACITY * 4ULL)
 #define CBD_POSITION_SPARSE_INTERSECTION_MAX 4
 #define CBD_TREE_CHILD_CACHE_MAX_BYTES (UINT64_C(8) * 1024 * 1024)
 #define CBD_GROWTH_STALE_FLOOR 16384ULL
@@ -350,6 +353,11 @@ struct compact_back_demod_index {
   unsigned long long mask_result_cache_budget_denials;
   unsigned long long mask_result_cache_incremental_slots;
   unsigned long long mask_result_cache_bucket_copies;
+  unsigned char *mask_result_frequency;
+  size_t mask_result_frequency_capacity;
+  unsigned long long mask_result_frequency_updates;
+  unsigned long long mask_result_frequency_decays;
+  unsigned long long mask_result_frequency_cold_rejections;
   unsigned mask_result_cache_min_blocks;
   struct cbd_tree_node *tree_nodes;
   size_t tree_node_count;
@@ -755,6 +763,8 @@ static unsigned long long index_bytes(Compact_back_demod_index index)
     index->mask_result_cache_capacity *
       sizeof(*index->mask_result_cache) +
     index->mask_result_cache_bytes +
+    index->mask_result_frequency_capacity * 2 *
+      sizeof(*index->mask_result_frequency) +
     index->tree_node_capacity * sizeof(*index->tree_nodes) +
     index->tree_posting_list_capacity *
       sizeof(*index->tree_posting_lists) +
@@ -5502,6 +5512,9 @@ static void free_mask_result_cache(Compact_back_demod_index index)
   index->mask_result_cache = NULL;
   index->mask_result_cache_capacity = 0;
   index->mask_result_cache_bytes = 0;
+  safe_free(index->mask_result_frequency);
+  index->mask_result_frequency = NULL;
+  index->mask_result_frequency_capacity = 0;
 }
 
 static void retain_mask_result_cache_counters(
@@ -5527,6 +5540,12 @@ static void retain_mask_result_cache_counters(
     source->mask_result_cache_incremental_slots;
   destination->mask_result_cache_bucket_copies =
     source->mask_result_cache_bucket_copies;
+  destination->mask_result_frequency_updates =
+    source->mask_result_frequency_updates;
+  destination->mask_result_frequency_decays =
+    source->mask_result_frequency_decays;
+  destination->mask_result_frequency_cold_rejections =
+    source->mask_result_frequency_cold_rejections;
 }
 
 static BOOL reserve_mask_result_cache(
@@ -5565,20 +5584,63 @@ static CBD_NOINLINE struct cbd_mask_result_cache_entry *
 mask_result_cache_entry(
   Compact_back_demod_index index, uint32_t symbol, cbd_path_mask required)
 {
+  size_t i, frequency_mask, frequency_first, frequency_second;
   size_t sets, first;
+  unsigned char *frequency_a, *frequency_b;
+  unsigned frequency, minimum;
   struct cbd_mask_result_cache_entry *a, *b, *entry;
   uint64_t key;
+  /* Keep singleton and very cold keys out of the much smaller exact table.
+     Conservative count-min updates preserve a lower estimate across table
+     conflicts.  False-positive admission can cost only bounded cache space
+     and cannot alter retrieval results.  Decay reflects recent reuse rather
+     than total run age.  This remains inside the already cold, out-of-line
+     table helper so prepare_mask_directory keeps its compact hot layout. */
+  if (index->mask_result_frequency_capacity == 0) {
+    index->mask_result_frequency_capacity =
+      CBD_MASK_RESULT_FREQUENCY_CAPACITY;
+    index->mask_result_frequency = safe_calloc(
+      index->mask_result_frequency_capacity * 2,
+      sizeof(*index->mask_result_frequency));
+    update_peak(index);
+  }
+  index->mask_result_frequency_updates++;
+  if (index->mask_result_frequency_updates != 0 &&
+      index->mask_result_frequency_updates %
+        CBD_MASK_RESULT_FREQUENCY_DECAY_INTERVAL == 0) {
+    for (i = 0; i < index->mask_result_frequency_capacity * 2; i++)
+      index->mask_result_frequency[i] >>= 1;
+    index->mask_result_frequency_decays++;
+  }
+  key = hash_id(((uint64_t) symbol << 32) ^ required);
+  frequency_mask = index->mask_result_frequency_capacity - 1;
+  frequency_first = (size_t) key & frequency_mask;
+  frequency_second = index->mask_result_frequency_capacity +
+    ((size_t) hash_id(key ^ UINT64_C(0x9e3779b97f4a7c15)) &
+     frequency_mask);
+  frequency_a = &index->mask_result_frequency[frequency_first];
+  frequency_b = &index->mask_result_frequency[frequency_second];
+  minimum = *frequency_a < *frequency_b ? *frequency_a : *frequency_b;
+  if (*frequency_a == minimum && *frequency_a != UCHAR_MAX)
+    (*frequency_a)++;
+  if (*frequency_b == minimum && *frequency_b != UCHAR_MAX)
+    (*frequency_b)++;
+  frequency = *frequency_a < *frequency_b ?
+    *frequency_a : *frequency_b;
+  index->mask_result_cache_queries++;
+  index->mask_result_cache_sequence++;
   if (index->mask_result_cache_capacity == 0) {
+    if (frequency < CBD_MASK_RESULT_CACHE_ADMIT_HITS) {
+      index->mask_result_frequency_cold_rejections++;
+      return NULL;
+    }
     index->mask_result_cache_capacity = CBD_MASK_RESULT_CACHE_CAPACITY;
     index->mask_result_cache = safe_calloc(
       index->mask_result_cache_capacity,
       sizeof(*index->mask_result_cache));
     update_peak(index);
   }
-  index->mask_result_cache_queries++;
-  index->mask_result_cache_sequence++;
   sets = index->mask_result_cache_capacity / 2;
-  key = hash_id(((uint64_t) symbol << 32) ^ required);
   first = ((size_t) key & (sets - 1)) * 2;
   a = &index->mask_result_cache[first];
   b = a + 1;
@@ -5587,6 +5649,10 @@ mask_result_cache_entry(
   else if (b->occupied && b->symbol == symbol && b->required == required)
     entry = b;
   else {
+    if (frequency < CBD_MASK_RESULT_CACHE_ADMIT_HITS) {
+      index->mask_result_frequency_cold_rejections++;
+      return NULL;
+    }
     if (!a->occupied)
       entry = a;
     else if (!b->occupied)
@@ -5612,13 +5678,12 @@ mask_result_cache_entry(
     entry->occupied = TRUE;
     entry->symbol = symbol;
     entry->required = required;
-    entry->frequency = 1;
+    entry->frequency = frequency;
     entry->last_seen = index->mask_result_cache_sequence;
     return entry;
   }
   index->mask_result_cache_key_hits++;
-  if (entry->frequency < UINT16_MAX)
-    entry->frequency++;
+  entry->frequency = frequency;
   entry->last_seen = index->mask_result_cache_sequence;
   return entry;
 }
@@ -8367,6 +8432,17 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
     index->mask_result_cache_incremental_slots;
   stats->mask_result_cache_bucket_copies =
     index->mask_result_cache_bucket_copies;
+  stats->mask_result_frequency_capacity =
+    index->mask_result_frequency_capacity;
+  stats->mask_result_frequency_bytes =
+    index->mask_result_frequency_capacity * 2 *
+      sizeof(*index->mask_result_frequency);
+  stats->mask_result_frequency_updates =
+    index->mask_result_frequency_updates;
+  stats->mask_result_frequency_decays =
+    index->mask_result_frequency_decays;
+  stats->mask_result_frequency_cold_rejections =
+    index->mask_result_frequency_cold_rejections;
   stats->mask_result_cache_min_blocks =
     index->mask_result_cache_min_blocks;
   stats->inactive_groups_examined = index->inactive_groups_examined;
@@ -8413,6 +8489,8 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
     index->mask_result_cache_capacity *
       sizeof(*index->mask_result_cache) +
     index->mask_result_cache_bytes +
+    index->mask_result_frequency_capacity * 2 *
+      sizeof(*index->mask_result_frequency) +
     index->tree_node_capacity * sizeof(*index->tree_nodes) +
     index->tree_posting_list_capacity *
       sizeof(*index->tree_posting_lists) +
