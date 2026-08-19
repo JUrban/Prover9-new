@@ -859,6 +859,60 @@ use the `*-pgo5-*` directory names.  This is the current external authority
 candidate, but its 1,000-given result still cannot predict the mature
 13,006-given phase without the external proof run.
 
+#### Deeper-profile audit: rejected
+
+The final profile deliberately keeps Josef 02 training at 600 givens.  That
+means the frequency-gated result cache is validated by the PGO-use binary at
+1,000 givens, but is not itself executed while collecting PGO5 counts.  A
+separate audit tested whether training through the active cache path improves
+the authority build.
+
+PGO6 replaced only the Josef 02/600 trainer with the exact 1,000-given
+trajectory.  The instrumented run used 98.45 total CPU seconds, peaked at
+236,464 KiB, and recorded all 5,160 frequency updates, 640 result hits, 366
+admissions, 4,154 cold rejections and the index compaction.  CHAT/600 and
+Josef 01/1,000 remained in the training mix, reaching exact endpoints at
+66.53 and 74.11 total CPU seconds.  All three trainers were sequential and
+swap-free.  PGO6 had complete core coverage, but regressed against PGO5 in
+both orders at Josef 02/1,000:
+
+| comparison | PGO5 | deeper PGO6 | result |
+|---|---:|---:|---|
+| pair 1, PGO5 then PGO6 | 70.65 s | 71.22 s | PGO6 +0.8% |
+| pair 2, PGO6 then PGO5 | 79.35 s | 93.06 s | PGO6 +17.3% |
+| two-order mean | 75.00 s | 82.14 s | PGO6 +9.5%; rejected |
+
+An equal offline blend, PGO7, then combined PGO5 and PGO6 counts.  Its
+effective mix contains Josef 02/600 and Josef 02/1,000 once each, with CHAT/600
+and Josef 01/1,000 represented twice each.  This restores generalization
+weight while retaining active-cache counts.  A requested 3:1 weighted merge
+was not used because GCC 13's `gcov-tool` crashed in its top-N counter logic;
+the ordinary equal merge completed all 103 profile files and its PGO-use build
+had no core coverage warnings.  PGO7 was exact and swap-free, but the two
+orientations disagreed:
+
+| comparison | PGO5 | blended PGO7 | result |
+|---|---:|---:|---|
+| pair 1, PGO5 then PGO7 | 69.66 s | 72.46 s | PGO7 +4.0% |
+| pair 2, PGO7 then PGO5 | 71.94 s | 67.59 s | PGO7 -6.0% |
+| two-order mean | 70.80 s | 70.03 s | PGO7 -1.1%; neutral/rejected |
+
+PGO7/PGO5 mean RSS is 234,048/234,058 KiB.  Every run preserves the exact
+endpoint, all three back-query fingerprints and every frequency/cache counter.
+The contradictory orientations make the 1.1% mean difference host noise, not
+an authority improvement.  No cross-workload PGO-use gates were spent on
+either rejected binary after it failed the target gate.  PGO6 and PGO7 hashes
+are `50c1187842aed11c6a3927c5702976e0a129f557ac6552776468b8d0d191539c`
+and `8f0ebdb36c5e18f1f7b7d0c0b7b18067e1f6e770acfa4aa97d2b60530f7aa2d9`;
+raw artifacts use `*-pgo6-*` and `*-pgo7-*` names.  The installed PGO5 binary
+and its documented hash remain unchanged.
+
+This rejects the tempting assumption that a longer bounded trainer is a
+better proxy for a week-long search.  It changes whole-program branch and
+layout weights before it supplies enough mature-cache volume to dominate the
+real long-run cost.  The full external proof, not still more weight tuning on
+short prefixes, is the next authority test.
+
 ## Rejected options and experiments
 
 - Raising `hint_conjunction_kb` to 384 MiB is rejected.  Rewritten hints grew
