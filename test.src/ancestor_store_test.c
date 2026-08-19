@@ -610,27 +610,37 @@ static void detached_archive_scaling_test(Clause_store_archive_mode mode)
           "detached offset materializes its exact clause");
     clause_store_release_materialized(sample);
   }
+  CHECK(!clause_store_retain_detached(store, offsets[0], ids[1]) &&
+        clause_store_get_stats(store).detached_current == RECORDS,
+        "detached retention rejects a mismatched public ID");
 
   for (i = 0; i < RECORDS; i++) {
-    if ((i & 1) == 0) {
+    if (i % 3 == 0) {
       Topform c = clause_store_activate_offset(store, offsets[i], ids[i]);
       CHECK(c != NULL && c->id == ids[i],
             "detached offset activates its exact public ID");
       if (c != NULL)
         delete_clause(c);
     }
-    else
+    else if (i % 3 == 1)
       CHECK(clause_store_discard_detached(store, offsets[i], ids[i]),
             "detached offset discards its exact public ID");
+    else
+      CHECK(clause_store_retain_detached(store, offsets[i], ids[i]),
+            "detached offset transfers into retained handle ownership");
   }
   stats = clause_store_get_stats(store);
-  CHECK(clause_store_current_length(store) == 0 &&
+  CHECK(clause_store_current_length(store) == RECORDS / 3 &&
+        clause_store_length(store) == RECORDS / 3 &&
         stats.detached_current == 0,
-        "activation and discard release every detached current record");
+        "activation, discard, and retention release detached ownership");
   CHECK(find_clause_by_id(ids[0]) == NULL &&
+        clause_id_is_archived(ids[2]) &&
         find_clause_by_id(ids[RECORDS - 1]) == NULL,
-        "detached lifecycle leaves no stale endpoint IDs");
+        "only retained detached records keep their archived IDs");
   clause_store_delete_clauses(store);
+  CHECK(find_clause_by_id(ids[2]) == NULL,
+        "retained detached teardown removes its archived ID");
   safe_free(offsets);
   safe_free(ids);
 }

@@ -987,6 +987,31 @@ BOOL clause_store_archive_detached(Clause_store store, Topform c,
 }
 
 /* PUBLIC */
+BOOL clause_store_retain_detached(Clause_store store, size_t offset,
+                                  unsigned long long expected_id)
+{
+  unsigned long long current_offset;
+  if (store == NULL || expected_id == 0 ||
+      store->mode == CLAUSE_STORE_ARCHIVE_OFF ||
+      store->detached_current == 0 ||
+      !clause_id_archive_offset(expected_id, &current_offset) ||
+      current_offset != (unsigned long long) offset)
+    return FALSE;
+  if (store->length == store->capacity) {
+    size_t new_capacity = store->capacity == 0 ? 16 : store->capacity * 2;
+    if (new_capacity < store->capacity ||
+        new_capacity > SIZE_MAX / sizeof(*store->refs))
+      fatal_error("clause_store_retain_detached: capacity overflow");
+    store->refs = safe_realloc(store->refs,
+                               new_capacity * sizeof(*store->refs));
+    store->capacity = new_capacity;
+  }
+  store->refs[store->length++] = offset_ref((unsigned long long) offset);
+  store->detached_current--;
+  return TRUE;
+}
+
+/* PUBLIC */
 BOOL clause_store_member(Clause_store store, Topform c)
 {
   return store != NULL && c != NULL && c->disabled;

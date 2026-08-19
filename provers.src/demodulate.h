@@ -96,6 +96,12 @@ void index_demodulator(Topform c, int type, Indexop operation, Clock clock);
 
 void index_back_demod(Topform c, Indexop operation, Clock clock, BOOL enabled);
 
+/* Remove one authoritative compact back-demodulation record by stable ID.
+   Returns FALSE only when the requested direct path is unavailable or the
+   record is missing. */
+BOOL unindex_compact_back_demod_id(unsigned long long id, Clock clock,
+                                   BOOL enabled);
+
 void write_demod_index(const char *dir);
 
 typedef Topform (*Demodulator_resolver)(unsigned long long id, void *context);

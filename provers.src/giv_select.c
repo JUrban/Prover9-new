@@ -118,6 +118,7 @@ struct giv_select {
 #define DENSE_PASSIVE_SEMANTICS_SHIFT 3U
 #define DENSE_PASSIVE_SEMANTICS_MASK  0x18U
 #define DENSE_PASSIVE_USED 0x20U
+#define DENSE_PASSIVE_ARCHIVE_DIRTY 0x40U
 #define DENSE_DIRECTORY_EVICT_STEP (64U * 1024U * 1024U)
 #define DENSE_DIRECTORY_HOT_WINDOW (64U * 1024U * 1024U)
 
@@ -374,6 +375,8 @@ static void dense_record_view(const struct dense_passive_record *r,
     (r->flags & DENSE_PASSIVE_DELAYED) != 0;
   view->rewrite_rule_dirty =
     (r->flags & DENSE_PASSIVE_RULE_DIRTY) != 0;
+  view->archive_metadata_dirty =
+    (r->flags & DENSE_PASSIVE_ARCHIVE_DIRTY) != 0;
 }
 
 static void dense_add_payload(const struct dense_passive_record *r)
@@ -553,7 +556,9 @@ BOOL dense_passive_mark_used(unsigned long long id)
   if (at == SIZE_MAX ||
       (Dense_records[at].flags & DENSE_PASSIVE_ACTIVE) == 0)
     return FALSE;
-  Dense_records[at].flags |= DENSE_PASSIVE_USED;
+  if ((Dense_records[at].flags & DENSE_PASSIVE_USED) == 0)
+    Dense_records[at].flags |=
+      DENSE_PASSIVE_USED | DENSE_PASSIVE_ARCHIVE_DIRTY;
   return TRUE;
 }
 
@@ -1954,6 +1959,11 @@ BOOL dense_passive_reactivate_id(unsigned long long id,
       (Dense_records[at].flags & DENSE_PASSIVE_ACTIVE) != 0)
     return FALSE;
   r = &Dense_records[at];
+  if (r->simplifier_epoch != simplifier_epoch ||
+      r->rewrite_epoch != rewrite_epoch ||
+      ((r->flags & DENSE_PASSIVE_DELAYED) != 0) != delayed_demodulator ||
+      ((r->flags & DENSE_PASSIVE_RULE_DIRTY) != 0) != rewrite_rule_dirty)
+    r->flags |= DENSE_PASSIVE_ARCHIVE_DIRTY;
   r->simplifier_epoch = simplifier_epoch;
   r->rewrite_epoch = rewrite_epoch;
   if (delayed_demodulator)
@@ -1980,7 +1990,7 @@ BOOL dense_passive_mark_rule_dirty(unsigned long long id)
         (DENSE_PASSIVE_ACTIVE | DENSE_PASSIVE_DELAYED) ||
       (r->flags & DENSE_PASSIVE_RULE_DIRTY) != 0)
     return FALSE;
-  r->flags |= DENSE_PASSIVE_RULE_DIRTY;
+  r->flags |= DENSE_PASSIVE_RULE_DIRTY | DENSE_PASSIVE_ARCHIVE_DIRTY;
   Dense_rule_stale++;
   return TRUE;
 }

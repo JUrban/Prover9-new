@@ -293,6 +293,32 @@ void index_back_demod(Topform c, Indexop operation, Clock clock, BOOL enabled)
   }
 }  /* index_back_demod */
 
+/* PUBLIC */
+BOOL unindex_compact_back_demod_id(unsigned long long id, Clock clock,
+                                   BOOL enabled)
+{
+  BOOL ok;
+  if (!enabled)
+    return TRUE;
+  if (!Compact_back_demod_authoritative ||
+      Compact_back_demod_idx == NULL || id == 0)
+    return FALSE;
+  clock_start(clock);
+  ok = compact_back_demod_remove(Compact_back_demod_idx, id);
+  if (ok && compact_back_demod_compaction_needed(Compact_back_demod_idx)) {
+    if (Compact_back_demod_resolve != NULL)
+      compact_back_demod_compact_materialized(
+        Compact_back_demod_idx,
+        compact_back_demod_materialize_clause,
+        compact_back_demod_release_materialized,
+        compact_back_demod_advise_materialized_batch, NULL);
+    else
+      compact_back_demod_compact(Compact_back_demod_idx);
+  }
+  clock_stop(clock);
+  return ok;
+}
+
 /*************
  *
  *   write_discrim_leaves() -- iterative DFS walk of DISCRIM tree

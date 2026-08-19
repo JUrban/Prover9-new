@@ -63,6 +63,10 @@ void destroy_literals_index(void);
 
 void index_literals(Topform c, Indexop op, Clock clock, BOOL no_fapl);
 
+/* Remove an authoritative compact unit or nonunit record by stable ID.
+   This is unavailable when a legacy pointer index is authoritative. */
+BOOL unindex_compact_literals_id(unsigned long long id, Clock clock);
+
 void index_denial(Topform c, Indexop op, Clock clock);
 
 BOOL unit_conflict(Topform c, Topform_proc empty_proc);

@@ -104,6 +104,7 @@ struct dense_passive_view {
   BOOL used;
   BOOL delayed_demodulator;
   BOOL rewrite_rule_dirty;
+  BOOL archive_metadata_dirty;
 };
 
 typedef void (*Dense_passive_visit_fn)(

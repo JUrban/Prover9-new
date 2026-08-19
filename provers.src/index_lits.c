@@ -738,6 +738,28 @@ void index_literals(Topform c, Indexop op, Clock clock, BOOL no_fapl)
   clock_stop(clock);
 }  /* index_literals */
 
+/* PUBLIC */
+BOOL unindex_compact_literals_id(unsigned long long id, Clock clock)
+{
+  BOOL ok;
+  if (!Compact_unit_authoritative || !Compact_nonunit_authoritative ||
+      Compact_units == NULL || Compact_nonunits == NULL || id == 0)
+    return FALSE;
+  clock_start(clock);
+  if (compact_unit_index_contains(Compact_units, id)) {
+    ok = compact_unit_index_remove(Compact_units, id);
+    if (ok && compact_unit_index_compaction_needed(Compact_units))
+      compact_unit_index_compact(Compact_units);
+  }
+  else {
+    ok = compact_feature_index_remove(Compact_nonunits, id);
+    if (ok && compact_feature_index_compaction_needed(Compact_nonunits))
+      compact_feature_index_compact(Compact_nonunits);
+  }
+  clock_stop(clock);
+  return ok;
+}
+
 /*************
  *
  *   index_denial()

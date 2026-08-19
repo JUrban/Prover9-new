@@ -128,6 +128,9 @@ static unsigned long long Compact_passive_cache_misses;
 static unsigned long long Compact_passive_cache_bypasses;
 static unsigned long long Compact_passive_cache_evictions;
 static unsigned long long Compact_passive_cache_invalidations;
+static unsigned long long Compact_passive_direct_retentions;
+static unsigned long long Compact_passive_retention_fallbacks;
+static unsigned long long Compact_passive_payload_bytes_avoided;
 
 static void update_rewrite_only_stats(void);
 static void current_demodulate_clause(Topform, int, int, BOOL, BOOL);
@@ -3496,12 +3499,16 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
 
   fprintf(fp,
           "Disabled_compression: attempted=%s, successful=%s, skipped=%s, "
-          "materialized=%s, recompressed=%s.\n",
+          "materialized=%s, recompressed=%s, direct_retentions=%s, "
+          "retention_fallbacks=%s, payload_bytes_avoided=%s.\n",
           comma_num(s.compression_attempted),
           comma_num(s.compression_successful),
           comma_num(s.compression_skipped),
           comma_num(s.compression_materialized),
-          comma_num(s.compression_recompressed));
+          comma_num(s.compression_recompressed),
+          comma_num(Compact_passive_direct_retentions),
+          comma_num(Compact_passive_retention_fallbacks),
+          comma_num(Compact_passive_payload_bytes_avoided));
   fprintf(fp,
           "Clause_body_bytes: active=%s, passive=%s, hints=%s, "
           "disabled_full=%s (%s clauses), "
@@ -6268,6 +6275,9 @@ static void compact_passive_cache_init(unsigned megs)
   Compact_passive_cache_bypasses = 0;
   Compact_passive_cache_evictions = 0;
   Compact_passive_cache_invalidations = 0;
+  Compact_passive_direct_retentions = 0;
+  Compact_passive_retention_fallbacks = 0;
+  Compact_passive_payload_bytes_avoided = 0;
   if (megs == 0)
     return;
   Compact_passive_cache_budget = (size_t) megs * 1024 * 1024;
@@ -6738,6 +6748,37 @@ static void maybe_compact_shared_term_pool(void)
   Compact_term_next_reclaim_serialization = terms.serializations + 1024;
 }
 
+/* Retire a dense passive whose selector metadata still matches its immutable
+   archive record.  Keep this cold ownership transfer out of disable_clause's
+   ordinary legacy/list lifecycle path. */
+static SEARCH_NOINLINE void retain_clean_compact_passive(
+  Topform c, const struct dense_passive_view *view)
+{
+  unsigned long long id = c->id;
+  compact_passive_cache_discard(id, c);
+  if (!dense_passive_deactivate_id(id, NULL))
+    fatal_error("disable_clause: cold passive selector record is missing");
+  if (compact_rewrite_contains(Compact_rewrite_rules, id)) {
+    if (!compact_rewrite_remove(Compact_rewrite_rules, id))
+      fatal_error("disable_clause: compact cold demodulator is missing");
+    if (compact_rewrite_compaction_needed(Compact_rewrite_rules))
+      compact_rewrite_compact(Compact_rewrite_rules);
+    update_rewrite_only_stats();
+  }
+  if (!unindex_compact_literals_id(id, Clocks.index))
+    fatal_error("disable_clause: compact literal record is missing");
+  if (!unindex_compact_back_demod_id(
+        id, Clocks.index, flag(Opt->back_demod)))
+    fatal_error("disable_clause: compact back-demod record is missing");
+  maybe_compact_shared_term_pool();
+  if (!clause_store_retain_detached(
+        Glob.disabled, view->store_position, id))
+    fatal_error("disable_clause: cannot retain cold archive record");
+  Compact_passive_direct_retentions++;
+  Compact_passive_payload_bytes_avoided +=
+    (unsigned long long) view->body_bytes + view->justification_bytes;
+}
+
 /*************
  *
  *   disable_clause()
@@ -6764,6 +6805,17 @@ void disable_clause(Topform c)
     unsigned long long id = c->id;
     if (!dense_passive_view_id(id, &view))
       fatal_error("disable_clause: cold passive metadata is missing");
+    /* The compact indexes delete by stable ID; when the selector metadata
+       still matches the immutable archive header, retain that original
+       record directly.  This avoids decoding it a second time and appending
+       an identical replacement record.  Any metadata mutation takes the
+       established materialize/rearchive path below. */
+    if (!view.archive_metadata_dirty) {
+      retain_clean_compact_passive(c, &view);
+      clock_stop(Clocks.disable);
+      return;
+    }
+    Compact_passive_retention_fallbacks++;
     compact_passive_cache_discard(id, c);
     c = clause_store_activate_offset(Glob.disabled, view.store_position, id);
     if (c == NULL || c->id != id)

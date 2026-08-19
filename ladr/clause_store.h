@@ -77,6 +77,13 @@ BOOL clause_store_archive_clause_preserve(Clause_store store, Topform c);
 BOOL clause_store_archive_detached(Clause_store store, Topform c,
                                    size_t *offset);
 
+/* Transfer an existing detached archive record from an external compact
+   directory into this store's retained handle array without decoding or
+   rewriting its immutable payload.  The external owner must call this
+   exactly once while the ID still names that detached record. */
+BOOL clause_store_retain_detached(Clause_store store, size_t offset,
+                                  unsigned long long expected_id);
+
 BOOL clause_store_member(Clause_store store, Topform c);
 
 size_t clause_store_length(Clause_store store);
