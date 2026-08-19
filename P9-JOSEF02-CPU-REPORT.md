@@ -1,7 +1,7 @@
 # Josef 02 compact-P9 CPU investigation
 
 Status: source changes implemented and bounded-validated on branch
-`josef02-cpu` through `acb1c63`, with the portable PGO workflow fixed through
+`josef02-cpu` through `0210069`, with the portable PGO workflow fixed through
 `0b281d5`.  The current compact prover is already 3.9--5.4 times faster than
 the preserved old-P9 binary on exact 300/600-given Josef 02 prefixes.  A full
 old-P9 Josef 02 proof output was not supplied, so this report does not claim a
@@ -24,6 +24,7 @@ something attempted on the low-RAM development machine.
 | release binary at `fb7b873` | `7a911af3df69506d395a5c8c034ba472211f0953cfe65d44abfa5d4589a43e6f` |
 | release binary at `c40a81d` | `94d16148e6bf3a13170712c54fb09cbb6f1d30cdc846f148667489db722ff52c` |
 | release binary at `acb1c63` | `86821508f732be3bc9b8e35cc9e3cc1272eb86817b0938d1852887e15d04f0e4` |
+| release binary at `0210069` | `a1a0a06e7e15375ea20eb592bb9f4407c70243277c8b1fa1edc6c57eb89c153c` |
 
 The reconstructed input is
 `josef02-debug.heNOIJ/Josef_02-uninterrupted.in`.  It retains every formula,
@@ -469,6 +470,58 @@ long-run, hint, compact-OTTER audit/checkpoint, dense-passive and generalization
 tests all pass.  PGO profiles made before `acb1c63` must be discarded because
 the compact disable call graph changed.
 
+### Linear position-append grouping
+
+Commit `0210069` removes another cost that is directly present at mature
+scale.  The eager position index formerly accumulated every
+`(bucket, root_offset)` match for a new record and comparison-sorted the whole
+array.  Subject roots are already visited in increasing serialized offset.
+The new path therefore chains matches by bucket, sorts only the unique
+32-bit bucket IDs to retain deterministic physical layout, and flattens each
+chain directly in offset order.  If a future traversal violates the offset
+invariant, the complete old comparison sort remains as a correctness
+fallback.
+
+This is deliberately not a Josef-sized fixed table.  One transient chain head
+fits the existing padding of each feature record; links, bucket IDs, and
+ordered output are reusable scratch bounded by the largest clause being
+inserted.  At the 1,000-given gate the permanent root/index byte count is
+exactly unchanged at 6,608,624 bytes.  Total compact-back-index storage rises
+only from 21,387,904 to 21,390,536 bytes (+2,632 bytes of peak scratch), and
+process RSS remains within normal run variance.
+
+| gate | control | grouped result | result |
+|---|---:|---:|---|
+| Josef 02/600, two reversed algorithm pairs | 48.31, 54.04 s | 44.12, 47.93 s | -8.7% and -11.3%; exact |
+| Josef 02/600, final RAM-neutral representation | same trajectory controls above | 44.74 s / 206,672 KiB | exact; 26,669 grouped, zero fallbacks |
+| Josef 02/1,000, adjacent algorithm pair | 108.19 s / 233,892 KiB | 101.79 s / 235,848 KiB | -5.9%; exact |
+| Josef 02/1,000, final RAM-neutral confirmation | no new paired control | 89.10 s / 234,408 KiB | exact; 88,085 grouped, zero fallbacks |
+| CHAT/600, final code | prior same-path observations 62.27--62.88 s | 65.89 s / 467,740 KiB | exact; timing inconclusive under 5.8% host spread |
+
+Raw final-code outputs and GNU-time sidecars are retained in
+`josef02-position-grouping-final-{600,1000}/` and
+`chat-position-grouping-final-600/`; the adjacent controls and intermediate
+reversed pairs use the corresponding `*-control-*`, `*-sorted-*`, and
+`*-candidate-pair2-*` names.
+
+All Josef and CHAT runs preserve their exact query-input, ordered-output and
+semantic-answer fingerprints.  The completed 13,006-given baseline reports
+21,628,534 position appends and 830,263,640 append matches (about 38 matches
+per record).  Those are mature operations, not an extrapolated hint mix; the
+change replaces potentially about 21.6 million full pair sorts in the
+authority rerun.  The bounded 1,000 result supports a CPU improvement, but it
+is not a substitute for measuring the finished proof.
+
+The final `Compact_back_demod:` line now exposes
+`position_append_matches`, `position_append_bucket_groups`,
+`position_append_grouped_records`, and `position_append_sort_fallbacks`.
+The first two quantify the old and reduced sort widths; the latter two are
+the coverage and safety checks.  The focused eager-position test requires
+grouping coverage and zero unexpected fallbacks.  No Prover9 input option is
+needed: the optimization is automatic whenever the compact position index is
+active.  The focused back-index test, compact long-run test and compact-OTTER
+audit all pass on the committed source.
+
 ### Fresh post-retention balanced PGO validation
 
 The balanced GCC profile was regenerated from the current `acb1c63` source,
@@ -500,7 +553,9 @@ mature 17% claim.  PGO is therefore still the recommended external authority
 build, with a same-host unprofiled native control, but it does not replace the
 need to remove work whose cost grows through the 13,006-given phase.  Any
 subsequent source change in a trained search/index object invalidates this
-profile and requires the same bounded retraining sequence.
+profile and requires the same bounded retraining sequence.  In particular,
+the recorded `acb1c63` profile predates `0210069` and must be regenerated
+before an authority run of the current source.
 
 ## Rejected options and experiments
 
@@ -751,7 +806,9 @@ accessors remove costs whose old complexity grows with both lifecycle events
 and index width; the mask lower-bound optimization has only just crossed over
 at 1,500 givens but targets a directory sixteen times wider at the proof.
 Inherited slab recycling and direct symbol/term hot-path work also postdate the
-baseline output.
+baseline output.  Linear position-append grouping additionally targets the
+baseline's 21.6 million full pair sorts, but its bounded 5.9% 1,000-given
+benefit is not applied mechanically to the planning range.
 
 A cautious planning range for the next same-machine **release** total is
 **6,200--7,500 CPU seconds** (about 15--30% below the compact baseline), with
