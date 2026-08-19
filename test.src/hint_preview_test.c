@@ -300,6 +300,49 @@ static void run_conjunction_plan_case(int bsub)
   delete_clause(hint);
 }
 
+static void run_candidate_order_case(int bsub)
+{
+  Topform first_hint = parse_clause_from_string("order_probe(f(a)).");
+  Topform second_hint = parse_clause_from_string("order_probe(f(b)).");
+  Topform ascending_query = parse_clause_from_string("order_probe(x).");
+  Topform mixed_query = parse_clause_from_string("order_probe(x).");
+
+  first_hint->attributes = set_int_attribute(
+    first_hint->attributes, bsub, 11);
+  second_hint->attributes = set_int_attribute(
+    second_hint->attributes, bsub, 22);
+  init_hints(ORDINARY_UNIF, bsub, FALSE, FALSE, 2,
+             TRUE, TRUE, TRUE, 0, 0, 0, 8, NULL);
+  index_hint(first_hint);
+  index_hint(second_hint);
+
+  /* Monotone posting IDs are produced as [first, second], then converted to
+     the legacy decreasing-ID scan order.  Both hints are proper subsumees,
+     so the last one visited must be the lower stable ID. */
+  adjust_weight_with_hints(ascending_query, FALSE, FALSE);
+  CHECK(ascending_query->matching_hint == first_hint,
+        "monotone candidate reversal preserves legacy hint tie order");
+
+  /* Re-indexing the lower stable ID appends it after the higher one in the
+     conservative postings.  This deliberately creates mixed/decreasing raw
+     input and exercises the comparison-sort fallback. */
+  unindex_hint(first_hint);
+  CHECK(materialize_clause(first_hint),
+        "stable-ID order test materializes the hint before re-indexing");
+  index_hint(first_hint);
+  adjust_weight_with_hints(mixed_query, FALSE, FALSE);
+  CHECK(mixed_query->matching_hint == first_hint,
+        "mixed candidate fallback preserves legacy hint tie order");
+
+  unindex_hint(first_hint);
+  unindex_hint(second_hint);
+  done_with_hints();
+  delete_clause(mixed_query);
+  delete_clause(ascending_query);
+  delete_clause(second_hint);
+  delete_clause(first_hint);
+}
+
 static void run_hint_lifecycle_case(BOOL packed, BOOL better, BOOL fast,
                                     int bsub)
 {
@@ -400,6 +443,7 @@ int main(void)
   run_back_fingerprint_case(bsub);
   run_conjunction_budget_case(bsub);
   run_conjunction_plan_case(bsub);
+  run_candidate_order_case(bsub);
   run_hint_lifecycle_case(FALSE, FALSE, FALSE, bsub);
   run_hint_lifecycle_case(TRUE, FALSE, FALSE, bsub);
   run_hint_lifecycle_case(TRUE, TRUE, FALSE, bsub);

@@ -53,6 +53,7 @@ static unsigned Packed_hint_capacity = 0;
 static unsigned Packed_candidate_serial = 1;
 static unsigned *Packed_candidates = NULL;
 static unsigned Packed_candidates_count = 0, Packed_candidates_capacity = 0;
+static BOOL Packed_candidates_nondecreasing = TRUE;
 static unsigned long long Packed_candidate_checks = 0;
 
 /* Dedicated read-only-preview query workspace.  It is allocated alongside
@@ -657,6 +658,9 @@ static void packed_add_candidate(unsigned id)
                                      (size_t) cap * sizeof(unsigned));
     Packed_candidates_capacity = cap;
   }
+  if (Packed_candidates_nondecreasing && Packed_candidates_count != 0 &&
+      id < Packed_candidates[Packed_candidates_count - 1])
+    Packed_candidates_nondecreasing = FALSE;
   Packed_candidates[Packed_candidates_count++] = id;
 }
 
@@ -675,6 +679,7 @@ static BOOL packed_term_has_theory_symbol(Term t)
 static void packed_begin_candidates(void)
 {
   Packed_candidates_count = 0;
+  Packed_candidates_nondecreasing = TRUE;
   Packed_candidate_serial++;
   if (Packed_candidate_serial == 0) {
     memset(Packed_candidate_mark, 0,
@@ -759,9 +764,19 @@ static void packed_finish_candidates(BOOL include_anyconst,
       }
     }
   }
-  if (Packed_candidates_count > 1)
-    qsort(Packed_candidates, Packed_candidates_count, sizeof(unsigned),
-          packed_id_decreasing);
+  if (Packed_candidates_count > 1) {
+    if (Packed_candidates_nondecreasing) {
+      unsigned low = 0, high = Packed_candidates_count - 1;
+      while (low < high) {
+        unsigned id = Packed_candidates[low];
+        Packed_candidates[low++] = Packed_candidates[high];
+        Packed_candidates[high--] = id;
+      }
+    }
+    else
+      qsort(Packed_candidates, Packed_candidates_count, sizeof(unsigned),
+            packed_id_decreasing);
+  }
 }
 
 static unsigned long long better_feature_key(unsigned kind, unsigned path,
