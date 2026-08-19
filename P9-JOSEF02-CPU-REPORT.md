@@ -1,9 +1,10 @@
 # Josef 02 compact-P9 CPU investigation
 
 Status: source changes implemented and bounded-validated on branch
-`josef02-cpu` through `7e06aaa`, with the portable PGO workflow and
-low-overhead detailed-clock mode implemented through that commit.  The
-current compact prover is already 3.9--5.4 times faster than
+`josef02-cpu` through `4fac006`, including low-overhead detailed clocks and
+frequency-gated admission to the mature mask-result cache.  A fresh balanced
+PGO build from that exact source is installed locally.  The current compact
+prover is already 3.9--5.4 times faster than
 the preserved old-P9 binary on exact 300/600-given Josef 02 prefixes.  A full
 old-P9 Josef 02 proof output was not supplied, so this report does not claim a
 measured proof-to-proof old/new CPU ratio.  The existing compact proof is the
@@ -30,6 +31,9 @@ something attempted on the low-RAM development machine.
 | host-native sampled-clock candidate at `2d6779d` | `f789e006696c6185f33ecf7b5053ed51180435dfd21a6092aa00d45d8ad5bfe3` |
 | sampled-clock PGO generator at `7e06aaa` | `63a711fc882f140ad92814c96ea325daeabcb013400f9cc94040beaa03f37de7` |
 | sampled-clock balanced PGO-use prover at `7e06aaa` | `eca26b2b6858d1c110bed3fd4e3ff40aa6de1da61b4c0c8103eb8ab1aa211097` |
+| frequency-gated native prover at `4fac006` | `abab867a4b5cad66db3d316a0a573a60df176a198e3d42e29b1c0ffabc8926e5` |
+| balanced PGO generator at `4fac006` | `c6f97a9902d9abd04e3a08167b51e7995eab82222713e01de8bcc3f93acf23fc` |
+| balanced PGO-use prover at `4fac006` | `dad5d12683bc8106f4bd43cff4cb7be5d66e200ab4ee7e145579639e209b98f2` |
 
 The reconstructed input is
 `josef02-debug.heNOIJ/Josef_02-uninterrupted.in`.  It retains every formula,
@@ -738,10 +742,11 @@ The PGO-use prover SHA-256 is
 `eca26b2b6858d1c110bed3fd4e3ff40aa6de1da61b4c0c8103eb8ab1aa211097`;
 the identical-source, identical-flag native control is
 `f789e006696c6185f33ecf7b5053ed51180435dfd21a6092aa00d45d8ad5bfe3`.
-Only profile use differs.  The host-local authority candidate is retained at
-`/tmp/prover9-josef02-pgo4/prover9-pgo4-use` and installed as
-`bin/prover9`.  It is compiled with `-march=native` and must not be copied to
-a machine with a different CPU.  The build logs are in
+Only profile use differs.  This older host-local candidate is retained at
+`/tmp/prover9-josef02-pgo4/prover9-pgo4-use` as a comparison artifact; it was
+superseded after `4fac006` and is no longer the installed authority binary.
+It is compiled with `-march=native` and must not be copied to a machine with a
+different CPU.  The build logs are in
 `josef02-pgo4-build/`; raw measurements use the `*-pgo4-*` directory names.
 
 All validation processes ran one at a time.  Josef 02/600 used reversed
@@ -762,12 +767,97 @@ direct-retention/archive counters.  Josef 01 preserves every compact-unit
 counter.  No run swapped.  The compact-OTTER equivalence audit and the
 checkpoint/resume audit both pass with the retained PGO binary.
 
-At Josef 02/600, the current PGO candidate is 4.04 times faster in total CPU
+At Josef 02/600, that retained PGO candidate is 4.04 times faster in total CPU
 than the preserved old-P9 observation (36.35 versus 146.73 seconds), and 4.21
 times faster in user CPU.  Its roughly 8--12% bounded PGO advantage is useful,
 but must not be extrapolated as a guaranteed full-proof percentage.  The
 1,000-given gate is the longest new Josef 02 run attempted locally; the
 13,006-given proof remains the external acceptance test.
+
+### Frequency-gated mature mask-result admission (`4fac006`)
+
+The exact result cache introduced by `fb7b873` was effective once a mask key
+was resident, but its two-way 2,048-entry metadata table recorded almost every
+first observation.  At Josef 02/1,000 it held 1,712 keys, had already evicted
+1,126 entries, admitted result vectors on only 196 queries, and produced 415
+exact result hits.  The cache was therefore spending most of its metadata
+capacity on singleton or very cold keys.  This is especially risky for the
+mature proof, where each compatible-mask miss scans roughly 1,011 directory
+blocks on average and recurrent keys are much more valuable than first-use
+keys.
+
+The cache now has a lazy 16,384-column, two-row count-min frequency sketch.
+Each eligible key updates two saturating byte counters, and exact result-table
+admission starts only after the estimated frequency reaches three.  A
+conservative update and a deterministic halving pass every 65,536 eligible
+queries keep collision overestimates and stale history bounded.  The sketch
+is allocated only after the existing 64-directory-block maturity gate, costs
+32 KiB, and is destroyed with the cache on compaction.  Existing exact suffix
+validation, decreasing proof-ID answer order, the 16 MiB result-vector budget,
+and all search semantics are unchanged.
+
+The implementation is deliberately kept out of the hot scan body.  Folding
+the frequency operation into the existing cold, noinline cache helper leaves
+native `prepare_mask_directory` at exactly 1,126 bytes, the same size as its
+control.  The first inline prototype grew that hot function to 1,506 bytes
+and was rejected; a separate noinline helper still grew it to 1,146 bytes and
+gave unstable timings.  A threshold-four prototype reduced churn but was
+neutral at Josef 02/1,000, so the accepted threshold is three.
+
+Matched native binaries were measured in two reversed Josef 02/1,000 pairs:
+
+| exact gate | frequency-gated cache | old admission | change | candidate/control RSS |
+|---|---:|---:|---:|---:|
+| Josef 02/1,000, two reversed pairs | 76.19 s mean | 81.22 s mean | -6.2% total CPU | 234,946 / 234,492 KiB |
+| CHAT/600, two reversed pairs | 46.22 s mean | 51.39 s mean | -10.1%, layout-only evidence | 468,486 / 466,780 KiB |
+| Josef 01/1,000, two reversed pairs | 58.21 s mean | 58.40 s mean | -0.3%, neutral | 604,798 / 604,500 KiB |
+
+At the Josef 02 endpoint, exact result hits rise from 415 to 640 while table
+occupancy falls from 1,712 to 308 and evictions from 1,126 to 6.  Admissions
+rise from 196 to 366 because recurrent keys now survive long enough to be
+useful.  Directory block scans fall by 19,045 and word checks by 74,865
+(both 1.36--1.37%).  The sketch records 5,160 updates and rejects 4,154 cold
+observations.  Total compact-index bytes rise by only 81,512 bytes, including
+the 32 KiB sketch and more retained exact result suffixes.  CHAT never reaches
+the 64-block gate, so both sketch and result table remain unallocated; its
+timing difference is compiler/layout evidence rather than a cache benefit.
+Josef 01 does not use this back-demodulation path and remains neutral.
+
+All endpoints, generated/kept counts, ordered-output and semantic-answer
+fingerprints are exact, and no validation run swapped.  The focused test now
+requires singleton filtering, hot-key admission, append-suffix correctness
+and forced-compaction correctness.  The compact long-run, compact-OTTER
+equivalence and checkpoint/resume audits also pass.  New final statistics are
+`mask_frequency_capacity`, `mask_frequency_bytes`,
+`mask_frequency_updates`, `mask_frequency_decays`, and
+`mask_frequency_cold_rejections`.  There is no new Prover9 input option: the
+policy is automatic under the existing mature result cache.
+
+Because `4fac006` changes trained compact-index control flow, the sampled-clock
+profile above was discarded.  A replacement generator was trained
+sequentially at rate 16 on Josef 02/600, CHAT/600 and Josef 01/1,000.  Training
+used 44.10, 69.06 and 67.21 total CPU seconds, peaked at 208,688, 470,256 and
+606,816 KiB, reached every exact endpoint, and did not swap.  It produced 103
+GCC `.gcda` files (584 KiB).  The PGO-use build has no coverage mismatch and
+no missing core profile; only unused `pindex.c`, `random.c`, and
+`tstp_proof.c` lack counts.
+
+| exact gate | fresh PGO | matched native | change | PGO/native RSS |
+|---|---:|---:|---:|---:|
+| Josef 02/1,000, two reversed pairs | 60.99 s mean | 71.51 s mean | -14.7% | 234,628 / 234,826 KiB |
+| CHAT/600, adjacent | 44.34 s | 50.60 s | -12.4% | 467,924 / 468,096 KiB |
+| Josef 01/1,000, adjacent | 47.74 s | 58.41 s | -18.3% | 604,256 / 604,768 KiB |
+
+The PGO/native comparisons use identical source, host-native flags and input;
+only profile use differs.  They preserve `(1001,1310234,65416,0)`,
+`(601,497430,16974,0)` and `(1001,1628048,320239,0)`, respectively, plus all
+applicable query fingerprints and detailed index counters.  Every process ran
+alone and none swapped.  The fresh PGO-use binary is
+`/tmp/prover9-josef02-pgo5/prover9-pgo5-use`, is installed as `bin/prover9`,
+and is host-specific.  Build logs are under `josef02-pgo5-build/`; raw outputs
+use the `*-pgo5-*` directory names.  This is the current external authority
+candidate, but its 1,000-given result still cannot predict the mature
+13,006-given phase without the external proof run.
 
 ## Rejected options and experiments
 
@@ -860,6 +950,13 @@ but must not be extrapolated as a guaranteed full-proof percentage.  The
   2,048 to 16,384 entries reduced collisions but made Josef 02/600 slower and
   raised metadata to about 1.1 MiB.  The accepted 64-block maturity gate and
   compact table are consequences of these failures, not Josef-specific keys.
+- Three frequency-gate layouts were rejected before `4fac006`.  A four-hit
+  admission threshold reduced occupancy to 183 entries and evictions to 2,
+  but was neutral at Josef 02/1,000.  Inlining the sketch logic enlarged the
+  1,126-byte hot directory function to 1,506 bytes; a separate noinline helper
+  still enlarged it to 1,146 bytes and produced unstable timings.  The final
+  three-hit policy is folded into the existing cold cache helper, restoring
+  the hot function to exactly 1,126 bytes.
 - Reordering each query's required mask planes by per-root frequency was
   rejected despite reducing logical directory work.  With an eight-block
   gate, Josef 02/600 word checks fell 21.9% (1,376,331 to 1,074,839) and
@@ -937,7 +1034,11 @@ but must not be extrapolated as a guaranteed full-proof percentage.  The
   `(301,120793,5737,0)` and all back-query fingerprints.  Rate 16 reduces
   system CPU from 4.13 to 2.31 seconds but leaves total CPU neutral at 34.31
   versus 34.40 seconds; its poor short-run preprocess estimate is why sampled
-  clock values are explicitly non-authoritative.
+  clock values are explicitly non-authoritative.  On final `4fac006` source,
+  the fresh balanced PGO binary reaches the same CHAT/600 endpoint in 44.34
+  total CPU seconds versus 50.60 for the matched native control.  Its mask
+  frequency sketch and result table are both dormant and unallocated, so this
+  is a profile/layout generalization result rather than cache evidence.
 - Josef 01 at 1,000 givens exactly reproduces
   `(1001, 1628048, 320239, 0)` and every compact unit-index counter.  Current
   host observations span 59.85--70.30 s; the controlled reverse-adjacent gate
@@ -945,13 +1046,17 @@ but must not be extrapolated as a guaranteed full-proof percentage.  The
   demodulation and records zero compact rewrite attempts.  It also records
   zero packed-dense queries, so it is an independent trajectory gate rather
   than timing evidence for the counter batching.  No bounded validation
-  process swapped.
+  process swapped.  The fresh final-source PGO/native pair takes 47.74 versus
+  58.41 total CPU seconds at that exact endpoint, again with every detailed
+  counter identical.
 - `compact_back_demod_test`, `compact_long_run_test`,
   `compact_rewrite_test`, `compact_unit_index_test` and
-  `compact_otter_audit_test` pass.  The hint-postings, hint-preview and
+  `compact_otter_audit_test` pass.  The compact checkpoint/resume audit also
+  passes.  The hint-postings, hint-preview and
   compressed-unit-match tests also pass.  The back-demod test now explicitly
-  covers cache admission, reuse, a compatible bucket appended after admission,
-  exact decreasing proof-ID order and forced compaction.  Hint-preview also
+  covers singleton filtering, hot-key admission and reuse, a compatible
+  bucket appended after admission, exact decreasing proof-ID order and forced
+  compaction.  Hint-preview also
   covers packed active owners, inactive retained owners, ordinary nonpacked
   mode and post-teardown lookup.
 
@@ -1054,7 +1159,10 @@ block.  For an unlimited run remove/replace only bounded `max_given`,
 budget or enable the deep rewrite cache for the first authority run.  The
 mature mask-result cache is automatic under `adaptive32`; there is no new P9
 input command to add.  Its `mask_cache_*` fields will appear in the final
-`Compact_back_demod:` report.  Constant-time packed hint-owner restoration
+`Compact_back_demod:` report.  The automatic frequency gate additionally
+reports `mask_frequency_capacity`, `mask_frequency_bytes`,
+`mask_frequency_updates`, `mask_frequency_decays`, and
+`mask_frequency_cold_rejections`.  Constant-time packed hint-owner restoration
 is likewise automatic under packed hint modes; its coverage appears in the
 final `Hint_id_lookup:` line and requires no option.
 Clean passive-record retention is also automatic for this compact-OTTER plus
@@ -1084,16 +1192,18 @@ A cautious planning range for the next same-machine **release** total is
 roughly 5.0--5.2 GiB process PSS.  The bounded `-O3`/LTO result supports a
 separate, wider **5,900--7,200 CPU-second** planning range for the recommended
 `NATIVE=1` authority run.  The current-source balanced profile supports a
-still provisional **5,500--6,900 CPU-second** planning range: it improved two
-reversed 1,000-given Josef 02 pairs by 5.9% and two reversed 600-given pairs
-by 14.0%, while also improving both generalization workloads.  These are
-deliberately ranges, not measured full claims; neither the 2.37--12.08%
+still provisional **5,500--6,900 CPU-second** planning range.  The final-source
+profile improves two reversed 1,000-given Josef 02 pairs by 14.7%, CHAT/600 by
+12.4%, and Josef 01/1,000 by 18.3%.  The range is intentionally not narrowed
+from those larger bounded gains: the trainer never sees the mature
+million-clause index.  These remain deliberately ranges, not measured full
+claims; neither the 2.37--12.08%
 compiler benefit nor any bounded PGO benefit can be assumed constant through
 the mature 13,006-given phase.  The range is deliberately not lowered again
-by the sampled-clock result: Josef 02 saved 11.5--15.0% at 600 givens, but
-CHAT total CPU was neutral and the mature interval mix is unknown.  A rate-16
-run should plausibly land toward the lower part of the range, but that is an
-acceptance hypothesis rather than advance credit.  A simple
+by the sampled-clock result: Josef 02 saved 11.5--15.0% at 600 givens, but the
+mature interval mix is unknown.  A rate-16 run should plausibly land toward
+the lower part of the range, but that is an acceptance hypothesis rather than
+advance credit.  A simple
 per-attempt extrapolation of only the
 clause-snapshot delta
 from the reversed 600-given mean and the adjacent 1,000-given pair spans about
@@ -1108,9 +1218,11 @@ removes 4.28--5.27% on bounded Josef 02 and 3.97% on CHAT, but mature hint
 rewrites may create more mixed-order fallback vectors, so those percentages
 are not applied mechanically to the proof baseline.  The mature mask-result
 cache can plausibly remove a large fraction of the proof's 7.35 billion
-directory-block examinations if long-run key reuse is high, but the bounded
-active-path timing did not prove a CPU gain.  It is consequently assigned no
-advance credit in these ranges.  Packed owner lookup removes a proven
+directory-block examinations if long-run key reuse is high.  Frequency-gated
+admission improves the bounded native pair by 6.2%, but only 1.37% of directory
+scans are removed at that endpoint and the mature recurrence distribution is
+unknown.  It is consequently assigned no advance credit in these ranges.
+Packed owner lookup removes a proven
 245.5-million-node lower bound by given 1,000 and improves that adjacent pair
 by 1.37%, but its full restoration count is not present in the old output, so
 it is also assigned no separate numerical credit.  The revised range gives
@@ -1135,7 +1247,10 @@ Accept the external run only if it:
    `mask_directory_blocks_examined` and `mask_directory_word_checks` with the
    exact baseline values 7,352,224,411 and 27,753,331,661.  Reject the cache as
    a CPU optimization if total CPU does not improve, even when those work
-   counters fall; and
+   counters fall.  Also retain all `mask_frequency_*` fields so recurrent-key
+   admissions, cold rejections and any decay can be compared through maturity;
+   sketch bytes must remain bounded at 32 KiB per root that crosses the
+   maturity gate; and
 7. reports `Hint_id_lookup` with packed hits equal to queries and zero linear
    fallback steps.  Retain `packed_id_sum` so the eliminated-work scale can be
    compared with the 245,545,806 lower bound at given 1,000; and
