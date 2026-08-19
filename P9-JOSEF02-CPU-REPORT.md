@@ -1,7 +1,7 @@
 # Josef 02 compact-P9 CPU investigation
 
-Status: implemented and bounded-validated on branch `josef02-cpu` at
-`b143cc3`.  The current compact prover is already 3.6--5.4 times faster than
+Status: implemented and bounded-validated on branch `josef02-cpu` through
+`10b6abd`.  The current compact prover is already 3.6--5.4 times faster than
 the preserved old-P9 binary on exact 300/600-given Josef 02 prefixes.  A full
 old-P9 Josef 02 proof output was not supplied, so this report does not claim a
 measured proof-to-proof old/new CPU ratio.  The existing compact proof is the
@@ -15,7 +15,7 @@ something attempted on the low-RAM development machine.
 | reconstructed uninterrupted Josef 02 input | `8961d86efd2163010117cbba0fd9c6085d3d71751f2d6f2675406f84c57634ba` |
 | completed compact output, `/project/bob/Josef_02.out.new3` | `eaf22c2bda54fbe5eb0d487aca91f4ad27dabe1cb656111f97b74fc9930a1d29` |
 | preserved old-P9 binary | `bcdf6bafbf608fde463fd43ef541891813f5c49a2d5153711c54925e98d76bcc` |
-| release binary at `b143cc3` | `a8166bd9caf92dcb38f7c291ca9d33eb3099bb612512273540c24141533c7ba7` |
+| release binary at `10b6abd` | `d13973d3311ba8e31590f139e48f6560ec24af845fc60acb4b2e342dfd001ddc` |
 
 The reconstructed input is
 `josef02-debug.heNOIJ/Josef_02-uninterrupted.in`.  It retains every formula,
@@ -117,6 +117,36 @@ lookup estimate is 6.229 versus 5.960 s, so the result is a first total-CPU
 crossover plus a deterministic work reduction, not proof of a uniform win at
 every prefix.
 
+### Snapshot shared-term addressing once per clause (`10b6abd`)
+
+Every rigid-subterm rewrite attempt refreshed the shared compact term pool's
+token and logical-address bases through two out-of-line accessors.  The pool
+can move while clauses and rules are serialized, but compact normalization
+does not mutate it while one clause is being rewritten.  The safe
+invalidation boundary is therefore the clause, not every subterm.
+
+The completed baseline made 3,677,581,851 rewrite attempts but processed only
+130,519,375 subject atoms.  Moving the two refreshes to clause entry therefore
+eliminates at least 7.09 billion redundant accessor calls on that trajectory;
+there are no new allocations or indexes.
+
+| gate | parent user | candidate user | CPU change | parent/candidate RSS |
+|---|---:|---:|---:|---:|
+| Josef 02, 600 given, two reversed pairs | 40.03 s mean | 39.63 s mean | -1.0% | 206.3 / 206.9 MiB mean |
+| Josef 02, 1,000 given, adjacent | 91.21 s | 86.42 s | -5.25% | 230,576 / 230,848 KiB |
+| CHAT, 600 given, adjacent | 55.27 s | 52.06 s | -5.81% | 467,748 / 467,464 KiB |
+| Josef 01, 1,000 given, reverse adjacent | 60.77 s | 60.56 s | -0.35% | 620,808 / 617,848 KiB |
+
+The Josef 02 comparisons preserve `(601, 524799, 26671, 0)` and
+`(1001, 1310234, 65416, 0)`, respectively, with identical rewrite counters
+and back-demod input, output and answer fingerprints.  CHAT likewise preserves
+`(601, 497430, 16974, 0)` and all three fingerprints.  Josef 01 deliberately
+clears back demodulation and records zero compact rewrite attempts, so its
+neutral reverse pair is the expected independent no-regression result.  An
+earlier Josef 01 candidate observation of 68.10 s did not repeat after the
+adjacent 60.77 s control and is retained as host-load noise, not discarded
+from the interpretation.
+
 ## Rejected options and experiments
 
 - Raising `hint_conjunction_kb` to 384 MiB is rejected.  Rewritten hints grew
@@ -137,19 +167,27 @@ every prefix.
   CPU cost is already 16%.
 - Enabling the rigid-edge side index is not justified by the existing CHAT
   and Josef profiles.  Leave `compact_back_edge_filter` clear.
+- A bounded generation-aware cache of compatible mask buckets reduced the
+  sampled 1,000-given back lookup from 2.542 to 2.069 s, but increased total
+  user CPU from 90.47 to 99.26 s and RSS from 228,860 to 239,624 KiB.  Its
+  8 MiB directory churn merely moved work into refresh/preprocessing.  The
+  experiment was fully reverted; do not trade whole-run CPU for an isolated
+  lookup counter.
 
 ## Cross-workload gates
 
 - CHAT at 600 givens reaches the known exact
   `(601, 497430, 16974, 0)` endpoint and 3,775 back-demod candidates.  The
   conjunction table is admitted for this different hint population, so its
-  468,100 KiB peak RSS is expected and is not Josef 02 back-index growth.
+  467,464 KiB peak RSS is expected and is not Josef 02 back-index growth.
+  The new rewrite snapshot is 5.81% faster than its adjacent parent while
+  preserving the rewrite and back-demod fingerprints.
 - Josef 01 at 1,000 givens exactly reproduces
   `(1001, 1628048, 320239, 0)` and every compact unit-index counter.  Current
-  user CPU is 57.27 s versus 57.42 s in the prior bounded output.  That input
-  clears back demodulation, independently exercising the shared unit/rewrite
-  changes.  Its roughly 64 MiB PSS increase is the inherited bounded slab
-  recycler; no swapping occurred.
+  reverse-adjacent user CPU is 60.56 s versus 60.77 s for the parent.  That
+  input clears back demodulation and records zero compact rewrite attempts,
+  independently checking that the changed path does not perturb the search.
+  No bounded validation process swapped.
 - `compact_back_demod_test`, `compact_long_run_test`,
   `compact_rewrite_test`, `compact_unit_index_test` and
   `compact_otter_audit_test` pass.
@@ -214,11 +252,16 @@ at 1,500 givens but targets a directory sixteen times wider at the proof.
 Inherited slab recycling and direct symbol/term hot-path work also postdate the
 baseline output.
 
-A cautious planning range for the next same-machine total is **7,500--8,400
-CPU seconds** (about 5--15% below the compact baseline), with roughly
+A cautious planning range for the next same-machine total is **7,400--8,300
+CPU seconds** (about 6--16% below the compact baseline), with roughly
 5.0--5.2 GiB process PSS.  This is deliberately a range, not a measured
-claim.  The back-index optimization alone cannot be extrapolated linearly
-from the 1,500-given prefix, and no full old-P9 Josef 02 time exists.
+claim.  A simple per-attempt extrapolation of only the clause-snapshot delta
+from the reversed 600-given mean and the adjacent 1,000-given pair spans about
+120--530 user seconds at the proof's 3.678 billion attempts.  That range is
+useful for planning but too load-sensitive to add mechanically to the other
+unmeasured long-run changes.  The back-index optimization likewise cannot be
+extrapolated linearly from the 1,500-given prefix, and no full old-P9 Josef 02
+time exists.
 
 Accept the external run only if it:
 
