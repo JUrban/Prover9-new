@@ -143,6 +143,18 @@ hit count alone is not a speedup.  Source changes to this cache invalidate old
 PGO control-flow profiles, so regenerate training data after updating the
 checkout.
 
+Packed hint modes also restore archived `matching_hint` links directly from
+their existing stable ID-to-owner vector.  This is automatic and allocates no
+second hint table.  The final `Hint_id_lookup:` line reports the number of
+restorations, packed hits, legacy linear fallback steps and the packed ID sum.
+For a healthy packed production run, packed hits should equal queries and
+linear fallback steps should remain zero.  Owners stay addressable after they
+expire from matching indexes; lookup does not make them active again.
+
+This restoration helper is deliberately kept out of line for LTO/PGO builds.
+Profiles generated before a checkout containing this change must be discarded
+and retrained because the search call graph differs.
+
 
 Technical Notes
 ---------------

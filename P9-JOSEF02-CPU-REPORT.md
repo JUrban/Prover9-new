@@ -1,7 +1,7 @@
 # Josef 02 compact-P9 CPU investigation
 
 Status: source changes implemented and bounded-validated on branch
-`josef02-cpu` through `fb7b873`, with the portable PGO workflow fixed through
+`josef02-cpu` through `c40a81d`, with the portable PGO workflow fixed through
 `0b281d5`.  The current compact prover is already 3.9--5.4 times faster than
 the preserved old-P9 binary on exact 300/600-given Josef 02 prefixes.  A full
 old-P9 Josef 02 proof output was not supplied, so this report does not claim a
@@ -22,6 +22,7 @@ something attempted on the low-RAM development machine.
 | host-native binary at `06deec9` | `7c9cbd5471f92f659a6004a1a9d43f1e24dea8a7702d5ce9e8500fc8c29c10ac` |
 | balanced GCC-PGO binary at `06deec9` | `6b1bced78f2ba5c4c36e95e3e0cfa035c7ff7c8c33c2b9d8e69d6fd5302764f0` |
 | release binary at `fb7b873` | `7a911af3df69506d395a5c8c034ba472211f0953cfe65d44abfa5d4589a43e6f` |
+| release binary at `c40a81d` | `94d16148e6bf3a13170712c54fb09cbb6f1d30cdc846f148667489db722ff52c` |
 
 The reconstructed input is
 `josef02-debug.heNOIJ/Josef_02-uninterrupted.in`.  It retains every formula,
@@ -370,6 +371,43 @@ the 7.35-billion-block workload.  The planning ranges below are therefore not
 lowered.  Any PGO profile made before `fb7b873` must be discarded and retrained
 because this changes compact-index control flow.
 
+### Constant-time packed hint-owner restoration (`34c790a`, `c40a81d`)
+
+File-backed passive and ancestor records retain a matching hint by stable
+hint ID.  Materializing such a record previously restored the pointer by
+walking `Glob.hints` from its first entry.  Josef 02 owns 148,330 hints, so
+this made a logically constant metadata restoration linear in the complete
+hint population.  Packed hint matching already maintains the stable
+`Packed_hint_by_id` owner vector, including owners which have expired from
+active indexes because archived clauses can still reference them.
+
+The restoration helper now reads that existing vector first and retains the
+old clist walk only as the nonpacked/missing-owner fallback.  It allocates no
+new table and does not reactivate expired hints.  The final
+`Hint_id_lookup:` statistic reports queries, packed hits, fallback list steps
+and `packed_id_sum`.  For the initial Josef 02 ordering the last value is a
+conservative lower bound on eliminated clist visits because active IDs were
+assigned in input-list order.  The helper is explicitly out of line so LTO or
+PGO cannot duplicate the rare path into its eleven archive/materialization
+call sites; this annotation leaves the ordinary release binary unchanged.
+
+| gate | restoration work | total CPU / RSS | interpretation |
+|---|---|---:|---|
+| Josef 02/600 | 1,486 packed hits, zero fallback steps | 46.34 s / 206,572 KiB | inside 45.30--46.84 s bracketing controls |
+| Josef 02/1,000 | 4,173 packed hits, zero fallback steps; `packed_id_sum=245545806` | 94.87 s / 235,856 KiB | 1.37% below adjacent 96.19 s / 235,952 KiB control |
+| CHAT/600 | 1,856 packed hits, zero fallback steps; `packed_id_sum=38073727` | 60.21 s / 467,792 KiB reverse observation | 1.07% above adjacent 59.57 s control; no CHAT speedup claimed |
+
+All gates preserve their exact generated/kept endpoints and compact
+input/output/answer fingerprints, and none swapped.  An earlier CHAT
+candidate before the same control took 62.94 seconds, illustrating the
+host's several-second spread rather than supplying positive timing evidence.
+The accepted claim is asymptotic and Josef-specific in magnitude, not a
+universal short-prefix gain: at 1,000 Josef givens the removed pointer chasing
+is already more than six times larger than on CHAT/600, and the existing
+owner table makes the change RAM-neutral.  Any PGO profile made before
+`c40a81d` must again be discarded and retrained because the search call graph
+has changed.
+
 ## Rejected options and experiments
 
 - Raising `hint_conjunction_kb` to 384 MiB is rejected.  Rewritten hints grew
@@ -465,7 +503,10 @@ because this changes compact-index control flow.
   the subsequent query-context refactor is neutral in two reversed pairs.
   Packed-hint counter batching is also neutral at 52.29 versus 52.46 s.
   The later monotone candidate-order fast path improves another 3.97%, from
-  56.44 to 54.20 s.  All preserve the rewrite and back-demod fingerprints.
+  56.44 to 54.20 s.  Constant-time packed hint-owner restoration is timing
+  neutral-to-slightly-negative at this short prefix (60.21 versus 59.57 s in
+  the reverse adjacent observation), while eliminating at least 38.1 million
+  list visits.  All preserve the rewrite and back-demod fingerprints.
 - Josef 01 at 1,000 givens exactly reproduces
   `(1001, 1628048, 320239, 0)` and every compact unit-index counter.  Current
   host observations span 59.85--70.30 s; the controlled reverse-adjacent gate
@@ -479,7 +520,9 @@ because this changes compact-index control flow.
   `compact_otter_audit_test` pass.  The hint-postings, hint-preview and
   compressed-unit-match tests also pass.  The back-demod test now explicitly
   covers cache admission, reuse, a compatible bucket appended after admission,
-  exact decreasing proof-ID order and forced compaction.
+  exact decreasing proof-ID order and forced compaction.  Hint-preview also
+  covers packed active owners, inactive retained owners, ordinary nonpacked
+  mode and post-teardown lookup.
 
 ## Recommended full-run options
 
@@ -576,7 +619,9 @@ block.  For an unlimited run remove/replace only bounded `max_given`,
 budget or enable the deep rewrite cache for the first authority run.  The
 mature mask-result cache is automatic under `adaptive32`; there is no new P9
 input command to add.  Its `mask_cache_*` fields will appear in the final
-`Compact_back_demod:` report.
+`Compact_back_demod:` report.  Constant-time packed hint-owner restoration
+is likewise automatic under packed hint modes; its coverage appears in the
+final `Hint_id_lookup:` line and requires no option.
 
 ## Expected full result and acceptance gate
 
@@ -611,7 +656,11 @@ are not applied mechanically to the proof baseline.  The mature mask-result
 cache can plausibly remove a large fraction of the proof's 7.35 billion
 directory-block examinations if long-run key reuse is high, but the bounded
 active-path timing did not prove a CPU gain.  It is consequently assigned no
-advance credit in these ranges.  No full old-P9 Josef 02 time exists.
+advance credit in these ranges.  Packed owner lookup removes a proven
+245.5-million-node lower bound by given 1,000 and improves that adjacent pair
+by 1.37%, but its full restoration count is not present in the old output, so
+it is also assigned no separate numerical credit.  No full old-P9 Josef 02
+time exists.
 
 Accept the external run only if it:
 
@@ -629,7 +678,10 @@ Accept the external run only if it:
    `mask_directory_blocks_examined` and `mask_directory_word_checks` with the
    exact baseline values 7,352,224,411 and 27,753,331,661.  Reject the cache as
    a CPU optimization if total CPU does not improve, even when those work
-   counters fall.
+   counters fall; and
+7. reports `Hint_id_lookup` with packed hits equal to queries and zero linear
+   fallback steps.  Retain `packed_id_sum` so the eliminated-work scale can be
+   compared with the 245,545,806 lower bound at given 1,000.
 
 Until that run exists, the precise conclusion is: current compact P9 is
 decisively faster than old P9 on exact Josef 02 prefixes, and the identified
