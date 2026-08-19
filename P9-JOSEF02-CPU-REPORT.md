@@ -203,6 +203,13 @@ that every rewrite population benefits equally.
   8 MiB directory churn merely moved work into refresh/preprocessing.  The
   experiment was fully reverted; do not trade whole-run CPU for an isolated
   lookup counter.
+- Splitting out a zero-deep-cache recursive matcher shrank the common
+  `retrieve_rec` body from 3,219 to 1,739 bytes.  Two noisy reversed 600-given
+  pairs averaged 39.05 s candidate versus 40.70 s control, but the decisive
+  adjacent 1,000-given pair regressed from 79.61 to 83.97 s (+5.5%) with no
+  memory benefit.  The extra dispatch and duplicated inlining outweighed the
+  smaller recursive body at the longer prefix.  The specialization was fully
+  reverted and the accepted release binary hash restored exactly.
 
 ## Cross-workload gates
 
