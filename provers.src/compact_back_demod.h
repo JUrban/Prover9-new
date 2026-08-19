@@ -99,6 +99,9 @@ struct compact_back_demod_stats {
   unsigned long long position_append_token_visits;
   unsigned long long position_append_feature_lookups;
   unsigned long long position_append_matches;
+  unsigned long long position_append_bucket_groups;
+  unsigned long long position_append_grouped_records;
+  unsigned long long position_append_sort_fallbacks;
   unsigned long long position_credit_balance;
   unsigned long long position_credit_earned;
   unsigned long long position_credit_spent;

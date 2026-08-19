@@ -217,6 +217,11 @@ struct cbd_position_bucket {
   uint32_t posting_count;
   uint64_t *membership;
   size_t membership_capacity;
+  /* Transient one-record append chain.  Stored as a scratch offset plus one
+     so zero remains the empty sentinel; cleared before the next record is
+     collected.  This occupies existing tail padding instead of growing every
+     permanent feature. */
+  uint32_t append_head;
   unsigned char active;
 };
 
@@ -268,6 +273,13 @@ struct cbd_position_query_feature {
 struct cbd_position_append_match {
   uint32_t bucket;
   uint32_t root_offset;
+};
+
+struct cbd_position_append_link {
+  uint32_t bucket;
+  uint32_t root_offset;
+  uint32_t next;
+  uint32_t group_count;
 };
 
 struct cbd_position_probation {
@@ -369,6 +381,12 @@ struct compact_back_demod_index {
   size_t position_query_capacity;
   struct cbd_position_append_match *position_append_matches;
   size_t position_append_match_capacity;
+  struct cbd_position_append_link *position_append_links;
+  size_t position_append_link_capacity;
+  uint32_t *position_append_buckets;
+  size_t position_append_bucket_capacity;
+  size_t position_append_bucket_count;
+  BOOL position_append_offsets_monotone;
   uint32_t *position_token_ends;
   size_t position_token_end_capacity;
   struct cbd_position_probation *position_probation;
@@ -502,6 +520,9 @@ struct compact_back_demod_index {
   unsigned long long position_append_token_visits;
   unsigned long long position_append_feature_lookups;
   unsigned long long position_append_matches_count;
+  unsigned long long position_append_bucket_groups;
+  unsigned long long position_append_grouped_records;
+  unsigned long long position_append_sort_fallbacks;
   unsigned long long position_credit_balance;
   unsigned long long position_credit_earned;
   unsigned long long position_credit_spent;
@@ -767,6 +788,10 @@ static unsigned long long index_bytes(Compact_back_demod_index index)
     index->position_query_capacity * sizeof(*index->position_query) +
     index->position_append_match_capacity *
       sizeof(*index->position_append_matches) +
+    index->position_append_link_capacity *
+      sizeof(*index->position_append_links) +
+    index->position_append_bucket_capacity *
+      sizeof(*index->position_append_buckets) +
     index->position_token_end_capacity *
       sizeof(*index->position_token_ends) +
     index->edge_query_capacity * sizeof(*index->edge_query) +
@@ -4796,13 +4821,80 @@ static void ensure_position_append_matches(Compact_back_demod_index index,
   }
 }
 
+static void ensure_position_append_links(Compact_back_demod_index index,
+                                         size_t needed)
+{
+  while (needed > index->position_append_link_capacity) {
+    index->position_append_link_capacity = grow_record_capacity(
+      index->position_append_link_capacity,
+      sizeof(*index->position_append_links),
+      "compact_back_demod: incremental position link overflow");
+    index->position_append_links = safe_realloc(
+      index->position_append_links,
+      index->position_append_link_capacity *
+        sizeof(*index->position_append_links));
+  }
+}
+
+static void ensure_position_append_buckets(Compact_back_demod_index index,
+                                           size_t needed)
+{
+  while (needed > index->position_append_bucket_capacity) {
+    index->position_append_bucket_capacity = grow_record_capacity(
+      index->position_append_bucket_capacity,
+      sizeof(*index->position_append_buckets),
+      "compact_back_demod: incremental position bucket overflow");
+    index->position_append_buckets = safe_realloc(
+      index->position_append_buckets,
+      index->position_append_bucket_capacity *
+        sizeof(*index->position_append_buckets));
+  }
+}
+
+static void begin_position_append_matches(Compact_back_demod_index index)
+{
+  if (index->position_append_bucket_count != 0)
+    fatal_error("compact_back_demod: uncleared position append buckets");
+  index->position_append_offsets_monotone = TRUE;
+}
+
 static void append_position_match(Compact_back_demod_index index,
                                   size_t *count, uint32_t bucket,
                                   uint32_t root_offset)
 {
-  ensure_position_append_matches(index, *count + 1);
-  index->position_append_matches[*count].bucket = bucket;
-  index->position_append_matches[*count].root_offset = root_offset;
+  struct cbd_position_bucket *position_bucket;
+  struct cbd_position_append_link *match;
+  struct cbd_position_append_link *previous = NULL;
+  uint32_t group_count = 1;
+  uint32_t encoded;
+  if (*count >= UINT32_MAX)
+    fatal_error("compact_back_demod: position append links exceed 32 bits");
+  position_bucket = &index->position_buckets[bucket];
+  if (position_bucket->append_head != CBD_NONE) {
+    previous = &index->position_append_links[
+      position_bucket->append_head - 1];
+    if (previous->root_offset == root_offset)
+      return;
+    if (previous->root_offset > root_offset)
+      index->position_append_offsets_monotone = FALSE;
+    if (previous->group_count == UINT32_MAX)
+      fatal_error("compact_back_demod: position append group overflow");
+    group_count = previous->group_count + 1;
+  }
+  ensure_position_append_links(index, *count + 1);
+  encoded = (uint32_t) *count + 1;
+  match = &index->position_append_links[*count];
+  match->bucket = bucket;
+  match->root_offset = root_offset;
+  match->next = position_bucket->append_head;
+  match->group_count = group_count;
+  if (position_bucket->append_head == CBD_NONE) {
+    ensure_position_append_buckets(
+      index, index->position_append_bucket_count + 1);
+    index->position_append_buckets[index->position_append_bucket_count++] =
+      bucket;
+  }
+  position_bucket->append_head = encoded;
   (*count)++;
 }
 
@@ -4849,15 +4941,90 @@ static uint32_t collect_position_append_matches_rec(
   return position;
 }
 
-static int increasing_position_append_match(const void *left,
-                                            const void *right)
+static int increasing_position_append_link(const void *left,
+                                           const void *right)
 {
-  const struct cbd_position_append_match *a = left;
-  const struct cbd_position_append_match *b = right;
+  const struct cbd_position_append_link *a = left;
+  const struct cbd_position_append_link *b = right;
   if (a->bucket != b->bucket)
     return a->bucket < b->bucket ? -1 : 1;
   return a->root_offset < b->root_offset ? -1 :
     a->root_offset > b->root_offset ? 1 : 0;
+}
+
+/* Group a record's matches through transient per-bucket chains.  Subject
+   roots are visited in serialized-offset order, so each chain is normally
+   already delta-encodable.  Retain the comparison sort as a correctness
+   fallback if that invariant is ever violated by a different traversal. */
+static size_t finish_position_append_matches(Compact_back_demod_index index,
+                                             size_t count)
+{
+  size_t i, out = 0;
+  size_t bucket_groups = index->position_append_bucket_count;
+  ensure_position_append_matches(index, count);
+  if (index->position_append_offsets_monotone) {
+    if (index->position_append_bucket_count >= 2)
+      qsort(index->position_append_buckets,
+            index->position_append_bucket_count,
+            sizeof(*index->position_append_buckets), increasing_u32);
+    for (i = 0; i < index->position_append_bucket_count; i++) {
+      uint32_t bucket = index->position_append_buckets[i];
+      uint32_t encoded = index->position_buckets[bucket].append_head;
+      size_t first = out, write;
+      if (encoded == CBD_NONE)
+        fatal_error("compact_back_demod: empty position append group");
+      write = out + index->position_append_links[encoded - 1].group_count;
+      if (write > count)
+        fatal_error("compact_back_demod: corrupt position append group");
+      out = write;
+      while (encoded != CBD_NONE) {
+        struct cbd_position_append_link *match =
+          &index->position_append_links[encoded - 1];
+        index->position_append_matches[--write].bucket = bucket;
+        index->position_append_matches[write].root_offset =
+          match->root_offset;
+        encoded = match->next;
+      }
+      if (write != first)
+        fatal_error("compact_back_demod: incomplete position append group");
+    }
+    if (count >= 2 && index->position_append_grouped_records != ULLONG_MAX)
+      index->position_append_grouped_records++;
+  }
+  else {
+    qsort(index->position_append_links, count,
+          sizeof(*index->position_append_links),
+          increasing_position_append_link);
+    for (i = 0; i < count; i++)
+      if (i == 0 ||
+          index->position_append_links[i].bucket !=
+            index->position_append_links[i - 1].bucket ||
+          index->position_append_links[i].root_offset !=
+            index->position_append_links[i - 1].root_offset) {
+        index->position_append_matches[out].bucket =
+          index->position_append_links[i].bucket;
+        index->position_append_matches[out].root_offset =
+          index->position_append_links[i].root_offset;
+        out++;
+      }
+    if (index->position_append_sort_fallbacks != ULLONG_MAX)
+      index->position_append_sort_fallbacks++;
+  }
+  for (i = 0; i < index->position_append_bucket_count; i++) {
+    struct cbd_position_bucket *bucket =
+      &index->position_buckets[index->position_append_buckets[i]];
+    bucket->append_head = CBD_NONE;
+  }
+  index->position_append_bucket_count = 0;
+  if (ULLONG_MAX - index->position_append_bucket_groups < bucket_groups)
+    index->position_append_bucket_groups = ULLONG_MAX;
+  else
+    index->position_append_bucket_groups += bucket_groups;
+  if (ULLONG_MAX - index->position_append_matches_count < out)
+    index->position_append_matches_count = ULLONG_MAX;
+  else
+    index->position_append_matches_count += out;
+  return out;
 }
 
 static void ensure_position_token_ends(Compact_back_demod_index index,
@@ -4944,7 +5111,8 @@ static size_t collect_eager_position_matches(
 {
   const int32_t *tokens;
   uint32_t i, position, end = compact_term_slice_length(record->tokens);
-  size_t count = 0, in, out;
+  size_t count = 0;
+  begin_position_append_matches(index);
   if (index->position_append_records != ULLONG_MAX)
     index->position_append_records++;
   if (end == 0)
@@ -4962,27 +5130,7 @@ static size_t collect_eager_position_matches(
       (void) collect_eager_position_matches_rec(
         index, tokens, end, i, (uint32_t) tokens[i], i, 0, 0, &count);
     }
-  if (count < 2) {
-    if (count != 0 && index->position_append_matches_count != ULLONG_MAX)
-      index->position_append_matches_count++;
-    return count;
-  }
-  qsort(index->position_append_matches, count,
-        sizeof(*index->position_append_matches),
-        increasing_position_append_match);
-  out = 1;
-  for (in = 1; in < count; in++)
-    if (index->position_append_matches[in].bucket !=
-          index->position_append_matches[out - 1].bucket ||
-        index->position_append_matches[in].root_offset !=
-          index->position_append_matches[out - 1].root_offset)
-      index->position_append_matches[out++] =
-        index->position_append_matches[in];
-  if (ULLONG_MAX - index->position_append_matches_count < out)
-    index->position_append_matches_count = ULLONG_MAX;
-  else
-    index->position_append_matches_count += out;
-  return out;
+  return finish_position_append_matches(index, count);
 }
 
 static size_t collect_position_append_matches(
@@ -4990,9 +5138,10 @@ static size_t collect_position_append_matches(
 {
   const int32_t *tokens;
   uint32_t i, end = compact_term_slice_length(record->tokens);
-  size_t count = 0, in, out;
+  size_t count = 0;
   if (index->position_eager_depth != 0)
     return collect_eager_position_matches(index, record);
+  begin_position_append_matches(index);
   if (index->position_append_records != ULLONG_MAX)
     index->position_append_records++;
   if (end == 0)
@@ -5007,27 +5156,7 @@ static size_t collect_position_append_matches(
       (void) collect_position_append_matches_rec(
         index, tokens, end, i, (uint32_t) tokens[i], i, 0, &count);
     }
-  if (count < 2) {
-    if (count != 0 && index->position_append_matches_count != ULLONG_MAX)
-      index->position_append_matches_count++;
-    return count;
-  }
-  qsort(index->position_append_matches, count,
-        sizeof(*index->position_append_matches),
-        increasing_position_append_match);
-  out = 1;
-  for (in = 1; in < count; in++)
-    if (index->position_append_matches[in].bucket !=
-          index->position_append_matches[out - 1].bucket ||
-        index->position_append_matches[in].root_offset !=
-          index->position_append_matches[out - 1].root_offset)
-      index->position_append_matches[out++] =
-        index->position_append_matches[in];
-  if (ULLONG_MAX - index->position_append_matches_count < out)
-    index->position_append_matches_count = ULLONG_MAX;
-  else
-    index->position_append_matches_count += out;
-  return out;
+  return finish_position_append_matches(index, count);
 }
 
 static void append_admitted_position_features(
@@ -6942,6 +7071,12 @@ static void copy_position_definitions(Compact_back_demod_index destination,
     source->position_append_feature_lookups;
   destination->position_append_matches_count =
     source->position_append_matches_count;
+  destination->position_append_bucket_groups =
+    source->position_append_bucket_groups;
+  destination->position_append_grouped_records =
+    source->position_append_grouped_records;
+  destination->position_append_sort_fallbacks =
+    source->position_append_sort_fallbacks;
   destination->position_retry_deferrals =
     source->position_retry_deferrals;
   destination->position_admission_freezes =
@@ -7202,6 +7337,8 @@ static void compact_back_demod_compact_internal(
   safe_free(old.position_blocks);
   safe_free(old.position_query);
   safe_free(old.position_append_matches);
+  safe_free(old.position_append_links);
+  safe_free(old.position_append_buckets);
   safe_free(old.position_token_ends);
   safe_free(old.position_probation);
   safe_free(old.edge_buckets);
@@ -7423,6 +7560,8 @@ void compact_back_demod_compact_materialized(
   safe_free(old.position_blocks);
   safe_free(old.position_query);
   safe_free(old.position_append_matches);
+  safe_free(old.position_append_links);
+  safe_free(old.position_append_buckets);
   safe_free(old.position_token_ends);
   safe_free(old.position_probation);
   safe_free(old.edge_buckets);
@@ -8088,6 +8227,12 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->position_append_feature_lookups =
     index->position_append_feature_lookups;
   stats->position_append_matches = index->position_append_matches_count;
+  stats->position_append_bucket_groups =
+    index->position_append_bucket_groups;
+  stats->position_append_grouped_records =
+    index->position_append_grouped_records;
+  stats->position_append_sort_fallbacks =
+    index->position_append_sort_fallbacks;
   stats->position_credit_balance = index->position_credit_balance;
   stats->position_credit_earned = index->position_credit_earned;
   stats->position_credit_spent = index->position_credit_spent;
@@ -8292,6 +8437,10 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
     index->position_query_capacity * sizeof(*index->position_query) +
     index->position_append_match_capacity *
       sizeof(*index->position_append_matches) +
+    index->position_append_link_capacity *
+      sizeof(*index->position_append_links) +
+    index->position_append_bucket_capacity *
+      sizeof(*index->position_append_buckets) +
     index->position_token_end_capacity *
       sizeof(*index->position_token_ends) +
     index->edge_query_capacity * sizeof(*index->edge_query) +
@@ -8340,6 +8489,8 @@ void compact_back_demod_free(Compact_back_demod_index index)
   safe_free(index->position_blocks);
   safe_free(index->position_query);
   safe_free(index->position_append_matches);
+  safe_free(index->position_append_links);
+  safe_free(index->position_append_buckets);
   safe_free(index->position_token_ends);
   safe_free(index->position_probation);
   safe_free(index->edge_buckets);

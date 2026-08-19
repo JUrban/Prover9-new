@@ -1323,8 +1323,13 @@ int main(void)
           eager_stats.position_admissions == 0 &&
           eager_stats.position_queries == 1 &&
           eager_stats.mask_directory_queries == 0 &&
+          eager_stats.position_append_grouped_records > 0 &&
+          eager_stats.position_append_bucket_groups > 0 &&
+          eager_stats.position_append_bucket_groups <=
+            eager_stats.position_append_matches &&
+          eager_stats.position_append_sort_fallbacks == 0 &&
           eager_stats.position_bitmap_bytes == 0,
-          "eager sparse paths need no mask/demand census or record bitmap");
+          "eager sparse paths group ordered appends without fallback sorts");
     before_empty = eager_stats;
     missing = indexed_clause(
       "eager_root(x,eager_branch(eager_missing)) = eager_done.");
