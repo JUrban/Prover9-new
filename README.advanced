@@ -92,20 +92,31 @@ processing the file and hang.
 Profile data accumulates in pgo_data/ at the project root. Multiple
 runs merge automatically into the same profile file.
 
+For a compact, hint-heavy production build, train on bounded prefixes rather
+than completing a large proof.  Use at least one problem with back
+demodulation and a different problem or mode that exercises another compact
+index.  Each training input should set explicit `max_given`, `max_seconds`
+and `max_megs` limits, and the runs should be sequential on a memory-limited
+machine.  A profile learned from only one theorem is an experiment, not a
+general production recommendation.
+
 ### Step 3: Merge profiles and rebuild
 
     make pgo-merge
     make all NATIVE=1 PGO=use
 
-The pgo-merge target runs llvm-profdata (via xcrun on macOS) to
-convert raw profile data into an optimized format. Then PGO=use
-rebuilds with -fprofile-use, applying the collected branch weights
-and hot/cold annotations.
+With Clang, the `pgo-merge` target runs llvm-profdata (via xcrun on
+macOS) to convert raw profiles into `default.profdata`.  GCC accumulates
+`.gcda` counters itself and reads them directly; for GCC the same target
+prints that no merge is needed.  `PGO=use` then rebuilds with
+`-fprofile-use`, applying the collected branch weights and hot/cold
+annotations.
 
-Warnings about "function control flow change detected (hash mismatch)"
-are expected for programs that were not exercised during training
-(e.g. apps like interpformat, isofilter). The core prover9 and mace4
-binaries will have full profile coverage.
+Missing-profile warnings are expected for source units that training never
+executes (for example random-term or proof-reader utilities).  A coverage or
+control-flow hash mismatch in a trained Prover9 search, compact-index, hint,
+rewrite or allocator object is not expected: clean the profile directory,
+rebuild the generator and retrain instead of accepting that binary.
 
 ### Cleaning profile data
 

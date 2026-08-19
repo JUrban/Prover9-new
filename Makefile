@@ -117,8 +117,12 @@ realclean:
 	/bin/rm -f bin/*
 
 pgo-merge:
-	xcrun llvm-profdata merge -output=pgo_data/default.profdata pgo_data/*.profraw 2>/dev/null || \
-	llvm-profdata merge -output=pgo_data/default.profdata pgo_data/*.profraw
+	@if $(CC) --version 2>/dev/null | head -1 | grep -qi clang; then \
+	  xcrun llvm-profdata merge -output=pgo_data/default.profdata pgo_data/*.profraw 2>/dev/null || \
+	  llvm-profdata merge -output=pgo_data/default.profdata pgo_data/*.profraw; \
+	else \
+	  echo "GCC uses accumulated .gcda profiles directly; no merge is needed."; \
+	fi
 
 pgo-clean:
 	/bin/rm -rf pgo_data
