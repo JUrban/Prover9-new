@@ -1,8 +1,8 @@
 # Josef 02 compact-P9 CPU investigation
 
 Status: source changes implemented and bounded-validated on branch
-`josef02-cpu` through `0516e7b`, with the portable PGO workflow fixed through
-`0b281d5`.  The current compact prover is already 3.9--5.4 times faster than
+`josef02-cpu` through `c3947a5`, with the portable PGO workflow fixed through
+that commit.  The current compact prover is already 3.9--5.4 times faster than
 the preserved old-P9 binary on exact 300/600-given Josef 02 prefixes.  A full
 old-P9 Josef 02 proof output was not supplied, so this report does not claim a
 measured proof-to-proof old/new CPU ratio.  The existing compact proof is the
@@ -590,6 +590,66 @@ profile and requires the same bounded retraining sequence.  In particular,
 the recorded `acb1c63` profile predates `0210069` and must be regenerated
 before an authority run of the current source.
 
+### Current-source balanced PGO validation
+
+The obsolete post-retention profile above was not reused.  A fresh GCC profile
+was generated after `0210069` and `0516e7b`, from the exact documented Josef
+02/600 and CHAT/600 inputs plus Josef 01/1,000 with only its inactive memory
+limit tightened from 10 GiB to 2 GiB.  Training was sequential on one core:
+
+| training trajectory | total CPU | peak RSS | result |
+|---|---:|---:|---|
+| Josef 02/600 | 58.54 s | 208,540 KiB | exact endpoint/fingerprints; zero swap |
+| CHAT/600 | 69.49 s | 469,976 KiB | exact endpoint/fingerprints; zero swap |
+| Josef 01/1,000 | 96.89 s | 599,456 KiB | exact endpoint/counters; zero swap |
+
+GCC accumulated 103 `.gcda` files (584 KiB).  The PGO-use build has no missing
+or mismatched profile in Prover9 search, compact indexes, rewriting, hints,
+term ordering or allocation.  Warnings are confined to paths not executed by
+the three Prover9 trainers: Mace4, standalone applications, sibling prover
+front ends, and the unused `pindex`, random-term and TSTP-reader utilities.
+
+The first full PGO-use build also found and fixed a genuine workflow bug.
+`apps.src` did not depend on its existing build-mode sentinel, so generator
+objects survived the `PGO=gen` to `PGO=use` transition and failed to link on
+unresolved `__gcov_*` symbols.  Commit `c3947a5` makes `all`, `apps` and
+`install` evaluate the sentinel before app objects.  The corrected transition
+reports `native-pgo-use`, rebuilds the stale objects and succeeds; repeating
+the same-mode build performs no recompilation.
+
+| artifact | SHA-256 |
+|---|---|
+| current PGO generator | `66caf842e24dcce79468f538a711a05e1d969aff4d532db8567ea25189b91102` |
+| current balanced PGO-use prover | `157b67948b81117c37c0e258675b42b2a4f912ee47cb2ea315e7927cef821ea9` |
+| matched unprofiled native prover | `5a06c34278bab88878d676eb6d04a325229b07e05a0aca2efaf454f20592b721` |
+
+The PGO and native binaries use identical Prover9 source and `-O3
+-march=native -flto`; only profile use differs.  Results below are total CPU
+and use reversed run order where two pairs are reported:
+
+| exact gate | balanced PGO | native control | change | PGO/native RSS |
+|---|---:|---:|---:|---:|
+| Josef 02/600, two reversed pairs | 37.83 s mean | 43.99 s mean | -14.0% | 206,324 / 206,790 KiB |
+| Josef 02/1,000, two reversed pairs | 85.32 s mean | 90.63 s mean | -5.9% | 234,540 / 234,770 KiB |
+| CHAT/600, two reversed pairs | 53.68 s mean | 58.07 s mean | -7.6% | 467,700 / 468,216 KiB |
+| Josef 01/1,000, adjacent | 74.49 s | 80.99 s | -8.0% | 600,548 / 601,148 KiB |
+
+Both orderings favor PGO at each reversed gate.  The endpoints are exactly
+`(601,524799,26671,0)`, `(1001,1310234,65416,0)`,
+`(601,497430,16974,0)` and `(1001,1628048,320239,0)`.  Josef and CHAT retain
+all query-input, ordered-output and semantic-answer fingerprints; Josef 01
+retains every compact-unit counter.  No run swapped, and the compact-OTTER
+audit passes against the retained PGO binary.
+
+The PGO binary is retained at
+`/tmp/prover9-josef02-pgo3/prover9-pgo3-use` and the native control at
+`/tmp/prover9-josef02-native3/provers.src/prover9`.  They are host-specific
+and must not be copied to another CPU.  Complete logs are in
+`josef02-pgo3-build/`; raw outputs use the `*-pgo3-*` directory names.  This
+is now the recommended external authority build, but the 5.9% gain at the
+untrained 1,000-given extension remains bounded evidence, not a promised
+percentage for the mature 13,006-given proof.
+
 ## Rejected options and experiments
 
 - Raising `hint_conjunction_kb` to 384 MiB is rejected.  Rewritten hints grew
@@ -884,12 +944,13 @@ A cautious planning range for the next same-machine **release** total is
 **6,200--7,500 CPU seconds** (about 15--30% below the compact baseline), with
 roughly 5.0--5.2 GiB process PSS.  The bounded `-O3`/LTO result supports a
 separate, wider **5,900--7,200 CPU-second** planning range for the recommended
-`NATIVE=1` authority run.  The fresh post-retention balanced profile supports
-only a still provisional **5,800--7,200 CPU-second** planning range: its
-adjacent 1,000-given Josef 02 gate improved total CPU by just 1.5%, despite
-larger 600-given gains.  These are deliberately ranges, not measured full
-claims; neither the 2.37--12.08% compiler benefit nor any bounded PGO benefit
-can be assumed constant through the mature 13,006-given phase.  A simple
+`NATIVE=1` authority run.  The current-source balanced profile supports a
+still provisional **5,500--6,900 CPU-second** planning range: it improved two
+reversed 1,000-given Josef 02 pairs by 5.9% and two reversed 600-given pairs
+by 14.0%, while also improving both generalization workloads.  These are
+deliberately ranges, not measured full claims; neither the 2.37--12.08%
+compiler benefit nor any bounded PGO benefit can be assumed constant through
+the mature 13,006-given phase.  A simple
 per-attempt extrapolation of only the
 clause-snapshot delta
 from the reversed 600-given mean and the adjacent 1,000-given pair spans about
