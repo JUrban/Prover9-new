@@ -435,14 +435,15 @@ int main(void)
   {
     enum { SHALLOW_FAMILY = 128, SHALLOW_TARGET = 73 };
     Compact_back_demod_index mask32_index;
-    struct compact_back_demod_stats before, after;
+    struct compact_back_demod_stats before, cache_stats, after;
     Topform clauses[SHALLOW_FAMILY];
-    Topform rule;
+    Topform rule, broad_rule, later;
     unsigned long long *mask32_ids;
     size_t mask32_count;
     char text[128];
     int j;
 
+    compact_back_demod_set_mask_result_cache_min_blocks(1);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK32);
     mask32_index = compact_back_demod_init();
     for (j = 0; j < SHALLOW_FAMILY; j++) {
@@ -470,6 +471,38 @@ int main(void)
           before.mask_directory_word_checks > 0 &&
           before.mask_directory_buckets_selected == 1,
           "mask32 bit-plane directory is linear and filters by words");
+    broad_rule = indexed_clause("f(x,y) = x.");
+    for (j = 0; j < 5; j++) {
+      safe_free(mask32_ids);
+      mask32_ids = compact_back_demod_candidate_ids(
+        mask32_index, broad_rule, ORIENTED, &mask32_count);
+      CHECK(mask32_count == SHALLOW_FAMILY &&
+            mask32_ids[0] == clauses[SHALLOW_FAMILY - 1]->id &&
+            mask32_ids[SHALLOW_FAMILY - 1] == clauses[0]->id,
+            "cached mask directory preserves every ordered broad answer");
+    }
+    compact_back_demod_get_stats(mask32_index, &cache_stats);
+    CHECK(cache_stats.mask_result_cache_admissions >= 1 &&
+          cache_stats.mask_result_cache_hits >= 1 &&
+          cache_stats.mask_result_cache_bytes > 0,
+          "repeated mask query admits and reuses one bounded result vector");
+    later = indexed_clause(
+      "u(f(shallow_later_a,g(h(shallow_later_b)))).");
+    CHECK(compact_back_demod_add(mask32_index, later),
+          "append a compatible bucket after mask-result admission");
+    safe_free(mask32_ids);
+    mask32_ids = compact_back_demod_candidate_ids(
+      mask32_index, broad_rule, ORIENTED, &mask32_count);
+    CHECK(mask32_count == SHALLOW_FAMILY + 1 &&
+          mask32_ids[0] == later->id &&
+          mask32_ids[SHALLOW_FAMILY] == clauses[0]->id,
+          "cached mask directory incorporates later buckets in exact order");
+    compact_back_demod_get_stats(mask32_index, &after);
+    CHECK(after.mask_result_cache_hits ==
+            cache_stats.mask_result_cache_hits + 1 &&
+          after.mask_result_cache_incremental_slots >
+            cache_stats.mask_result_cache_incremental_slots,
+          "cache scans only the directory suffix appended after admission");
     CHECK(compact_back_demod_remove(
             mask32_index, clauses[SHALLOW_TARGET]->id),
           "remove shallow mask32 answer");
@@ -481,12 +514,16 @@ int main(void)
           "mask32 bit-plane retrieval survives forced compaction");
     compact_back_demod_get_stats(mask32_index, &after);
     CHECK(after.mask_directory_blocks <= after.path_buckets &&
-          after.mask_directory_queries == 2,
+          after.mask_directory_queries ==
+            cache_stats.mask_directory_queries + 2,
           "compaction rebuilds the bounded mask32 bit-plane directory");
     compact_back_demod_free(mask32_index);
     delete_clause(rule);
+    delete_clause(broad_rule);
+    delete_clause(later);
     for (j = 0; j < SHALLOW_FAMILY; j++)
       delete_clause(clauses[j]);
+    compact_back_demod_set_mask_result_cache_min_blocks(64);
     compact_back_demod_set_strategy(COMPACT_BACK_DEMOD_MASK8);
   }
 

@@ -183,6 +183,20 @@ struct compact_back_demod_stats {
   unsigned long long mask_directory_blocks_examined;
   unsigned long long mask_directory_word_checks;
   unsigned long long mask_directory_buckets_selected;
+  unsigned long long mask_result_cache_capacity;
+  unsigned long long mask_result_cache_occupied;
+  unsigned long long mask_result_cache_bytes;
+  unsigned long long mask_result_cache_queries;
+  unsigned long long mask_result_cache_bypasses;
+  unsigned long long mask_result_cache_key_hits;
+  unsigned long long mask_result_cache_hits;
+  unsigned long long mask_result_cache_admissions;
+  unsigned long long mask_result_cache_evictions;
+  unsigned long long mask_result_cache_aged_evictions;
+  unsigned long long mask_result_cache_budget_denials;
+  unsigned long long mask_result_cache_incremental_slots;
+  unsigned long long mask_result_cache_bucket_copies;
+  unsigned mask_result_cache_min_blocks;
   unsigned long long inactive_groups_examined;
   unsigned long long duplicate_groups_examined;
   unsigned long long posting_bytes_decoded;
@@ -250,6 +264,7 @@ void compact_back_demod_set_eager_position_depth(unsigned depth);
    edges.  Queries use it only as a conservative record filter; exact compact
    matching remains authoritative. */
 void compact_back_demod_set_edge_filter(BOOL enabled);
+void compact_back_demod_set_mask_result_cache_min_blocks(unsigned blocks);
 
 BOOL compact_back_demod_add(Compact_back_demod_index index, Topform clause);
 

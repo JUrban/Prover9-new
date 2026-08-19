@@ -18,6 +18,11 @@
 #define CBD_EDGE_INTERSECTION_LIMIT 4
 #define CBD_EDGE_ROOT_MARKER UINT32_MAX
 #define CBD_MASK_DIRECTORY_BUCKETS 64
+#define CBD_MASK_RESULT_CACHE_CAPACITY 2048
+#define CBD_MASK_RESULT_CACHE_ADMIT_HITS 4
+#define CBD_MASK_RESULT_CACHE_DEFAULT_MIN_BLOCKS 64
+#define CBD_MASK_RESULT_CACHE_BUDGET_BYTES \
+  (UINT64_C(16) * 1024 * 1024)
 #define CBD_POSITION_SPARSE_INTERSECTION_MAX 4
 #define CBD_TREE_CHILD_CACHE_MAX_BYTES (UINT64_C(8) * 1024 * 1024)
 #define CBD_GROWTH_STALE_FLOOR 16384ULL
@@ -28,6 +33,12 @@
 #define CBD_ROUTE_STALE_QUANTUM 4096
 #define CBD_ROUTE_FREQUENCY_DECAY_INTERVAL \
   (CBD_ROUTE_FREQUENCY_CAPACITY * 4)
+
+#if defined(__GNUC__) || defined(__clang__)
+#define CBD_NOINLINE __attribute__((noinline))
+#else
+#define CBD_NOINLINE
+#endif
 
 enum cbd_route {
   CBD_ROUTE_MASK,
@@ -55,6 +66,8 @@ static unsigned long long Back_demod_tree_budget_bytes =
   UINT64_C(64) * 1024 * 1024;
 static unsigned Back_demod_tree_budget_pct = 0;
 static BOOL Back_demod_edge_filter = FALSE;
+static unsigned Back_demod_mask_result_cache_min_blocks =
+  CBD_MASK_RESULT_CACHE_DEFAULT_MIN_BLOCKS;
 
 typedef uint32_t cbd_path_mask;
 
@@ -101,6 +114,26 @@ struct cbd_mask_directory_block {
   uint16_t reserved;
   uint32_t buckets[CBD_MASK_DIRECTORY_BUCKETS];
   uint64_t planes[32];
+};
+
+/* Bounded exact-result cache for repeated (root, required-mask) queries.
+   Directory buckets are append-only between index rebuilds, so an admitted
+   entry keeps the established insertion order and scans only slots appended
+   after its cursor.  Posting populations are deliberately re-read on every
+   hit because existing buckets continue to grow. */
+struct cbd_mask_result_cache_entry {
+  uint32_t symbol;
+  cbd_path_mask required;
+  uint32_t cursor_block;
+  uint16_t cursor_count;
+  uint16_t frequency;
+  uint32_t *buckets;
+  size_t count;
+  size_t capacity;
+  unsigned long long last_seen;
+  unsigned char occupied;
+  unsigned char admitted;
+  unsigned char blocked;
 };
 
 /* Radix edges refer directly to the shared serialized-term pool.  Only
@@ -279,6 +312,7 @@ struct compact_back_demod_index {
   uint32_t *path_bucket_hash;
   size_t path_bucket_hash_capacity;
   struct cbd_mask_directory_root *mask_directory_roots;
+  unsigned char *mask_directory_root_blocks;
   size_t mask_directory_root_capacity;
   struct cbd_mask_directory_block *mask_directory_blocks;
   size_t mask_directory_block_count;
@@ -289,6 +323,22 @@ struct compact_back_demod_index {
   unsigned long long mask_query_population;
   Term mask_query_pattern;
   uint32_t mask_query_stamp;
+  struct cbd_mask_result_cache_entry *mask_result_cache;
+  size_t mask_result_cache_capacity;
+  unsigned long long mask_result_cache_sequence;
+  unsigned long long mask_result_cache_occupied;
+  unsigned long long mask_result_cache_bytes;
+  unsigned long long mask_result_cache_queries;
+  unsigned long long mask_result_cache_bypasses;
+  unsigned long long mask_result_cache_key_hits;
+  unsigned long long mask_result_cache_hits;
+  unsigned long long mask_result_cache_admissions;
+  unsigned long long mask_result_cache_evictions;
+  unsigned long long mask_result_cache_aged_evictions;
+  unsigned long long mask_result_cache_budget_denials;
+  unsigned long long mask_result_cache_incremental_slots;
+  unsigned long long mask_result_cache_bucket_copies;
+  unsigned mask_result_cache_min_blocks;
   struct cbd_tree_node *tree_nodes;
   size_t tree_node_count;
   size_t tree_node_capacity;
@@ -677,8 +727,13 @@ static unsigned long long index_bytes(Compact_back_demod_index index)
     index->path_bucket_hash_capacity * sizeof(*index->path_bucket_hash) +
     index->mask_directory_root_capacity *
       sizeof(*index->mask_directory_roots) +
+    index->mask_directory_root_capacity *
+      sizeof(*index->mask_directory_root_blocks) +
     index->mask_directory_block_capacity *
       sizeof(*index->mask_directory_blocks) +
+    index->mask_result_cache_capacity *
+      sizeof(*index->mask_result_cache) +
+    index->mask_result_cache_bytes +
     index->tree_node_capacity * sizeof(*index->tree_nodes) +
     index->tree_posting_list_capacity *
       sizeof(*index->tree_posting_lists) +
@@ -799,6 +854,13 @@ static void ensure_symbols(Compact_back_demod_index index, unsigned symbol)
     memset(index->mask_directory_roots + old_roots, 0,
            (index->mask_directory_root_capacity - old_roots) *
              sizeof(*index->mask_directory_roots));
+    index->mask_directory_root_blocks = safe_realloc(
+      index->mask_directory_root_blocks,
+      index->mask_directory_root_capacity *
+        sizeof(*index->mask_directory_root_blocks));
+    memset(index->mask_directory_root_blocks + old_roots, 0,
+           (index->mask_directory_root_capacity - old_roots) *
+             sizeof(*index->mask_directory_root_blocks));
   }
   if (strategy_uses_hot_tree(index->strategy)) {
     size_t old_roots = index->tree_root_capacity;
@@ -1011,6 +1073,9 @@ static void insert_mask_directory_bucket(Compact_back_demod_index index,
     else
       index->mask_directory_blocks[root->tail].next = added;
     root->tail = added;
+    if (index->mask_directory_root_blocks[symbol] <
+        index->mask_result_cache_min_blocks)
+      index->mask_directory_root_blocks[symbol]++;
   }
   block = &index->mask_directory_blocks[root->tail];
   at = block->count++;
@@ -2547,6 +2612,8 @@ static Compact_back_demod_index compact_back_demod_init_with_pool_strategy(
   index->position_sparse = Back_demod_sparse_positions;
   index->position_eager_depth = Back_demod_eager_position_depth;
   index->edge_enabled = Back_demod_edge_filter;
+  index->mask_result_cache_min_blocks =
+    Back_demod_mask_result_cache_min_blocks;
   if (index->position_eager_depth != 0 &&
       (!index->position_sparse || index->position_budget_bytes != 0))
     fatal_error("compact_back_demod: eager positions require sparse storage "
@@ -2702,6 +2769,12 @@ void compact_back_demod_set_eager_position_depth(unsigned depth)
 void compact_back_demod_set_edge_filter(BOOL enabled)
 {
   Back_demod_edge_filter = enabled;
+}
+
+void compact_back_demod_set_mask_result_cache_min_blocks(unsigned blocks)
+{
+  Back_demod_mask_result_cache_min_blocks = blocks == 0 ? 1 :
+    (blocks > UCHAR_MAX ? UCHAR_MAX : blocks);
 }
 
 static void ensure_edge_append(Compact_back_demod_index index,
@@ -5276,12 +5349,243 @@ static void ensure_mask_query_buckets(Compact_back_demod_index index,
   }
 }
 
+static void drop_mask_result_cache_value(
+  Compact_back_demod_index index,
+  struct cbd_mask_result_cache_entry *entry)
+{
+  unsigned long long bytes = entry->capacity * sizeof(*entry->buckets);
+  if (bytes > index->mask_result_cache_bytes)
+    fatal_error("compact_back_demod: corrupt mask-result cache bytes");
+  safe_free(entry->buckets);
+  index->mask_result_cache_bytes -= bytes;
+  entry->buckets = NULL;
+  entry->count = 0;
+  entry->capacity = 0;
+  entry->admitted = FALSE;
+}
+
+static void free_mask_result_cache(Compact_back_demod_index index)
+{
+  size_t i;
+  for (i = 0; i < index->mask_result_cache_capacity; i++)
+    safe_free(index->mask_result_cache[i].buckets);
+  safe_free(index->mask_result_cache);
+  index->mask_result_cache = NULL;
+  index->mask_result_cache_capacity = 0;
+  index->mask_result_cache_bytes = 0;
+}
+
+static void retain_mask_result_cache_counters(
+  Compact_back_demod_index destination,
+  Compact_back_demod_index source)
+{
+  destination->mask_result_cache_queries =
+    source->mask_result_cache_queries;
+  destination->mask_result_cache_bypasses =
+    source->mask_result_cache_bypasses;
+  destination->mask_result_cache_key_hits =
+    source->mask_result_cache_key_hits;
+  destination->mask_result_cache_hits = source->mask_result_cache_hits;
+  destination->mask_result_cache_admissions =
+    source->mask_result_cache_admissions;
+  destination->mask_result_cache_evictions =
+    source->mask_result_cache_evictions;
+  destination->mask_result_cache_aged_evictions =
+    source->mask_result_cache_aged_evictions;
+  destination->mask_result_cache_budget_denials =
+    source->mask_result_cache_budget_denials;
+  destination->mask_result_cache_incremental_slots =
+    source->mask_result_cache_incremental_slots;
+  destination->mask_result_cache_bucket_copies =
+    source->mask_result_cache_bucket_copies;
+}
+
+static BOOL reserve_mask_result_cache(
+  Compact_back_demod_index index,
+  struct cbd_mask_result_cache_entry *entry, size_t needed)
+{
+  size_t capacity = entry->capacity == 0 ? 16 : entry->capacity;
+  unsigned long long old_bytes, new_bytes, added;
+  if (needed <= entry->capacity)
+    return TRUE;
+  while (capacity < needed) {
+    if (capacity > SIZE_MAX / 2)
+      return FALSE;
+    capacity *= 2;
+  }
+  if (capacity > SIZE_MAX / sizeof(*entry->buckets))
+    return FALSE;
+  old_bytes = entry->capacity * sizeof(*entry->buckets);
+  new_bytes = capacity * sizeof(*entry->buckets);
+  added = new_bytes - old_bytes;
+  if (added > CBD_MASK_RESULT_CACHE_BUDGET_BYTES -
+        index->mask_result_cache_bytes) {
+    index->mask_result_cache_budget_denials++;
+    entry->blocked = TRUE;
+    drop_mask_result_cache_value(index, entry);
+    return FALSE;
+  }
+  entry->buckets = safe_realloc(entry->buckets, (size_t) new_bytes);
+  entry->capacity = capacity;
+  index->mask_result_cache_bytes += added;
+  update_peak(index);
+  return TRUE;
+}
+
+static CBD_NOINLINE struct cbd_mask_result_cache_entry *
+mask_result_cache_entry(
+  Compact_back_demod_index index, uint32_t symbol, cbd_path_mask required)
+{
+  size_t sets, first;
+  struct cbd_mask_result_cache_entry *a, *b, *entry;
+  uint64_t key;
+  if (index->mask_result_cache_capacity == 0) {
+    index->mask_result_cache_capacity = CBD_MASK_RESULT_CACHE_CAPACITY;
+    index->mask_result_cache = safe_calloc(
+      index->mask_result_cache_capacity,
+      sizeof(*index->mask_result_cache));
+    update_peak(index);
+  }
+  index->mask_result_cache_queries++;
+  index->mask_result_cache_sequence++;
+  sets = index->mask_result_cache_capacity / 2;
+  key = hash_id(((uint64_t) symbol << 32) ^ required);
+  first = ((size_t) key & (sets - 1)) * 2;
+  a = &index->mask_result_cache[first];
+  b = a + 1;
+  if (a->occupied && a->symbol == symbol && a->required == required)
+    entry = a;
+  else if (b->occupied && b->symbol == symbol && b->required == required)
+    entry = b;
+  else {
+    if (!a->occupied)
+      entry = a;
+    else if (!b->occupied)
+      entry = b;
+    else if (index->mask_result_cache_sequence - a->last_seen >
+             index->mask_result_cache_capacity * 8ULL ||
+             index->mask_result_cache_sequence - b->last_seen >
+             index->mask_result_cache_capacity * 8ULL) {
+      entry = a->last_seen <= b->last_seen ? a : b;
+      index->mask_result_cache_aged_evictions++;
+    }
+    else if (a->frequency != b->frequency)
+      entry = a->frequency < b->frequency ? a : b;
+    else
+      entry = a->last_seen <= b->last_seen ? a : b;
+    if (entry->occupied) {
+      drop_mask_result_cache_value(index, entry);
+      index->mask_result_cache_evictions++;
+    }
+    else
+      index->mask_result_cache_occupied++;
+    memset(entry, 0, sizeof(*entry));
+    entry->occupied = TRUE;
+    entry->symbol = symbol;
+    entry->required = required;
+    entry->frequency = 1;
+    entry->last_seen = index->mask_result_cache_sequence;
+    return entry;
+  }
+  index->mask_result_cache_key_hits++;
+  if (entry->frequency < UINT16_MAX)
+    entry->frequency++;
+  entry->last_seen = index->mask_result_cache_sequence;
+  return entry;
+}
+
+static BOOL append_mask_result_cache_updates(
+  Compact_back_demod_index index,
+  struct cbd_mask_result_cache_entry *entry)
+{
+  uint32_t block_index = entry->cursor_block;
+  unsigned start = entry->cursor_count;
+  if (block_index == CBD_NONE) {
+    block_index = index->mask_directory_roots[entry->symbol].head;
+    start = 0;
+  }
+  while (block_index != CBD_NONE) {
+    struct cbd_mask_directory_block *block;
+    unsigned slot;
+    if (block_index >= index->mask_directory_block_count)
+      fatal_error("compact_back_demod: corrupt cached mask cursor");
+    block = &index->mask_directory_blocks[block_index];
+    if (start > block->count)
+      fatal_error("compact_back_demod: corrupt cached mask slot");
+    for (slot = start; slot < block->count; slot++) {
+      uint32_t bucket = block->buckets[slot];
+      index->mask_result_cache_incremental_slots++;
+      if (bucket == CBD_NONE || bucket >= index->path_bucket_count)
+        fatal_error("compact_back_demod: corrupt cached mask bucket");
+      if ((index->path_buckets[bucket].mask & entry->required) ==
+          entry->required) {
+        if (!reserve_mask_result_cache(index, entry, entry->count + 1))
+          return FALSE;
+        entry->buckets[entry->count++] = bucket;
+      }
+    }
+    entry->cursor_block = block_index;
+    entry->cursor_count = block->count;
+    block_index = block->next;
+    start = 0;
+  }
+  return TRUE;
+}
+
+static CBD_NOINLINE BOOL use_mask_result_cache(
+  Compact_back_demod_index index,
+  struct cbd_mask_result_cache_entry *entry)
+{
+  size_t i;
+  if (entry == NULL || !entry->admitted || entry->blocked ||
+      !append_mask_result_cache_updates(index, entry))
+    return FALSE;
+  ensure_mask_query_buckets(index, entry->count);
+  if (entry->count != 0)
+    memcpy(index->mask_query_buckets, entry->buckets,
+           entry->count * sizeof(*entry->buckets));
+  index->mask_query_bucket_count = entry->count;
+  index->mask_query_population = 0;
+  for (i = 0; i < entry->count; i++)
+    index->mask_query_population = saturating_add(
+      index->mask_query_population,
+      index->path_buckets[entry->buckets[i]].posting_count);
+  index->mask_directory_buckets_selected += entry->count;
+  index->path_filter_checks += entry->count;
+  index->mask_result_cache_hits++;
+  index->mask_result_cache_bucket_copies += entry->count;
+  return TRUE;
+}
+
+static CBD_NOINLINE void admit_mask_result_cache(
+  Compact_back_demod_index index,
+  struct cbd_mask_result_cache_entry *entry)
+{
+  struct cbd_mask_directory_root *root;
+  if (entry == NULL || entry->admitted || entry->blocked ||
+      entry->frequency < CBD_MASK_RESULT_CACHE_ADMIT_HITS ||
+      !reserve_mask_result_cache(
+        index, entry, index->mask_query_bucket_count))
+    return;
+  if (index->mask_query_bucket_count != 0)
+    memcpy(entry->buckets, index->mask_query_buckets,
+           index->mask_query_bucket_count * sizeof(*entry->buckets));
+  entry->count = index->mask_query_bucket_count;
+  root = &index->mask_directory_roots[entry->symbol];
+  entry->cursor_block = root->tail;
+  entry->cursor_count = root->tail == CBD_NONE ? 0 :
+    index->mask_directory_blocks[root->tail].count;
+  entry->admitted = TRUE;
+  index->mask_result_cache_admissions++;
+}
+
 static unsigned long long prepare_mask_directory(
   Compact_back_demod_index index, Term pattern)
 {
   unsigned symbol;
   cbd_path_mask required;
   uint32_t block_index;
+  struct cbd_mask_result_cache_entry *cache_entry;
   if (index->mask_query_stamp == index->query_stamp &&
       index->mask_query_pattern == pattern)
     return index->mask_query_population;
@@ -5299,6 +5603,16 @@ static unsigned long long prepare_mask_directory(
     return 0;
   required = term_path_mask(index, pattern);
   index->mask_directory_queries++;
+  if (index->mask_directory_root_blocks[symbol] >=
+      index->mask_result_cache_min_blocks)
+    cache_entry = mask_result_cache_entry(
+      index, (uint32_t) symbol, required);
+  else {
+    cache_entry = NULL;
+    index->mask_result_cache_bypasses++;
+  }
+  if (cache_entry != NULL && use_mask_result_cache(index, cache_entry))
+    return index->mask_query_population;
   for (; block_index != CBD_NONE;
        block_index = index->mask_directory_blocks[block_index].next) {
     struct cbd_mask_directory_block *block;
@@ -5333,6 +5647,8 @@ static unsigned long long prepare_mask_directory(
       compatible &= compatible - 1;
     }
   }
+  if (cache_entry != NULL)
+    admit_mask_result_cache(index, cache_entry);
   return index->mask_query_population;
 }
 
@@ -6870,8 +7186,10 @@ static void compact_back_demod_compact_internal(
   safe_free(old.path_buckets);
   safe_free(old.path_bucket_hash);
   safe_free(old.mask_directory_roots);
+  safe_free(old.mask_directory_root_blocks);
   safe_free(old.mask_directory_blocks);
   safe_free(old.mask_query_buckets);
+  free_mask_result_cache(&old);
   safe_free(old.tree_nodes);
   safe_free(old.tree_posting_lists);
   safe_free(old.tree_child_cache);
@@ -6915,6 +7233,7 @@ static void compact_back_demod_compact_internal(
   index->mask_directory_word_checks = old.mask_directory_word_checks;
   index->mask_directory_buckets_selected =
     old.mask_directory_buckets_selected;
+  retain_mask_result_cache_counters(index, &old);
   index->tree_queries = old.tree_queries;
   index->tree_nodes_examined = old.tree_nodes_examined;
   index->tree_sibling_checks = old.tree_sibling_checks;
@@ -7076,8 +7395,10 @@ void compact_back_demod_compact_materialized(
   safe_free(old.path_buckets);
   safe_free(old.path_bucket_hash);
   safe_free(old.mask_directory_roots);
+  safe_free(old.mask_directory_root_blocks);
   safe_free(old.mask_directory_blocks);
   safe_free(old.mask_query_buckets);
+  free_mask_result_cache(&old);
   safe_free(old.tree_nodes);
   safe_free(old.tree_posting_lists);
   safe_free(old.tree_child_cache);
@@ -7162,6 +7483,7 @@ void compact_back_demod_compact_materialized(
   index->mask_directory_word_checks = old.mask_directory_word_checks;
   index->mask_directory_buckets_selected =
     old.mask_directory_buckets_selected;
+  retain_mask_result_cache_counters(index, &old);
   index->tree_queries = old.tree_queries;
   index->tree_nodes_examined = old.tree_nodes_examined;
   index->tree_sibling_checks = old.tree_sibling_checks;
@@ -7874,6 +8196,27 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
   stats->mask_directory_word_checks = index->mask_directory_word_checks;
   stats->mask_directory_buckets_selected =
     index->mask_directory_buckets_selected;
+  stats->mask_result_cache_capacity = index->mask_result_cache_capacity;
+  stats->mask_result_cache_occupied = index->mask_result_cache_occupied;
+  stats->mask_result_cache_bytes = index->mask_result_cache_capacity *
+      sizeof(*index->mask_result_cache) + index->mask_result_cache_bytes;
+  stats->mask_result_cache_queries = index->mask_result_cache_queries;
+  stats->mask_result_cache_bypasses = index->mask_result_cache_bypasses;
+  stats->mask_result_cache_key_hits = index->mask_result_cache_key_hits;
+  stats->mask_result_cache_hits = index->mask_result_cache_hits;
+  stats->mask_result_cache_admissions =
+    index->mask_result_cache_admissions;
+  stats->mask_result_cache_evictions = index->mask_result_cache_evictions;
+  stats->mask_result_cache_aged_evictions =
+    index->mask_result_cache_aged_evictions;
+  stats->mask_result_cache_budget_denials =
+    index->mask_result_cache_budget_denials;
+  stats->mask_result_cache_incremental_slots =
+    index->mask_result_cache_incremental_slots;
+  stats->mask_result_cache_bucket_copies =
+    index->mask_result_cache_bucket_copies;
+  stats->mask_result_cache_min_blocks =
+    index->mask_result_cache_min_blocks;
   stats->inactive_groups_examined = index->inactive_groups_examined;
   stats->duplicate_groups_examined = index->duplicate_groups_examined;
   stats->posting_bytes_decoded = index->posting_bytes_decoded;
@@ -7911,8 +8254,13 @@ void compact_back_demod_get_stats(Compact_back_demod_index index,
     index->path_bucket_hash_capacity * sizeof(*index->path_bucket_hash) +
     index->mask_directory_root_capacity *
       sizeof(*index->mask_directory_roots) +
+    index->mask_directory_root_capacity *
+      sizeof(*index->mask_directory_root_blocks) +
     index->mask_directory_block_capacity *
       sizeof(*index->mask_directory_blocks) +
+    index->mask_result_cache_capacity *
+      sizeof(*index->mask_result_cache) +
+    index->mask_result_cache_bytes +
     index->tree_node_capacity * sizeof(*index->tree_nodes) +
     index->tree_posting_list_capacity *
       sizeof(*index->tree_posting_lists) +
@@ -7975,8 +8323,10 @@ void compact_back_demod_free(Compact_back_demod_index index)
   safe_free(index->path_buckets);
   safe_free(index->path_bucket_hash);
   safe_free(index->mask_directory_roots);
+  safe_free(index->mask_directory_root_blocks);
   safe_free(index->mask_directory_blocks);
   safe_free(index->mask_query_buckets);
+  free_mask_result_cache(index);
   safe_free(index->tree_nodes);
   safe_free(index->tree_posting_lists);
   safe_free(index->tree_child_cache);

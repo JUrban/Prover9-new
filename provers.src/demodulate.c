@@ -658,6 +658,15 @@ void fprint_compact_back_demod(FILE *fp)
           "mask_directory_blocks_examined=%llu, "
           "mask_directory_word_checks=%llu, "
           "mask_directory_buckets_selected=%llu, "
+          "mask_cache_capacity=%llu, mask_cache_occupied=%llu, "
+          "mask_cache_bytes=%llu, mask_cache_queries=%llu, "
+          "mask_cache_bypasses=%llu, "
+          "mask_cache_key_hits=%llu, mask_cache_hits=%llu, "
+          "mask_cache_admissions=%llu, mask_cache_evictions=%llu, "
+          "mask_cache_aged_evictions=%llu, "
+          "mask_cache_budget_denials=%llu, "
+          "mask_cache_incremental_slots=%llu, "
+          "mask_cache_bucket_copies=%llu, mask_cache_min_blocks=%u, "
           "tree_nodes=%llu, tree_terminals=%llu, "
           "tree_queries=%llu, tree_nodes_examined=%llu, "
           "tree_sibling_checks=%llu, "
@@ -742,6 +751,20 @@ void fprint_compact_back_demod(FILE *fp)
           stats.mask_directory_blocks_examined,
           stats.mask_directory_word_checks,
           stats.mask_directory_buckets_selected,
+          stats.mask_result_cache_capacity,
+          stats.mask_result_cache_occupied,
+          stats.mask_result_cache_bytes,
+          stats.mask_result_cache_queries,
+          stats.mask_result_cache_bypasses,
+          stats.mask_result_cache_key_hits,
+          stats.mask_result_cache_hits,
+          stats.mask_result_cache_admissions,
+          stats.mask_result_cache_evictions,
+          stats.mask_result_cache_aged_evictions,
+          stats.mask_result_cache_budget_denials,
+          stats.mask_result_cache_incremental_slots,
+          stats.mask_result_cache_bucket_copies,
+          stats.mask_result_cache_min_blocks,
           stats.tree_nodes, stats.tree_terminals, stats.tree_queries,
           stats.tree_nodes_examined,
           stats.tree_sibling_checks,
