@@ -123,6 +123,27 @@ rebuild the generator and retrain instead of accepting that binary.
     make pgo-clean              Remove pgo_data/ directory
 
 
+Long-Running Compact Back-Demodulation
+--------------------------------------
+
+The `mask32`-family compact back-demodulation index automatically enables a
+bounded exact result cache only after one root grows to 64 mask-directory
+blocks.  No input option is required.  Smaller roots stay on the ordinary
+bit-plane scan and allocate no cache storage; this keeps short and unrelated
+runs on the established path.  The cache uses at most about 16.1 MiB, is
+discarded safely when the index is compacted, and never replaces the final
+structural match.
+
+The final `Compact_back_demod:` line reports `mask_cache_queries`,
+`mask_cache_bypasses`, `mask_cache_hits`, `mask_cache_bytes`, evictions and
+incremental suffix work.  For a same-trajectory long-run comparison, judge it
+by total CPU together with reductions in
+`mask_directory_blocks_examined` and `mask_directory_word_checks`; a nonzero
+hit count alone is not a speedup.  Source changes to this cache invalidate old
+PGO control-flow profiles, so regenerate training data after updating the
+checkout.
+
+
 Technical Notes
 ---------------
 

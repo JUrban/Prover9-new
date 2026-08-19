@@ -1,7 +1,7 @@
 # Josef 02 compact-P9 CPU investigation
 
 Status: source changes implemented and bounded-validated on branch
-`josef02-cpu` through `06deec9`, with the portable PGO workflow fixed through
+`josef02-cpu` through `fb7b873`, with the portable PGO workflow fixed through
 `0b281d5`.  The current compact prover is already 3.9--5.4 times faster than
 the preserved old-P9 binary on exact 300/600-given Josef 02 prefixes.  A full
 old-P9 Josef 02 proof output was not supplied, so this report does not claim a
@@ -21,6 +21,7 @@ something attempted on the low-RAM development machine.
 | release binary at `06deec9` | `e756487a8ab02a5884b1ac370ca18ceb4de61dda1ea5ae60e929b761ba6a3306` |
 | host-native binary at `06deec9` | `7c9cbd5471f92f659a6004a1a9d43f1e24dea8a7702d5ce9e8500fc8c29c10ac` |
 | balanced GCC-PGO binary at `06deec9` | `6b1bced78f2ba5c4c36e95e3e0cfa035c7ff7c8c33c2b9d8e69d6fd5302764f0` |
+| release binary at `fb7b873` | `7a911af3df69506d395a5c8c034ba472211f0953cfe65d44abfa5d4589a43e6f` |
 
 The reconstructed input is
 `josef02-debug.heNOIJ/Josef_02-uninterrupted.in`.  It retains every formula,
@@ -318,6 +319,57 @@ profile, with no demonstrated CPU or RAM penalty on CHAT.  It is not evidence
 that every problem gains 12--18%, nor that a profile trained only through
 given 1,000 predicts the mature given-13,006 phase exactly.
 
+### Mature exact mask-directory result cache (`fb7b873`)
+
+The completed proof exposes a later scaling problem which a 600-given profile
+cannot represent.  Its mask directory performs 7,271,896 queries, examines
+7,352,224,411 64-bucket blocks and applies 27,753,331,661 bit-plane word
+checks: about 1,011 blocks and 3,816 word checks per query.  The sampled
+back-index lookup estimate is 957.668 seconds and the enclosing back-demod
+clock is 1,022.42 seconds.  Re-enumerating the same compatible mask buckets is
+therefore material at proof scale even though it is cheap in early prefixes.
+
+The accepted implementation caches the exact ordered compatible-bucket vector
+for `(root symbol, required mask)`.  It preserves semantics in four ways:
+
+- entries are admitted only after four observations and only after that root
+  reaches 64 directory blocks (4,096 distinct mask buckets);
+- existing bucket populations are read afresh on every hit, because posting
+  lists continue to grow;
+- directories are append-only between rebuilds, so a hit scans just the suffix
+  appended since its saved cursor and appends compatible buckets in the
+  original order; and
+- compaction discards cache values and rebuilds them from the authoritative
+  directory while preserving only cumulative diagnostics.
+
+The metadata table has 2,048 two-way entries, stale entries lose replacement
+priority after 16,384 eligible queries, and result vectors have a hard 16 MiB
+budget.  Allocation is lazy.  Maximum cache storage is about 16.1 MiB plus one
+byte per symbol-root; prefixes below the maturity gate allocate no cache at
+all.  Cache helpers are deliberately out of line: allowing GCC to inline them
+grew the hot `prepare_mask_directory` routine from 792 to 2,389 bytes and
+caused a real unrelated CHAT slowdown.  The accepted form is 911 bytes and
+restores the dormant-path result.
+
+Validation is deliberately qualified:
+
+| gate | cache behavior | deterministic effect | total CPU / RSS |
+|---|---|---|---:|
+| final source, Josef 02/600 | 12,687 bypasses, 0 cache bytes | exact control directory work and fingerprints | 45.30 s / 206,608 KiB |
+| accepted-layout prototype, CHAT/600 | 7,343 bypasses, 0 cache bytes | exact control directory work and fingerprints | 61.67 s / 467,116 KiB |
+| accepted active path, Josef 02/1,000 | 5,160 eligible, 415 hits, 164,288 bytes | removes 35,612 block scans and 139,485 word checks | 119.26 s / 235,880 KiB |
+
+The adjacent final 1,000-given control took 115.82 seconds, so this table does
+**not** establish a bounded CPU speedup; sampled lookup itself was essentially
+equal (2.393 versus 2.362 seconds) and whole-run timings on this host vary by
+several percent.  Earlier gated observations also moved in the opposite
+direction.  The defensible claim is narrower: the cache is exact, bounded,
+dormant on short/different workloads, and removes measured directory work once
+a root matures.  Only the external full proof can establish its CPU payoff on
+the 7.35-billion-block workload.  The planning ranges below are therefore not
+lowered.  Any PGO profile made before `fb7b873` must be discarded and retrained
+because this changes compact-index control flow.
+
 ## Rejected options and experiments
 
 - Raising `hint_conjunction_kb` to 384 MiB is rejected.  Rewritten hints grew
@@ -388,6 +440,20 @@ given 1,000 predicts the mature given-13,006 phase exactly.
   shrink the inlined dense collector and averaged 44.34 versus 43.05 total
   CPU at 600 givens (+3.0%) across reversed ordering.  It also increased run
   variance.  The split was fully reverted.
+- Copying every exact-demodulated hint solely to detect whether rewriting
+  changed it looked attractive at 600 givens: an explicit change result
+  removed 50,733 temporary clauses, 603,104 terms and about 704,000 allocator
+  calls, and the noisy pair mean improved 10.9%.  At 1,000 givens the reversed
+  mean was neutral (+0.36%).  More decisively, the completed proof performs
+  only 179,868 exact-positive hint back-demodulations against 16.7 billion
+  allocator calls, so this cannot change mature total CPU materially.  The
+  prototype was rejected as a short-prefix optimization.
+- Applying the new mask-result cache to every directory was also rejected.
+  At 1,000 givens two reversed pairs averaged 107.82 versus 104.90 total CPU
+  (+2.8%), despite reducing block scans.  Expanding its metadata table from
+  2,048 to 16,384 entries reduced collisions but made Josef 02/600 slower and
+  raised metadata to about 1.1 MiB.  The accepted 64-block maturity gate and
+  compact table are consequences of these failures, not Josef-specific keys.
 
 ## Cross-workload gates
 
@@ -411,7 +477,9 @@ given 1,000 predicts the mature given-13,006 phase exactly.
 - `compact_back_demod_test`, `compact_long_run_test`,
   `compact_rewrite_test`, `compact_unit_index_test` and
   `compact_otter_audit_test` pass.  The hint-postings, hint-preview and
-  compressed-unit-match tests also pass after the packed-counter change.
+  compressed-unit-match tests also pass.  The back-demod test now explicitly
+  covers cache admission, reuse, a compatible bucket appended after admission,
+  exact decreasing proof-ID order and forced compaction.
 
 ## Recommended full-run options
 
@@ -505,7 +573,10 @@ assign(compact_term_reclaim_kb,8192).
 Retain the original inference, ordering, weight and hint commands after this
 block.  For an unlimited run remove/replace only bounded `max_given`,
 `max_seconds` and `max_megs` commands.  Do not raise the hint-conjunction
-budget or enable the deep rewrite cache for the first authority run.
+budget or enable the deep rewrite cache for the first authority run.  The
+mature mask-result cache is automatic under `adaptive32`; there is no new P9
+input command to add.  Its `mask_cache_*` fields will appear in the final
+`Compact_back_demod:` report.
 
 ## Expected full result and acceptance gate
 
@@ -536,8 +607,11 @@ full baseline.  The back-index optimization likewise cannot be extrapolated
 linearly from the 1,500-given prefix.  The monotone candidate-order fast path
 removes 4.28--5.27% on bounded Josef 02 and 3.97% on CHAT, but mature hint
 rewrites may create more mixed-order fallback vectors, so those percentages
-are not applied mechanically to the proof baseline.  No full old-P9 Josef 02
-time exists.
+are not applied mechanically to the proof baseline.  The mature mask-result
+cache can plausibly remove a large fraction of the proof's 7.35 billion
+directory-block examinations if long-run key reuse is high, but the bounded
+active-path timing did not prove a CPU gain.  It is consequently assigned no
+advance credit in these ranges.  No full old-P9 Josef 02 time exists.
 
 Accept the external run only if it:
 
@@ -550,7 +624,12 @@ Accept the external run only if it:
 4. improves total CPU on 8,841.30 s without an unexplained increase over the
    approximately 5 GiB compact PSS baseline; and
 5. retains the full `Compact_rewrite`, `Compact_back_demod`, route, query
-   profile, hint and allocator statistics for the next scaling audit.
+   profile, hint and allocator statistics for the next scaling audit; and
+6. reports nonzero `mask_cache_hits` after maturity and compares
+   `mask_directory_blocks_examined` and `mask_directory_word_checks` with the
+   exact baseline values 7,352,224,411 and 27,753,331,661.  Reject the cache as
+   a CPU optimization if total CPU does not improve, even when those work
+   counters fall.
 
 Until that run exists, the precise conclusion is: current compact P9 is
 decisively faster than old P9 on exact Josef 02 prefixes, and the identified
