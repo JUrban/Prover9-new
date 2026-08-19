@@ -1,7 +1,8 @@
 # Josef 02 compact-P9 CPU investigation
 
-Status: implemented and bounded-validated on branch `josef02-cpu` through
-`06deec9`.  The current compact prover is already 3.9--5.4 times faster than
+Status: source changes implemented and bounded-validated on branch
+`josef02-cpu` through `06deec9`, with the portable PGO workflow fixed through
+`0b281d5`.  The current compact prover is already 3.9--5.4 times faster than
 the preserved old-P9 binary on exact 300/600-given Josef 02 prefixes.  A full
 old-P9 Josef 02 proof output was not supplied, so this report does not claim a
 measured proof-to-proof old/new CPU ratio.  The existing compact proof is the
@@ -18,6 +19,8 @@ something attempted on the low-RAM development machine.
 | accepted parent binary at `10b6abd` | `d13973d3311ba8e31590f139e48f6560ec24af845fc60acb4b2e342dfd001ddc` |
 | accepted rewrite parent at `3846b92` | `25fd1849ea8ac898dd45af9ce96397f61465cfdfb7ab8baacda2b1803010bc73` |
 | release binary at `06deec9` | `e756487a8ab02a5884b1ac370ca18ceb4de61dda1ea5ae60e929b761ba6a3306` |
+| host-native binary at `06deec9` | `7c9cbd5471f92f659a6004a1a9d43f1e24dea8a7702d5ce9e8500fc8c29c10ac` |
+| balanced GCC-PGO binary at `06deec9` | `6b1bced78f2ba5c4c36e95e3e0cfa035c7ff7c8c33c2b9d8e69d6fd5302764f0` |
 
 The reconstructed input is
 `josef02-debug.heNOIJ/Josef_02-uninterrupted.in`.  It retains every formula,
@@ -276,6 +279,45 @@ attributed to `-O3` plus link-time optimization, not to CPU-specific
 instructions.  `NATIVE=1` remains the recommended interface because its build
 mode sentinel prevents accidental mixing with release objects.
 
+### Balanced profile-guided production build (`0b281d5`)
+
+A GCC 13 PGO generator was trained sequentially on three bounded, exact
+prefixes: Josef 02/600 (back demodulation and rewritten hints), CHAT/600 (a
+different hint population whose conjunction index is admitted), and Josef
+01/1,000 (compact unit indexing with back demodulation cleared).  The training
+runs reached `(601,524799,26671,0)`, `(601,497430,16974,0)` and
+`(1001,1628048,320239,0)`, respectively.  Their peaks were 208,688, 469,712
+and 602,840 KiB and none swapped.  This profile is intentionally broader than
+a Josef 02-only profile, while remaining small enough to regenerate on the
+target host.
+
+| PGO artifact | SHA-256 |
+|---|---|
+| Josef 02/600 training input | `2d9f1fff2134d619131d5568dfc95c5931ddfd7b134ca578f559ed6754ece2ab` |
+| CHAT/600 training input | `161a40bdad2efef4970aa31eda6e0c8739358ecacc2b5fd59af7580184cc0c18` |
+| Josef 01/1,000 training input | `ce01c17554300ca5747919dcb5220dae8586257a4d18b333b49d972be5c480a6` |
+| CHAT/800 extended gate input | `94b8e43edfbd513605491ab77d0b29d4f5494009d77682b611345ac7ba14368d` |
+
+GCC found profiles for all Prover9 search, compact-index, hint, rewrite and
+allocator objects.  Its three missing-profile warnings were confined to
+unexecuted pair-index, random-term and TSTP-reader utilities.  The PGO-use
+binary preserved every normalized final search and index counter:
+
+| gate | native total CPU | balanced PGO total CPU | change | native/PGO RSS |
+|---|---:|---:|---:|---:|
+| Josef 02, 600 given, control then PGO | 44.25 s | 38.88 s | -12.14% | 206,940 / 206,536 KiB |
+| Josef 02, 1,000 given, PGO then control | 105.52 s | 86.48 s | -18.04% | 235,508 / 235,296 KiB |
+| CHAT, 800 given, two reversed pairs | 70.91 s mean | 68.75 s mean | -3.05% | 469,614 / 469,154 KiB mean |
+
+The CHAT pair must be classified as neutral: its PGO observations were 65.43
+and 72.06 seconds, a spread larger than the 2.16-second mean advantage, and
+the reverse pair mildly favored native.  It nevertheless supplies an
+extended-endpoint exactness and no-regression gate.  The defensible result is
+therefore a repeatable 12--18% bounded Josef 02 gain from a multi-workload
+profile, with no demonstrated CPU or RAM penalty on CHAT.  It is not evidence
+that every problem gains 12--18%, nor that a profile trained only through
+given 1,000 predicts the mature given-13,006 phase exactly.
+
 ## Rejected options and experiments
 
 - Raising `hint_conjunction_kb` to 384 MiB is rejected.  Rewritten hints grew
@@ -388,6 +430,34 @@ machine with a different instruction set.  Use plain `make all` for the
 portable release control.  The build sentinel automatically recompiles when
 switching between these modes.
 
+For the strongest CPU candidate, regenerate a balanced PGO profile on the
+same host, compiler and checkout that will run the proof.  Do not copy this
+report's binary or profile files to another CPU.  First create bounded copies
+of the three training inputs with explicit 600/600/1,000 `max_given` limits,
+reasonable `max_seconds`, and a hard `max_megs`; then run:
+
+```sh
+make pgo-clean
+make realclean
+make all NATIVE=1 PGO=gen
+
+taskset -c 1 bin/prover9 < Josef_02.train600.in > Josef_02.train600.out 2>&1
+taskset -c 1 bin/prover9 < chat_test.train600.in > chat_test.train600.out 2>&1
+taskset -c 1 bin/prover9 < Josef_01.train1000.in > Josef_01.train1000.out 2>&1
+
+# LLVM merges .profraw files; on GCC this now reports a successful no-op.
+make pgo-merge
+make all NATIVE=1 PGO=use
+sha256sum bin/prover9
+```
+
+Verify that each training output stopped at its intended `max_given` and did
+not swap before accepting the PGO-use build.  Treat a coverage/hash mismatch
+in a trained core search or compact-index object as a failed build and
+retrain from an empty `pgo_data`; missing profiles in genuinely unused
+utilities are harmless.  Retain a plain `NATIVE=1` binary as the unprofiled
+control.
+
 Use the following input block unchanged for the external Josef 02 rerun:
 
 ```prolog
@@ -450,8 +520,10 @@ A cautious planning range for the next same-machine **release** total is
 **6,800--7,800 CPU seconds** (about 12--23% below the compact baseline), with
 roughly 5.0--5.2 GiB process PSS.  The bounded `-O3`/LTO result supports a
 separate, wider **6,400--7,600 CPU-second** planning range for the recommended
-`NATIVE=1` authority run.  These are deliberately ranges, not measured full
-claims; the 2.37--12.08% build benefit cannot be assumed constant through the
+`NATIVE=1` authority run.  Balanced PGO supports a still provisional
+**5,800--7,200 CPU-second** planning range.  These are deliberately ranges,
+not measured full claims; neither the 2.37--12.08% compiler benefit nor the
+12.14--18.04% bounded Josef PGO benefit can be assumed constant through the
 mature 13,006-given phase.  A simple per-attempt extrapolation of only the
 clause-snapshot delta
 from the reversed 600-given mean and the adjacent 1,000-given pair spans about
