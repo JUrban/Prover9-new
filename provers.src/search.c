@@ -50,6 +50,12 @@
 #include <dirent.h>
 #include <stdint.h>
 
+#if defined(__GNUC__) || defined(__clang__)
+#define SEARCH_NOINLINE __attribute__((noinline))
+#else
+#define SEARCH_NOINLINE
+#endif
+
 // Private definitions and types
 
 static jmp_buf Jump_env;                 // for setjmp/longjmp
@@ -5827,7 +5833,7 @@ BOOL active_or_indexable_clause(Topform c)
          (Glob.hints != NULL && clist_member(c, Glob.hints));
 }  /* active_or_indexable_clause */
 
-static
+static SEARCH_NOINLINE
 Topform hint_by_id(unsigned long long id)
 {
   Clist_pos p;
