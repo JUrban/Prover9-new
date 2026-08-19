@@ -1,7 +1,7 @@
 # Josef 02 compact-P9 CPU investigation
 
 Status: implemented and bounded-validated on branch `josef02-cpu` through
-`3846b92`.  The current compact prover is already 3.9--5.4 times faster than
+`92009ad`.  The current compact prover is already 3.9--5.4 times faster than
 the preserved old-P9 binary on exact 300/600-given Josef 02 prefixes.  A full
 old-P9 Josef 02 proof output was not supplied, so this report does not claim a
 measured proof-to-proof old/new CPU ratio.  The existing compact proof is the
@@ -16,7 +16,8 @@ something attempted on the low-RAM development machine.
 | completed compact output, `/project/bob/Josef_02.out.new3` | `eaf22c2bda54fbe5eb0d487aca91f4ad27dabe1cb656111f97b74fc9930a1d29` |
 | preserved old-P9 binary | `bcdf6bafbf608fde463fd43ef541891813f5c49a2d5153711c54925e98d76bcc` |
 | accepted parent binary at `10b6abd` | `d13973d3311ba8e31590f139e48f6560ec24af845fc60acb4b2e342dfd001ddc` |
-| release binary at `3846b92` | `25fd1849ea8ac898dd45af9ce96397f61465cfdfb7ab8baacda2b1803010bc73` |
+| accepted rewrite parent at `3846b92` | `25fd1849ea8ac898dd45af9ce96397f61465cfdfb7ab8baacda2b1803010bc73` |
+| release binary at `92009ad` | `414f6b14e7350da94db7923b3b0d2f3528f2c52025f035a47b21d936c8a223c1` |
 
 The reconstructed input is
 `josef02-debug.heNOIJ/Josef_02-uninterrupted.in`.  It retains every formula,
@@ -177,6 +178,34 @@ the 0.28 s mean difference.  The accepted result is therefore a strong Josef
 02 improvement without a demonstrated cross-workload regression, not a claim
 that every rewrite population benefits equally.
 
+### Batch packed-hint intersection counters (`92009ad`)
+
+An isolated `gprof` build of the accepted rewrite code reached the exact
+600-given endpoint in 66.96 profiled user seconds.  Its leading self-time was
+recursive rewrite retrieval at 13.4%, followed by packed dense hint
+intersection at 7.0% and slab allocation at 4.4%.  Dense hint intersection
+had already visited 7.84 million summary words and 64.13 million data words.
+
+The dense and sparse loops formerly updated global diagnostic counters for
+every visited word, posting candidate, feature test, rejection and result.
+Those counters are observational: candidate admission and order do not read
+them.  They are now accumulated locally and published once per query.  At the
+exact 1,000-given Josef endpoint this batches 20,009,856 summary-word,
+161,660,929 data-word, 38,765,984 result and the associated posting-candidate
+increments.  The compiled `fast_dense_collect_candidates` body is 9.5%
+smaller and no persistent memory is added.
+
+| gate | parent user | candidate user | CPU change | result |
+|---|---:|---:|---:|---|
+| Josef 02, 600 given, two reversed pairs | 44.30 s mean | 42.43 s mean | -4.21% | exact |
+| Josef 02, 1,000 given, adjacent | 91.95 s | 91.82 s | -0.14% | exact/neutral |
+| CHAT, 600 given, adjacent | 52.46 s | 52.29 s | -0.32% | exact/neutral |
+
+All final packed-dense counters, packed-hint operation counters, generated and
+kept counts, and back-demod input/output/answer fingerprints match.  Periodic
+reports can occur at different given counts when host speed differs, so only
+the final cumulative reports are equality authorities.
+
 ## Rejected options and experiments
 
 - Raising `hint_conjunction_kb` to 384 MiB is rejected.  Rewritten hints grew
@@ -210,6 +239,16 @@ that every rewrite population benefits equally.
   memory benefit.  The extra dispatch and duplicated inlining outweighed the
   smaller recursive body at the longer prefix.  The specialization was fully
   reverted and the accepted release binary hash restored exactly.
+- Dispatching a terminal radix child directly to leaf processing avoided a
+  redundant recursive end test in principle, but duplicated enough leaf code
+  into the inlined child wrapper to worsen two reversed 600-given pairs from
+  39.29 to 41.36 s mean (+5.3%).  It was fully reverted.
+- Starting dense hint intersection from the posting with the smallest sparse
+  reference count was also rejected.  Sparse count did not predict dense
+  summary selectivity and the reorder disturbed the cache-friendly feature
+  order: two reversed 600-given pairs regressed from 36.62 to 41.33 s mean
+  (+12.9%).  Candidate sets and counters were exact, and the code was fully
+  reverted.
 
 ## Cross-workload gates
 
@@ -219,17 +258,20 @@ that every rewrite population benefits equally.
   467,464 KiB peak RSS is expected and is not Josef 02 back-index growth.
   The clause-level address snapshot was 5.81% faster than its adjacent parent;
   the subsequent query-context refactor is neutral in two reversed pairs.
-  Both preserve the rewrite and back-demod fingerprints.
+  Packed-hint counter batching is also neutral at 52.29 versus 52.46 s.
+  All preserve the rewrite and back-demod fingerprints.
 - Josef 01 at 1,000 givens exactly reproduces
   `(1001, 1628048, 320239, 0)` and every compact unit-index counter.  Current
-  final user CPU is 59.85 s; the preceding reverse-adjacent gate was 60.56 s
-  versus 60.77 s for the parent.  That
-  input clears back demodulation and records zero compact rewrite attempts,
-  independently checking that the changed path does not perturb the search.
-  No bounded validation process swapped.
+  host observations span 59.85--70.30 s; the controlled reverse-adjacent gate
+  was 60.56 s versus 60.77 s for the parent.  That input clears back
+  demodulation and records zero compact rewrite attempts.  It also records
+  zero packed-dense queries, so it is an independent trajectory gate rather
+  than timing evidence for the counter batching.  No bounded validation
+  process swapped.
 - `compact_back_demod_test`, `compact_long_run_test`,
   `compact_rewrite_test`, `compact_unit_index_test` and
-  `compact_otter_audit_test` pass.
+  `compact_otter_audit_test` pass.  The hint-postings, hint-preview and
+  compressed-unit-match tests also pass after the packed-counter change.
 
 ## Recommended full-run options
 
