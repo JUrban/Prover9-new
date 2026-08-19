@@ -516,6 +516,13 @@ profile and requires the same bounded retraining sequence.
   reversed 600-given pairs (45.27 control versus 45.45 candidate mean).  Most
   Josef 02 clauses are positive units, so the expected OR/NOT wrapper saving
   was absent.  The experiment was reverted.
+- Skipping the position-append `qsort` when matches happened to arrive in
+  final `(bucket, root_offset)` order had negligible coverage.  At the exact
+  600-given Josef 02 endpoint, only 51 of 26,669 multi-match appends (0.19%)
+  were monotone; 26,618 still required the original sort.  The preliminary
+  order scan therefore adds work to virtually every append.  The trajectory
+  and back-query fingerprints remained exact, but the prototype was rejected
+  and never merged.
 - `mask32` is not a CPU replacement for `adaptive32`.  At the exact 1,000
   endpoint it needs 90.65 versus 77.96 user seconds and examines 4.883M versus
   2.281M back-index work units.  It saves about 22 MiB at this prefix, but the
