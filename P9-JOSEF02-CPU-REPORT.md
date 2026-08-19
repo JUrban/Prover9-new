@@ -240,6 +240,42 @@ swapped.  The focused regression covers both the monotone reversal and a
 materialize/re-index sequence whose conservative postings require the
 mixed-order fallback.
 
+### Post-change profile and optimized production build
+
+An isolated `gprof` build of the accepted `06deec9` source reproduced the
+exact 600-given endpoint and final packed counters.  It used 70.99 profiled
+user seconds.  The most important self-time samples were recursive compact
+rewrite retrieval (13.32%), packed dense intersection (6.82%), slab lookup
+(4.36%), variable setup (2.49%), back-demodulation of hints (2.29%),
+instance-tree candidate collection (2.26%), packed clause candidate
+collection (2.23%) and varint term decoding (2.07%).  At this endpoint the
+hint back-demodulation path had already materialized 1,433,225 candidates
+after 3,426,140 unique-candidate visits and rejected 1,992,915 by fingerprint.
+This profile explains why isolated micro-optimizations can move total CPU in
+either direction: the remaining time is spread across retrieval, dense
+filtering, allocation, decoding and hint maintenance rather than one dominant
+loop.
+
+The supported optimized build was then tested without changing search code or
+input options.  The controlled candidate used `-O3 -flto`; the ordinary
+release control used `-O2`.  Timings below are total CPU (user plus system),
+which matters because the file-backed stores make system CPU material.
+
+| gate | release total CPU | `-O3 -flto` total CPU | change | release/candidate RSS |
+|---|---:|---:|---:|---:|
+| Josef 02, 600 given, two reversed pairs | 47.28 s mean | 44.74 s mean | -5.37% | 206,454 / 206,862 KiB |
+| Josef 02, 1,000 given, adjacent | 110.66 s | 97.30 s | -12.08% | 235,136 / 235,536 KiB |
+| CHAT, 600 given, reversed order | 62.82 s | 61.33 s | -2.37% | 467,592 / 467,988 KiB |
+
+All three endpoints and all normalized final search, rewrite, packed-hint,
+allocator and fingerprint counters match.  No run swapped.  A separate build
+using the repository's supported `NATIVE=1` mode adds `-march=native`; it was
+neutral against otherwise identical `-O3 -flto` at Josef 02/600 (49.47 versus
+49.36 total CPU in one adjacent pair).  Therefore the demonstrated benefit is
+attributed to `-O3` plus link-time optimization, not to CPU-specific
+instructions.  `NATIVE=1` remains the recommended interface because its build
+mode sentinel prevents accidental mixing with release objects.
+
 ## Rejected options and experiments
 
 - Raising `hint_conjunction_kb` to 384 MiB is rejected.  Rewritten hints grew
@@ -299,6 +335,17 @@ mixed-order fallback.
   all hint counters and RSS were unchanged.  The experiment was fully
   reverted; recursive rigid descent remains faster on the tested compiler and
   host.
+- Reusing a known logical clause-body size across an unchanged
+  materialize/recompress cycle avoided one size traversal, but regressed the
+  decisive reversed 1,000-given comparison from 83.20 to 87.71 mean total CPU
+  (+5.42%).  Exact trajectories, hint counters and RSS matched.  The apparent
+  600-given improvement was short-prefix noise, and the experiment was fully
+  reverted.
+- Splitting the active-candidate admission case out of
+  `packed_add_candidate` made its isolated function smaller, but did not
+  shrink the inlined dense collector and averaged 44.34 versus 43.05 total
+  CPU at 600 givens (+3.0%) across reversed ordering.  It also increased run
+  variance.  The split was fully reverted.
 
 ## Cross-workload gates
 
@@ -326,7 +373,22 @@ mixed-order fallback.
 
 ## Recommended full-run options
 
-Use the following block unchanged for the external Josef 02 rerun:
+For the CPU comparison, build the current branch in its supported host-native
+mode.  Start from a clean mode switch; do not append ad-hoc `XFLAGS` to an
+existing object tree:
+
+```sh
+make realclean
+make all NATIVE=1
+sha256sum bin/prover9
+```
+
+This produces a host-specific binary and is unsuitable for copying to a
+machine with a different instruction set.  Use plain `make all` for the
+portable release control.  The build sentinel automatically recompiles when
+switching between these modes.
+
+Use the following input block unchanged for the external Josef 02 rerun:
 
 ```prolog
 assign(search_loop,otter).
@@ -384,10 +446,14 @@ at 1,500 givens but targets a directory sixteen times wider at the proof.
 Inherited slab recycling and direct symbol/term hot-path work also postdate the
 baseline output.
 
-A cautious planning range for the next same-machine total is **6,800--7,800
-CPU seconds** (about 12--23% below the compact baseline), with roughly
-5.0--5.2 GiB process PSS.  This is deliberately a range, not a measured
-claim.  A simple per-attempt extrapolation of only the clause-snapshot delta
+A cautious planning range for the next same-machine **release** total is
+**6,800--7,800 CPU seconds** (about 12--23% below the compact baseline), with
+roughly 5.0--5.2 GiB process PSS.  The bounded `-O3`/LTO result supports a
+separate, wider **6,400--7,600 CPU-second** planning range for the recommended
+`NATIVE=1` authority run.  These are deliberately ranges, not measured full
+claims; the 2.37--12.08% build benefit cannot be assumed constant through the
+mature 13,006-given phase.  A simple per-attempt extrapolation of only the
+clause-snapshot delta
 from the reversed 600-given mean and the adjacent 1,000-given pair spans about
 120--530 user seconds at the proof's 3.678 billion attempts.  That range is
 useful for planning but too load-sensitive to add mechanically to the other
