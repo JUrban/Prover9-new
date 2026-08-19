@@ -138,6 +138,21 @@ struct cr_match_result {
   int direction;
 };
 
+/* Keep the recursive radix lookup's invariant state behind one pointer.  The
+   former eleven-argument calls exhausted the x86-64 integer argument
+   registers and rebuilt five stack arguments at every recursive edge. */
+struct cr_query {
+  Compact_rewrite_bank bank;
+  Flatterm end;
+  Flatterm target;
+  Flatterm bindings[MAX_VARS];
+  uint64_t bound[CR_BINDING_WORDS];
+  unsigned binding_trail[MAX_VARS];
+  unsigned trail_count;
+  BOOL lex_order_vars;
+  struct cr_match_result result;
+};
+
 static unsigned long long rule_proof_id(const struct cr_rule *rule)
 {
   return rule->proof_id_flags & CR_RULE_PROOF_ID_MASK;
@@ -1555,12 +1570,9 @@ static Flatterm build_flat_contractum(Compact_rewrite_bank bank,
   return result;
 }
 
-static BOOL try_leaf(Compact_rewrite_bank bank, uint32_t node,
-                     Flatterm target, Flatterm *bindings,
-                     const uint64_t *bound,
-                     BOOL lex_order_vars,
-                     struct cr_match_result *result)
+static BOOL try_leaf(struct cr_query *query, uint32_t node)
 {
+  Compact_rewrite_bank bank = query->bank;
   uint32_t posting;
   for (posting = bank->nodes[node].first_posting;
        posting != CR_NONE; posting = bank->postings[posting].next) {
@@ -1581,15 +1593,15 @@ static BOOL try_leaf(Compact_rewrite_bank bank, uint32_t node,
     tokens = hot_slice_tokens(bank, contractum_slice);
     end = hot_slice_length(contractum_slice);
     contractum = build_flat_contractum(bank, tokens, &position, end,
-                                       bindings, bound);
+                                       query->bindings, query->bound);
     if (position != end)
       fatal_error("compact_rewrite: incomplete RHS consumption");
     if (rule_type(rule) == ORIENTED ||
-        flat_greater(target, contractum, lex_order_vars)) {
-      result->found = TRUE;
-      result->contractum = contractum;
-      result->proof_id = rule_proof_id(rule);
-      result->direction = p->direction;
+        flat_greater(query->target, contractum, query->lex_order_vars)) {
+      query->result.found = TRUE;
+      query->result.contractum = contractum;
+      query->result.proof_id = rule_proof_id(rule);
+      query->result.direction = p->direction;
       return TRUE;
     }
     subject_zap(bank, contractum);
@@ -1599,12 +1611,10 @@ static BOOL try_leaf(Compact_rewrite_bank bank, uint32_t node,
 
 static inline __attribute__((always_inline))
 BOOL match_rewrite_edge(
-  Compact_rewrite_bank bank, uint32_t node,
-  Flatterm position, Flatterm end,
-  Flatterm *bindings, uint64_t *bound, unsigned *binding_trail,
-  unsigned *trail_count,
+  struct cr_query *query, uint32_t node, Flatterm position,
   Flatterm *next_position)
 {
+  Compact_rewrite_bank bank = query->bank;
   struct cr_node *edge = &bank->nodes[node];
   const int32_t *tokens = hot_slice_tokens(bank, edge->tokens);
   uint32_t length = hot_slice_length(edge->tokens);
@@ -1612,19 +1622,19 @@ BOOL match_rewrite_edge(
   for (i = 0; i < length; i++) {
     int32_t code = tokens[i];
     Flatterm query_term;
-    if (position == end)
+    if (position == query->end)
       return FALSE;
     query_term = position;
     if (code < 0) {
       unsigned variable = (unsigned) (-code - 1);
       if (variable >= MAX_VARS)
         fatal_error("compact_rewrite: variable exceeds MAX_VARS");
-      if (!rewrite_binding_is_set(bound, variable)) {
-        bindings[variable] = query_term;
-        set_rewrite_binding(bound, variable);
-        binding_trail[(*trail_count)++] = variable;
+      if (!rewrite_binding_is_set(query->bound, variable)) {
+        query->bindings[variable] = query_term;
+        set_rewrite_binding(query->bound, variable);
+        query->binding_trail[query->trail_count++] = variable;
       }
-      else if (!flatterm_ident(bindings[variable], query_term))
+      else if (!flatterm_ident(query->bindings[variable], query_term))
         return FALSE;
       position = query_term->end->next;
     }
@@ -1638,22 +1648,16 @@ BOOL match_rewrite_edge(
   return TRUE;
 }
 
-static void undo_rewrite_bindings(uint64_t *bound,
-                                  const unsigned *binding_trail,
-                                  unsigned *trail_count,
+static void undo_rewrite_bindings(struct cr_query *query,
                                   unsigned trail_mark)
 {
-  while (*trail_count != trail_mark)
-    clear_rewrite_binding(bound, binding_trail[--(*trail_count)]);
+  while (query->trail_count != trail_mark)
+    clear_rewrite_binding(
+      query->bound, query->binding_trail[--query->trail_count]);
 }
 
-static BOOL retrieve_rec(Compact_rewrite_bank bank, uint32_t node,
-                         Flatterm position, Flatterm end,
-                         Flatterm *bindings, uint64_t *bound,
-                         unsigned *binding_trail, unsigned *trail_count,
-                         Flatterm target,
-                         BOOL lex_order_vars,
-                         struct cr_match_result *result);
+static BOOL retrieve_rec(struct cr_query *query, uint32_t node,
+                         Flatterm position);
 
 /* Keep edge matching in the caller's traversal frame.  This helper used to
    be the other half of a mutually recursive pair and accounted for roughly
@@ -1662,41 +1666,29 @@ static BOOL retrieve_rec(Compact_rewrite_bank bank, uint32_t node,
    forcing this small wrapper inline removes a complete call/return and lets
    the compiler keep the binding trail in registers. */
 static inline __attribute__((always_inline))
-BOOL retrieve_child(Compact_rewrite_bank bank, uint32_t child,
-                    Flatterm position, Flatterm end,
-                    Flatterm *bindings, uint64_t *bound,
-                    unsigned *binding_trail, unsigned *trail_count,
-                    Flatterm target, BOOL lex_order_vars,
-                    struct cr_match_result *result)
+BOOL retrieve_child(struct cr_query *query, uint32_t child,
+                    Flatterm position)
 {
-  unsigned trail_mark = *trail_count;
+  unsigned trail_mark = query->trail_count;
   Flatterm next_position = position;
   BOOL found = FALSE;
-  if (match_rewrite_edge(bank, child, position, end, bindings, bound,
-                         binding_trail, trail_count, &next_position))
-    found = retrieve_rec(bank, child, next_position, end, bindings,
-                         bound, binding_trail, trail_count, target,
-                         lex_order_vars, result);
-  undo_rewrite_bindings(bound, binding_trail, trail_count, trail_mark);
+  if (match_rewrite_edge(query, child, position, &next_position))
+    found = retrieve_rec(query, child, next_position);
+  undo_rewrite_bindings(query, trail_mark);
   return found;
 }
 
-static BOOL retrieve_rec(Compact_rewrite_bank bank, uint32_t node,
-                         Flatterm position, Flatterm end,
-                         Flatterm *bindings, uint64_t *bound,
-                         unsigned *binding_trail, unsigned *trail_count,
-                         Flatterm target,
-                         BOOL lex_order_vars,
-                         struct cr_match_result *result)
+static BOOL retrieve_rec(struct cr_query *query, uint32_t node,
+                         Flatterm position)
 {
+  Compact_rewrite_bank bank = query->bank;
   uint32_t child, rigid_start;
   unsigned rigid_scanned = 0;
   BOOL deep_cache_enabled = bank->deep_child_cache_budget_bytes != 0;
   Flatterm query_term;
   int32_t query_code;
-  if (position == end)
-    return try_leaf(bank, node, target, bindings, bound, lex_order_vars,
-                    result);
+  if (position == query->end)
+    return try_leaf(query, node);
   query_term = position;
   query_code = VARIABLE(query_term) ? INT32_MIN : SYMNUM(query_term);
   /* Variable-led alternatives retain their exact predecessor order and must
@@ -1706,9 +1698,7 @@ static BOOL retrieve_rec(Compact_rewrite_bank bank, uint32_t node,
        child = bank->nodes[child].next_sibling) {
     if (deep_cache_enabled)
       bank->variable_sibling_checks++;
-    if (retrieve_child(bank, child, position, end, bindings, bound,
-                       binding_trail, trail_count, target, lex_order_vars,
-                       result))
+    if (retrieve_child(query, child, position))
       return TRUE;
   }
   if (query_code == INT32_MIN)
@@ -1716,17 +1706,13 @@ static BOOL retrieve_rec(Compact_rewrite_bank bank, uint32_t node,
 
   rigid_start = child;
   if (node == 0 && child_cache_get(bank, node, query_code, &child))
-    return retrieve_child(bank, child, position, end, bindings, bound,
-                          binding_trail, trail_count, target, lex_order_vars,
-                          result);
+    return retrieve_child(query, child, position);
   if (deep_cache_enabled && node != 0 &&
       deep_child_cache_parent_enabled(bank, node) &&
       deep_child_cache_get(bank, node, query_code, &child)) {
     if (child == CR_NONE)
       return FALSE;
-    return retrieve_child(bank, child, position, end, bindings, bound,
-                          binding_trail, trail_count, target, lex_order_vars,
-                          result);
+    return retrieve_child(query, child, position);
   }
 
   /* A cache miss is semantically uninteresting: search the same ordered
@@ -1752,9 +1738,7 @@ static BOOL retrieve_rec(Compact_rewrite_bank bank, uint32_t node,
         deep_child_cache_put(bank, node, query_code, child, TRUE);
       }
     }
-    return retrieve_child(bank, child, position, end, bindings, bound,
-                          binding_trail, trail_count, target, lex_order_vars,
-                          result);
+    return retrieve_child(query, child, position);
   }
   if (deep_cache_enabled && node != 0 &&
       (deep_child_cache_parent_enabled(bank, node) ||
@@ -1770,13 +1754,14 @@ static struct cr_match_result find_rewrite(Compact_rewrite_bank bank,
                                            Flatterm target,
                                            BOOL lex_order_vars)
 {
-  struct cr_match_result result;
-  Flatterm bindings[MAX_VARS];
-  uint64_t bound[CR_BINDING_WORDS];
-  unsigned binding_trail[MAX_VARS];
-  unsigned trail_count = 0;
-  memset(&result, 0, sizeof(result));
-  memset(bound, 0, sizeof(bound));
+  struct cr_query query;
+  query.bank = bank;
+  query.end = target->end->next;
+  query.target = target;
+  query.trail_count = 0;
+  query.lex_order_vars = lex_order_vars;
+  memset(&query.result, 0, sizeof(query.result));
+  memset(query.bound, 0, sizeof(query.bound));
   {
     uint32_t first = bank->nodes[0].first_child;
     int32_t code = VARIABLE(target) ? INT32_MIN : SYMNUM(target);
@@ -1790,16 +1775,12 @@ static struct cr_match_result find_rewrite(Compact_rewrite_bank bank,
         (size_t) code < bank->child_cache_capacity ?
         bank->child_cache[code] : CR_NONE;
       if (child != CR_NONE)
-        retrieve_child(bank, child, target, target->end->next,
-                       bindings, bound, binding_trail, &trail_count,
-                       target, lex_order_vars, &result);
+        retrieve_child(&query, child, target);
     }
     else
-      retrieve_rec(bank, 0, target, target->end->next, bindings, bound,
-                   binding_trail, &trail_count, target, lex_order_vars,
-                   &result);
+      retrieve_rec(&query, 0, target);
   }
-  return result;
+  return query.result;
 }
 
 static Flatterm normalize_flat_term(Compact_rewrite_bank bank, Flatterm term,
