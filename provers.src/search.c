@@ -336,6 +336,10 @@ static unsigned Simplifier_epoch = 1; /* active state visible to DISCOUNT SOS */
    the uninterrupted Disabled statistic.  Preserve only that count across a
    resume so statistics remain deterministic without retaining dead bodies. */
 static unsigned long long Disabled_checkpoint_omitted = 0;
+static unsigned long long Hint_id_lookup_queries = 0;
+static unsigned long long Hint_id_lookup_packed_hits = 0;
+static unsigned long long Hint_id_lookup_linear_steps = 0;
+static unsigned long long Hint_id_lookup_packed_id_sum = 0;
 
 enum inference_source {
   INFER_SOURCE_OTHER,
@@ -3817,6 +3821,12 @@ void fprint_all_stats(FILE *fp, char *stats_level)
 
   if (!clist_empty(Glob.hints))
     print_hint_match_stats(fp, Glob.hints);
+  if (Hint_id_lookup_queries != 0)
+    fprintf(fp,
+            "Hint_id_lookup: queries=%llu, packed_hits=%llu, "
+            "linear_steps=%llu, packed_id_sum=%llu.\n",
+            Hint_id_lookup_queries, Hint_id_lookup_packed_hits,
+            Hint_id_lookup_linear_steps, Hint_id_lookup_packed_id_sum);
 
   if (str_ident(stats_level, "all")) {
     print_memory_stats(fp);
@@ -5821,11 +5831,21 @@ static
 Topform hint_by_id(unsigned long long id)
 {
   Clist_pos p;
+  Topform packed;
   if (id == 0 || Glob.hints == NULL)
     return NULL;
-  for (p = Glob.hints->first; p != NULL; p = p->next)
+  Hint_id_lookup_queries++;
+  packed = packed_hint_by_id(id);
+  if (packed != NULL) {
+    Hint_id_lookup_packed_hits++;
+    Hint_id_lookup_packed_id_sum += id;
+    return packed;
+  }
+  for (p = Glob.hints->first; p != NULL; p = p->next) {
+    Hint_id_lookup_linear_steps++;
     if (p->c->id == id)
       return p->c;
+  }
   return NULL;
 }
 
@@ -16778,6 +16798,10 @@ Prover_results search(Prover_input p)
     Glob.sos     = move_clauses_to_clist(p->sos, "sos", FALSE);
     Glob.demods  = move_clauses_to_clist(p->demods,"demodulators",FALSE);
     Glob.hints   = move_clauses_to_clist(p->hints, "hints", FALSE);
+    Hint_id_lookup_queries = 0;
+    Hint_id_lookup_packed_hits = 0;
+    Hint_id_lookup_linear_steps = 0;
+    Hint_id_lookup_packed_id_sum = 0;
 
     /* Do not let parsed hint term forests overlap the packed feature bank.
        The indexing pass below materializes one hint at a time.  This is an

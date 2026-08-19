@@ -34,6 +34,12 @@ static void run_case(BOOL packed, BOOL better, BOOL fast, int bsub)
   init_hints(ORDINARY_UNIF, bsub, FALSE, FALSE, 2, packed, better, fast, 2048,
              327680, 0, 8, NULL);
   index_hint(hint);
+  if (packed)
+    CHECK(packed_hint_by_id(hint->id) == hint,
+          "packed hint ID lookup returns the stable owner");
+  else
+    CHECK(packed_hint_by_id(hint->id) == NULL,
+          "packed hint ID lookup is disabled outside packed mode");
   epoch_before = hint_state_epoch();
   packed_hint_index_stats(&nb, &rb, &tb, &checks_before);
   nb_before = nb;
@@ -67,7 +73,12 @@ static void run_case(BOOL packed, BOOL better, BOOL fast, int bsub)
         "preview and authoritative adjusted weights agree");
 
   unindex_hint(hint);
+  if (packed)
+    CHECK(packed_hint_by_id(hint->id) == hint,
+          "packed hint ID lookup retains an inactive owner");
   done_with_hints();
+  CHECK(packed_hint_by_id(hint->id) == NULL,
+        "packed hint ID lookup is empty after teardown");
   delete_clause(candidate);
   delete_clause(hint);
 }

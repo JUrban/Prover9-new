@@ -112,6 +112,11 @@ int matched_hints(Clist hint_list);
 
 BOOL packed_hints_enabled(void);
 
+/* Return the stable owner for a packed hint ID, including an expired hint
+   that is no longer active in matching indexes.  NULL means packed mode is
+   inactive or the ID has no packed owner. */
+Topform packed_hint_by_id(unsigned long long id);
+
 void packed_hint_index_stats(unsigned long long *node_bytes,
 			     unsigned long long *reference_bytes,
 			     unsigned long long *table_bytes,

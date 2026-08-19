@@ -3685,6 +3685,14 @@ BOOL packed_hints_enabled(void)
 }
 
 /* PUBLIC */
+Topform packed_hint_by_id(unsigned long long id)
+{
+  if (!Packed_index || id == 0 || id >= Packed_hint_capacity)
+    return NULL;
+  return Packed_hint_by_id[id];
+}
+
+/* PUBLIC */
 void packed_hint_index_stats(unsigned long long *node_bytes,
                              unsigned long long *reference_bytes,
                              unsigned long long *table_bytes,
