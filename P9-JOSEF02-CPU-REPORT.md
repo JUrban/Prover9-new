@@ -1,7 +1,7 @@
 # Josef 02 compact-P9 CPU investigation
 
 Status: source changes implemented and bounded-validated on branch
-`josef02-cpu` through `c40a81d`, with the portable PGO workflow fixed through
+`josef02-cpu` through `acb1c63`, with the portable PGO workflow fixed through
 `0b281d5`.  The current compact prover is already 3.9--5.4 times faster than
 the preserved old-P9 binary on exact 300/600-given Josef 02 prefixes.  A full
 old-P9 Josef 02 proof output was not supplied, so this report does not claim a
@@ -23,6 +23,7 @@ something attempted on the low-RAM development machine.
 | balanced GCC-PGO binary at `06deec9` | `6b1bced78f2ba5c4c36e95e3e0cfa035c7ff7c8c33c2b9d8e69d6fd5302764f0` |
 | release binary at `fb7b873` | `7a911af3df69506d395a5c8c034ba472211f0953cfe65d44abfa5d4589a43e6f` |
 | release binary at `c40a81d` | `94d16148e6bf3a13170712c54fb09cbb6f1d30cdc846f148667489db722ff52c` |
+| release binary at `acb1c63` | `86821508f732be3bc9b8e35cc9e3cc1272eb86817b0938d1852887e15d04f0e4` |
 
 The reconstructed input is
 `josef02-debug.heNOIJ/Josef_02-uninterrupted.in`.  It retains every formula,
@@ -408,6 +409,66 @@ owner table makes the change RAM-neutral.  Any PGO profile made before
 `c40a81d` must again be discarded and retrained because the search call graph
 has changed.
 
+### Retain clean passive archive records in place (`acb1c63`)
+
+Compact OTTER writes each accepted passive clause to the ancestor store while
+the dense selector owns its scheduling metadata.  The old disable path later
+released the selected materialization, decoded the same record again, removed
+the clause from ID-based compact indexes, and appended an equivalent second
+archive record.  This was small at the start of Josef 02 but pathological at
+maturity: the completed baseline spent 2,246.41 seconds in `disable`.
+
+Clean passive records now transfer their original stable offset directly into
+the retained disabled-store handle array.  Compact literal, rewrite and
+back-demodulation records are removed by stable ID, so no clause body is
+needed.  A dense-directory dirty bit records every mutable field that can
+diverge from the immutable header (`used`, activation/rewrite epochs, delayed
+demodulator state and rewrite-rule debt).  A dirty record takes the complete
+old materialize/rearchive path.  This is an ownership optimization, not a
+search heuristic, and requires no new input option.
+
+A temporary environment gate was used only to compare both paths in the exact
+same diagnostic binary
+(`8663ccec39dfd9edc481334920bd5435251363e0fd1c58eb4c04281c4fdef46c`).
+That gate is absent from the committed production source.  Raw outputs and
+GNU-time sidecars are retained in
+`josef02-direct-retain-samebin-{on,off}-pair{1,2}-600/`,
+`josef02-direct-retain-samebin-{on,off}-1000/`, and
+`josef02-direct-retain-final-300/`.
+
+| gate | path-off total / `disable` | retained-path total / `disable` | eliminated work |
+|---|---:|---:|---:|
+| Josef 02/300, adjacent production binaries | 22.09 / 0.02 s | 20.33 / 0.01 s | 972 records, 1,944 read calls |
+| Josef 02/600, two same-binary orientations | 47.44 / 0.245 s mean | 44.68 / 0.100 s mean | 10,257 records, 20,514 read calls |
+| Josef 02/1,000, same binary | 103.02 / 1.26 s | 98.15 / 0.86 s | 23,612 records, 47,224 read calls |
+
+Every run preserves its exact generated/kept endpoint and back-query semantic
+fingerprint.  The 1,000-given candidate ends at
+`(1001, 1310234, 65416, 0)`, reports 23,612 direct retentions and zero dirty
+fallbacks, and reduces ancestor records from 89,279 to 65,667.  It also
+removes exactly 23,612 compression attempts/materializations, reduces logical
+archive bytes from 18,630,914 to 13,636,235, and reduces record reads from
+150,684 to 103,460.  Prefix RSS is essentially unchanged because `file` mode
+keeps archive bytes outside process RSS; `memory` and `mmap` modes can also
+avoid the duplicate backing bytes.
+
+The full baseline itself supplies an unusually strong scale check.  It has
+13,337,405 archive records but only 9,222,382 detached records, a difference
+of 4,115,023--within 43 records of its 4,115,066 disabled clauses.  Those are
+the mature duplicate append operations this change targets.  If the external
+trajectory again has zero dirty fallbacks, it should avoid about 4.1 million
+record writes/materializations and 8.2 million read calls.  Scaling the
+measured 600-given record width gives roughly 0.8 GiB less logical ancestor
+file growth and read traffic.  The CPU benefit cannot be asserted until the
+full rerun, but unlike a short-prefix matcher tweak this work and the old
+`disable` clock are directly present in the completed proof.
+
+The detached-record lifecycle test now covers transfer accounting, mismatched
+ID rejection and teardown.  Archive, selector, compact rewrite/unit/back/nonunit,
+long-run, hint, compact-OTTER audit/checkpoint, dense-passive and generalization
+tests all pass.  PGO profiles made before `acb1c63` must be discarded because
+the compact disable call graph changed.
+
 ## Rejected options and experiments
 
 - Raising `hint_conjunction_kb` to 384 MiB is rejected.  Rewritten hints grew
@@ -492,6 +553,21 @@ has changed.
   2,048 to 16,384 entries reduced collisions but made Josef 02/600 slower and
   raised metadata to about 1.1 MiB.  The accepted 64-block maturity gate and
   compact table are consequences of these failures, not Josef-specific keys.
+- Table-driven archive CRC implementations improved the isolated one-million
+  record store benchmark by roughly 14--40%, but worsened Josef 02/600.  The
+  clean 1-KiB byte table took 47.99 seconds and the compact nibble table 48.52
+  seconds after a 43.68-second adjacent control; a slicing prototype was still
+  worse.  Extra table/cache and code-layout pressure outweighed checksum work
+  in the complete search, so the original small bitwise CRC remains.
+- Exporting compressed clauses from `String_buf` in one linear operation
+  improved the one-million-record archive benchmark from 6.25 to 4.64 seconds
+  (-25.8%), but two reversed Josef 02/600 pairs averaged 44.94 versus 42.82
+  seconds (+5.0%).  The microbenchmark win did not generalize and the change
+  was reverted.
+- Lazily initializing the ordinary matcher's `_AnyConst` table was noisy at
+  600 givens and decisively regressed the exact 1,000-given endpoint from
+  100.00 to 107.25 total CPU seconds (+7.25%).  Packed matching is not the only
+  matcher consumer, so the eager initialization remains.
 
 ## Cross-workload gates
 
@@ -622,6 +698,11 @@ input command to add.  Its `mask_cache_*` fields will appear in the final
 `Compact_back_demod:` report.  Constant-time packed hint-owner restoration
 is likewise automatic under packed hint modes; its coverage appears in the
 final `Hint_id_lookup:` line and requires no option.
+Clean passive-record retention is also automatic for this compact-OTTER plus
+ancestor-store configuration.  Its coverage appears as `direct_retentions`,
+`retention_fallbacks`, and `payload_bytes_avoided` in
+`Disabled_compression:`.  Do not add the experiment-only environment variable
+used for the same-binary A/B measurement; it is not part of the product.
 
 ## Expected full result and acceptance gate
 
@@ -633,11 +714,11 @@ Inherited slab recycling and direct symbol/term hot-path work also postdate the
 baseline output.
 
 A cautious planning range for the next same-machine **release** total is
-**6,800--7,800 CPU seconds** (about 12--23% below the compact baseline), with
+**6,200--7,500 CPU seconds** (about 15--30% below the compact baseline), with
 roughly 5.0--5.2 GiB process PSS.  The bounded `-O3`/LTO result supports a
-separate, wider **6,400--7,600 CPU-second** planning range for the recommended
+separate, wider **5,900--7,200 CPU-second** planning range for the recommended
 `NATIVE=1` authority run.  Balanced PGO supports a still provisional
-**5,800--7,200 CPU-second** planning range.  These are deliberately ranges,
+**5,400--6,900 CPU-second** planning range.  These are deliberately ranges,
 not measured full claims; neither the 2.37--12.08% compiler benefit nor the
 12.14--18.04% bounded Josef PGO benefit can be assumed constant through the
 mature 13,006-given phase.  A simple per-attempt extrapolation of only the
@@ -659,8 +740,11 @@ active-path timing did not prove a CPU gain.  It is consequently assigned no
 advance credit in these ranges.  Packed owner lookup removes a proven
 245.5-million-node lower bound by given 1,000 and improves that adjacent pair
 by 1.37%, but its full restoration count is not present in the old output, so
-it is also assigned no separate numerical credit.  No full old-P9 Josef 02
-time exists.
+it is also assigned no separate numerical credit.  The revised range gives
+the direct-retention change only a fraction of its bounded 4.7--5.8% total-CPU
+effect and of the mature 2,246-second disable clock: the exact 4.1-million
+duplicate-record target is known, but dirty fallbacks and mature filesystem
+behavior are not.  No full old-P9 Josef 02 time exists.
 
 Accept the external run only if it:
 
@@ -681,7 +765,12 @@ Accept the external run only if it:
    counters fall; and
 7. reports `Hint_id_lookup` with packed hits equal to queries and zero linear
    fallback steps.  Retain `packed_id_sum` so the eliminated-work scale can be
-   compared with the 245,545,806 lower bound at given 1,000.
+   compared with the 245,545,806 lower bound at given 1,000; and
+8. reports `direct_retentions` and `retention_fallbacks`.  Compare the former
+   with the structural 4,115,023-record target and explain any substantial
+   fallback count.  When the trajectory is exact and fallbacks remain near
+   zero, ancestor records should be close to 9.22 million rather than the old
+   13.34 million.
 
 Until that run exists, the precise conclusion is: current compact P9 is
 decisively faster than old P9 on exact Josef 02 prefixes, and the identified

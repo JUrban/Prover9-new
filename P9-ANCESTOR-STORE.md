@@ -1,6 +1,6 @@
 # Prover9 Phase 4 ancestor-store contract
 
-Date: 2026-08-07 (Europe/Berlin)
+Date: 2026-08-19 (Europe/Berlin)
 
 This document specifies the exact, internal store used by
 `assign(ancestor_store, memory).`, `assign(ancestor_store, mmap).`, and
@@ -35,6 +35,18 @@ or another explicit body consumer.  Materialized clauses carry a private
 ownership flag, are never installed into search indexes, and are released at
 the end of the enclosing proof/output scope.  Final proof traversal follows
 parent IDs and materializes exactly the reachable DAG.
+
+Compact-OTTER dense passives are a temporary exception to the ordinary
+store-handle ownership sequence: the dense directory owns the current record
+offset while the clause remains selectable, so no disabled-store handle is
+allocated yet.  If the clause is later disabled and its directory metadata
+still matches the immutable record, `clause_store_retain_detached` transfers
+that same offset into the disabled-store handle array exactly once.  The ID
+slot continues to name the original record; the body is neither decoded nor
+rewritten.  If `used`, activation/rewrite epoch, delayed-demodulator state, or
+rewrite-rule debt changed, the directory marks the record dirty and the
+caller uses the original materialize/rearchive transaction.  Handle append
+order remains disable order, preserving proof/checkpoint traversal order.
 
 ## Version 2 record
 
@@ -138,10 +150,19 @@ maintained incrementally, so periodic statistics do not scan the file.  Body
 statistics continue to report compressed and estimated full bytes so Phase 2
 and Phase 4 are comparable.
 
+Compact-OTTER statistics additionally report clean direct retentions, dirty
+fallbacks, and compressed body/justification payload bytes whose duplicate
+append was avoided.  The normal `Ancestor_store` record/read/write counters
+include the complete header and payload effect and remain the authority for
+physical/logical comparison.  Direct retention is automatic when its ownership
+preconditions hold; there is no user-facing tuning option.
+
 `ancestor_store_test` exercises memory, mmap, and file round trips, all scalar
 and term flags, attributes, compact parents and justifications (including IVY
 and INSTANCE), final-DAG reconstruction, synchronization, unknown versions,
 malformed bounds, payload corruption, counters, and complete ID/store teardown.
+It also covers detached-to-retained transfer, mismatched-ID rejection, exact
+current/detached accounting, and retained-ID teardown.
 `ancestor_store_scale_test` measures bounded record/handle/ID accounting in all
 three modes.
 Integrated x2 proof checks, capped AIM runs, and format-3 checkpoint

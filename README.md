@@ -77,6 +77,14 @@ version, reserved fields, and header/payload checksums are validated before a
 record is used.  A bad record aborts proof/checkpoint use instead of emitting a
 possibly unsound proof.
 
+In compact-OTTER dense-passive mode, a clause that leaves the selector with
+unchanged archived metadata now retains its existing ancestor record directly.
+This automatically avoids a second decode, compression, checksum, and append;
+metadata changes use the original exact fallback.  No additional P9 option is
+needed.  `Disabled_compression` reports `direct_retentions`,
+`retention_fallbacks`, and `payload_bytes_avoided`, while `Ancestor_store`
+reports the complete record and I/O reduction.
+
 The mmap file is unlinked immediately and exists only for the running process.
 Crash/restart remains the job of the architecture-neutral format-3 checkpoint:
 checkpoint output materializes records to the established textual format, and
