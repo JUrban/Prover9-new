@@ -1,7 +1,7 @@
 # Josef 02 compact-P9 CPU investigation
 
 Status: implemented and bounded-validated on branch `josef02-cpu` through
-`92009ad`.  The current compact prover is already 3.9--5.4 times faster than
+`06deec9`.  The current compact prover is already 3.9--5.4 times faster than
 the preserved old-P9 binary on exact 300/600-given Josef 02 prefixes.  A full
 old-P9 Josef 02 proof output was not supplied, so this report does not claim a
 measured proof-to-proof old/new CPU ratio.  The existing compact proof is the
@@ -17,7 +17,7 @@ something attempted on the low-RAM development machine.
 | preserved old-P9 binary | `bcdf6bafbf608fde463fd43ef541891813f5c49a2d5153711c54925e98d76bcc` |
 | accepted parent binary at `10b6abd` | `d13973d3311ba8e31590f139e48f6560ec24af845fc60acb4b2e342dfd001ddc` |
 | accepted rewrite parent at `3846b92` | `25fd1849ea8ac898dd45af9ce96397f61465cfdfb7ab8baacda2b1803010bc73` |
-| release binary at `92009ad` | `414f6b14e7350da94db7923b3b0d2f3528f2c52025f035a47b21d936c8a223c1` |
+| release binary at `06deec9` | `e756487a8ab02a5884b1ac370ca18ceb4de61dda1ea5ae60e929b761ba6a3306` |
 
 The reconstructed input is
 `josef02-debug.heNOIJ/Josef_02-uninterrupted.in`.  It retains every formula,
@@ -216,6 +216,30 @@ dense intersection at 7.00%; this confirms the intended local work reduction
 without pretending that two separate `gprof` runs are a controlled timing
 pair.
 
+### Reverse monotone candidate vectors without sorting (`06deec9`)
+
+Packed hint matching must inspect candidates in decreasing stable-ID order to
+preserve legacy `back_subsume` tie-breaking.  Dense bit intersections and
+append-only posting vectors normally produce unique IDs in increasing order,
+but every query previously sent that already ordered vector through libc
+`qsort`.  The candidate builder now records whether admitted IDs remain
+nondecreasing.  A monotone vector is reversed in linear time; any mixed-order
+vector uses the unchanged comparison-sort fallback.  Candidate membership and
+the final decreasing order are therefore identical in both paths.
+
+| gate | parent user | candidate user | CPU change | parent/candidate RSS |
+|---|---:|---:|---:|---:|
+| Josef 02, 600 given, two reversed pairs | 42.71 s mean | 40.88 s mean | -4.28% | 206,452 / 206,724 KiB mean |
+| Josef 02, 1,000 given, adjacent | 96.59 s | 91.50 s | -5.27% | 235,136 / 235,284 KiB |
+| CHAT, 600 given, adjacent | 56.44 s | 54.20 s | -3.97% | 467,588 / 466,924 KiB |
+
+Josef 02 preserves `(601, 524799, 26671, 0)` and
+`(1001, 1310234, 65416, 0)`; CHAT preserves
+`(601, 497430, 16974, 0)`.  All final packed-dense counters match and no run
+swapped.  The focused regression covers both the monotone reversal and a
+materialize/re-index sequence whose conservative postings require the
+mixed-order fallback.
+
 ## Rejected options and experiments
 
 - Raising `hint_conjunction_kb` to 384 MiB is rejected.  Rewritten hints grew
@@ -285,7 +309,8 @@ pair.
   The clause-level address snapshot was 5.81% faster than its adjacent parent;
   the subsequent query-context refactor is neutral in two reversed pairs.
   Packed-hint counter batching is also neutral at 52.29 versus 52.46 s.
-  All preserve the rewrite and back-demod fingerprints.
+  The later monotone candidate-order fast path improves another 3.97%, from
+  56.44 to 54.20 s.  All preserve the rewrite and back-demod fingerprints.
 - Josef 01 at 1,000 givens exactly reproduces
   `(1001, 1628048, 320239, 0)` and every compact unit-index counter.  Current
   host observations span 59.85--70.30 s; the controlled reverse-adjacent gate
@@ -359,8 +384,8 @@ at 1,500 givens but targets a directory sixteen times wider at the proof.
 Inherited slab recycling and direct symbol/term hot-path work also postdate the
 baseline output.
 
-A cautious planning range for the next same-machine total is **7,000--8,000
-CPU seconds** (about 10--21% below the compact baseline), with roughly
+A cautious planning range for the next same-machine total is **6,800--7,800
+CPU seconds** (about 12--23% below the compact baseline), with roughly
 5.0--5.2 GiB process PSS.  This is deliberately a range, not a measured
 claim.  A simple per-attempt extrapolation of only the clause-snapshot delta
 from the reversed 600-given mean and the adjacent 1,000-given pair spans about
@@ -370,7 +395,11 @@ unmeasured long-run changes.  The later query-context refactor removes another
 6.25--11.87% of bounded Josef 02 user CPU, but the different mature rule and
 subject mix makes that percentage equally unsafe to apply directly to the
 full baseline.  The back-index optimization likewise cannot be extrapolated
-linearly from the 1,500-given prefix, and no full old-P9 Josef 02 time exists.
+linearly from the 1,500-given prefix.  The monotone candidate-order fast path
+removes 4.28--5.27% on bounded Josef 02 and 3.97% on CHAT, but mature hint
+rewrites may create more mixed-order fallback vectors, so those percentages
+are not applied mechanically to the proof baseline.  No full old-P9 Josef 02
+time exists.
 
 Accept the external run only if it:
 
