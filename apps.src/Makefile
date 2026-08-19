@@ -93,7 +93,7 @@ FORCE:
 
 PROGRAMS = latfilter olfilter clausefilter idfilter renamer unfast clausetester rewriter isofilter0 isofilter isofilter2 dprofiles interpfilter upper-covers miniscope interpformat prooftrans mirror-flip perm3 sigtest directproof test_clause_eval test_complex complex gen_trc_defs
 
-all: ladr apps install
+all: .build_mode ladr apps install
 
 ladr:
 	cd ../ladr && $(MAKE) libladr.a
@@ -104,7 +104,7 @@ clean:
 realclean:
 	/bin/rm -f *.o *.d $(PROGRAMS) .build_mode
 
-install:
+install: .build_mode $(PROGRAMS)
 	@for f in $(PROGRAMS); do \
 	  codesign -s - -f "$$f" 2>/dev/null || true; \
 	  /bin/cp -p "$$f" ../bin; \
@@ -115,7 +115,7 @@ tags:
 
 LADR_LIB = ../ladr/libladr.a
 
-apps: $(PROGRAMS)
+apps: .build_mode $(PROGRAMS)
 
 test: test.o $(LADR_LIB)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o test test.o $(LADR_LIB)
@@ -202,5 +202,4 @@ DEPS := $(wildcard *.d)
 ifneq ($(DEPS),)
 -include $(DEPS)
 endif
-
 
