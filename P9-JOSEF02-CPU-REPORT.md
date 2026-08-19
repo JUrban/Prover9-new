@@ -648,6 +648,23 @@ before an authority run of the current source.
   2,048 to 16,384 entries reduced collisions but made Josef 02/600 slower and
   raised metadata to about 1.1 MiB.  The accepted 64-block maturity gate and
   compact table are consequences of these failures, not Josef-specific keys.
+- Reordering each query's required mask planes by per-root frequency was
+  rejected despite reducing logical directory work.  With an eight-block
+  gate, Josef 02/600 word checks fell 21.9% (1,376,331 to 1,074,839) and
+  Josef 02/1,000 checks fell 24.3% (5,489,197 to 4,153,621), but CHAT/600
+  regressed in both adjacent observations (+5.7% and +10.5%).  A 32-block
+  gate retained a 21.5% check reduction at Josef 02/1,000 but took 108.28
+  versus 104.41 seconds (+3.7%).  A cheaper single-rarest-plane variant also
+  regressed Josef 02/600 by 8.8%.  The frequency bookkeeping, selection and
+  altered access order cost more than the saved plane intersections on these
+  exact gates, so none of these workload-sensitive orderings was merged.
+- Decoding a query's required-mask bit numbers once and reusing the array for
+  every directory block was also rejected.  It preserved every search and
+  back-query fingerprint and the exact 5,489,197 word checks at Josef
+  02/1,000, but the valid adjacent pair took 106.92 versus 101.27 seconds
+  total CPU (+5.6%); RSS was 238,080 versus 238,288 KiB.  The original
+  block-local `ctz` loop is cheaper than the extra array indexing and live
+  state.  This candidate added no persistent memory and was never merged.
 - Table-driven archive CRC implementations improved the isolated one-million
   record store benchmark by roughly 14--40%, but worsened Josef 02/600.  The
   clean 1-KiB byte table took 47.99 seconds and the compact nibble table 48.52
