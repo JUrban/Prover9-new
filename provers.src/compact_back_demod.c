@@ -5715,6 +5715,11 @@ static unsigned long long prepare_mask_directory(
   cbd_path_mask required;
   uint32_t block_index;
   struct cbd_mask_result_cache_entry *cache_entry;
+  /* These values are authoritative only after the complete directory scan.
+     Keeping them local avoids publishing result and diagnostic state for
+     every compatible bucket in mature, billion-selection directories. */
+  size_t collected = 0;
+  unsigned long long population = 0;
   if (index->mask_query_stamp == index->query_stamp &&
       index->mask_query_pattern == pattern)
     return index->mask_query_population;
@@ -5766,16 +5771,18 @@ static unsigned long long prepare_mask_directory(
       uint32_t bucket = block->buckets[slot];
       if (bucket == CBD_NONE || bucket >= index->path_bucket_count)
         fatal_error("compact_back_demod: corrupt mask-directory bucket");
-      ensure_mask_query_buckets(index, index->mask_query_bucket_count + 1);
-      index->mask_query_buckets[index->mask_query_bucket_count++] = bucket;
-      index->mask_query_population = saturating_add(
-        index->mask_query_population,
+      ensure_mask_query_buckets(index, collected + 1);
+      index->mask_query_buckets[collected++] = bucket;
+      population = saturating_add(
+        population,
         index->path_buckets[bucket].posting_count);
-      index->mask_directory_buckets_selected++;
-      index->path_filter_checks++;
       compatible &= compatible - 1;
     }
   }
+  index->mask_query_bucket_count = collected;
+  index->mask_query_population = population;
+  index->mask_directory_buckets_selected += collected;
+  index->path_filter_checks += collected;
   if (cache_entry != NULL)
     admit_mask_result_cache(index, cache_entry);
   return index->mask_query_population;
