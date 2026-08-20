@@ -266,12 +266,13 @@ void hint_postings_add_profile(Hint_postings index, unsigned long long key,
   posting->profile_literal_counts[posting->count] =
     (positive << 16) | negative;
   {
-    unsigned bit;
     unsigned block = posting->count / 64;
     unsigned long long flag = 1ULL << (posting->count % 64);
-    for (bit = 0; bit < 64; bit++)
-      if (mask & (1ULL << bit))
-        posting->profile_mask_planes[(size_t) block * 64 + bit] |= flag;
+    while (mask != 0) {
+      unsigned bit = (unsigned) __builtin_ctzll(mask);
+      posting->profile_mask_planes[(size_t) block * 64 + bit] |= flag;
+      mask &= mask - 1;
+    }
   }
   posting->count++;
   posting->generation++;
