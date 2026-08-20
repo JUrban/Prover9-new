@@ -57,6 +57,43 @@ phase reports, use `set(clocks)` with `assign(clock_sample_rate,16)`.  Exact
 clocks are a diagnostic mode and must be enabled on both competitors if their
 process CPU is compared.
 
+### Amortized periodic CPU reports (`josef01-cpu-next`)
+
+Turning detailed clocks off exposed a second diagnostic tax.  With
+`assign(report,60)`, the clocks-off profile called `possible_report()` and
+`user_time()` once for each of 1,628,048 generated clauses.  The latter is a
+`getrusage()` call.  A control with periodic reports disabled reduced the
+current PGO prefix from 40.85 to 37.16 total CPU seconds while preserving the
+same endpoint and given digest.
+
+`possible_report()` now polls CPU time once per 256 report opportunities.
+Given-count reporting remains exact, final statistics are unchanged, and a
+CPU-time report can be delayed by at most 255 clause-report opportunities.
+On the 1,001-given gate this reduces about 1.63 million CPU-time reads to at
+most 6,360; at the completed 1.60-billion-generation endpoint it reduces the
+same polling path to about 6.26 million reads.  The change adds no persistent
+search memory and cannot affect clause admission, inference or selection.
+Every statistics section exposes the cumulative check as
+`Periodic_report_poll`; this records generated clauses, actual CPU-time reads
+and the fixed interval for an external mature-run audit.
+
+Matched portable `-O2` binaries were run as a serial reversed pair with
+clocks off, `report=60`, a 2-GiB limit and no swapping:
+
+| Binary | Mean user CPU | Mean system CPU | Mean total CPU | Mean RSS |
+|---|---:|---:|---:|---:|
+| parent | 46.80 s | 4.57 s | 51.37 s | 610,108 KiB |
+| amortized polling | 45.80 s | 2.48 s | 48.28 s | 609,484 KiB |
+| change | -2.1% | -45.8% | **-6.0%** | -624 KiB |
+
+The individual totals were parent/candidate 54.44/48.90 seconds followed by
+48.29/47.65 seconds in reversed order.  Every run ended at
+`(1001,1628048,320239,0)` with the normalized given digest above.  A separate
+100-given `report=1` production smoke emitted six statistics sections,
+confirming that short periodic reports remain live after amortization.
+An independent `report_given=10` smoke reported at givens 10, 20 and 30
+exactly, followed by the final given 31 statistics.
+
 ## Authoritative completed runs
 
 The source files are:

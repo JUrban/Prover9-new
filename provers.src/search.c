@@ -103,6 +103,7 @@ static unsigned long long Resume_rewrite_interreduce_cursor_id = 0;
 #define COMPACT_PASSIVE_CACHE_WAYS 4
 #define COMPACT_PASSIVE_CACHE_MIN_CHARGE 512
 #define COMPACT_PASSIVE_CACHE_MAX_SLOTS 8192
+#define CPU_REPORT_POLL_INTERVAL 256U
 
 struct compact_passive_cache_entry {
   unsigned long long id;
@@ -131,6 +132,7 @@ static unsigned long long Compact_passive_cache_invalidations;
 static unsigned long long Compact_passive_direct_retentions;
 static unsigned long long Compact_passive_retention_fallbacks;
 static unsigned long long Compact_passive_payload_bytes_avoided;
+static unsigned long long Cpu_report_time_reads;
 
 static void update_rewrite_only_stats(void);
 static void current_demodulate_clause(Topform, int, int, BOOL, BOOL);
@@ -3831,6 +3833,14 @@ void fprint_all_stats(FILE *fp, char *stats_level)
 
   fprint_prover_stats(fp, Stats, stats_level);
 
+  if (Opt != NULL &&
+      (parm(Opt->report) > 0 || parm(Opt->report_stderr) > 0))
+    fprintf(fp,
+            "Periodic_report_poll: generated=%llu, cpu_time_reads=%llu, "
+            "interval=%u.\n",
+            Stats.generated, Cpu_report_time_reads,
+            CPU_REPORT_POLL_INTERVAL);
+
   fprint_prover_clocks(fp, Clocks);
 
   if (!clist_empty(Glob.hints))
@@ -5598,32 +5608,49 @@ void report(FILE *fp, char *level)
  *
  *************/
 
+/* CPU-time reports are diagnostic.  Polling getrusage() before every
+   generated clause made a report interval of hundreds of seconds cost one
+   kernel CPU-time query per clause--1.6 billion calls in the completed Josef
+   01 search.  Search clauses are normally processed far faster than this
+   bounded cadence, and a report may already be delayed by the current
+   inference.  Amortize only the CPU-time test; given-count reports below
+   remain exact. */
 static
 void possible_report(void)
 {
   static int Next_report, Next_report_stderr;
   static unsigned long long Next_report_given;
-  int runtime;
+  static unsigned Cpu_report_poll_count;
+  int runtime = -1;
 
-  runtime = user_time() / 1000;
-
-  if (parm(Opt->report) > 0) {
-    if (Next_report == 0)
-      Next_report = parm(Opt->report);
-    if (runtime >= Next_report) {
-      report(stdout, stringparm1(Opt->stats));
-      while (runtime >= Next_report)
-	Next_report += parm(Opt->report);
+  if (parm(Opt->report) > 0 || parm(Opt->report_stderr) > 0) {
+    Cpu_report_poll_count++;
+    if (Cpu_report_poll_count >= CPU_REPORT_POLL_INTERVAL) {
+      Cpu_report_poll_count = 0;
+      Cpu_report_time_reads++;
+      runtime = user_time() / 1000;
     }
   }
 
-  if (parm(Opt->report_stderr) > 0) {
-    if (Next_report_stderr == 0)
-      Next_report_stderr = parm(Opt->report_stderr);
-    if (runtime >= Next_report_stderr) {
-      report(stderr, "some");
-      while (runtime >= Next_report_stderr)
-	Next_report_stderr += parm(Opt->report_stderr);
+  if (runtime >= 0) {
+    if (parm(Opt->report) > 0) {
+      if (Next_report == 0)
+        Next_report = parm(Opt->report);
+      if (runtime >= Next_report) {
+        report(stdout, stringparm1(Opt->stats));
+        while (runtime >= Next_report)
+	  Next_report += parm(Opt->report);
+      }
+    }
+
+    if (parm(Opt->report_stderr) > 0) {
+      if (Next_report_stderr == 0)
+        Next_report_stderr = parm(Opt->report_stderr);
+      if (runtime >= Next_report_stderr) {
+        report(stderr, "some");
+        while (runtime >= Next_report_stderr)
+	  Next_report_stderr += parm(Opt->report_stderr);
+      }
     }
   }
 
