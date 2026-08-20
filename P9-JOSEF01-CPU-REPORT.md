@@ -583,6 +583,18 @@ Three scaling failures stand out.
    235.74 billion posting candidates, so this is already a filtered hot path,
    not a missing elementary index.
 
+An updated `-pg` profile of the accepted source at the exact 1,001-given
+endpoint separates current steady-state costs from older code.  The profiled
+process used 75.92 user and 2.61 system seconds, 619,328 KiB peak RSS and zero
+swap; profiler overhead means those totals are not release benchmarks.
+`generalization_rec()` remained the largest search-time self entry at 3.12
+sampled seconds (7.69%), followed by `slab_get()` at 2.09 seconds (5.15%).
+The larger one-time entries were construction of the 153,681-hint packed
+index, not work which repeats with every given clause.  Temporary exact
+counters at 301 givens then found 2,093,293 sibling reads behind only 923,880
+previously reported generalization work units.  The route-cache experiment
+below tested whether those unreported reads were profitably avoidable.
+
 The RAM itself is dominated by necessary long-lived compact state rather than
 ordinary live clauses:
 
@@ -1117,6 +1129,27 @@ plausible-looking options that were already negative.
   The 1,501-given gate was intentionally skipped after this two-placement
   early failure.  Instrumentation, guards and the temporary test were removed,
   restoring the accepted binary to SHA-256
+  `4a32437f5ff84e98946ae1309b130d9d7b9b574dbd949ca76521d275be03ff92`.
+- A bounded rigid-sibling route cache for forward unit generalization was
+  implemented and removed.  The 1.5-MiB direct-mapped design stored the first
+  sibling at or above a requested rigid symbol.  A separate bounded parent
+  generation table made every hit exact across concurrent radix insertions
+  and splits; table collisions caused misses, and a focused regression covered
+  cached negative reuse, insertion of the formerly missing symbol, positive
+  reuse and splitting of a cached path.  At 301 givens it obtained 317,561
+  validated hits and reduced sibling scans from 2,093,293 to 1,329,978
+  (-36.5%), but the reversed total was neutral: 15.285 seconds candidate
+  versus 15.310 control (-0.16%), with one win and one loss.  At 1,001 givens
+  it obtained 3,325,759 hits but lost both placements: 46.74 versus 45.05
+  seconds, then 48.62 versus 46.84.  Candidate/control means were
+  44.310/42.595 user seconds (+4.03%), 3.370/3.350 system seconds, and
+  47.680/45.945 total seconds (+3.78%).  Mean peak RSS rose from 601,374 to
+  614,970 KiB, much more than the logical cache alone.  Every run preserved
+  `(Given=1001, Generated=1628048, Kept=320239, proofs=0)`, rule-generation
+  counts and allocator traffic, and used zero swap.  Hashing and exact
+  mutation validation cost more than the pointer walk they avoided.  The
+  implementation, telemetry and temporary tests were removed completely;
+  the accepted binary is again SHA-256
   `4a32437f5ff84e98946ae1309b130d9d7b9b574dbd949ca76521d275be03ff92`.
 - A negative Bloom summary was slower and was removed completely.
 - A query-scoped binding trail preserved all answers but raised the sampled
