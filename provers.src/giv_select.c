@@ -50,7 +50,6 @@ typedef struct giv_select *Giv_select;
 #define DENSE_SELECTOR_READ_ENTRIES 8192
 
 struct dense_selector_entry {
-  unsigned long long id;
   union {
     unsigned long long hint_id;
     double weight;
@@ -58,10 +57,12 @@ struct dense_selector_entry {
   uint64_t record;
 };
 
-/* Widening the physical record reference must consume the old padding rather
-   than enlarge every external selector entry. */
-typedef char dense_selector_entry_must_remain_24_bytes[
-  sizeof(struct dense_selector_entry) == 24 ? 1 : -1];
+/* Dense records are appended in strictly increasing clause-ID order, and a
+   directory compaction rebuilds every selector run.  The physical record
+   reference is consequently also the exact final age tie-breaker; storing
+   the ID beside it would add eight redundant bytes to every external entry. */
+typedef char dense_selector_entry_must_remain_16_bytes[
+  sizeof(struct dense_selector_entry) == 16 ? 1 : -1];
 typedef char dense_file_record_reference_must_hold_size_t[
   sizeof(size_t) <= sizeof(uint64_t) ? 1 : -1];
 
@@ -824,8 +825,10 @@ static int dense_entry_compare(int order,
     if (a->key.hint_id < b->key.hint_id) return -1;
     if (a->key.hint_id > b->key.hint_id) return 1;
   }
-  if (a->id < b->id) return -1;
-  if (a->id > b->id) return 1;
+  /* Record order is clause-ID order; see dense_insert_passive() and
+     dense_passive_compact(). */
+  if (a->record < b->record) return -1;
+  if (a->record > b->record) return 1;
   return 0;
 }
 
@@ -1141,7 +1144,6 @@ static void dense_selector_file_push(Giv_select gs, size_t record)
       gs->dense_buffer, capacity * sizeof(*gs->dense_buffer));
     gs->dense_buffer_capacity = capacity;
   }
-  entry.id = r->id;
   if (gs->order == GS_ORDER_WEIGHT)
     entry.key.weight = r->weight;
   else if (gs->order == GS_ORDER_HINT_AGE)
@@ -1383,8 +1385,7 @@ static BOOL dense_selector_peek(Giv_select gs, size_t *record)
       if (dense_passive_file_record_index(entry.record, &at) &&
           at < Dense_record_count) {
         struct dense_passive_record *r = &Dense_records[at];
-        if (r->id == entry.id &&
-            (r->flags & DENSE_PASSIVE_ACTIVE) != 0 &&
+        if ((r->flags & DENSE_PASSIVE_ACTIVE) != 0 &&
             (r->selector_mask & bit) != 0) {
           *record = at;
           return TRUE;

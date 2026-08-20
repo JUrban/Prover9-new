@@ -107,7 +107,7 @@ int main(int argc, char **argv)
       selectors.mode != DENSE_SELECTOR_FILE || selectors.flushes == 0 ||
       selectors.merges == 0 ||
       selectors.record_reference_bits != expected_reference_bits ||
-      selectors.entry_bytes != 24 ||
+      selectors.entry_bytes != 16 ||
       selectors.run_entries + selectors.buffered_entries != count ||
       heap_bytes >
         (unsigned long long) buffer_entries * selectors.entry_bytes +
