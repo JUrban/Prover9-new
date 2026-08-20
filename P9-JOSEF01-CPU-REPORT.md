@@ -395,6 +395,14 @@ plausible-looking options that were already negative.
 - A query-scoped binding trail preserved all answers but raised the sampled
   generalization timer from roughly 2.72--2.76 to 2.920 seconds.  It was
   reverted completely.
+- Moving the 256-clause CPU-report cadence from `possible_report()` into its
+  caller removed the residual per-generated function call and separated
+  exact given-count reports.  In a clocks-off, cache-off reversed Josef
+  01/1000 pair, mean system CPU fell from 2.25 to 2.08 seconds, but mean total
+  CPU rose from 49.13 to 49.50 seconds (+0.8%) and the pair orientations
+  disagreed.  Every given digest remained exact; the dispatch split was
+  nevertheless reverted completely because the release compiler already
+  makes the residual call negligible.
 - A native `-O3 -march=native -flto` build used 77.60 CPU seconds in one
   pinned 1,000-given run versus 81.69 for the immediately following portable
   `-O2` control.  Earlier portable pairs averaged 78.83, so host-frequency
