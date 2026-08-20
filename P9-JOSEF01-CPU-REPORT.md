@@ -1147,6 +1147,25 @@ plausible-looking options that were already negative.
   now-inlined hot traversal outweighed the removed frame operations.  Longer
   gates were intentionally skipped, and source plus portable executable were
   restored byte-for-byte to SHA-256 `55e42911...`.
+- Converting unit-conflict code-tree recursion to an explicit DFS was also
+  implemented and removed.  The prototype shared a 32-byte union with the
+  accepted generalization stack, retained pending-subtree, query-variable and
+  ordered rigid-sibling routes exactly, and added no per-node or per-clause
+  allocation.  A depth-80 broad-variable regression forced the new stack past
+  its initial 64 frames.  The first implementation mistakenly called the
+  grow/check helper at every expandable node: it looked 4.7% faster at 301
+  givens, then lost both 1,001-given placements and regressed from 41.125 to
+  42.555 mean total CPU seconds (+3.5%).  Hoisting that helper behind the
+  actual capacity boundary removed the accidental call tax.  The corrected
+  form remained inconclusive at 301 and lost at both mature gates: 41.330
+  versus 40.875 seconds at 1,001 (+1.1%), then 73.030 versus 72.170 at 1,501
+  (+1.2%).  At 1,501, mean user CPU was 70.275 versus 69.570 seconds and mean
+  RSS was effectively equal at 672,294 versus 672,352 KiB.  All four mature
+  outputs shared selected-given SHA-256 `41cae549...`, endpoint
+  `(1501,3603947,521972,0)`, every tree-node/sibling/posting/exact-test count,
+  and zero swap.  Explicit state traffic was costlier than compiler-managed
+  recursion even as the tree grew.  Source, focused tests and executable were
+  restored byte-for-byte to accepted SHA-256 `55e42911...`.
 - The pre-`45ecaac` single-position, unlimited-depth
   `compact_unit_strategy=adaptive` reduced tree work but was about 8.5% slower
   at 2,000 givens and produced more exact tests.  Do not infer from the later
