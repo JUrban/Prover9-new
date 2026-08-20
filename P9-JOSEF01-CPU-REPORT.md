@@ -1267,6 +1267,30 @@ plausible-looking options that were already negative.
   skipped; source and portable executable were restored byte-for-byte to
   accepted SHA-256
   `639513c2cf019436460cd41556136e82ce20cef147960a126c3cfbdd8efa389a`.
+- A narrower internal-node first-code overlay was likewise rejected after it
+  exposed a short-to-mature crossover.  Prefix term encodings are prefix-free,
+  so a radix node with children cannot also be an exact-term terminal.  The
+  prototype overlaid the otherwise unused internal-node posting-tail word
+  with the first radix code while leaving every terminal posting list and all
+  three posting iterators unchanged.  Temporary exact counters at 301 givens
+  showed that 1,985,475 of 2,481,516 first-code reads (80.0%) targeted such
+  internal nodes.  The node remained exactly 24 bytes and all allocated index
+  byte totals were unchanged.  Focused unit-index, long-run compaction/rebase,
+  ASan and UBSan tests passed.  Reversed means initially improved from 15.135
+  to 14.915 total seconds at 301 givens (-1.45%) and from 42.900 to 42.595 at
+  1,001 givens (-0.71%), winning all four placements.  The exact 1,501-given
+  gate reversed that result decisively: candidate/control totals were
+  71.21/70.61 and 81.88/80.26 seconds.  Candidate/control means were
+  72.795/71.730 user seconds, 3.750/3.705 system seconds, and 76.545/75.435
+  total seconds (+1.47%); the candidate lost both placements.  Mean RSS was
+  effectively identical at 673,860 versus 673,852 KiB and process swap was
+  zero.  All four outputs shared the selected-given digest `41cae549...` and
+  exact final rule, index, hint, passive, ancestor and allocator counters at
+  `(Given=1501, Generated=3603947, Kept=521972, proofs=0)`.  This is direct
+  evidence that a representation can win every short gate yet lose as the
+  index matures; source and executable were restored byte-for-byte to accepted
+  SHA-256
+  `639513c2cf019436460cd41556136e82ce20cef147960a126c3cfbdd8efa389a`.
 - A negative Bloom summary was slower and was removed completely.
 - A query-scoped binding trail preserved all answers but raised the sampled
   generalization timer from roughly 2.72--2.76 to 2.920 seconds.  It was
