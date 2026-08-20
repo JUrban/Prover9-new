@@ -104,8 +104,14 @@ struct compact_unit_index {
   size_t result_capacity;
   uint64_t *path_stack;
   size_t path_capacity;
+  unsigned *child_stack;
+  size_t child_capacity;
+  unsigned *selected_path;
+  size_t selected_path_capacity;
   uint64_t *selected_variable_keys;
   size_t selected_variable_capacity;
+  uint64_t *first_variable_keys;
+  size_t first_variable_capacity;
   struct cui_adaptive_route *adaptive_routes;
   uint32_t query_stamp;
   unsigned long long active;
@@ -139,6 +145,9 @@ struct compact_unit_index {
   unsigned long long adaptive_tree_choices;
   unsigned long long adaptive_position_choices;
   unsigned long long adaptive_position_empty_choices;
+  unsigned long long position_refinement_queries;
+  unsigned long long position_refinement_checks;
+  unsigned long long position_refinement_rejects;
   unsigned long long adaptive_route_hits;
   unsigned long long adaptive_route_misses;
   unsigned long long adaptive_route_replacements;
@@ -417,8 +426,12 @@ static unsigned long long index_bytes(Compact_unit_index index)
     index->query_capacity * sizeof(*index->query) +
     index->result_capacity * sizeof(*index->result_ids) +
     index->path_capacity * sizeof(*index->path_stack) +
+    index->child_capacity * sizeof(*index->child_stack) +
+    index->selected_path_capacity * sizeof(*index->selected_path) +
     index->selected_variable_capacity *
       sizeof(*index->selected_variable_keys) +
+    index->first_variable_capacity *
+      sizeof(*index->first_variable_keys) +
     (index->adaptive_routes == NULL ? 0 :
      CUI_ADAPTIVE_ROUTE_CAPACITY * sizeof(*index->adaptive_routes));
 }
@@ -916,7 +929,10 @@ static void compact_unit_index_compact_internal(Compact_unit_index index,
   safe_free(old.query);
   safe_free(old.result_ids);
   safe_free(old.path_stack);
+  safe_free(old.child_stack);
+  safe_free(old.selected_path);
   safe_free(old.selected_variable_keys);
+  safe_free(old.first_variable_keys);
   safe_free(old.adaptive_routes);
   old.records = safe_realloc(
     old.records, packed * sizeof(*old.records));
@@ -973,6 +989,9 @@ static void compact_unit_index_compact_internal(Compact_unit_index index,
   index->adaptive_position_choices = old.adaptive_position_choices;
   index->adaptive_position_empty_choices =
     old.adaptive_position_empty_choices;
+  index->position_refinement_queries = old.position_refinement_queries;
+  index->position_refinement_checks = old.position_refinement_checks;
+  index->position_refinement_rejects = old.position_refinement_rejects;
   index->adaptive_route_hits = old.adaptive_route_hits;
   index->adaptive_route_misses = old.adaptive_route_misses;
   index->adaptive_route_replacements = old.adaptive_route_replacements;
@@ -1790,12 +1809,23 @@ struct cui_feature_choice {
   uint64_t exact_key;
   uint64_t variable_shape;
   unsigned long long score;
+  unsigned symbol;
+  size_t depth;
   size_t variable_count;
   BOOL found;
 };
 
 static void ensure_u64_scratch(uint64_t **values, size_t *capacity,
                                size_t needed, const char *message)
+{
+  while (needed > *capacity) {
+    *capacity = grow_capacity(*capacity, sizeof(**values), message);
+    *values = safe_realloc(*values, *capacity * sizeof(**values));
+  }
+}
+
+static void ensure_unsigned_scratch(unsigned **values, size_t *capacity,
+                                    size_t needed, const char *message)
 {
   while (needed > *capacity) {
     *capacity = grow_capacity(*capacity, sizeof(**values), message);
@@ -1812,6 +1842,7 @@ static unsigned long long feature_posting_count(Compact_unit_index index,
 
 static void select_unifier_feature(Compact_unit_index index, Term term,
                                    BOOL sign, uint64_t path, size_t depth,
+                                   uint64_t excluded_exact_key,
                                    struct cui_feature_choice *choice)
 {
   int i;
@@ -1821,6 +1852,9 @@ static void select_unifier_feature(Compact_unit_index index, Term term,
     return;
   ensure_u64_scratch(&index->path_stack, &index->path_capacity, depth + 1,
                      "compact_unit_index: query path overflow");
+  ensure_unsigned_scratch(&index->child_stack, &index->child_capacity,
+                          depth + 1,
+                          "compact_unit_index: query child path overflow");
   index->path_stack[depth] = path;
   if (VARIABLE(term)) {
     choice->variable_shape ^= mix64(
@@ -1839,23 +1873,35 @@ static void select_unifier_feature(Compact_unit_index index, Term term,
       else
         score += n;
     }
-    if (!choice->found || score < choice->score) {
+    if (exact_key != excluded_exact_key &&
+        (!choice->found || score < choice->score)) {
       ensure_u64_scratch(&index->selected_variable_keys,
                          &index->selected_variable_capacity, depth,
                          "compact_unit_index: selected path overflow");
       for (ancestor = 1; ancestor <= depth; ancestor++)
         index->selected_variable_keys[ancestor - 1] =
           variable_feature_key(index->path_stack[ancestor], sign);
+      ensure_unsigned_scratch(&index->selected_path,
+                              &index->selected_path_capacity, depth,
+                              "compact_unit_index: selected path overflow");
+      if (depth != 0)
+        memcpy(index->selected_path, index->child_stack,
+               depth * sizeof(*index->selected_path));
       choice->exact_key = exact_key;
+      choice->symbol = (unsigned) SYMNUM(term);
+      choice->depth = depth;
       choice->score = score;
       choice->variable_count = depth;
       choice->found = TRUE;
     }
   }
-  for (i = 0; i < ARITY(term); i++)
+  for (i = 0; i < ARITY(term); i++) {
+    index->child_stack[depth] = (unsigned) i;
     select_unifier_feature(index, ARG(term, i), sign,
                            child_path(path, (unsigned) i), depth + 1,
+                           excluded_exact_key,
                            choice);
+  }
 }
 
 static void begin_position_query(Compact_unit_index index)
@@ -1869,11 +1915,48 @@ static void begin_position_query(Compact_unit_index index)
   }
 }
 
+/* A rigid query position is a necessary condition for unification: the
+   stored term must contain the same symbol there, or a variable at that
+   position or one of its ancestors.  Check that condition directly in the
+   compact prefix stream so a second feature can refine the rarest posting
+   union without decoding an entire second union. */
+static BOOL record_satisfies_position(
+  Compact_unit_index index, const struct cui_record *record,
+  const struct cui_feature_choice *choice)
+{
+  const int32_t *tokens = query_slice_tokens(index, record->tokens);
+  uint32_t end = query_slice_length(record->tokens);
+  uint32_t position = 0;
+  size_t level;
+  for (level = 0; level < choice->depth; level++) {
+    int32_t code;
+    unsigned child, i;
+    int arity;
+    if (position >= end)
+      return FALSE;
+    code = tokens[position++];
+    if (code < 0)
+      return TRUE;
+    arity = sn_to_arity(code);
+    child = index->selected_path[level];
+    if (child >= (unsigned) arity)
+      return FALSE;
+    for (i = 0; i < child; i++) {
+      position = token_term_end(tokens, position, end);
+      if (position == UINT32_MAX)
+        return FALSE;
+    }
+  }
+  return position < end &&
+    (tokens[position] < 0 || tokens[position] == (int32_t) choice->symbol);
+}
+
 static void collect_position_bucket(
   Compact_unit_index index, uint64_t key, Term query, BOOL sign,
   unsigned long long exclude_id, size_t *found,
   unsigned long long *visited, unsigned long long *live,
-  unsigned long long *dead, unsigned long long *duplicates)
+  unsigned long long *dead, unsigned long long *duplicates,
+  const struct cui_feature_choice *required_choice)
 {
   uint32_t bucket = find_feature_bucket(index, key);
   uint32_t chunk;
@@ -1921,6 +2004,13 @@ static void collect_position_bucket(
           query_slice_length(record->tokens) == 0 ||
           record->root_symbol != (unsigned) SYMNUM(query))
         continue;
+      if (required_choice != NULL) {
+        index->position_refinement_checks++;
+        if (!record_satisfies_position(index, record, required_choice)) {
+          index->position_refinement_rejects++;
+          continue;
+        }
+      }
       index->unifier_exact_tests++;
       if (resident_unifies_record(index, query, record))
         append_result_id(index, record->proof_id, found);
@@ -1961,10 +2051,10 @@ unsigned long long *compact_unit_unifier_ids(
   unsigned long long tests_before, visited = 0, live = 0, dead = 0;
   unsigned long long duplicates = 0;
   struct cui_code_tree_work tree_work;
-  struct cui_feature_choice choice;
+  struct cui_feature_choice choice, second_choice;
   struct cui_adaptive_route *route = NULL;
   BOOL route_hit = FALSE;
-  BOOL use_tree, use_position;
+  BOOL use_tree, use_position, have_second_choice = FALSE;
   if (count == NULL)
     return NULL;
   *count = 0;
@@ -1982,13 +2072,14 @@ unsigned long long *compact_unit_unifier_ids(
   }
   prepare_query_term_access(index);
   memset(&choice, 0, sizeof(choice));
+  memset(&second_choice, 0, sizeof(second_choice));
   memset(&tree_work, 0, sizeof(tree_work));
   use_tree = index->strategy == COMPACT_UNIT_CODE_TREE;
   use_position = index->strategy == COMPACT_UNIT_POSITION;
   if (index->strategy == COMPACT_UNIT_POSITION ||
       index->strategy == COMPACT_UNIT_ADAPTIVE)
     select_unifier_feature(index, query, sign,
-                           UINT64_C(0x726f6f745f706174), 0, &choice);
+                           UINT64_C(0x726f6f745f706174), 0, 0, &choice);
   if (index->strategy == COMPACT_UNIT_ADAPTIVE) {
     index->adaptive_queries++;
     route = choice.found ?
@@ -2051,15 +2142,34 @@ unsigned long long *compact_unit_unifier_ids(
   else if (use_position) {
     size_t key_at;
     index->position_queries++;
-    if (choice.found) {
+    /* SCORE is the sum of every exact/ancestor-variable posting that can
+       satisfy this rigid query position.  Zero is therefore a complete
+       negative answer; avoid even the empty bucket probes and query-stamp
+       update on the overwhelmingly common position fast-negative path. */
+    if (choice.found && choice.score != 0) {
+      ensure_u64_scratch(&index->first_variable_keys,
+                         &index->first_variable_capacity,
+                         choice.variable_count,
+                         "compact_unit_index: first path overflow");
+      if (choice.variable_count != 0)
+        memcpy(index->first_variable_keys, index->selected_variable_keys,
+               choice.variable_count * sizeof(*index->first_variable_keys));
+      select_unifier_feature(index, query, sign,
+                             UINT64_C(0x726f6f745f706174), 0,
+                             choice.exact_key, &second_choice);
+      have_second_choice = second_choice.found;
+      if (have_second_choice)
+        index->position_refinement_queries++;
       begin_position_query(index);
-      collect_position_bucket(index, choice.exact_key, query, sign,
-                              exclude_id, &found, &visited, &live, &dead,
-                              &duplicates);
+      collect_position_bucket(
+        index, choice.exact_key, query, sign, exclude_id, &found, &visited,
+        &live, &dead, &duplicates,
+        have_second_choice ? &second_choice : NULL);
       for (key_at = 0; key_at < choice.variable_count; key_at++)
         collect_position_bucket(
-          index, index->selected_variable_keys[key_at], query, sign,
-          exclude_id, &found, &visited, &live, &dead, &duplicates);
+          index, index->first_variable_keys[key_at], query, sign,
+          exclude_id, &found, &visited, &live, &dead, &duplicates,
+          have_second_choice ? &second_choice : NULL);
     }
   }
   if (index->strategy == COMPACT_UNIT_ROOT_SCAN ||
@@ -2157,6 +2267,9 @@ void compact_unit_index_get_stats(Compact_unit_index index,
   stats->adaptive_position_choices = index->adaptive_position_choices;
   stats->adaptive_position_empty_choices =
     index->adaptive_position_empty_choices;
+  stats->position_refinement_queries = index->position_refinement_queries;
+  stats->position_refinement_checks = index->position_refinement_checks;
+  stats->position_refinement_rejects = index->position_refinement_rejects;
   stats->adaptive_route_hits = index->adaptive_route_hits;
   stats->adaptive_route_misses = index->adaptive_route_misses;
   stats->adaptive_route_replacements = index->adaptive_route_replacements;
@@ -2201,8 +2314,11 @@ void compact_unit_index_get_stats(Compact_unit_index index,
     index->query_capacity * sizeof(*index->query) +
     index->result_capacity * sizeof(*index->result_ids) +
     index->path_capacity * sizeof(*index->path_stack) +
+    index->child_capacity * sizeof(*index->child_stack) +
+    index->selected_path_capacity * sizeof(*index->selected_path) +
     index->selected_variable_capacity *
-      sizeof(*index->selected_variable_keys);
+      sizeof(*index->selected_variable_keys) +
+    index->first_variable_capacity * sizeof(*index->first_variable_keys);
   stats->total_bytes = index_bytes(index);
   stats->peak_bytes = index->peak_bytes;
 }
@@ -2237,7 +2353,10 @@ void compact_unit_index_free(Compact_unit_index index)
   safe_free(index->query);
   safe_free(index->result_ids);
   safe_free(index->path_stack);
+  safe_free(index->child_stack);
+  safe_free(index->selected_path);
   safe_free(index->selected_variable_keys);
+  safe_free(index->first_variable_keys);
   safe_free(index->adaptive_routes);
   free_clock(index->sort_clock);
   free_clock(index->maintenance_clock);

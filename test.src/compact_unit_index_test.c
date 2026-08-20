@@ -394,6 +394,41 @@ int main(void)
   }
 
   {
+    Compact_unit_index position_index;
+    struct compact_unit_index_stats stats;
+    Topform exact, near_left, near_right, query;
+    unsigned long long *ids;
+    size_t count;
+
+    compact_unit_index_set_strategy(COMPACT_UNIT_POSITION);
+    position_index = compact_unit_index_init();
+    exact = indexed_unit("u(f(f(c137,a),a)).");
+    near_left = indexed_unit("u(f(f(c138,a),b)).");
+    near_right = indexed_unit("u(f(f(c139,b),a)).");
+    CHECK(compact_unit_index_add(position_index, exact) &&
+          compact_unit_index_add(position_index, near_left) &&
+          compact_unit_index_add(position_index, near_right),
+          "add two-position refinement family");
+    query = parse_clause_from_string("u(f(f(x,a),a)).");
+    ids = compact_unit_unifier_ids(
+      position_index, query->literals->atom, TRUE, 0, &count);
+    compact_unit_index_get_stats(position_index, &stats);
+    CHECK(count == 1 && ids != NULL && ids[0] == exact->id,
+          "direct two-position refinement preserves the exact answer");
+    CHECK(stats.position_refinement_queries == 1 &&
+          stats.position_refinement_checks == 2 &&
+          stats.position_refinement_rejects == 1,
+          "second rigid feature rejects one first-position near miss");
+    safe_free(ids);
+    delete_clause(exact);
+    delete_clause(near_left);
+    delete_clause(near_right);
+    delete_clause(query);
+    compact_unit_index_free(position_index);
+    compact_unit_index_set_strategy(COMPACT_UNIT_ROOT_SCAN);
+  }
+
+  {
     const char *unit_text[] = {
       "p(x).", "p(a).", "p(f(x)).", "p(f(a)).",
       "p(f(x,x)).", "p(f(a,b)).", "p(g(f(a),y)).",
