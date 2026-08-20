@@ -644,6 +644,16 @@ counters at 301 givens then found 2,093,293 sibling reads behind only 923,880
 previously reported generalization work units.  The route-cache experiment
 below tested whether those unreported reads were profitably avoidable.
 
+A fresh profile after the accepted binding-bitset change at `b3d19f3`
+reproduced the exact 1,001-given endpoint in 68.00 user and 2.80 system
+seconds, 611,964 KiB peak RSS and zero swap.  Profiler overhead again makes
+those process totals unsuitable as release comparisons.  The ranking remains
+stable: `generalization_rec()` is still the largest scalable self entry at
+2.96 sampled seconds (7.94%), followed by `slab_get()` at 1.69 seconds
+(4.53%).  Construction of the fixed 153,681-hint index occupies several of
+the other leading entries, whereas paramodulation construction and clause
+processing are the principal work that scales toward the proof endpoint.
+
 The RAM itself is dominated by necessary long-lived compact state rather than
 ordinary live clauses:
 
@@ -1238,6 +1248,25 @@ plausible-looking options that were already negative.
   1,001/1,501 gates were intentionally skipped after the two-placement loss;
   source and executable were restored byte-for-byte to accepted SHA-256
   `4a32437f5ff84e98946ae1309b130d9d7b9b574dbd949ca76521d275be03ff92`.
+- Reusing the compact-unit node's posting-tail space for an inline first radix
+  code was also implemented and removed.  To retain ordered O(1) insertion
+  without increasing the 24-byte node, the prototype represented each exact
+  terminal's postings as a circular list with its tail in the node.  Only
+  three posting iterators required circular termination; a focused regression
+  verified insertion order, exclusion, retirement and forced compaction, and
+  the full compact-unit, long-run, ASan and UBSan tests passed.  This avoided
+  both the packed-term first-code load and the rejected separate sidecar's
+  projected 246 MiB allocation, but it still lost the strict 301-given gate.
+  Candidate/control totals were 16.10/15.67 seconds and 15.33/15.37 seconds
+  after reversing core and launch order.  Candidate/control means were
+  12.780/12.675 user seconds, 2.935/2.845 system seconds, and 15.715/15.520
+  total seconds (+1.26%), with one win and one loss.  Mean peak RSS rose from
+  512,048 to 512,936 KiB despite identical allocated index bytes.  Every run
+  preserved `(Given=301, Generated=141040, Kept=38770, proofs=0)`, all
+  compact-unit counters and zero swap.  The longer gates were intentionally
+  skipped; source and portable executable were restored byte-for-byte to
+  accepted SHA-256
+  `639513c2cf019436460cd41556136e82ce20cef147960a126c3cfbdd8efa389a`.
 - A negative Bloom summary was slower and was removed completely.
 - A query-scoped binding trail preserved all answers but raised the sampled
   generalization timer from roughly 2.72--2.76 to 2.920 seconds.  It was
