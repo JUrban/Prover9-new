@@ -1151,6 +1151,24 @@ plausible-looking options that were already negative.
   implementation, telemetry and temporary tests were removed completely;
   the accepted binary is again SHA-256
   `4a32437f5ff84e98946ae1309b130d9d7b9b574dbd949ca76521d275be03ff92`.
+- Removing the slab allocator's redundant `free_count` writes was also
+  rejected.  The count is exactly `next_unused - live_count`, so the prototype
+  derived reusable-space reports from those existing fields and removed one
+  metadata write from every free-list allocation and every free.  Allocator
+  lifecycle, 300,000-object churn and bookkeeping tests passed, and every
+  reported allocator byte/counter remained exact.  The noisy 301-given gate
+  favored the candidate in both placements (18.585 versus 19.140 mean total
+  seconds), but the 1,001-given gate did not confirm it.  Candidate/control
+  means were 45.630/45.605 user seconds, 3.985/3.820 system seconds, and
+  49.615/49.425 total seconds (+0.38%); one placement won and the reverse
+  lost.  More importantly, mean peak RSS reproducibly rose from 601,250 to
+  618,488 KiB despite identical logical allocator state.  All processes ended
+  at `(Given=1001, Generated=1628048, Kept=320239, proofs=0)` with identical
+  rule-generation counts and allocator traffic, and zero swap.  The two hot
+  writes were therefore not removed: their whole-binary layout effect was
+  neutral for CPU and adverse for observed residency.  Source and binary were
+  restored byte-for-byte to the accepted SHA-256
+  `4a32437f5ff84e98946ae1309b130d9d7b9b574dbd949ca76521d275be03ff92`.
 - A negative Bloom summary was slower and was removed completely.
 - A query-scoped binding trail preserved all answers but raised the sampled
   generalization timer from roughly 2.72--2.76 to 2.920 seconds.  It was
