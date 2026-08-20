@@ -1077,6 +1077,28 @@ plausible-looking options that were already negative.
   and the accepted binary was restored byte-for-byte.  Recomputing a compact
   hash can be cheaper than extending live ranges and perturbing this already
   large hot function.
+- A direct unit-to-unit paramodulant constructor was implemented and removed.
+  It passed the target literal already known by the eager and bounded
+  traversals into construction, bypassed two one-element sibling-list walks,
+  and built the sole result literal without `append_literal()`.  This was an
+  exact specialization of the generic path, and a focused regression checked
+  both the expected `P(a)` result and agreement with the independent
+  `para_pos2()` implementation.  The completed run's 1.600 billion
+  paramodulants made the call site look important, but strict whole-binary
+  gates were negative.  At 301 givens, candidate totals were 15.60 and 15.81
+  seconds versus 15.31 and 15.85 for the controls: one win, one loss, and a
+  +0.8% mean regression.  At the exact 1,501-given gate the candidate lost
+  both placements.  Candidate/control mean user CPU was 72.785/72.330 seconds
+  (+0.63%); system CPU was 4.020/4.025 seconds; and total CPU was
+  76.805/76.355 seconds (+0.59%).  Every process ended at
+  `(Given=1501, Generated=3603947, Kept=521972, proofs=0)`, with identical
+  rule-generation counts, normalized final operation counters and allocator
+  state, effectively identical RSS, and zero swap.  The prototype and its
+  temporary test were reverted completely, and the accepted portable binary
+  was restored byte-for-byte to SHA-256
+  `4a32437f5ff84e98946ae1309b130d9d7b9b574dbd949ca76521d275be03ff92`.
+  Removing a source-level list walk can still worsen optimized hot-code layout;
+  do not reintroduce this specialization without new mature evidence.
 - A negative Bloom summary was slower and was removed completely.
 - A query-scoped binding trail preserved all answers but raised the sampled
   generalization timer from roughly 2.72--2.76 to 2.920 seconds.  It was
