@@ -579,6 +579,74 @@ two-position near miss rejected only by the third condition, and the current
 binary passes `compact_unit_index_test`, `hint_preview_test`, and the full
 bounded compact-generalization smoke.
 
+### Posting-wide packed-hint rejection
+
+The completed Josef output identifies a separate mature hot path.  Its packed
+conjunction index received 1,921,904,699 cache-miss queries and reported
+235,862,987,833 posting candidates; profile masks and literal counts then
+rejected 235,740,740,444 of them.  These candidate counts are abstract posting
+references--the implementation scans them in 64-reference bit-plane
+blocks--but the scale and rejection ratio show that reading profile sidecars
+is substantial work even though almost no hint reaches exact subsumption.
+
+Commit `3f2f566` stores three conservative summaries for every profile
+posting: the OR of all 64-bit feature masks and the independent maximum
+positive and negative literal counts.  If a query requires a feature absent
+from the OR, or a literal count above either maximum, the entire posting is
+impossible.  The per-block planes and counts are then not touched.  This is a
+necessary-condition shortcut: overflow hints are still processed, surviving
+IDs retain their original order, and authoritative exact matching is
+unchanged.  The new cumulative counters are:
+
+```text
+summary_reject_queries=...
+summary_reject_candidates=...
+```
+
+The initial representation added eight bytes to every hash-table slot and
+therefore raised Josef's conjunction plan by 4 MiB.  That implementation was
+not retained.  Commit `4c0d0b2` overlays profile summaries with the dense
+bitset pointer and word-count fields used only by ordinary postings.  Posting
+kind is checked in dense construction, destruction and statistics.  The final
+representation restores Josef's exact control footprints:
+`table_bytes=46137424`, `estimated_bytes=314579336` and
+`peak_bytes=314579336`.  It therefore neither consumes extra index RAM nor
+causes a near-budget conjunction index to be declined earlier.
+
+At the exact Josef 01/1,501 endpoint, the shortcut rejected 2,221,209 of
+4,270,806 posting views (52.0%) before their sidecars, covering 37,287,356 of
+342,117,152 posting references (10.9%).  A clocks-off, 2-GiB concurrent
+reversed-core pair produced:
+
+| Binary | Pair user CPU | Mean user | Mean total CPU | Mean RSS |
+|---|---:|---:|---:|---:|
+| previous source | 80.42 / 79.82 s | 80.12 s | 84.67 s | 703,196 KiB |
+| posting summary | 78.49 / 77.90 s | **78.20 s** | **82.80 s** | 703,464 KiB |
+| change | -2.4% / -2.4% | **-2.4%** | **-2.2%** | +268 KiB |
+
+All four runs ended at
+`(Given=1501, Generated=3603947, Kept=521972, proofs=0)` with identical hint,
+cache, unit-index, selector and search-work counters; every process reported
+zero swap.  The 268-KiB RSS difference is measurement noise rather than an
+allocated sidecar: both the planner and runtime table bytes are exact.
+
+The generalization gates also preserved every endpoint and work counter.
+CHAT/601 rejected 53,832 posting views covering 440,413 references and used
+41.72 versus 42.67 total CPU seconds in one pinned orientation.  Josef 02/601
+declined the conjunction index in both binaries at exactly 107,115 plan scans
+and `estimated_bytes=335548256`; its inactive path used 34.01 versus 34.31
+seconds.  These single-orientation held-out timings are compatibility evidence,
+not standalone speedup claims.
+
+Applying Josef's bounded 10.9% candidate ratio to the completed count would
+suggest roughly 25.7 billion reference-equivalents whose sidecars might be
+avoided.  That is a workload projection, not a mature measurement: posting
+sizes and query profiles can shift substantially.  The full authority run
+must use the new counters to report interval and final selectivity directly.
+
+`hint_postings_test`, `hint_preview_test`, `compact_unit_index_test`, and the
+full compact-generalization smoke pass with the final overlaid layout.
+
 ### Sparse hint planes and reused generalization edge heads
 
 Commits `f13e552` and `3eb7c2b` remove two high-frequency pieces of redundant
@@ -800,6 +868,9 @@ the four-million-record scale gate observed a 34-MiB PSS increase including
 the associated mapping/page-cache effects.  Third-position unit refinement
 adds only a growable query-path scratch array; it occupied 256 bytes at the
 1,501-given gate and adds no per-clause or per-feature storage.
+Posting-wide packed-hint summaries are overlaid with mutually exclusive dense
+posting fields: measured conjunction table, plan and peak bytes are identical
+to the previous source, so this optimization adds no index allocation.
 
 The adaptive unit strategy is the exception: it maintains compressed position
 features as well as the code tree.  Unlimited depth still projects to about
@@ -842,6 +913,10 @@ CPU estimates are less certain and the gains are not additive:
   from 958,845 to 452,851 (-52.8%) at the same 1,501-given state and wins its
   strict reversed whole-process pair by 0.8%; this is a scaling improvement,
   not a claim that the bounded elapsed change alone is large;
+- posting-wide packed-hint summaries skip 52.0% of conjunction posting views
+  and 10.9% of their reference-equivalents at Josef 01/1,501 with no added
+  index bytes; their strict reversed pair improves mean user/total CPU by
+  2.4%/2.2%, while only the full run can establish mature selectivity;
 - sparse hint-plane population and first-edge reuse remove measured hot-path
   instructions with no new storage; their combined Josef 01/1,000 paired mean
   improved 2.6%, but frequency noise prevents a tighter full-run estimate;
@@ -882,10 +957,11 @@ sha256sum bin/prover9
 Do not reuse objects from a differently instrumented, sanitized, profiled, or
 `NATIVE=1` build.  If in doubt, use a fresh worktree or clean the build before
 compiling.  In particular, the repository's currently installed `bin/prover9`
-is intentionally the older PGO executable and does not contain commit
-`107665b`; run the build and copy steps above before the authority run.  The
-fresh portable source binary measured after that commit has SHA-256
-`45c3c7f51fe5b6037a921e2ac01d84ca2d548792742fdf6ed97342d5ee391b63`.
+is intentionally the older PGO executable and does not contain commits
+`107665b`, `3f2f566`, or `4c0d0b2`; run the build and copy steps above before
+the authority run.  The fresh portable source binary measured at `4c0d0b2`
+has SHA-256
+`70899ba6535f3e11a5b4c34c0680056aa0a5ebf4b33f51a34b77f76ba899eb6b`.
 
 ### Prover9 options
 
@@ -1050,6 +1126,10 @@ The new run is accepted only if all of the following hold:
    stores and posting candidates avoided.  Compare interval deltas rather than
    only the cumulative hit rate; mature reuse was much more valuable than the
    first 1,001 givens suggested.
+10. Inspect `Packed_fast_conjunction` for `summary_reject_queries` and
+    `summary_reject_candidates`.  Compare interval ratios against conjunction
+    queries and posting candidates; a falling ratio is harmless semantically
+    but limits the full-run CPU gain projected from the bounded prefix.
 
 ## Reproducing the bounded CHAT smoke
 
@@ -1082,10 +1162,12 @@ The next change should follow the mature telemetry, in this order:
    accident.  If adaptive's interval CPU/given slope loses to the bounded
    `code_tree` control, fall back instead of carrying an unproductive sidecar.
 3. If packed hints remain near 4,250 seconds, first separate cache hit work,
-   admission skips and conjunction candidates from authoritative exact tests.
-   Stable keys and work-based admission address cache overhead; a larger cache
-   has already failed.  Remaining profile-intersection cost needs a different
-   general representation, not a Josef-shaped special case.
+   admission skips, posting-wide summary rejects and residual conjunction
+   candidates from authoritative exact tests.  Stable keys and work-based
+   admission address cache overhead, posting summaries avoid proven-impossible
+   sidecar reads, and a larger cache has already failed.  Optimize residual
+   profile intersections only from their mature interval counters, not from a
+   Josef-shaped special case.
 4. If selector read amplification dominates, tune run merging from measured
    run counts and bytes, not from the short-prefix 65,536/1,048,576 buffer
    difference.
