@@ -187,6 +187,38 @@ production cases can reproduce either policy without editing logical input.
 It is unset by default; `CHAT_HINT_CACHE_KB=0` emits the Josef override only
 for `new_otter_compact_file_production`.
 
+### Mature file-selector buffer gate
+
+The completed compact run used a 65,536-entry selector buffer.  At the proof
+endpoint, its file selector had 36.11 million run entries and had performed
+551 flushes and 546 binary-run merges.  It wrote 8.38 GB and reread 7.52 GB.
+This is real merge amplification, not inference work, and motivates the
+1,048,576-entry setting in the authority configuration below.
+
+The scale probe was first repaired to use the directory's authoritative
+runtime record width.  It had retained a historical 64-byte assertion after
+later metadata increased the record to 72 bytes.  The probe now accepts a
+buffer size and reports directory/selector entry widths, flushes and merges.
+Existing selector order, compaction and checkpoint tests remain green.
+
+An optimized serial reversed pair inserted four million age-selected records
+with one file selector, selected the exact first ID and used zero swap:
+
+| Buffer | Mean user | Mean system | Mean total | Peak RSS | Flush / merge |
+|---:|---:|---:|---:|---:|---:|
+| 65,536 | 0.96 s | 1.26 s | 2.22 s | 89,636 KiB | 61 / 56 |
+| 1,048,576 | 0.71 s | 0.75 s | 1.46 s | 124,086 KiB | 3 / 1 |
+| change | -26.0% | -40.6% | **-34.3%** | +34,450 KiB | bounded |
+
+The larger buffer deterministically reduced bytes written from 498,597,888
+to 125,829,120 (-74.8%) and bytes read from 403,636,224 to 50,724,864
+(-87.4%).  The test is a selector-only scale proxy, so its 34% process result
+must not be applied to the complete prover.  It does establish that the
+larger buffer trades tens of MiB for substantially less mature selector CPU
+and I/O.  Buffers grow on demand per selector; in Josef 01 only `TheRest`
+grows to millions of entries, while the other active selector populations at
+the proof endpoint were below 20,000.
+
 ## Authoritative completed runs
 
 The source files are:
@@ -377,7 +409,10 @@ The accepted CPU changes do not materially undo the compact memory result.
 The direct symbol table costs one pointer per rounded symbol slot; term-base
 caching and sibling pruning add no long-lived search structure.  The slab
 pool has a strict 64-MiB ceiling, and changing the selector buffer from 65,536
-to 1,048,576 entries adds at most roughly 24 MiB of buffered selector entries.
+to 1,048,576 entries adds at most roughly 24 MiB for each selector that
+actually grows to the cap.  Only Josef's `TheRest` selector is large enough;
+the four-million-record scale gate observed a 34-MiB PSS increase including
+the associated mapping/page-cache effects.
 
 Starting from 9,083,561 KiB PSS, even charging the complete slab and selector
 allowances gives roughly 9.17 GiB-equivalent PSS.  The expected saving against
@@ -398,6 +433,9 @@ CPU estimates are less certain and the gains are not additive:
 - the direct symbol table is a measured 3.95% whole-prefix gain;
 - term-base caching saves about 12% only inside unit lookups;
 - sibling pruning saves about 38% only inside forward generalization;
+- the 1-Mi-entry selector buffer cuts scale-probe selector CPU by 34% and
+  read/write amplification by 87%/75%; its whole-prover contribution is
+  unknown until the authority run;
 - the slab recycler changes almost no bounded CPU but removes nearly all
   post-warm-up slab unmaps by 2,000 givens;
 - native compilation may add 0--5% depending on the host.
@@ -557,6 +595,9 @@ The new run is accepted only if all of the following hold:
 7. Inspect `Compact_unit_fanout` and unit query profiles.  If pending-subtree
    traversal dominates, the next work is a lower-exact-test position or
    substitution-tree route—not a larger result cache.
+8. Inspect `Dense_passive_selector` flushes, merges and read/write bytes.  The
+   1-Mi-entry policy should be far below the baseline's 551/546 merge counts;
+   otherwise another selector is unexpectedly reaching the cap.
 
 ## Reproducing the bounded CHAT smoke
 

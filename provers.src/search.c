@@ -2686,6 +2686,7 @@ void update_memory_stats(void)
   dense_passive_memory(&Stats.dense_passive_record_bytes,
                        &Stats.dense_passive_heap_bytes,
                        &Stats.dense_passive_records);
+  Stats.dense_passive_directory_entry_bytes = directory.entry_bytes;
   Stats.dense_passive_directory_logical_bytes = directory.logical_bytes;
   Stats.dense_passive_directory_allocated_bytes = directory.allocated_bytes;
   Stats.dense_passive_directory_file_eviction_passes =
@@ -3533,7 +3534,8 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
   if (dense_passive_mode())
     fprintf(fp,
             "Dense_passive: backing=%s, directory=%s, records=%s, "
-            "record_bytes=%s, directory_logical=%s, "
+            "record_bytes=%s, directory_entry_bytes=%s, "
+            "directory_logical=%s, "
             "directory_allocated=%s, "
             "heap_bytes=%s, arena_records=%s, arena_record_bytes=%s, "
             "arena_backing=%s, arena_physical=%s, "
@@ -3549,6 +3551,7 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
               "file" : "memory",
             comma_num(s.dense_passive_records),
             comma_num(s.dense_passive_record_bytes),
+            comma_num(s.dense_passive_directory_entry_bytes),
             comma_num(s.dense_passive_directory_logical_bytes),
             comma_num(s.dense_passive_directory_allocated_bytes),
             comma_num(s.dense_passive_heap_bytes),

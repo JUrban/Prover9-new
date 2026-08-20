@@ -730,7 +730,7 @@ scale gate.
 
 ## File-backed dense passive directory
 
-`assign(passive_directory,file).` moves the fixed 64-byte dense selection
+`assign(passive_directory,file).` moves the fixed 72-byte dense selection
 record array from anonymous memory to a separate private temporary file.  The
 file is created in `TMPDIR` (or `/tmp`), unlinked immediately, and therefore
 disappears automatically when the process closes or is killed.  It is distinct
@@ -746,7 +746,8 @@ proof IDs.  Weight and hint-age selectors still access their keys through the
 mapping in the default heap mode.  The optional external selector mode below
 removes that dependency and bounds their resident queues.
 
-The accelerated scale probe inserted 2.2 million active age-selected records:
+The original accelerated scale probe inserted 2.2 million active age-selected
+records when the record was still 64 bytes:
 
 | Logical directory | Allocated file | Heap | PSS | Anonymous | Evicted |
 |---:|---:|---:|---:|---:|---:|
@@ -762,9 +763,10 @@ generated and 5,737 kept clauses.  At that point 5,737 physical records used a
 367,168-byte logical directory, with zero anonymous directory bytes reported.
 
 At the 65.9-million-passive scale seen in the uploaded nine-hour clauses run,
-this stage moves roughly 4.22 GB of fixed directory records out of anonymous
-RAM.  It does **not** yet bound selector heaps: extrapolating the measured
-`out41` heap density still leaves roughly 0.42 GB at 65.9 million passives.
+the current 72-byte record moves roughly 4.74 GB of fixed directory records
+out of anonymous RAM.  It does **not** yet bound selector heaps: extrapolating
+the measured `out41` heap density still leaves roughly 0.42 GB at 65.9 million
+passives.
 Thus the directory alone is a material RAM step and a useful isolation
 boundary, not completion of the external passive control plane.
 
@@ -795,7 +797,8 @@ The full compact-OTTER checkpoint differential now uses a file directory and
 1,024-entry file selectors; checkpoint boundaries zero and two reproduce the
 uninterrupted candidate/given traces, final search counters, and proof.
 
-With a 65,536-entry buffer, the 2.2-million-age-record probe now reports:
+With a 65,536-entry buffer, the original 64-byte, smaller-read-block
+2.2-million-age-record probe reported:
 
 | Directory logical | Selector resident | Selector run logical | PSS | Anonymous | Selector bytes written |
 |---:|---:|---:|---:|---:|---:|
@@ -831,8 +834,24 @@ shows no material CPU regression at this prefix.  No individual selector had
 yet filled 65,536 entries, so this closes the resident-buffer and queue-policy
 gate, not the mature-run IO gate.
 
+The current scale probe is record-width aware and accepts an optional selector
+buffer argument.  With the present 72-byte directory record, a serial reversed
+four-million-record comparison produced:
+
+| Buffer | Total CPU mean | System CPU mean | PSS | Writes | Reads | Flushes / merges |
+|---:|---:|---:|---:|---:|---:|---:|
+| 65,536 | 2.22 s | 1.26 s | about 28.3 MiB | 498.60 MB | 403.64 MB | 61 / 56 |
+| 1,048,576 | 1.46 s | 0.75 s | about 62.1 MiB | 125.83 MB | 50.72 MB | 3 / 1 |
+
+Both order orientations agreed, returned the exact first age-selected ID and
+used zero swap.  The larger buffer reduces total selector CPU by 34.3%, writes
+by 74.8% and reads by 87.4%, at a roughly 34-MiB PSS cost for this one-selector
+probe.  This closes the previously open multi-million selector CPU/I/O gate
+for the buffer policy; the complete prover gate remains open because
+inference, hint and index work dominate its process CPU.
+
 At the observed 65.9-million-passive scale, file directory plus file selectors
-remove the roughly 4.22 GB directory and approximately 0.42 GB selector heaps
+remove the roughly 4.74 GB directory and approximately 0.42 GB selector heaps
 from anonymous RAM.  This does not reduce compact inference-index memory or
 the OS-accounted file cache; those remain separate totals in the 80--90% RAM
 acceptance calculation.

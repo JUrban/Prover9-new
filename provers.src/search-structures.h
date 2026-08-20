@@ -576,6 +576,7 @@ struct prover_stats {
     dense_passive_records,
     dense_passive_record_bytes,
     dense_passive_heap_bytes,
+    dense_passive_directory_entry_bytes,
     dense_passive_directory_logical_bytes,
     dense_passive_directory_allocated_bytes,
     dense_passive_directory_file_eviction_passes,
