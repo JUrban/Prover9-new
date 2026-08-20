@@ -78,6 +78,20 @@ struct cui_new_bindings {
 typedef char cui_new_bindings_cover_max_vars[
   MAX_VARS <= 128 ? 1 : -1];
 
+/* Explicit depth-first-search state for generalization lookup.  Each frame
+   owns exactly the bindings introduced by the edge from its parent, so
+   popping a failed branch restores the same state as recursive unwinding. */
+struct cui_generalization_frame {
+  uint32_t node;
+  uint32_t position;
+  uint32_t next_child;
+  int32_t wanted;
+  struct cui_new_bindings new_bindings;
+};
+
+typedef char cui_generalization_frame_must_remain_32_bytes[
+  sizeof(struct cui_generalization_frame) == 32 ? 1 : -1];
+
 struct cui_adaptive_route {
   uint64_t key;
   unsigned long long tree_nodes;
@@ -114,6 +128,8 @@ struct compact_unit_index {
   Compact_id_map id_map;
   struct cui_query_term *query;
   size_t query_capacity;
+  struct cui_generalization_frame *generalization_stack;
+  size_t generalization_stack_capacity;
   unsigned long long *result_ids;
   size_t result_capacity;
   uint64_t *path_stack;
@@ -445,6 +461,8 @@ static unsigned long long index_bytes(Compact_unit_index index)
     (index->owns_term_pool ? terms.total_bytes : 0) +
     compact_id_map_bytes(index->id_map) +
     index->query_capacity * sizeof(*index->query) +
+    index->generalization_stack_capacity *
+      sizeof(*index->generalization_stack) +
     index->result_capacity * sizeof(*index->result_ids) +
     index->path_capacity * sizeof(*index->path_stack) +
     index->child_capacity * sizeof(*index->child_stack) +
@@ -955,6 +973,7 @@ static void compact_unit_index_compact_internal(Compact_unit_index index,
   safe_free(old.feature_chunks);
   compact_id_map_free(old.id_map);
   safe_free(old.query);
+  safe_free(old.generalization_stack);
   safe_free(old.result_ids);
   safe_free(old.path_stack);
   safe_free(old.child_stack);
@@ -1127,9 +1146,9 @@ static BOOL match_generalization_edge(
   uint32_t i = 0;
   new_bindings->low = 0;
   new_bindings->high = 0;
-  /* GENERALIZATION_REC has already read and classified the first token.
-     For its equal rigid branch, the target is known rigid with this symbol;
-     consume both without resolving and comparing them a second time. */
+  /* The generalization traversal has already read and classified the first
+     token.  For its equal rigid branch, the target is known rigid with this
+     symbol; consume both without resolving and comparing them a second time. */
   if (first_code >= 0) {
     if (length == 0 || position >= end)
       return FALSE;
@@ -1183,28 +1202,53 @@ static void undo_generalization_bindings(Term *bindings,
   }
 }
 
-static unsigned long long generalization_rec(
-  Compact_unit_index index, uint32_t node, uint32_t position,
-  uint32_t end, Term *bindings, unsigned long long exclude_id,
-  struct cui_query_work *work)
+static void ensure_generalization_stack(Compact_unit_index index,
+                                        size_t required)
 {
-  uint32_t child;
+  size_t capacity = index->generalization_stack_capacity;
+  if (capacity >= required)
+    return;
+  while (capacity < required)
+    capacity = grow_capacity(
+      capacity,
+      sizeof(*index->generalization_stack),
+      "compact_unit_index: generalization stack overflow");
+  index->generalization_stack = safe_realloc(
+    index->generalization_stack,
+    capacity * sizeof(*index->generalization_stack));
+  index->generalization_stack_capacity = capacity;
+}
+
+static void initialize_generalization_frame(
+  Compact_unit_index index, struct cui_generalization_frame *frame,
+  uint32_t node, uint32_t position, uint32_t end,
+  struct cui_new_bindings new_bindings)
+{
+  frame->node = node;
+  frame->position = position;
+  frame->new_bindings = new_bindings;
   if (position == end) {
-    uint32_t posting;
-    for (posting = index->nodes[node].first_posting;
-         posting != CUI_NONE; posting = index->postings[posting].next) {
-      struct cui_record *record =
-        &index->records[index->postings[posting].record];
-      work->postings++;
-      if (record->active)
-        work->live++;
-      else
-        work->dead++;
-      if (record->active && record->proof_id != exclude_id)
-        return record->proof_id;
-    }
-    return 0;
+    frame->next_child = CUI_NONE;
+    frame->wanted = -1;
   }
+  else {
+    Term target = index->query[position].term;
+    frame->next_child = index->nodes[node].first_child;
+    frame->wanted = VARIABLE(target) ? -1 : (int32_t) SYMNUM(target);
+  }
+}
+
+static unsigned long long generalization_iterative(
+  Compact_unit_index index, uint32_t root, uint32_t end, Term *bindings,
+  unsigned long long exclude_id, struct cui_query_work *work)
+{
+  struct cui_new_bindings no_bindings = { 0, 0 };
+  size_t depth = 1;
+
+  ensure_generalization_stack(index, (size_t) end + 1);
+  initialize_generalization_frame(
+    index, &index->generalization_stack[0], root, 0, end,
+    no_bindings);
 
   /*
    * Siblings use code_compare() order: every stored-variable edge first,
@@ -1216,30 +1260,58 @@ static unsigned long long generalization_rec(
    * Repeated stored variables still require visiting every variable edge;
    * their bindings remain authoritative in match_generalization_edge().
    */
-  {
-    Term target = index->query[position].term;
-    BOOL target_variable = VARIABLE(target);
-    int32_t wanted = target_variable ? 0 : (int32_t) SYMNUM(target);
+  while (depth != 0) {
+    struct cui_generalization_frame *frame =
+      &index->generalization_stack[depth - 1];
 
-  for (child = index->nodes[node].first_child; child != CUI_NONE;
-       child = index->nodes[child].next_sibling) {
-      int32_t code = query_first_code(index, child);
-      if (code < 0 || (!target_variable && code == wanted)) {
-        struct cui_new_bindings new_bindings;
-        uint32_t next_position = position;
-        unsigned long long found = 0;
-        work->nodes++;
-        if (match_generalization_edge(index, child, position, end, code,
-                                      bindings, &new_bindings,
-                                      &next_position))
-          found = generalization_rec(index, child, next_position, end,
-                                     bindings, exclude_id, work);
-        undo_generalization_bindings(bindings, new_bindings);
-        if (found != 0)
-          return found;
+    if (frame->position == end) {
+      uint32_t posting;
+      for (posting = index->nodes[frame->node].first_posting;
+           posting != CUI_NONE; posting = index->postings[posting].next) {
+        struct cui_record *record =
+          &index->records[index->postings[posting].record];
+        work->postings++;
+        if (record->active)
+          work->live++;
+        else
+          work->dead++;
+        if (record->active && record->proof_id != exclude_id)
+          return record->proof_id;
       }
-      else if (target_variable || code > wanted)
-        break;
+      undo_generalization_bindings(bindings, frame->new_bindings);
+      depth--;
+    }
+    else if (frame->next_child == CUI_NONE) {
+      undo_generalization_bindings(bindings, frame->new_bindings);
+      depth--;
+    }
+    else {
+      uint32_t child = frame->next_child;
+      int32_t code;
+
+      /* Advance the parent before descending so a pop resumes at the exact
+         next sibling, just as the recursive for-loop did. */
+      frame->next_child = index->nodes[child].next_sibling;
+      code = query_first_code(index, child);
+      if (code < 0 || (frame->wanted >= 0 && code == frame->wanted)) {
+        struct cui_new_bindings new_bindings;
+        uint32_t next_position = frame->position;
+        work->nodes++;
+        if (match_generalization_edge(index, child, frame->position, end, code,
+                                      bindings, &new_bindings,
+                                      &next_position)) {
+          if (depth >= index->generalization_stack_capacity)
+            fatal_error("compact_unit_index: invalid generalization depth");
+          initialize_generalization_frame(
+            index, &index->generalization_stack[depth], child,
+            next_position, end, new_bindings);
+          depth++;
+        }
+        else
+          undo_generalization_bindings(bindings, new_bindings);
+      }
+      else if (frame->wanted < 0 || code > frame->wanted)
+        frame->next_child = CUI_NONE;
     }
   }
   return 0;
@@ -1261,9 +1333,12 @@ unsigned long long compact_unit_generalization_first(
   prepare_query_term_access(index);
   memset(bindings, 0, sizeof(bindings));
   flatten_query(index, target, &count);
-  result = count == 0 ? 0 : generalization_rec(
-    index, index->roots[sign ? 1 : 0], 0, (uint32_t) count,
-    bindings, exclude_id, &work);
+  if (count == 0)
+    result = 0;
+  else
+    result = generalization_iterative(
+      index, index->roots[sign ? 1 : 0], (uint32_t) count,
+      bindings, exclude_id, &work);
   compact_profile_note(&index->generalization_profile,
                        work.postings,
                        work.nodes + work.postings,
@@ -2422,6 +2497,8 @@ void compact_unit_index_get_stats(Compact_unit_index index,
   stats->hash_bytes = compact_id_map_bytes(index->id_map);
   stats->scratch_bytes =
     index->query_capacity * sizeof(*index->query) +
+    index->generalization_stack_capacity *
+      sizeof(*index->generalization_stack) +
     index->result_capacity * sizeof(*index->result_ids) +
     index->path_capacity * sizeof(*index->path_stack) +
     index->child_capacity * sizeof(*index->child_stack) +
@@ -2462,6 +2539,7 @@ void compact_unit_index_free(Compact_unit_index index)
     compact_term_pool_free(index->term_pool);
   compact_id_map_free(index->id_map);
   safe_free(index->query);
+  safe_free(index->generalization_stack);
   safe_free(index->result_ids);
   safe_free(index->path_stack);
   safe_free(index->child_stack);

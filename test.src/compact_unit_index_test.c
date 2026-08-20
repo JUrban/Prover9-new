@@ -41,6 +41,69 @@ static void check_high_variable_generalization(void)
   delete_clause(target);
 }
 
+static void check_deep_generalization_stack(void)
+{
+  enum { DEPTH = 80 };
+  Compact_unit_index index = compact_unit_index_init();
+  Topform branches[DEPTH];
+  Topform general;
+  Topform target;
+  char text[1024];
+  int i, j;
+
+  /* Give the compressed radix tree a branch at every target depth.  The
+     matching path consequently needs more than the stack's initial 64-frame
+     allocation even though no fixed recursion or depth limit is allowed. */
+  for (i = 0; i < DEPTH; i++) {
+    size_t at = (size_t) snprintf(text, sizeof(text), "deep_stack(");
+    for (j = 0; j < i; j++)
+      at += (size_t) snprintf(text + at, sizeof(text) - at, "f(");
+    at += (size_t) snprintf(text + at, sizeof(text) - at, "c%d", i);
+    for (j = 0; j <= i; j++)
+      at += (size_t) snprintf(text + at, sizeof(text) - at, ")");
+    at += (size_t) snprintf(text + at, sizeof(text) - at, ".");
+    CHECK(at < sizeof(text), "construct a deep radix branch");
+    branches[i] = indexed_unit(text);
+    CHECK(compact_unit_index_add(index, branches[i]),
+          "index a deep radix branch");
+  }
+
+  {
+    size_t at = (size_t) snprintf(text, sizeof(text), "deep_stack(");
+    for (i = 0; i < DEPTH; i++)
+      at += (size_t) snprintf(text + at, sizeof(text) - at, "f(");
+    at += (size_t) snprintf(text + at, sizeof(text) - at, "x");
+    for (i = 0; i <= DEPTH; i++)
+      at += (size_t) snprintf(text + at, sizeof(text) - at, ")");
+    at += (size_t) snprintf(text + at, sizeof(text) - at, ".");
+    CHECK(at < sizeof(text), "construct a deep generalization");
+    general = indexed_unit(text);
+    CHECK(compact_unit_index_add(index, general),
+          "index a deep generalization");
+  }
+
+  {
+    size_t at = (size_t) snprintf(text, sizeof(text), "deep_stack(");
+    for (i = 0; i < DEPTH; i++)
+      at += (size_t) snprintf(text + at, sizeof(text) - at, "f(");
+    at += (size_t) snprintf(text + at, sizeof(text) - at, "a");
+    for (i = 0; i <= DEPTH; i++)
+      at += (size_t) snprintf(text + at, sizeof(text) - at, ")");
+    at += (size_t) snprintf(text + at, sizeof(text) - at, ".");
+    CHECK(at < sizeof(text), "construct a deep target");
+    target = parse_clause_from_string(text);
+  }
+  CHECK(compact_unit_generalization_first(
+          index, target->literals->atom, TRUE, 0) == general->id,
+        "iterative generalization grows beyond its initial stack allocation");
+
+  compact_unit_index_free(index);
+  for (i = 0; i < DEPTH; i++)
+    delete_clause(branches[i]);
+  delete_clause(general);
+  delete_clause(target);
+}
+
 static void check_high_base_strategy(Compact_unit_strategy strategy)
 {
   Compact_term_pool pool = compact_term_pool_init();
@@ -113,6 +176,7 @@ int main(void)
 
   init_standard_ladr();
   check_high_variable_generalization();
+  check_deep_generalization_stack();
   index = compact_unit_index_init();
   general = indexed_unit("p(x).");
   exact = indexed_unit("p(a).");
