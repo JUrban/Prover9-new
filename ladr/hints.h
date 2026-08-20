@@ -47,6 +47,9 @@ void init_hints(Uniftype utype,
 		unsigned rebuild_scan_ratio,
 		void (*demod_proc) (Topform, int, int, BOOL, BOOL));
 
+/* Admit a packed-fast result only after at least this much posting work. */
+void set_hint_cache_min_candidates(unsigned minimum);
+
 void done_with_hints(void);
 
 /* Complete the population-wide packed-fast conjunction plan after all input

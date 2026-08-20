@@ -83,7 +83,8 @@ static void run_case(BOOL packed, BOOL better, BOOL fast, int bsub)
   delete_clause(hint);
 }
 
-static void run_variable_cache_case(int bsub)
+static void run_variable_cache_case(int bsub, unsigned conjunction_kb,
+                                    const char *path)
 {
   const char *text = "cache_probe(wide(a,b,c,d,e,f,g,h,i,j)).";
   Topform hint = parse_clause_from_string((char *) text);
@@ -91,13 +92,14 @@ static void run_variable_cache_case(int bsub)
   Topform second = parse_clause_from_string((char *) text);
   unsigned long long maximum_keys = 0;
   unsigned long long cache_bytes = 0;
+  unsigned long long cache_hits = 0;
   BOOL saw_cache = FALSE, saw_no_overflow = FALSE;
   FILE *stats = tmpfile();
   char line[4096];
 
   hint->attributes = set_int_attribute(hint->attributes, bsub, 5);
   init_hints(ORDINARY_UNIF, bsub, FALSE, FALSE, 2,
-             TRUE, TRUE, TRUE, 64, 327680, 0, 8, NULL);
+             TRUE, TRUE, TRUE, 64, conjunction_kb, 0, 8, NULL);
   index_hint(hint);
   adjust_weight_with_hints(first, FALSE, FALSE);
   adjust_weight_with_hints(second, FALSE, FALSE);
@@ -111,8 +113,11 @@ static void run_variable_cache_case(int bsub)
       char *maximum = strstr(line, "max_keys=");
       char *table = strstr(line, "table_bytes=");
       if (strstr(line, "Packed_fast_cache:") != NULL) {
+        char *hits = strstr(line, "hits=");
         saw_cache = TRUE;
         saw_no_overflow = strstr(line, "key_overflow=0,") != NULL;
+        if (hits != NULL)
+          cache_hits = strtoull(hits + strlen("hits="), NULL, 10);
       }
       if (maximum != NULL)
         (void) sscanf(maximum, "max_keys=%llu", &maximum_keys);
@@ -127,6 +132,56 @@ static void run_variable_cache_case(int bsub)
         "cache accepts a complete profile beyond the former eight-key cap");
   CHECK(cache_bytes <= 64 * 1024 && cache_bytes > 0,
         "fast cache allocation obeys its KiB budget");
+  if (cache_hits == 0) {
+    fprintf(stderr, "FAIL: %s cache profile produces an exact hit (line %d)\n",
+            path, __LINE__);
+    Failures++;
+  }
+  unindex_hint(hint);
+  done_with_hints();
+  delete_clause(first);
+  delete_clause(second);
+  delete_clause(hint);
+}
+
+static void run_cache_admission_case(int bsub)
+{
+  Topform hint = parse_clause_from_string("cache_admit(f(a)).");
+  Topform first = parse_clause_from_string("cache_admit(f(a)).");
+  Topform second = parse_clause_from_string("cache_admit(f(a)).");
+  unsigned long long skips = 0, stores = ULLONG_MAX, hits = ULLONG_MAX;
+  FILE *stats = tmpfile();
+  char line[4096];
+
+  hint->attributes = set_int_attribute(hint->attributes, bsub, 4);
+  set_hint_cache_min_candidates(UINT_MAX);
+  init_hints(ORDINARY_UNIF, bsub, FALSE, FALSE, 2,
+             TRUE, TRUE, TRUE, 64, 327680, 0, 8, NULL);
+  index_hint(hint);
+  adjust_weight_with_hints(first, FALSE, FALSE);
+  adjust_weight_with_hints(second, FALSE, FALSE);
+  CHECK(first->matching_hint == hint && second->matching_hint == hint,
+        "cache admission threshold preserves authoritative matches");
+  CHECK(stats != NULL, "open cache admission statistics stream");
+  if (stats != NULL) {
+    fprint_packed_hint_operation_stats(stats);
+    rewind(stats);
+    while (fgets(line, sizeof(line), stats) != NULL)
+      if (strstr(line, "Packed_fast_cache:") != NULL) {
+        char *field = strstr(line, "admission_skips=");
+        if (field != NULL)
+          skips = strtoull(field + strlen("admission_skips="), NULL, 10);
+        field = strstr(line, "stores=");
+        if (field != NULL)
+          stores = strtoull(field + strlen("stores="), NULL, 10);
+        field = strstr(line, "hits=");
+        if (field != NULL)
+          hits = strtoull(field + strlen("hits="), NULL, 10);
+      }
+    fclose(stats);
+  }
+  CHECK(skips >= 2 && stores == 0 && hits == 0,
+        "cache admission rejects cheap profiles before storing them");
   unindex_hint(hint);
   done_with_hints();
   delete_clause(first);
@@ -449,7 +504,9 @@ int main(void)
   run_case(TRUE, FALSE, FALSE, bsub);
   run_case(TRUE, TRUE, FALSE, bsub);
   run_case(TRUE, TRUE, TRUE, bsub);
-  run_variable_cache_case(bsub);
+  run_variable_cache_case(bsub, 327680, "stable conjunction-order");
+  run_variable_cache_case(bsub, 0, "canonical sparse-fallback");
+  run_cache_admission_case(bsub);
   run_observed_stale_rebuild_case(bsub);
   run_back_fingerprint_case(bsub);
   run_conjunction_budget_case(bsub);

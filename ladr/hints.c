@@ -214,6 +214,7 @@ static uint32_t *Fast_match_cache_key_owners = NULL;
 static size_t Fast_match_cache_key_count = 0;
 static size_t Fast_match_cache_key_capacity = 0;
 static unsigned long long Fast_match_cache_budget = 0;
+static unsigned Fast_match_cache_min_candidates = 0;
 static unsigned long long Fast_cache_queries = 0;
 static unsigned long long Fast_cache_eligible = 0;
 static unsigned long long Fast_cache_hits = 0;
@@ -221,6 +222,7 @@ static unsigned long long Fast_cache_misses = 0;
 static unsigned long long Fast_cache_stores = 0;
 static unsigned long long Fast_cache_key_overflow = 0;
 static unsigned long long Fast_cache_candidate_overflow = 0;
+static unsigned long long Fast_cache_admission_skips = 0;
 static unsigned long long Fast_cache_posting_candidates_avoided = 0;
 static unsigned long long Fast_cache_dependency_misses = 0;
 static unsigned long long Fast_cache_profile_misses = 0;
@@ -1918,13 +1920,18 @@ static int fast_key_order(const void *a, const void *b)
   return x < y ? -1 : x > y ? 1 : 0;
 }
 
-static BOOL fast_canonical_profile(const unsigned long long **keys,
-                                   unsigned *key_count)
+static BOOL fast_cache_profile(const unsigned long long **keys,
+                               unsigned *key_count)
 {
   if (Fast_match_cache == NULL)
     return FALSE;
   *key_count = Better_key_scratch_count;
-  if (*key_count > 1)
+  /* The complete conjunction path consumes the collection-order vector
+     without mutating it, so that deterministic order is already an exact
+     cache identity.  The fallback posting intersection selects rare keys by
+     reordering this shared vector; canonicalize only for that path so cache
+     stores and later lookups agree. */
+  if (Fast_conjunction_postings == NULL && *key_count > 1)
     qsort(Better_key_scratch, *key_count,
           sizeof(*Better_key_scratch), fast_key_order);
   *keys = Better_key_scratch;
@@ -1995,6 +2002,10 @@ static void fast_cache_store(
   unsigned i;
   if (Hint_preview_active)
     return;
+  if (source_posting_candidates < Fast_match_cache_min_candidates) {
+    Fast_cache_admission_skips++;
+    return;
+  }
   if (Packed_candidates_count > FAST_MATCH_CACHE_CANDIDATES) {
     Fast_cache_candidate_overflow++;
     return;
@@ -2363,6 +2374,11 @@ static void fast_cache_init(unsigned cache_kb)
   Fast_match_cache_capacity = capacity;
 }
 
+void set_hint_cache_min_candidates(unsigned minimum)
+{
+  Fast_match_cache_min_candidates = minimum;
+}
+
 /* DOCUMENTATION
 */
 
@@ -2547,6 +2563,7 @@ void done_with_hints(void)
   Fast_match_cache_capacity = 0;
   Fast_match_cache_key_count = Fast_match_cache_key_capacity = 0;
   Fast_match_cache_budget = 0;
+  Fast_match_cache_min_candidates = 0;
   Better_feature_live_count = 0;
   Better_equivalence_live_count = 0;
   Better_anyconst_live_count = 0;
@@ -2566,6 +2583,7 @@ void done_with_hints(void)
   Fast_cache_queries = Fast_cache_eligible = 0;
   Fast_cache_hits = Fast_cache_misses = Fast_cache_stores = 0;
   Fast_cache_key_overflow = Fast_cache_candidate_overflow = 0;
+  Fast_cache_admission_skips = 0;
   Fast_cache_posting_candidates_avoided = 0;
   Fast_cache_dependency_misses = Fast_cache_profile_misses = 0;
   Fast_cache_arena_resets = 0;
@@ -2765,7 +2783,7 @@ static void better_collect_clause_candidates(
                                        BETTER_MATCH_FEATURE_DEPTH);
     if (Fast_packed_index) {
       fast_eligible = positive <= USHRT_MAX && negative <= USHRT_MAX &&
-                      fast_canonical_profile(&fast_keys, &fast_key_count);
+                      fast_cache_profile(&fast_keys, &fast_key_count);
       if (!fast_eligible && !Hint_preview_active) {
         Fast_cache_queries++;
       }
@@ -2819,11 +2837,19 @@ static void better_collect_clause_candidates(
       Packed_candidates[keep++] = id;
   }
   Packed_candidates_count = keep;
-  if (fast_eligible)
+  if (fast_eligible) {
+    /* The sparse fallback chooses a rare posting by reordering the scratch
+       keys after the lookup.  Restore its canonical identity before storing;
+       otherwise every later lookup sorts the same profile but cannot hit the
+       permuted entry.  Conjunction collection never mutates the keys. */
+    if (Fast_conjunction_postings == NULL && fast_key_count > 1)
+      qsort(Better_key_scratch, fast_key_count,
+            sizeof(*Better_key_scratch), fast_key_order);
     fast_cache_store(
       fast_keys, fast_key_count, first_mask, positive, negative,
       Packed_operation_stats[op].posting_candidates -
         posting_candidates_before);
+  }
   packed_operation_candidates(op);
 }
 
@@ -3928,6 +3954,7 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             "entry_bytes=%llu, key_capacity=%llu, key_cursor=%llu, "
             "table_bytes=%llu, queries=%llu, eligible=%llu, hits=%llu, "
             "misses=%llu, hit_rate=%.2f, stores=%llu, key_overflow=%llu, "
+            "min_candidates=%u, admission_skips=%llu, "
             "mean_keys=%.2f, max_keys=%llu, arena_wraps=%llu, "
             "overlap_invalidations=%llu, "
             "candidate_overflow=%llu, dependency_misses=%llu, "
@@ -3947,6 +3974,7 @@ void fprint_packed_hint_operation_stats(FILE *fp)
               100.0 * (double) Fast_cache_hits /
                 (double) Fast_cache_eligible,
             Fast_cache_stores, Fast_cache_key_overflow,
+            Fast_match_cache_min_candidates, Fast_cache_admission_skips,
             Fast_cache_eligible == 0 ? 0.0 :
               (double) Fast_cache_profile_keys /
                 (double) Fast_cache_eligible,

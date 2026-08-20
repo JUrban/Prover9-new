@@ -2196,6 +2196,8 @@ Prover_options init_prover_options(void)
   p->hint_expiry_min =    init_parm("hint_expiry_min",       1,      1,INT_MAX);
   p->hints_fpa_depth =    init_parm("hints_fpa_depth",      10,      1,    100);
   p->hint_cache_kb =      init_parm("hint_cache_kb",      2048,      0,INT_MAX);
+  p->hint_cache_min_candidates =
+    init_parm("hint_cache_min_candidates", 0, 0, INT_MAX);
   p->hint_conjunction_kb =
     init_parm("hint_conjunction_kb", 327680, 0, INT_MAX);
   p->hint_rebuild_scan_ratio =
@@ -11593,6 +11595,8 @@ void index_and_process_initial_clauses(void)
   Glob.clashable_idx = lindex_init(FPA, ORDINARY_UNIF, fpa_depth,
 				   FPA, ORDINARY_UNIF, fpa_depth);
 
+  set_hint_cache_min_candidates(
+    (unsigned) parm(Opt->hint_cache_min_candidates));
   init_hints(ORDINARY_UNIF, Att.bsub_hint_wt,
 	     flag(Opt->collect_hint_labels),
 	     flag(Opt->back_demod_hints),
@@ -16135,6 +16139,8 @@ void load_checkpoint_into_loop(void)
   init_back_demod_index(FPA, ORDINARY_UNIF, fpa_depth);
   Glob.clashable_idx = lindex_init(FPA, ORDINARY_UNIF, fpa_depth,
                                    FPA, ORDINARY_UNIF, fpa_depth);
+  set_hint_cache_min_candidates(
+    (unsigned) parm(Opt->hint_cache_min_candidates));
   init_hints(ORDINARY_UNIF, Att.bsub_hint_wt,
              flag(Opt->collect_hint_labels),
              flag(Opt->back_demod_hints),
