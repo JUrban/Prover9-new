@@ -416,6 +416,9 @@ The statistics line exposes the mechanism directly:
 position_refinement_queries=...
 position_refinement_checks=...
 position_refinement_rejects=...
+position_tertiary_queries=...
+position_tertiary_checks=...
+position_tertiary_rejects=...
 ```
 
 At the exact Josef 01 601-given endpoint, the refined route performed 4,183
@@ -536,6 +539,46 @@ trajectory and proof are unchanged and the interval CPU/given slope improves
 without compromising the radical RAM saving.  Depth 1 saves more RAM but
 scans many more common postings and is not the recommended long-run policy.
 
+### Third direct unit-conflict condition
+
+Commit `107665b` extends direct refinement by one more rigid query position.
+It still decodes only the rarest first-position union.  After a record passes
+the existing second-position condition, the code checks a third distinct
+position directly in the same compact prefix term before invoking the exact
+unifier.  A stored variable at that position or any ancestor passes, so this
+is another complete necessary-condition filter rather than an approximation.
+No third posting union is decoded, proof-ID order is unchanged, and the only
+new persistent capacity observed at the 1,501-given gate was a 256-byte path
+scratch buffer.
+
+In a clocks-off, 2-GiB Josef 01/1,501 reversed pair, the new condition won
+both core orientations:
+
+| Refinement | Pair totals | Mean CPU | Conflict exact tests | Peak RSS mean |
+|---|---:|---:|---:|---:|
+| two positions | 82.33 / 81.11 s | 81.72 s | 958,845 | 689,964 KiB |
+| three positions | 81.83 / 80.31 s | 81.07 s | 452,851 | 689,694 KiB |
+
+Thus the whole-prefix gain is modest (-0.8%), but exact-unifier calls fall by
+505,994 (-52.8%).  The third condition ran for 398,526 queries, checked
+680,261 survivors and rejected 505,994 of them (74.4%).  Every run ended at
+`(Given=1501, Generated=3603947, Kept=521972)` with identical hint, routing,
+posting and selected-search counters and zero swap.  A separate traced
+100-given candidate/control gate produced the same 100 selected-given lines,
+with SHA-256
+`2eb5d7ef1674e54e8c25e6031e230072d971ec26fcc7aec291271de69ed362d3`.
+
+The cross-workload gates found no general regression.  CHAT/601 preserved
+`(Generated=497430, Kept=16974)` and averaged 41.07 seconds candidate versus
+41.45 control across reversed cores; only 11 queries selected a third feature
+and no posting survivor reached that check.  Josef 02/601 preserved
+`(Generated=524799, Kept=26671)` and never selected the position route at all.
+Its candidate/control timing difference is therefore optimized-binary layout
+or host-frequency noise, not an algorithmic claim.  The focused test covers a
+two-position near miss rejected only by the third condition, and the current
+binary passes `compact_unit_index_test`, `hint_preview_test`, and the full
+bounded compact-generalization smoke.
+
 ### Sparse hint planes and reused generalization edge heads
 
 Commits `f13e552` and `3eb7c2b` remove two high-frequency pieces of redundant
@@ -623,6 +666,23 @@ plausible-looking options that were already negative.
   it lost in both orientations.  The current learned factor 12 is therefore
   retained; larger factors merely exchange cheap contiguous tree work for
   too little avoided position work.
+- Extending the resident feature sidecar from depth 2 to depth 3 was rejected
+  at the exact 1,501-given endpoint.  It reduced position postings from
+  2,988,159 to 1,438,042 (-51.9%) and exact tests from 958,845 to 750,933
+  (-21.7%), but the adaptive policy selected the tree more often and tree
+  nodes rose from 4,675,184 to 9,299,799.  In a reversed pair, depth 3
+  averaged 92.76 CPU seconds versus 91.78 for depth 2 (+1.1%), lost one
+  orientation, and raised mean RSS from 689,928 to 700,232 KiB.  All endpoints
+  and search counters were exact and swap was zero.  Better-looking candidate
+  counts do not justify the extra feature coverage or its altered route mix;
+  keep `compact_unit_feature_depth=2`.
+- A proposed cost gate for the third direct condition was also removed.  It
+  skipped 67,098 third-feature selections while losing only 1,310 rejections,
+  which looked favorable as a work count, but its reversed mean was 84.05 CPU
+  seconds versus 83.43 for the unconditional third check (+0.7%), and it lost
+  both core orientations.  The extra branch/counter and resulting optimized
+  layout outweighed the avoided short query traversals.  The production code
+  therefore has no hidden small-union threshold.
 - A 64-MiB packed-hint result cache raised its hit rate only from 7.42% to
   9.03%, used about 63 MiB more RSS, and increased the 1,000-given CPU result
   from the current paired mean of 78.83 to 82.11 seconds.  Do not add
@@ -729,7 +789,9 @@ pool has a strict 64-MiB ceiling, and changing the selector buffer from 65,536
 to 1,048,576 entries adds at most roughly 24 MiB for each selector that
 actually grows to the cap.  Only Josef's `TheRest` selector is large enough;
 the four-million-record scale gate observed a 34-MiB PSS increase including
-the associated mapping/page-cache effects.
+the associated mapping/page-cache effects.  Third-position unit refinement
+adds only a growable query-path scratch array; it occupied 256 bytes at the
+1,501-given gate and adds no per-clause or per-feature storage.
 
 The adaptive unit strategy is the exception: it maintains compressed position
 features as well as the code tree.  Unlimited depth still projects to about
@@ -768,6 +830,10 @@ CPU estimates are less certain and the gains are not additive:
   reversed-pair total by 2.6% while adding 18.2 MiB RSS, but its full-run gain
   and mature feature-store size still must be measured rather than
   extrapolated;
+- the third direct position condition then cuts conflict exact-unifier calls
+  from 958,845 to 452,851 (-52.8%) at the same 1,501-given state and wins its
+  strict reversed whole-process pair by 0.8%; this is a scaling improvement,
+  not a claim that the bounded elapsed change alone is large;
 - sparse hint-plane population and first-edge reuse remove measured hot-path
   instructions with no new storage; their combined Josef 01/1,000 paired mean
   improved 2.6%, but frequency noise prevents a tighter full-run estimate;
@@ -809,9 +875,9 @@ Do not reuse objects from a differently instrumented, sanitized, profiled, or
 `NATIVE=1` build.  If in doubt, use a fresh worktree or clean the build before
 compiling.  In particular, the repository's currently installed `bin/prover9`
 is intentionally the older PGO executable and does not contain commit
-`6a5d18c`; run the build and copy steps above before the authority run.  The
-fresh portable source binary measured while writing this report has SHA-256
-`51dd69534b78d895062fd5392522160237f656ba48b911539d77770bb91ec6d3`.
+`107665b`; run the build and copy steps above before the authority run.  The
+fresh portable source binary measured after that commit has SHA-256
+`45c3c7f51fe5b6037a921e2ac01d84ca2d548792742fdf6ed97342d5ee391b63`.
 
 ### Prover9 options
 
@@ -890,7 +956,9 @@ control.  For the adaptive authority run, continue only if the
 given/generated/kept/hint trajectory is exact, the interval CPU/given slope
 remains no worse than the code-tree preflight, there is no swap, and the ratio
 of `position_refinement_rejects` to `position_refinement_checks` remains
-substantial.  Record feature bytes and PSS explicitly: the CPU-first run is a
+substantial.  Also monitor the tertiary reject/check ratio separately; a
+collapsing late ratio would turn the third query traversal into pure overhead.
+Record feature bytes and PSS explicitly: the CPU-first run is a
 measured CPU/RAM tradeoff with a preliminary 79.6% RAM-saving projection, not
 a claim that the feature sidecar is free.
 
@@ -959,7 +1027,8 @@ The new run is accepted only if all of the following hold:
    still large despite high mapping reuse, the remaining cause is not slab
    churn.
 7. Inspect `Compact_unit_fanout` and the adaptive unit query profiles.  Record
-   `position_refinement_queries/checks/rejects`, position postings, conflict
+   `position_refinement_queries/checks/rejects`,
+   `position_tertiary_queries/checks/rejects`, position postings, conflict
    exact tests, code-tree nodes and feature bytes at every report.  Continue
    the adaptive authority run only while its interval CPU/given slope stays
    competitive and refinement rejects a substantial fraction of checks.  A
@@ -996,10 +1065,11 @@ The next change should follow the mature telemetry, in this order:
    passive/selector/ancestor file I/O and page-cache eviction.  Increase no
    cache until this attribution is known.
 2. If unit retrieval still dominates under depth-2 adaptive, separate its
-   position postings, refinement checks/rejects, exact tests and residual
-   code-tree nodes.  If posting or exact work grows faster than the avoided
-   tree traversal, make feature admission more selective; if the feature
-   store itself compromises the RAM target, consider a file-backed sidecar.
+   position postings, secondary/tertiary refinement checks and rejects, exact
+   tests and residual code-tree nodes.  If posting or exact work grows faster
+   than the avoided tree traversal, make feature admission more selective; if
+   the feature store itself compromises the RAM target, consider a file-backed
+   sidecar.
    Do not restore the rejected two-posting intersection or unlimited depth by
    accident.  If adaptive's interval CPU/given slope loses to the bounded
    `code_tree` control, fall back instead of carrying an unproductive sidecar.
