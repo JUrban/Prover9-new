@@ -1082,15 +1082,25 @@ static void flatten_query(Compact_unit_index index, Term term,
 
 static BOOL match_generalization_edge(
   Compact_unit_index index, uint32_t node, uint32_t position, uint32_t end,
+  int32_t first_code,
   Term *bindings, unsigned *new_bindings, unsigned *new_count,
   uint32_t *next_position)
 {
   struct cui_node *edge = &index->nodes[node];
   const int32_t *tokens = query_slice_tokens(index, edge->tokens);
   uint32_t length = query_slice_length(edge->tokens);
-  uint32_t i;
+  uint32_t i = 0;
   *new_count = 0;
-  for (i = 0; i < length; i++) {
+  /* GENERALIZATION_REC has already read and classified the first token.
+     For its equal rigid branch, the target is known rigid with this symbol;
+     consume both without resolving and comparing them a second time. */
+  if (first_code >= 0) {
+    if (length == 0 || position >= end)
+      return FALSE;
+    position++;
+    i = 1;
+  }
+  for (; i < length; i++) {
     int32_t code = tokens[i];
     Term query_term;
     if (position >= end)
@@ -1173,8 +1183,8 @@ static unsigned long long generalization_rec(
         uint32_t next_position = position;
         unsigned long long found = 0;
         work->nodes++;
-        if (match_generalization_edge(index, child, position, end, bindings,
-                                      new_bindings, &new_count,
+        if (match_generalization_edge(index, child, position, end, code,
+                                      bindings, new_bindings, &new_count,
                                       &next_position))
           found = generalization_rec(index, child, next_position, end,
                                      bindings, exclude_id, work);
