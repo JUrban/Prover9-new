@@ -763,6 +763,23 @@ plausible-looking options that were already negative.
   9.03%, used about 63 MiB more RSS, and increased the 1,000-given CPU result
   from the current paired mean of 78.83 to 82.11 seconds.  Do not add
   `assign(hint_cache_kb,65536)`.
+- Per-64-reference conjunction block summaries were implemented and removed.
+  They stored a feature-mask OR and literal-count maxima for each bit-plane
+  block, after the accepted posting-wide test.  At Josef 01/1,501 they rejected
+  1,772,012 of 5,235,594 residual blocks (33.8%), covering 94,264,901
+  reference-equivalents; the sidecar planned 5,850,752 bytes.  An early pair
+  looked favorable, demonstrating why work counters alone are not an
+  acceptance test.  After making summaries optional so a near-budget base
+  conjunction index could never be displaced, and hoisting that policy branch
+  outside the hot block loop, the final strict pair lost both orientations:
+  user CPU was 88.23 versus 87.46 seconds and 79.71 versus 78.06 seconds.
+  Candidate/control means were 83.97/82.76 user seconds (+1.5%) and
+  89.59/88.33 total seconds (+1.4%); all endpoints and pre-existing counters
+  were exact and swap was zero.  Commits `e373304` and `1a46d09` record the
+  prototype and budget-safe design; `45b01f4` removes them completely and
+  restores the accepted portable binary byte-for-byte.  Do not infer CPU from
+  the impressive block-rejection total or add a similar sidecar without new
+  mature evidence.
 - A negative Bloom summary was slower and was removed completely.
 - A query-scoped binding trail preserved all answers but raised the sampled
   generalization timer from roughly 2.72--2.76 to 2.920 seconds.  It was
@@ -960,7 +977,7 @@ compiling.  In particular, the repository's currently installed `bin/prover9`
 is intentionally the older PGO executable and does not contain commits
 `107665b`, `3f2f566`, or `4c0d0b2`; run the build and copy steps above before
 the authority run.  The fresh portable source binary measured at `4c0d0b2`
-has SHA-256
+and restored byte-for-byte at `45b01f4` has SHA-256
 `70899ba6535f3e11a5b4c34c0680056aa0a5ebf4b33f51a34b77f76ba899eb6b`.
 
 ### Prover9 options
