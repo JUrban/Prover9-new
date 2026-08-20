@@ -237,6 +237,45 @@ and I/O.  Buffers grow on demand per selector; in Josef 01 only `TheRest`
 grows to millions of entries, while the other active selector populations at
 the proof endpoint were below 20,000.
 
+### Compact file-selector entries
+
+Commit `b3cde19` removes the clause ID duplicated in every file-selector
+entry.  Dense directory records are appended in strictly increasing clause-ID
+order; directory compaction preserves that order and rebuilds every selector
+run.  The record reference is therefore the exact same final age tie-breaker
+for age, weight and hint-age selectors.  The file entry now contains only its
+eight-byte order key and eight-byte record reference, reducing its enforced
+size from 24 to 16 bytes.  This is a representation change, not a scheduling
+change.
+
+An optimized 16-million-record reversed scale pair, after both executables
+were warmed, preserved the exact first selected ID, selector counts, run
+topology and zero-swap result:
+
+| Entry | Mean user | Mean system | Mean total | Peak RSS | Read / written |
+|---:|---:|---:|---:|---:|---:|
+| 24 bytes | 3.92 s | 4.15 s | 8.07 s | 170,096 KiB | 856,424,448 / 1,233,125,376 B |
+| 16 bytes | 3.91 s | 4.01 s | 7.91 s | 157,854 KiB | 570,949,632 / 822,083,584 B |
+| change | -0.4% | -3.4% | **-1.9%** | -12,242 KiB | **-33.3% / -33.3%** |
+
+The retained selector runs shrink from 377,487,360 to 251,658,240 bytes and
+the 1-Mi-entry input buffer from 25,165,824 to 16,777,216 bytes.  The exact
+Josef 01/1,501 reversed whole-process gate had not flushed a selector run and
+was correspondingly CPU-neutral/noisy: candidate/control mean user CPU was
+73.99/73.38 seconds and mean total CPU was 78.28/77.60 seconds (+0.8%/+0.9%),
+while peak RSS fell by 15.8 MiB.  One placement won and one lost.  The change
+is retained for its deterministic one-third reduction of the mature merge
+data path, not as a short-prefix prover speed claim.
+
+CHAT/601 and Josef 02/601 preserved their exact endpoints
+`(497430,16974,0)` and `(524799,26671,0)`, respectively, including final hint
+and compact-index counters.  Differential heap/file ordering, reactivation,
+compaction, checkpoint and compact-generalization tests pass.  All measured
+processes used zero swap.  At the completed Josef 01 baseline's 36.11 million
+run entries, the representation alone would reduce the live selector run
+footprint by about 276 MiB; the authority run's larger buffer will determine
+the actual merge-byte and system-CPU savings.
+
 ## Authoritative completed runs
 
 The source files are:
@@ -957,6 +996,9 @@ CPU estimates are less certain and the gains are not additive:
 - the 1-Mi-entry selector buffer cuts scale-probe selector CPU by 34% and
   read/write amplification by 87%/75%; its whole-prover contribution is
   unknown until the authority run;
+- compact selector entries then cut the remaining selector buffer, run and
+  merge bytes by exactly one third; the 16-million-entry paired proxy improves
+  total CPU by 1.9%, while its no-flush Josef prefix is CPU-neutral/noisy;
 - the slab recycler changes almost no bounded CPU but removes nearly all
   post-warm-up slab unmaps by 2,000 givens;
 - native compilation may add 0--5% depending on the host.
@@ -992,10 +1034,10 @@ Do not reuse objects from a differently instrumented, sanitized, profiled, or
 `NATIVE=1` build.  If in doubt, use a fresh worktree or clean the build before
 compiling.  In particular, the repository's currently installed `bin/prover9`
 is intentionally the older PGO executable and does not contain commits
-`107665b`, `3f2f566`, or `4c0d0b2`; run the build and copy steps above before
-the authority run.  The fresh portable source binary measured at `4c0d0b2`
-and restored byte-for-byte at `45b01f4` has SHA-256
-`70899ba6535f3e11a5b4c34c0680056aa0a5ebf4b33f51a34b77f76ba899eb6b`.
+`107665b`, `3f2f566`, `4c0d0b2`, or `b3cde19`; run the build and copy steps
+above before the authority run.  The fresh portable source binary measured at
+`b3cde19` has SHA-256
+`55f924df1cc6cdfe987470896fb4c5255acd41c33a3f0ec781f4325e1bb0bc30`.
 
 ### Prover9 options
 
@@ -1154,8 +1196,9 @@ The new run is accepted only if all of the following hold:
    feature sidecar is no longer buying selectivity; stop and use the otherwise
    identical `code_tree` configuration as the strict-memory fallback.
 8. Inspect `Dense_passive_selector` flushes, merges and read/write bytes.  The
-   1-Mi-entry policy should be far below the baseline's 551/546 merge counts;
-   otherwise another selector is unexpectedly reaching the cap.
+   entry width must be 16 bytes, and the 1-Mi-entry policy should be far below
+   the baseline's 551/546 merge counts; otherwise the wrong binary is running
+   or another selector is unexpectedly reaching the cap.
 9. Inspect `Packed_fast_cache` for `min_candidates=128`, admission skips,
    stores and posting candidates avoided.  Compare interval deltas rather than
    only the cumulative hit rate; mature reuse was much more valuable than the
