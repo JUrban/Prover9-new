@@ -780,6 +780,23 @@ plausible-looking options that were already negative.
   restores the accepted portable binary byte-for-byte.  Do not infer CPU from
   the impressive block-rejection total or add a similar sidecar without new
   mature evidence.
+- Sharing the packed-fast query's key mixing across cache lookup, conjunction
+  lookup and cache store was also rejected.  It computes exactly the same two
+  hashes and preserves all cache slots, posting keys and candidates; the
+  completed run's roughly 1.92 billion conjunction misses made the duplicate
+  arithmetic look like an unusually strong memory-neutral target.  A first
+  implementation regressed even at 301 givens because it introduced hot-path
+  stack arguments and a pointer result.  A second returned both hashes in
+  registers and kept the conjunction call within the six x86-64 argument
+  registers.  Nevertheless, the exact Josef 01/1,501 reversed gate lost both
+  placements: user CPU was 82.74 versus 80.36 seconds and 77.81 versus 76.68
+  seconds.  Mean user/total CPU regressed 2.2%/2.3%, and optimized-layout page
+  touching raised measured RSS by about 27 MiB despite unchanged allocated
+  index bytes.  All cache, conjunction, hint and search counters were exact;
+  process swap was zero.  The prototype was removed without a source commit,
+  and the accepted binary was restored byte-for-byte.  Recomputing a compact
+  hash can be cheaper than extending live ranges and perturbing this already
+  large hot function.
 - A negative Bloom summary was slower and was removed completely.
 - A query-scoped binding trail preserved all answers but raised the sampled
   generalization timer from roughly 2.72--2.76 to 2.920 seconds.  It was
