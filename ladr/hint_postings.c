@@ -8,20 +8,28 @@
 
 struct hint_posting {
   unsigned long long key;
-  unsigned long long profile_mask_union;
   unsigned *references;
   unsigned long long *profile_mask_planes;
   unsigned *profile_literal_counts;
-  unsigned long long *dense_bits;
+  union {
+    unsigned long long profile_mask_union;
+    unsigned long long *dense_bits;
+  } profile_or_dense;
   unsigned long long *dense_summary;
   unsigned count;
   unsigned capacity;
-  unsigned dense_words;
-  unsigned dense_summary_words;
+  union {
+    struct {
+      unsigned words;
+      unsigned summary_words;
+    } dense;
+    struct {
+      unsigned short maximum_positive;
+      unsigned short maximum_negative;
+    } profile;
+  } counts_or_dense;
   unsigned profile_mask_blocks;
   unsigned long long generation;
-  unsigned short profile_maximum_positive;
-  unsigned short profile_maximum_negative;
   unsigned char occupied;
   unsigned char profile;
 };
@@ -99,10 +107,12 @@ void hint_postings_destroy(Hint_postings index)
       safe_free(index->table[i].profile_mask_planes);
     if (index->table[i].profile_literal_counts != NULL)
       safe_free(index->table[i].profile_literal_counts);
-    if (index->table[i].dense_bits != NULL)
-      safe_free(index->table[i].dense_bits);
-    if (index->table[i].dense_summary != NULL)
-      safe_free(index->table[i].dense_summary);
+    if (!index->table[i].profile) {
+      if (index->table[i].profile_or_dense.dense_bits != NULL)
+        safe_free(index->table[i].profile_or_dense.dense_bits);
+      if (index->table[i].dense_summary != NULL)
+        safe_free(index->table[i].dense_summary);
+    }
   }
   safe_free(index->table);
   safe_free(index);
@@ -115,32 +125,34 @@ static BOOL posting_dense_reserve(struct hint_postings *index,
   unsigned words = bit_capacity / 64 + (bit_capacity % 64 != 0);
   unsigned summary_words = words / 64 + (words % 64 != 0);
   unsigned long long added =
-    (unsigned long long) (words - posting->dense_words) *
+    (unsigned long long) (words - posting->counts_or_dense.dense.words) *
       sizeof(unsigned long long) +
-    (unsigned long long) (summary_words - posting->dense_summary_words) *
+    (unsigned long long) (summary_words -
+                          posting->counts_or_dense.dense.summary_words) *
       sizeof(unsigned long long);
   if (index->dense_bytes > index->dense_budget_bytes ||
       added > index->dense_budget_bytes - index->dense_bytes) {
     index->dense_budget_denials++;
     return FALSE;
   }
-  if (words > posting->dense_words) {
-    unsigned old_words = posting->dense_words;
-    posting->dense_bits = safe_realloc(
-      posting->dense_bits, (size_t) words * sizeof(unsigned long long));
-    memset(posting->dense_bits + old_words, 0,
+  if (words > posting->counts_or_dense.dense.words) {
+    unsigned old_words = posting->counts_or_dense.dense.words;
+    posting->profile_or_dense.dense_bits = safe_realloc(
+      posting->profile_or_dense.dense_bits,
+      (size_t) words * sizeof(unsigned long long));
+    memset(posting->profile_or_dense.dense_bits + old_words, 0,
            (size_t) (words - old_words) * sizeof(unsigned long long));
-    posting->dense_words = words;
+    posting->counts_or_dense.dense.words = words;
   }
-  if (summary_words > posting->dense_summary_words) {
-    unsigned old_words = posting->dense_summary_words;
+  if (summary_words > posting->counts_or_dense.dense.summary_words) {
+    unsigned old_words = posting->counts_or_dense.dense.summary_words;
     posting->dense_summary = safe_realloc(
       posting->dense_summary,
       (size_t) summary_words * sizeof(unsigned long long));
     memset(posting->dense_summary + old_words, 0,
            (size_t) (summary_words - old_words) *
              sizeof(unsigned long long));
-    posting->dense_summary_words = summary_words;
+    posting->counts_or_dense.dense.summary_words = summary_words;
   }
   index->dense_bytes += added;
   return TRUE;
@@ -150,20 +162,20 @@ static void posting_dense_discard(struct hint_postings *index,
                                   struct hint_posting *posting)
 {
   unsigned long long bytes =
-    (unsigned long long) posting->dense_words *
+    (unsigned long long) posting->counts_or_dense.dense.words *
       sizeof(unsigned long long) +
-    (unsigned long long) posting->dense_summary_words *
+    (unsigned long long) posting->counts_or_dense.dense.summary_words *
       sizeof(unsigned long long);
   if (bytes > index->dense_bytes)
     fatal_error("hint_postings: dense byte underflow");
-  if (posting->dense_bits != NULL)
-    safe_free(posting->dense_bits);
+  if (posting->profile_or_dense.dense_bits != NULL)
+    safe_free(posting->profile_or_dense.dense_bits);
   if (posting->dense_summary != NULL)
     safe_free(posting->dense_summary);
-  posting->dense_bits = NULL;
+  posting->profile_or_dense.dense_bits = NULL;
   posting->dense_summary = NULL;
-  posting->dense_words = 0;
-  posting->dense_summary_words = 0;
+  posting->counts_or_dense.dense.words = 0;
+  posting->counts_or_dense.dense.summary_words = 0;
   index->dense_bytes -= bytes;
 }
 
@@ -171,10 +183,10 @@ static BOOL posting_dense_add(struct hint_postings *index,
                               struct hint_posting *posting, unsigned id)
 {
   unsigned word = id / 64;
-  if (word >= posting->dense_words &&
+  if (word >= posting->counts_or_dense.dense.words &&
       !posting_dense_reserve(index, posting, id + 1))
     return FALSE;
-  posting->dense_bits[word] |= 1ULL << (id % 64);
+  posting->profile_or_dense.dense_bits[word] |= 1ULL << (id % 64);
   posting->dense_summary[word / 64] |= 1ULL << (word % 64);
   return TRUE;
 }
@@ -211,7 +223,7 @@ void hint_postings_add(Hint_postings index, unsigned long long key,
   posting->generation++;
   if (posting->generation == 0)
     posting->generation = 1;
-  if (posting->dense_bits != NULL &&
+  if (posting->profile_or_dense.dense_bits != NULL &&
       !posting_dense_add(index, posting, id))
     posting_dense_discard(index, posting);
   index->references++;
@@ -268,11 +280,13 @@ void hint_postings_add_profile(Hint_postings index, unsigned long long key,
   posting->references[posting->count] = id;
   posting->profile_literal_counts[posting->count] =
     (positive << 16) | negative;
-  posting->profile_mask_union |= mask;
-  if (positive > posting->profile_maximum_positive)
-    posting->profile_maximum_positive = (unsigned short) positive;
-  if (negative > posting->profile_maximum_negative)
-    posting->profile_maximum_negative = (unsigned short) negative;
+  posting->profile_or_dense.profile_mask_union |= mask;
+  if (positive > posting->counts_or_dense.profile.maximum_positive)
+    posting->counts_or_dense.profile.maximum_positive =
+      (unsigned short) positive;
+  if (negative > posting->counts_or_dense.profile.maximum_negative)
+    posting->counts_or_dense.profile.maximum_negative =
+      (unsigned short) negative;
   {
     unsigned block = posting->count / 64;
     unsigned long long flag = 1ULL << (posting->count % 64);
@@ -309,11 +323,13 @@ BOOL hint_postings_get_profile(Hint_postings index,
   view->ids = posting->references;
   view->mask_planes = posting->profile_mask_planes;
   view->literal_counts = posting->profile_literal_counts;
-  view->mask_union = posting->profile_mask_union;
+  view->mask_union = posting->profile_or_dense.profile_mask_union;
   view->count = posting->count;
   view->mask_blocks = posting->profile_mask_blocks;
-  view->maximum_positive = posting->profile_maximum_positive;
-  view->maximum_negative = posting->profile_maximum_negative;
+  view->maximum_positive =
+    posting->counts_or_dense.profile.maximum_positive;
+  view->maximum_negative =
+    posting->counts_or_dense.profile.maximum_negative;
   return TRUE;
 }
 
@@ -399,7 +415,9 @@ BOOL hint_postings_dense_view(Hint_postings index,
   posting = posting_slot(index, key);
   if (!posting->occupied)
     return FALSE;
-  if (posting->dense_bits == NULL) {
+  if (posting->profile)
+    fatal_error("hint_postings_dense_view: profile posting");
+  if (posting->profile_or_dense.dense_bits == NULL) {
     if (!create)
       return FALSE;
     if (!posting_dense_reserve(index, posting, bit_capacity))
@@ -410,17 +428,17 @@ BOOL hint_postings_dense_view(Hint_postings index,
         return FALSE;
       }
   }
-  else if (posting->dense_words <
+  else if (posting->counts_or_dense.dense.words <
            bit_capacity / 64 + (bit_capacity % 64 != 0)) {
     if (!create)
       return FALSE;
     if (!posting_dense_reserve(index, posting, bit_capacity))
       return FALSE;
   }
-  view->bits = posting->dense_bits;
+  view->bits = posting->profile_or_dense.dense_bits;
   view->summary = posting->dense_summary;
-  view->words = posting->dense_words;
-  view->summary_words = posting->dense_summary_words;
+  view->words = posting->counts_or_dense.dense.words;
+  view->summary_words = posting->counts_or_dense.dense.summary_words;
   return TRUE;
 }
 
@@ -458,13 +476,14 @@ void hint_postings_get_stats(Hint_postings index,
       stats->profile_mask_words +=
         (unsigned long long) posting->profile_mask_blocks * 64;
     }
-    if (posting->dense_bits != NULL) {
+    if (!posting->profile &&
+        posting->profile_or_dense.dense_bits != NULL) {
       stats->dense_keys++;
       stats->dense_bit_bytes +=
-        (unsigned long long) posting->dense_words *
+        (unsigned long long) posting->counts_or_dense.dense.words *
           sizeof(unsigned long long);
       stats->dense_summary_bytes +=
-        (unsigned long long) posting->dense_summary_words *
+        (unsigned long long) posting->counts_or_dense.dense.summary_words *
           sizeof(unsigned long long);
     }
   }
