@@ -566,6 +566,72 @@ generalization smoke and ASan/UBSan all pass.  No Prover9 option changes are
 required.  The measured portable binary is SHA-256
 `639513c2cf019436460cd41556136e82ce20cef147960a126c3cfbdd8efa389a`.
 
+### Iterative compact-unit generalization traversal
+
+Commit `7cb381b` removes the recursion that remained after the binding-bitset
+change.  The predecessor's `generalization_rec()` was still the largest
+scalable self-time entry in the fresh profile: 2.96 sampled seconds, or 7.94%
+of profiled self CPU, at the exact 1,001-given Josef 01 endpoint.  Its 72-byte
+optimized call frame was much smaller than the original 488-byte frame, but
+every visited radix edge still paid for a C call, return and compiler-managed
+frame.
+
+The replacement is an explicit depth-first traversal with reusable 32-byte
+frames.  A frame contains the radix node, flattened-query position, next
+sibling, wanted rigid code and the exact two-word set of bindings introduced
+by its incoming edge.  The parent advances to its next sibling before a
+descent; popping restores only that edge's bindings.  Consequently variable
+siblings, equal rigid siblings, terminal postings, excluded IDs and
+repeated-variable failures are visited in exactly the same order as before.
+The first live non-excluded proof ID therefore remains authoritative.
+
+The stack grows from the flattened query length, so the implementation does
+not replace recursion with a fixed-depth limit.  Its capacity is included in
+the unit index's scratch and total byte statistics and is released both by
+normal destruction and predecessor teardown during compaction.  The initial
+64 frames cost 2 KiB.  Josef 01 needed 128 frames of capacity, or 4 KiB, by
+the 1,001/1,501-given gates.  The complete index object, including its new
+pointer and capacity fields, was only 4,112 bytes larger at 1,501 givens; this
+does not scale with clauses, nodes or postings.
+
+Strict clocks-off serial reversed gates against the accepted binding-bitset
+binary gave:
+
+| Josef 01 gate | Recursive mean total | Iterative mean total | Change | Mean RSS change |
+|---|---:|---:|---:|---:|
+| 301 givens | 14.760 s | 13.240 s | **-10.30%** | +1,706 KiB |
+| 1,001 givens | 42.365 s | 42.155 s | **-0.50%** | -2,698 KiB |
+| 1,501 givens | 77.145 s | 76.290 s | **-1.11%** | -7,128 KiB |
+
+The 301 result is dominated by placement/system noise and is not used as a
+mature projection.  At 1,501 givens, mean user CPU fell from 74.260 to 73.265
+seconds (-1.34%); mean system CPU moved from 2.885 to 3.025 seconds.  All four
+processes ended at
+`(Given=1501, Generated=3603947, Kept=521972, proofs=0)`, shared selected-given
+SHA-256 `41cae549c3acae5751600ee9fe9a7ec0f109c14882b0030679f8034e258e6310`,
+and had exact rule, hint, passive, ancestor, allocator and compact-index work
+counters.  Every process used zero swap.
+
+The cross-workload gates did not expose a repeatable cost.  CHAT/301 reversed
+means improved from 25.750 to 25.360 total CPU seconds (-1.51%) at exact
+`(301,120793,5737,0)` endpoints and identical compact-unit profiles.  The
+first serial Josef 02/601 pair was unfavorable (29.390 versus 28.830 seconds),
+but its placements contradicted each other.  A concurrent, core-balanced
+tie-break favored the candidate (31.110 versus 31.755 seconds).  Across all
+four measurements per binary the candidate and control were effectively tied
+at 30.250 and 30.293 seconds (-0.14%).  Every Josef 02 process ended at
+`(601,524799,26671,0)`, had the same generalization profile and used zero
+swap.  This is classified as a non-regression, not as a Josef 02 speedup.
+
+The focused unit regression now constructs a depth-80 radix path, forcing the
+stack beyond its initial 64-frame allocation.  Existing tests retain sign,
+exclusion, posting order, repeated-variable, variable-64, retirement,
+compaction and high logical-base/rebase coverage.  The focused unit test,
+ASan/UBSan, the 10,000-record compact long-run stress test and the compact
+generalization matrix all pass.  No Prover9 option changes are required.  The
+measured portable binary is SHA-256
+`55e42911d55d2f27174bf88259e9ec39d2cb603ba48fcaf55516dbbfb555a831`.
+
 ## Authoritative completed runs
 
 The source files are:
@@ -1537,9 +1603,10 @@ compiling.  In particular, the repository's currently installed `bin/prover9`
 is intentionally the older PGO executable and does not contain commits
 `107665b`, `3f2f566`, `4c0d0b2`, `b3cde19`, `df7bfdb`, `f4f4614`,
 `1b15b40`, `b1d8128`, `9fecf54`, or `b3d19f3`; run the build and copy steps
-above before the authority run.  The fresh portable source binary measured at
-`b3d19f3` has SHA-256
-`639513c2cf019436460cd41556136e82ce20cef147960a126c3cfbdd8efa389a`.
+above before the authority run.  It also lacks the iterative generalization
+traversal in `7cb381b`.  The fresh portable source binary measured at
+`7cb381b` has SHA-256
+`55e42911d55d2f27174bf88259e9ec39d2cb603ba48fcaf55516dbbfb555a831`.
 
 ### Prover9 options
 
