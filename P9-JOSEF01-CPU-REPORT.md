@@ -1169,6 +1169,26 @@ plausible-looking options that were already negative.
   neutral for CPU and adverse for observed residency.  Source and binary were
   restored byte-for-byte to the accepted SHA-256
   `4a32437f5ff84e98946ae1309b130d9d7b9b574dbd949ca76521d275be03ff92`.
+- Caching one immutable 32-bit first symbol beside every compact-unit radix
+  node was implemented and removed.  It replaced the packed-term-pool load in
+  both insertion sibling comparisons and query sibling scans; radix splits
+  updated the old child explicitly, compaction rebuilt the sidecar, and the
+  rebase path needed no update because symbol codes are immutable.  The
+  focused unit-index and long-run compaction/rebase tests passed, as did an
+  AddressSanitizer/UndefinedBehaviorSanitizer run.  Nevertheless, the exact
+  301-given reversed gate lost both placements: candidate/control totals were
+  15.24/15.13 seconds and 15.02/14.68 seconds.  Candidate/control means were
+  12.245/12.095 user seconds, 2.885/2.810 system seconds, and
+  15.130/14.905 total seconds (+1.51%).  Mean peak RSS rose from 512,020 to
+  512,800 KiB.  Every run preserved
+  `(Given=301, Generated=141040, Kept=38770, proofs=0)`, all pre-existing
+  compact-unit counters, and zero swap.  Exact accounting reported 255,132
+  sidecar bytes at this prefix.  The completed-run node capacity projects the
+  same design to 257,610,840 bytes (about 246 MiB), consuming valuable margin
+  around the 80% RAM-reduction target while slowing the short gate.  The
+  1,001/1,501 gates were intentionally skipped after the two-placement loss;
+  source and executable were restored byte-for-byte to accepted SHA-256
+  `4a32437f5ff84e98946ae1309b130d9d7b9b574dbd949ca76521d275be03ff92`.
 - A negative Bloom summary was slower and was removed completely.
 - A query-scoped binding trail preserved all answers but raised the sampled
   generalization timer from roughly 2.72--2.76 to 2.920 seconds.  It was
