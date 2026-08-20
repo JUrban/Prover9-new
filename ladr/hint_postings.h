@@ -13,6 +13,7 @@ struct hint_postings_stats {
   unsigned long long table_bytes;
   unsigned long long reference_bytes;
   unsigned long long profile_bytes;
+  unsigned long long profile_summary_bytes;
   unsigned long long profile_mask_words;
   unsigned long long profile_key_histogram[7];
   unsigned long long profile_reference_histogram[7];
@@ -28,6 +29,8 @@ struct hint_profile_view {
   const unsigned *ids;
   const unsigned long long *mask_planes;
   const unsigned *literal_counts;
+  /* Two words per 64-reference block: mask OR, then packed max counts. */
+  const unsigned long long *block_summaries;
   unsigned long long mask_union;
   unsigned count;
   unsigned mask_blocks;

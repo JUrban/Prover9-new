@@ -157,6 +157,9 @@ static unsigned long long Fast_conjunction_overflow_candidates = 0;
 static unsigned long long Fast_conjunction_profile_rejects = 0;
 static unsigned long long Fast_conjunction_summary_reject_queries = 0;
 static unsigned long long Fast_conjunction_summary_reject_candidates = 0;
+static unsigned long long Fast_conjunction_block_summary_checks = 0;
+static unsigned long long Fast_conjunction_block_summary_rejects = 0;
+static unsigned long long Fast_conjunction_block_summary_candidates = 0;
 static unsigned long long Fast_conjunction_budget_bytes = 0;
 static unsigned long long Fast_conjunction_peak_bytes = 0;
 static unsigned long long Fast_conjunction_budget_denials = 0;
@@ -2262,12 +2265,29 @@ static BOOL fast_conjunction_collect_candidates(
   else {
     unsigned block;
     unsigned mask_survivors = 0;
+    unsigned block_summary_checks = 0;
+    unsigned block_summary_rejects = 0;
+    unsigned block_summary_candidates = 0;
     for (block = 0; block < view.mask_blocks; block++) {
       unsigned base = block * 64;
       unsigned remaining = view.count - base;
+      const unsigned long long *summary =
+        view.block_summaries + (size_t) block * 2;
+      unsigned maxima = (unsigned) summary[1];
       unsigned long long common = remaining >= 64 ? ~0ULL :
         ((1ULL << remaining) - 1);
       unsigned long long required = first_mask;
+      /* These are necessary conditions for the whole 64-ID block.  A reject
+         skips its bit planes and literal-count vector; a survivor follows
+         the original plane order and exact-matcher path unchanged. */
+      block_summary_checks++;
+      if (((summary[0] & first_mask) != first_mask) ||
+          (maxima >> 16) < positive ||
+          (maxima & 0xffffU) < negative) {
+        block_summary_rejects++;
+        block_summary_candidates += remaining >= 64 ? 64 : remaining;
+        continue;
+      }
       while (required != 0 && common != 0) {
         unsigned bit = (unsigned) __builtin_ctzll(required);
         common &= view.mask_planes[(size_t) block * 64 + bit];
@@ -2294,8 +2314,12 @@ static BOOL fast_conjunction_collect_candidates(
         common &= common - 1;
       }
     }
-    if (!Hint_preview_active)
+    if (!Hint_preview_active) {
       Fast_conjunction_profile_rejects += view.count - mask_survivors;
+      Fast_conjunction_block_summary_checks += block_summary_checks;
+      Fast_conjunction_block_summary_rejects += block_summary_rejects;
+      Fast_conjunction_block_summary_candidates += block_summary_candidates;
+    }
   }
   for (i = 0; i < Fast_conjunction_overflow_count[sign]; i++) {
     unsigned id = Fast_conjunction_overflow[sign][i];
@@ -2552,6 +2576,9 @@ void done_with_hints(void)
   Fast_conjunction_profile_rejects = 0;
   Fast_conjunction_summary_reject_queries = 0;
   Fast_conjunction_summary_reject_candidates = 0;
+  Fast_conjunction_block_summary_checks = 0;
+  Fast_conjunction_block_summary_rejects = 0;
+  Fast_conjunction_block_summary_candidates = 0;
   Fast_conjunction_budget_bytes = 0;
   Fast_conjunction_peak_bytes = 0;
   Fast_conjunction_budget_denials = 0;
@@ -3926,10 +3953,12 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             "planned_profiles=%llu, plan_scans=%llu, estimated_bytes=%llu, "
             "max_keys=%u, keys=%llu, "
             "references=%llu, reference_bytes=%llu, profile_bytes=%llu, "
-            "table_bytes=%llu, mask_words=%llu, "
+            "profile_summary_bytes=%llu, table_bytes=%llu, mask_words=%llu, "
             "negative_overflow=%u, positive_overflow=%u, queries=%llu, "
             "posting_candidates=%llu, profile_rejects=%llu, "
             "summary_reject_queries=%llu, summary_reject_candidates=%llu, "
+            "block_summary_checks=%llu, block_summary_rejects=%llu, "
+            "block_summary_candidates=%llu, "
             "overflow_candidates=%llu.\n",
             Fast_conjunction_postings == NULL ? "no" : "yes",
             Fast_conjunction_budget_bytes,
@@ -3943,6 +3972,7 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             conjunction_stats.references,
             conjunction_stats.reference_bytes,
             conjunction_stats.profile_bytes,
+            conjunction_stats.profile_summary_bytes,
             conjunction_stats.table_bytes,
             conjunction_stats.profile_mask_words,
             Fast_conjunction_overflow_count[0],
@@ -3952,6 +3982,9 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             Fast_conjunction_profile_rejects,
             Fast_conjunction_summary_reject_queries,
             Fast_conjunction_summary_reject_candidates,
+            Fast_conjunction_block_summary_checks,
+            Fast_conjunction_block_summary_rejects,
+            Fast_conjunction_block_summary_candidates,
             Fast_conjunction_overflow_candidates);
     fprintf(fp,
             "Packed_fast_conjunction_histogram: keys=%llu/%llu/%llu/%llu/"

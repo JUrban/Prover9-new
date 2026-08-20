@@ -106,6 +106,14 @@ int main(void)
             profile.maximum_positive == 10 &&
             profile.maximum_negative == 6,
             "profile exposes conservative posting-wide summaries");
+    require(profile.block_summaries[0] ==
+              ((1ULL << 2) | (1ULL << 47)) &&
+            (unsigned) profile.block_summaries[1] ==
+              ((10U << 16) | 6U) &&
+            profile.block_summaries[4] == (1ULL << 2) &&
+            (unsigned) profile.block_summaries[5] ==
+              ((8U << 16) | 3U),
+            "profile exposes exact block summaries");
     for (i = 0; i < profile.count; i++) {
       unsigned block = i / 64;
       unsigned long long flag = 1ULL << (i % 64);
@@ -136,7 +144,8 @@ int main(void)
   require(hint_postings_reference_count(index) == stats.references,
           "profile reference count matches full statistics");
   require(stats.keys == 1001 && stats.references == 1130 &&
-          stats.profile_bytes > 0 && stats.profile_mask_words == 64192 &&
+          stats.profile_bytes > 0 && stats.profile_summary_bytes > 0 &&
+          stats.profile_mask_words == 64192 &&
           stats.profile_key_histogram[0] == 1000 &&
           stats.profile_reference_histogram[0] == 1000 &&
           stats.profile_key_histogram[6] == 1 &&
