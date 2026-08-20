@@ -46,6 +46,7 @@ static double Var_penalty;
 static double Complexity;
 static BOOL Not_rules;  /* any rules for not_sym()? */
 static BOOL Or_rules;   /* any rules for or_sym()? */
+static BOOL Default_symbol_weighting;
 
 /* Cache the symnums */
 
@@ -198,6 +199,12 @@ void init_weight(Plist rules,
 	Or_rules = TRUE;
     }
   }
+  Default_symbol_weighting = Rules == NULL &&
+    Variable_weight == 1 && Constant_weight == 1 &&
+    Not_weight == 0 && Or_weight == 0 &&
+    Sk_constant_weight == 1 && Prop_atom_weight == 1 &&
+    Nest_penalty == 0 && Depth_penalty == 0 &&
+    Var_penalty == 0 && Complexity == 0;
 }  /* init_weight */
 
 /*************
@@ -645,10 +652,45 @@ double weight(Term t, Context subst)
 /* DOCUMENTATION
 */
 
+/* With the exact default parameters, no rules and no resonators, every term
+   node contributes one and clause punctuation contributes zero.  Use a
+   depth-first frame stack so supported term depth is unchanged from weight();
+   unlike symbol_count(), this does not accumulate all siblings on the stack. */
+static double default_symbol_clause_weight(Literals lits)
+{
+  struct { Term node; int child; } stack[1000];
+  double wt = 0;
+  Literals lit;
+  for (lit = lits; lit != NULL; lit = lit->next) {
+    int top = 0;
+    stack[0].node = lit->atom;
+    stack[0].child = 0;
+    wt += 1;
+    while (top >= 0) {
+      Term cur = stack[top].node;
+      if (stack[top].child >= ARITY(cur))
+        top--;
+      else {
+        Term ch = ARG(cur, stack[top].child++);
+        wt += 1;
+        if (ARITY(ch) != 0) {
+          top++;
+          stack[top].node = ch;
+          stack[top].child = 0;
+        }
+      }
+    }
+  }
+  return wt;
+}
+
 /* PUBLIC */
 double clause_weight(Literals lits)
 {
   double wt;
+
+  if (Default_symbol_weighting && Resonators == NULL)
+    return default_symbol_clause_weight(lits);
   
   if (!Not_rules && !Or_rules) {
     /* There are no rules for OR or NOT, so we don't need to construct a
