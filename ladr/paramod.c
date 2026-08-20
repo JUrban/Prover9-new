@@ -344,8 +344,15 @@ BOOL para_into(Literals from_lit, int from_side, Context cf, Ilist from_pos,
 	       BOOL skip_top,
 	       Topform_proc proc_proc)
 {
-  /* Iterative subterm traversal for paramodulation-into. */
-  struct { Term node; int child; Ilist pos_node; BOOL skip; } stack[1000];
+  /* Iterative subterm traversal for paramodulation-into.  The two leading
+     coordinates in into_pos are heap owned by para_into_lit().  Deeper
+     coordinates live in this depth-indexed stack array: every descended
+     frame has a complex parent, so path_nodes[top-1] is its exact predecessor.
+     paramodulate() copies the live coordinate list into each justification
+     before the consumer is called; no stack address escapes this routine. */
+  struct { Term node; int child; BOOL skip; } stack[1000];
+  struct ilist path_nodes[1000];
+  Ilist path_base, path_tail;
   int top;
 
   if (!(((!VARIABLE(into)) | Para_into_vars) && basic_check(into)))
@@ -354,8 +361,9 @@ BOOL para_into(Literals from_lit, int from_side, Context cf, Ilist from_pos,
   top = 0;
   stack[0].node = into;
   stack[0].child = -1;  /* -1 means haven't started children yet */
-  stack[0].pos_node = NULL;
   stack[0].skip = skip_top;
+  path_base = ilist_last(into_pos);
+  path_tail = path_base;
 
   while (top >= 0) {
     Term cur = stack[top].node;
@@ -363,17 +371,15 @@ BOOL para_into(Literals from_lit, int from_side, Context cf, Ilist from_pos,
     if (stack[top].child == -1) {
       /* First visit to this node.  Set up position list and start children. */
       if (COMPLEX(cur)) {
-        Ilist last = ilist_last(into_pos);
-        Ilist new_pos = get_ilist();
-        last->next = new_pos;
+        Ilist new_pos = &path_nodes[top];
         new_pos->i = 0;
-        stack[top].pos_node = new_pos;
+        new_pos->next = NULL;
+        path_tail->next = new_pos;
+        path_tail = new_pos;
         stack[top].child = 0;
       }
-      else {
-        stack[top].pos_node = NULL;
+      else
         stack[top].child = ARITY(cur);  /* skip to "try unify at top" */
-      }
     }
 
     /* Process children. */
@@ -381,37 +387,21 @@ BOOL para_into(Literals from_lit, int from_side, Context cf, Ilist from_pos,
       int ci_idx = stack[top].child;
       Term ch = ARG(cur, ci_idx);
       stack[top].child++;
-      stack[top].pos_node->i++;
+      path_nodes[top].i++;
 
       if (((!VARIABLE(ch)) | Para_into_vars) && basic_check(ch)) {
         top++;
         stack[top].node = ch;
         stack[top].child = -1;
-        stack[top].pos_node = NULL;
         stack[top].skip = FALSE;
       }
       continue;
     }
 
     /* All children done. Clean up position node if any. */
-    if (stack[top].pos_node != NULL) {
-      /* Find the ilist node BEFORE pos_node and unlink. */
-      Ilist last = ilist_last(into_pos);
-      /* pos_node IS the last node, remove it. */
-      if (last == stack[top].pos_node) {
-        /* Find the predecessor. */
-        Ilist prev = into_pos;
-        if (prev == stack[top].pos_node) {
-          /* This shouldn't happen since into_pos has at least 2 nodes. */
-        }
-        else {
-          while (prev->next != stack[top].pos_node)
-            prev = prev->next;
-          prev->next = NULL;
-        }
-      }
-      free_ilist(stack[top].pos_node);
-      stack[top].pos_node = NULL;
+    if (COMPLEX(cur)) {
+      path_tail = top == 0 ? path_base : &path_nodes[top - 1];
+      path_tail->next = NULL;
     }
 
     /* Try unifying at this node (unless skip_top). */
@@ -428,10 +418,11 @@ BOOL para_into(Literals from_lit, int from_side, Context cf, Ilist from_pos,
                                         into_clause,
                                         copy_ilist(into_pos));
           if (!(*proc_proc)(p)) {
-            Ilist dynamic_positions = into_pos->next->next;
-            into_pos->next->next = NULL;
+            /* The dynamic suffix consists of stack-owned traversal nodes.
+               Detach it before para_into_lit() frees the two heap-owned base
+               coordinates. */
+            path_base->next = NULL;
             undo_subst(tr);
-            zap_ilist(dynamic_positions);
             return FALSE;
           }
         }
