@@ -49,6 +49,15 @@ Hint_postings hint_postings_init(void);
 
 void hint_postings_destroy(Hint_postings index);
 
+/* Enable/disable optional two-word summaries for each 64-reference profile
+   block.  This must be selected before the first reference is inserted. */
+void hint_postings_set_profile_block_summaries(Hint_postings index,
+                                               BOOL enabled);
+
+/* Release optional profile block summaries while retaining the complete base
+   posting index.  Returns true iff any summary storage was removed. */
+BOOL hint_postings_drop_profile_block_summaries(Hint_postings index);
+
 void hint_postings_add(Hint_postings index, unsigned long long key,
                        unsigned id);
 
@@ -75,7 +84,8 @@ unsigned long long hint_postings_profile_allocated_bytes(
 unsigned long long hint_postings_profile_layout_bytes(
   unsigned table_capacity,
   unsigned long long reference_capacity,
-  unsigned long long mask_blocks);
+  unsigned long long mask_blocks,
+  BOOL block_summaries);
 
 const unsigned *hint_postings_get(Hint_postings index,
                                   unsigned long long key,

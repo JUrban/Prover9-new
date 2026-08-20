@@ -52,6 +52,7 @@ struct hint_postings {
   unsigned long long dense_bytes;
   unsigned long long dense_budget_bytes;
   unsigned long long dense_budget_denials;
+  BOOL profile_block_summaries;
 };
 
 static unsigned long long posting_hash(unsigned long long x)
@@ -97,8 +98,37 @@ Hint_postings hint_postings_init(void)
   struct hint_postings *index = safe_calloc(1, sizeof(struct hint_postings));
   index->capacity = 256;
   index->dense_budget_bytes = ~0ULL;
+  index->profile_block_summaries = TRUE;
   index->table = safe_calloc(index->capacity, sizeof(struct hint_posting));
   return index;
+}
+
+void hint_postings_set_profile_block_summaries(Hint_postings index,
+                                               BOOL enabled)
+{
+  if (index == NULL || index->references != 0)
+    fatal_error("hint_postings_set_profile_block_summaries: invalid state");
+  index->profile_block_summaries = enabled;
+}
+
+BOOL hint_postings_drop_profile_block_summaries(Hint_postings index)
+{
+  unsigned i;
+  BOOL removed = FALSE;
+  if (index == NULL || !index->profile_block_summaries)
+    return FALSE;
+  for (i = 0; i < index->capacity; i++) {
+    struct hint_posting *posting = index->table + i;
+    if (posting->profile &&
+        posting->summary.profile_block_summaries != NULL) {
+      safe_free(posting->summary.profile_block_summaries);
+      posting->summary.profile_block_summaries = NULL;
+      removed = TRUE;
+    }
+  }
+  index->profile_summary_bytes = 0;
+  index->profile_block_summaries = FALSE;
+  return removed;
 }
 
 void hint_postings_destroy(Hint_postings index)
@@ -279,17 +309,19 @@ void hint_postings_add_profile(Hint_postings index, unsigned long long key,
       (size_t) blocks * 64 * sizeof(unsigned long long));
     memset(posting->profile_mask_planes + (size_t) old_blocks * 64, 0,
            64 * sizeof(unsigned long long));
-    posting->summary.profile_block_summaries = safe_realloc(
-      posting->summary.profile_block_summaries,
-      (size_t) blocks * 2 * sizeof(unsigned long long));
-    memset(posting->summary.profile_block_summaries +
-             (size_t) old_blocks * 2,
-           0, 2 * sizeof(unsigned long long));
+    if (index->profile_block_summaries) {
+      posting->summary.profile_block_summaries = safe_realloc(
+        posting->summary.profile_block_summaries,
+        (size_t) blocks * 2 * sizeof(unsigned long long));
+      memset(posting->summary.profile_block_summaries +
+               (size_t) old_blocks * 2,
+             0, 2 * sizeof(unsigned long long));
+      index->profile_summary_bytes +=
+        2 * sizeof(unsigned long long);
+    }
     posting->profile_mask_blocks = blocks;
     index->profile_mask_bytes +=
       64 * sizeof(unsigned long long);
-    index->profile_summary_bytes +=
-      2 * sizeof(unsigned long long);
   }
   posting->references[posting->count] = id;
   posting->profile_literal_counts[posting->count] =
@@ -303,16 +335,18 @@ void hint_postings_add_profile(Hint_postings index, unsigned long long key,
       (unsigned short) negative;
   {
     unsigned block = posting->count / 64;
-    unsigned long long *summary =
-      posting->summary.profile_block_summaries + (size_t) block * 2;
-    unsigned maxima = (unsigned) summary[1];
+    unsigned long long *summary = index->profile_block_summaries ?
+      posting->summary.profile_block_summaries + (size_t) block * 2 : NULL;
     unsigned long long flag = 1ULL << (posting->count % 64);
-    summary[0] |= mask;
-    if (positive > (maxima >> 16))
-      maxima = (positive << 16) | (maxima & 0xffffU);
-    if (negative > (maxima & 0xffffU))
-      maxima = (maxima & 0xffff0000U) | negative;
-    summary[1] = maxima;
+    if (summary != NULL) {
+      unsigned maxima = (unsigned) summary[1];
+      summary[0] |= mask;
+      if (positive > (maxima >> 16))
+        maxima = (positive << 16) | (maxima & 0xffffU);
+      if (negative > (maxima & 0xffffU))
+        maxima = (maxima & 0xffff0000U) | negative;
+      summary[1] = maxima;
+    }
     while (mask != 0) {
       unsigned bit = (unsigned) __builtin_ctzll(mask);
       posting->profile_mask_planes[(size_t) block * 64 + bit] |= flag;
@@ -372,12 +406,14 @@ unsigned long long hint_postings_profile_allocated_bytes(
 unsigned long long hint_postings_profile_layout_bytes(
   unsigned table_capacity,
   unsigned long long reference_capacity,
-  unsigned long long mask_blocks)
+  unsigned long long mask_blocks,
+  BOOL block_summaries)
 {
   return sizeof(struct hint_postings) +
     (unsigned long long) table_capacity * sizeof(struct hint_posting) +
     reference_capacity * 2 * sizeof(unsigned) +
-    mask_blocks * 66 * sizeof(unsigned long long);
+    mask_blocks * (block_summaries ? 66 : 64) *
+      sizeof(unsigned long long);
 }
 
 const unsigned *hint_postings_get(Hint_postings index,
