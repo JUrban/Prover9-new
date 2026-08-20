@@ -403,6 +403,19 @@ plausible-looking options that were already negative.
   disagreed.  Every given digest remained exact; the dispatch split was
   nevertheless reverted completely because the release compiler already
   makes the residual call negligible.
+- A suspected long-run statistics scan was also audited and rejected as a
+  target before merging extra bookkeeping.  `update_memory_stats()` scans
+  `clause_store_length(Glob.disabled)`, but compact OTTER's dense passives are
+  detached archive records and are not members of that retained-handle
+  array.  At the completed endpoint the ancestor store reports 36,195,194
+  cumulative records and 36,195,190 detached records: only four records ever
+  used ordinary handles.  Its 1,053,512 handle bytes are the fixed 1-MiB
+  write buffer, the 4-KiB I/O buffer, the 328-byte store, and a 64-pointer
+  allocation.  Thus each report scans four entries, not 36 million.  A
+  synthetic million-handle scan confirmed that such a layout would be
+  measurable, but it does not model Josef's detached directory.  The proposed
+  resident side list was reverted completely; it would have added lifecycle
+  state without improving the production path.
 - A native `-O3 -march=native -flto` build used 77.60 CPU seconds in one
   pinned 1,000-given run versus 81.69 for the immediately following portable
   `-O2` control.  Earlier portable pairs averaged 78.83, so host-frequency
