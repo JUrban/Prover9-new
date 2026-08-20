@@ -321,6 +321,44 @@ same width to that run's recorded capacity reduces reserved directory size by
 330,971,616 bytes (315.6 MiB).  The full authority run is still required to
 measure its page-cache residency and whole-process CPU contribution.
 
+### Exact-default clause weighting
+
+Commit `f4f4614` specializes only the exact default weighting configuration:
+no ordinary weight rules, all symbol weights equal to one, all punctuation
+and penalty weights equal to zero, and no installed resonators.  In that case
+the clause weight is exactly its number of term nodes.  A depth-first frame
+stack now counts those nodes directly instead of allocating one substitution
+context per literal and entering the general rule/resonator/penalty evaluator.
+Any changed parameter, ordinary rule or resonator keeps the original path.
+The specialization has no option and does not alter the search policy.
+
+The strict clocks-off Josef 01/1,501 reversed pair preserved
+`(Given=1501, Generated=3603947, Kept=521972, proofs=0)` in every process:
+
+| Portable binary | Mean user | Mean system | Mean total | Mean RSS |
+|---|---:|---:|---:|---:|
+| 64-byte-directory control | 74.895 s | 4.220 s | 79.115 s | 683,556 KiB |
+| exact-default weighting | 74.275 s | 4.385 s | 78.660 s | 683,518 KiB |
+| change | **-0.8%** | +3.9% | **-0.6%** | -38 KiB |
+
+The candidate won user CPU in both placements.  It won first-placement total
+CPU by 0.98 seconds and lost the reversed total by 0.07 seconds because of a
+0.65-second system-CPU movement, so the whole-process effect is deliberately
+reported as modest.  The exact-clock 1,501-given operation gate gives the
+stronger mechanism check: measured `clock weigh` fell from 4.56 to 3.59
+seconds (-21.3%) at the identical endpoint.  Exact clocks made those complete
+process totals diagnostic rather than throughput results, as explained at the
+start of this report.
+
+CHAT/601 and Josef 02/601 independently preserved
+`(497430,16974,0)` and `(524799,26671,0)`.  Custom multi-literal rules,
+nondefault parameters and the shipped resonator example also preserved their
+control endpoints.  `default_weight_test` permanently covers default
+multi-literal/equality counts and all three fallback classes; the compact
+generalization smoke passes.  Every measured process used zero swap.  This
+change adds only a fixed traversal stack during a weight call and no
+persistent per-clause or per-index RAM.
+
 ## Authoritative completed runs
 
 The source files are:
@@ -1003,6 +1041,8 @@ adds only a growable query-path scratch array; it occupied 256 bytes at the
 Posting-wide packed-hint summaries are overlaid with mutually exclusive dense
 posting fields: measured conjunction table, plan and peak bytes are identical
 to the previous source, so this optimization adds no index allocation.
+Exact-default clause weighting adds no persistent state beyond one Boolean;
+its traversal stack exists only during `clause_weight()`.
 
 The adaptive unit strategy is the exception: it maintains compressed position
 features as well as the code tree.  Unlimited depth still projects to about
@@ -1061,6 +1101,10 @@ CPU estimates are less certain and the gains are not additive:
 - 64-byte dense passive directory records reduce that directory's logical and
   reserved size by 11.1%; their scale pair improves total CPU by 4.7% and the
   exact Josef 01/1,501 whole-process pair by 2.0%;
+- exact-default clause weighting reduces its directly measured phase by 21.3%
+  at Josef 01/1,501; its strict clocks-off reversed whole-process mean improves
+  by a much smaller 0.8% user and 0.6% total CPU, with exact independent CHAT
+  and Josef 02 trajectories;
 - the slab recycler changes almost no bounded CPU but removes nearly all
   post-warm-up slab unmaps by 2,000 givens;
 - native compilation may add 0--5% depending on the host.
@@ -1096,10 +1140,10 @@ Do not reuse objects from a differently instrumented, sanitized, profiled, or
 `NATIVE=1` build.  If in doubt, use a fresh worktree or clean the build before
 compiling.  In particular, the repository's currently installed `bin/prover9`
 is intentionally the older PGO executable and does not contain commits
-`107665b`, `3f2f566`, `4c0d0b2`, `b3cde19`, or `df7bfdb`; run the build and
-copy steps above before the authority run.  The fresh portable source binary
-measured at `df7bfdb` has SHA-256
-`f0d565d65824f6279573c1fa9f91f114e58a6b5b45470f011057db0e942858e5`.
+`107665b`, `3f2f566`, `4c0d0b2`, `b3cde19`, `df7bfdb`, or `f4f4614`; run the
+build and copy steps above before the authority run.  The fresh portable
+source binary measured at `f4f4614` has SHA-256
+`454bcfda53d435839d36344e571c8f2d16e30f9814deed71e24a7c9f3171b83e`.
 
 ### Prover9 options
 
@@ -1284,6 +1328,13 @@ CHAT_CPU=0 CHAT_REPORT_SECONDS=30 CHAT_CLOCKS=0 \
 
 It writes the generated input, raw output, GNU-time report, hashes, status,
 summary TSV, and long-run parser output under `chat-production-300/`.
+
+The focused default-weight/fallback regression is:
+
+```sh
+make -C test.src default_weight_test
+./test.src/default_weight_test
+```
 
 ## If the full run is still slow
 
