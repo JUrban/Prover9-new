@@ -32,9 +32,9 @@ same normalized given-clause SHA-256,
 | Exact 1,001-given control | User CPU | System CPU | Total CPU | Peak RSS | old / control |
 |---|---:|---:|---:|---:|---:|
 | preserved old P9, clocks off | 111.38 s | 5.44 s | 116.82 s | 697,984 KiB | 1.00 |
-| current PGO, exact clocks | 45.90 s | 21.69 s | 67.59 s | 599,492 KiB | 1.73x faster |
-| current PGO, clocks sampled 1/16 | 41.16 s | 6.36 s | 47.52 s | 604,256 KiB | 2.46x faster |
-| current PGO, clocks off | 37.14 s | 3.71 s | 40.85 s | 609,000 KiB | 2.86x faster |
+| installed pre-polling PGO, exact clocks | 45.90 s | 21.69 s | 67.59 s | 599,492 KiB | 1.73x faster |
+| installed pre-polling PGO, clocks sampled 1/16 | 41.16 s | 6.36 s | 47.52 s | 604,256 KiB | 2.46x faster |
+| installed pre-polling PGO, clocks off | 37.14 s | 3.71 s | 40.85 s | 609,000 KiB | 2.86x faster |
 
 Thus exact clocks added 26.74 CPU seconds, or 65.5% relative to the clocks-off
 process and 39.6% of the exact-clock total, at this prefix.  Sampling retained
@@ -42,7 +42,7 @@ approximate phase attribution but still cost 6.67 seconds relative to clocks
 off.  `/usr/bin/time -v` remains the authority for total user/system CPU when
 internal clocks are disabled.
 
-The current PGO binary is SHA-256
+The installed PGO binary used for this table is SHA-256
 `dad5d12683bc8106f4bd43cff4cb7be5d66e200ab4ee7e145579639e209b98f2`;
 the preserved old binary is
 `bcdf6bafbf608fde463fd43ef541891813f5c49a2d5153711c54925e98d76bcc`.
@@ -93,6 +93,53 @@ The individual totals were parent/candidate 54.44/48.90 seconds followed by
 confirming that short periodic reports remain live after amortization.
 An independent `report_given=10` smoke reported at givens 10, 20 and 30
 exactly, followed by the final given 31 statistics.
+
+### Balanced PGO retraining audit: not accepted as the general binary
+
+Because `search.c` changed, the installed binary's old profile is not valid
+profile-guided optimization data for the current source.  A fresh isolated
+PGO audit therefore trained the current branch serially on three workloads:
+Josef 01 to 1,001 given clauses, Josef 02 to 601, and CHAT to 601.  All runs
+were bounded to 2 GiB, had zero swap, and reproduced their exact endpoint and
+normalized selected-given digest.  Training produced 103 profile files
+totalling 298,988 bytes.  The instrumented generator and resulting PGO-use
+binaries have SHA-256 values:
+
+```text
+generator  c1f4c193d096b27426dc323cc2cf4a143cfcdbdac5a3093005b78b42c6597dab
+PGO-use   73971bff5c445c558ad7cc3e6fd42b4512f15c96e93fb852768b2dafa467768d
+```
+
+The retrained PGO-use binary was promising on its target workload.  In a
+serial reversed Josef 01 pair against the installed PGO binary, mean total
+CPU fell from 48.12 to 41.17 seconds (-14.5%), mean system CPU from 4.64 to
+1.90 seconds (-59.0%), and RSS remained approximately 610 MiB.  Both binaries
+ended at `(1001,1628048,320239,0)` with the same given digest.  An independent
+Josef 02/600 run also reproduced `(601,524799,26671,0)` in 27.07 total CPU
+seconds and 206,712 KiB RSS.
+
+The cross-workload CHAT gate did not confirm a general improvement.  At the
+exact `(601,497430,16974,0)` endpoint with a common given digest, the installed
+binary averaged 50.81 total CPU seconds and the retrained candidate 52.63
+seconds (+3.6%).  The two pair orientations contradicted each other: the
+candidate lost the first comparison and won the reversed comparison.  This
+is too noisy to claim a regression, but it is also insufficient evidence to
+replace a general production executable with a Josef-trained PGO build.
+
+Accordingly, the retrained binary is **not installed** and is not an
+authority for the full run.  `bin/prover9` deliberately remains the prior
+PGO executable with SHA-256 `dad5d126...`.  The accepted result on this branch
+is the portable source-level polling change; final testing must build that
+source afresh.  Any future PGO release needs repeated mature gates on Josef
+01, Josef 02, CHAT and Osborn, not merely a larger Josef-weighted training
+set.
+
+The isolated current-source PGO build also passed
+`compact_otter_audit_test.sh` and `compact_generalization_smoke_test.sh` under
+hard memory/time limits.  The first checks compact/legacy proof equivalence
+and all authoritative/audit index strategies; the second covers legacy and
+file-backed compact variants on two distinct problems.  These tests establish
+bounded semantic compatibility, not long-run CPU performance.
 
 ## Authoritative completed runs
 
@@ -176,7 +223,7 @@ file-backed.  Their logical/physical files are much larger than their process
 PSS and must be accounted separately when comparing RAM with disk/page-cache
 use.
 
-## Changes on `josef01-cpu`
+## Changes carried into `josef01-cpu-next`
 
 ### Instrumentation and adaptive escape
 
@@ -311,12 +358,13 @@ was discovered and is superseded.  It charged exact-clock work to the compact
 storage/index design.  A precise replacement cannot be obtained by scaling a
 1,001-given result across machines: the timer cost is approximately linear in
 phase intervals, while unit-tree, hint and selector work grow differently.
-The current clocks-off engine is 2.86 times old P9 at the bounded exact state,
-and current source also contains the slab recycler and mature index changes
-that were absent from `new3`.  It is therefore plausible that a clocks-off,
-current-PGO full run reaches the 24,191-second 1.25-times-old gate, but **CPU
-parity has not yet been demonstrated**.  Do not publish a tighter full-run
-estimate until that external acceptance run completes.
+The installed clocks-off engine is 2.86 times faster than old P9 at the
+bounded exact state, and current source additionally contains the amortized
+report polling, slab recycler and mature index changes that were absent from
+`new3`.  It is therefore plausible that a clocks-off, freshly built
+current-source full run reaches the 24,191-second 1.25-times-old gate, but
+**CPU parity has not yet been demonstrated**.  Do not publish a tighter
+full-run estimate until that external acceptance run completes.
 
 ## Build and run the decisive Josef 01 comparison
 
@@ -325,7 +373,7 @@ estimate until that external acceptance run completes.
 From this repository and branch:
 
 ```sh
-git switch josef01-cpu
+git switch josef01-cpu-next
 make -C ladr lib
 make -C provers.src prover9
 cp -p provers.src/prover9 bin/prover9
@@ -334,7 +382,9 @@ sha256sum bin/prover9
 
 Do not reuse objects from a differently instrumented, sanitized, profiled, or
 `NATIVE=1` build.  If in doubt, use a fresh worktree or clean the build before
-compiling.
+compiling.  In particular, the repository's currently installed `bin/prover9`
+is intentionally the older PGO executable and does not contain commit
+`1c3c413`; run the build and copy steps above before the authority run.
 
 ### Prover9 options
 
