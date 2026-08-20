@@ -416,6 +416,17 @@ plausible-looking options that were already negative.
   measurable, but it does not model Josef's detached directory.  The proposed
   resident side list was reverted completely; it would have added lifecycle
   state without improving the production path.
+- Requiring a packed-hint profile to appear three times before admitting its
+  exact result was rejected at the first 101-given Josef gate.  A bounded
+  two-row frequency sketch reduced cache stores from 10,398 to 390, but it
+  also lost useful first-repeat results: hits fell from 2,620 to 885 and
+  posting candidates avoided from 345,334 to 153,819.  Total CPU increased
+  from 13.40 to 14.13 seconds (+5.4%) with the exact same
+  `(Given=101, Generated=13675, Kept=7309)` endpoint, approximately equal RSS,
+  and zero swap.  The sketch and admission policy were reverted completely.
+  This also explains why the proven Josef policy disables the result cache
+  outright instead of retaining lookup/hash cost while selectively refusing
+  stores.
 - A native `-O3 -march=native -flto` build used 77.60 CPU seconds in one
   pinned 1,000-given run versus 81.69 for the immediately following portable
   `-O2` control.  Earlier portable pairs averaged 78.83, so host-frequency
