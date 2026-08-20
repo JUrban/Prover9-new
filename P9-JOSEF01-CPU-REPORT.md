@@ -328,12 +328,14 @@ rigid-child, and rigid-sibling sources.  It changes no answers.  This makes a
 mature run capable of distinguishing unavoidable variable expansion from a
 bad rigid lookup.
 
-Commit `8ced379` adds an opt-in `compact_unit_strategy=adaptive`.  Its complete
-position postings are delta-compressed in 256-byte chunks: the 1,000-given
-Josef feature store fell from 58,965,408 to 9,151,600 bytes, an 84.5% reduction.
-The adaptive route cut tree visits but was slower at 1,000 and 2,000 givens
-because it admitted more exact candidates.  It therefore remains an
-experiment, not the recommended full-run setting.
+Commit `8ced379` added the original opt-in
+`compact_unit_strategy=adaptive`.  Its complete position postings are
+delta-compressed in 256-byte chunks: the 1,000-given Josef feature store fell
+from 58,965,408 to 9,151,600 bytes, an 84.5% reduction.  That original,
+unlimited-depth route cut tree visits but was slower at 1,000 and 2,000 givens
+because it admitted more exact candidates.  It remains rejected for the full
+run.  The later direct refinement and depth-2 admission policy are materially
+different and form the CPU-first candidate described below.
 
 ### Packed-term access
 
@@ -448,17 +450,15 @@ answer.  `compact_unit_index_test`, `compact_long_run_test`, an adaptive `x2`
 audit, and `compact_generalization_smoke_test.sh` all pass.  These are bounded
 semantic and scalability gates, not a proof-endpoint CPU result.
 
-This does not yet replace `code_tree` as the primary authority configuration.
-Adaptive must maintain compressed position features in addition to the code
-tree.  The 2,000-given store used 21,988,160 feature bytes for 695,604 active
-units, about 31.6 bytes/unit.  A linear extrapolation to the completed
-35,592,170-unit population is approximately 1.1 GB of extra resident index
-capacity.  That would move the measured 9,083,561-KiB compact PSS toward about
-10.2 million KiB (roughly 9.7 GiB) and reduce the estimated saving versus old
-P9 from about 80% to roughly 77--78%.  This estimate is deliberately
-conservative and must be replaced by measured mature PSS.  The next design
-step, if adaptive wins CPU, is selective or file-backed feature admission
-rather than accepting an unbounded duplicate resident index.
+This unlimited-depth form does not replace `code_tree` as an authority
+configuration.  Adaptive must maintain compressed position features in
+addition to the code tree.  The 2,000-given unlimited store used 21,988,160
+feature bytes for 695,604 active units, about 31.6 bytes/unit.  A linear
+extrapolation to the completed 35,592,170-unit population is approximately
+1.1 GB, moving the measured compact PSS toward roughly 9.7 GiB and reducing
+the estimated saving versus old P9 to about 77--78%.  The depth-bounded design
+below is the accepted selective alternative; do not run adaptive accidentally
+with its compatibility depth zero.
 
 ### Depth-bounded adaptive unit features
 
@@ -501,26 +501,40 @@ process swap:
 | CHAT / 601 | adaptive, depth 2 | 48.47 s | 0.13 MB | 32,485 tree nodes + 15 postings |
 | Josef 02 / 601 | `code_tree` | 37.43 s | 0 | 70,122 tree nodes |
 | Josef 02 / 601 | adaptive, depth 2 | 37.55 s | 0.20 MB | identical 70,122 tree nodes; no position route selected |
+| Josef 01 / 1,501 | `code_tree` | 84.40 s paired mean | 0 | 73.93M tree nodes + 0.30M exact tests |
+| Josef 01 / 1,501 | adaptive, depth 2 | 82.19 s paired mean | 3.64 MB | 4.72M tree + 3.05M postings + 0.98M exact |
 
-The CPU differences are noise-scale and do **not** establish a prefix
-speedup.  The important long-run signal is work growth: at the Josef 01
-1,001 endpoint, depth 2 replaces roughly 35 million code-tree nodes with
-about 5 million combined tree/posting/exact items.  At 601 givens it also
-reduced feature capacity by 79.7% versus unlimited adaptive (767,744 versus
-3,777,032 bytes).  A naive linear extrapolation from depth 2 at 295,674 units
-to the completed 35,592,170-unit population is about 0.28 GB of feature
-capacity, versus the earlier 1.1-GB unlimited-depth projection.  This remains
-an estimate: posting popularity and allocator capacities can change at mature
-scale, so only a full PSS measurement is authoritative.
+At 1,001 givens the CPU differences are noise-scale.  The stricter 1,501 gate
+is the first observed crossover: adaptive won both core orientations, 79.31
+versus 82.18 seconds and 85.07 versus 86.62, for a 2.6% paired-mean saving.
+Both strategies ended at `(Given=1501, Generated=3603947, Kept=521972)` with
+the same hint/search counters and zero process swap.  Mean RSS rose from
+675,562 to 693,762 KiB (+18.2 MiB).
 
-Depth 2 is therefore a staged long-run CPU experiment, not the new primary
-authority mode.  Run the first full comparison with `code_tree`; an otherwise
-identical second run may use `adaptive` plus
-`compact_unit_feature_depth=2`.  Accept it only if the exact proof endpoint,
-hint trajectory and proof are unchanged and the interval CPU/given slope
-improves without compromising the RAM target.  Depth 1 saves another roughly
-1.6 MB at this prefix but scans many more common postings and is not the
-recommended long-run candidate.
+More important than the small elapsed win is the diverging work slope.  At
+1,001 givens, depth 2 replaces roughly 35 million code-tree nodes with about
+5 million combined tree/posting/exact items.  By 1,501, code-tree work has
+grown to 73.93 million nodes, while adaptive performs 4.72 million tree nodes,
+3.05 million posting checks and 0.98 million exact tests.  At the completed
+endpoint the old code tree reached 68.17 **billion** nodes, so this is the only
+currently measured mechanism with enough scaling leverage to remove a
+material part of its 4,311 sampled conflict seconds.
+
+At 601 givens depth 2 reduced feature capacity by 79.7% versus unlimited
+adaptive (767,744 versus 3,777,032 bytes).  The 1,501 store uses 3,638,272
+feature-capacity bytes for 490,940 physical units, or 7.41 bytes/unit.  A naive
+linear extrapolation to the completed 35,592,170-unit population is about
+264 MB (0.25 GiB), versus the earlier 1.1-GB unlimited-depth projection.
+Allocator capacity, posting popularity and touched PSS can change at mature
+scale, so only a full measurement is authoritative.
+
+Depth-2 adaptive is therefore now the **CPU-first full authority candidate**,
+not merely a post-run experiment.  `code_tree` remains the strict memory
+control and should be retained if the approximately quarter-GiB projection is
+unacceptable.  Accept adaptive only if the exact proof endpoint, hint
+trajectory and proof are unchanged and the interval CPU/given slope improves
+without compromising the radical RAM saving.  Depth 1 saves more RAM but
+scans many more common postings and is not the recommended long-run policy.
 
 ### Sparse hint planes and reused generalization edge heads
 
@@ -579,10 +593,12 @@ cost.
 These results are important because they prevent tuning a large run with
 plausible-looking options that were already negative.
 
-- The pre-`45ecaac` single-position `compact_unit_strategy=adaptive` reduced
-  tree work but was about 8.5% slower at 2,000 givens and produced more exact
-  tests.  Keep `code_tree` for the first decisive run; the refined adaptive
-  route requires a separate staged gate.
+- The pre-`45ecaac` single-position, unlimited-depth
+  `compact_unit_strategy=adaptive` reduced tree work but was about 8.5% slower
+  at 2,000 givens and produced more exact tests.  Do not infer from the later
+  depth-2 result that this old form is now acceptable: the CPU-first authority
+  candidate requires both direct refinement and
+  `compact_unit_feature_depth=2`.
 - A first attempt at two-position filtering marked the first posting union
   and decoded a complete second union to intersect it.  At 1,000 givens it
   reduced conflict exact tests from 293,410 in the compressed adaptive
@@ -671,8 +687,9 @@ plausible-looking options that were already negative.
   MB of cumulative object traffic at the same endpoint.  It looked excellent
   in the shorter adaptive 601-given gate and improved the adaptive 1,001-given
   reversed mean from 54.77 to 52.64 seconds (-3.9%).  That result did not
-  generalize to the primary `code_tree` authority configuration: its reversed
-  1,001-given mean was 49.31 seconds candidate versus 48.45 control (+1.8%).
+  generalize to the then-primary `code_tree` authority configuration: its
+  reversed 1,001-given mean was 49.31 seconds candidate versus 48.45 control
+  (+1.8%).
   Josef 02/601 also moved from 36.18 to 36.91 seconds (+2.0%) despite 7.70
   million fewer allocation calls, while CHAT/601 was neutral at 45.47 versus
   45.30 seconds with 2.45 million fewer calls.  All endpoints, search/index
@@ -682,6 +699,19 @@ plausible-looking options that were already negative.
   fallback.  Both implementations and the temporary test were nevertheless
   removed: fewer allocations are useful telemetry, not a CPU win, and the
   production configuration plus a second Josef workload both regressed.
+- Reusing exact-unifier binding state was rejected after a strict whole-engine
+  gate.  The completed Josef 01 run made 50,318,558 conflict exact tests, and
+  the compiler-generated prologue clears roughly 5.5 KiB of local binding
+  state for each test.  A prototype retained that state per compact unit index
+  and reset only two 100-byte bound maps between calls.  It improved a focused
+  repeated-variable failure microbenchmark, but the exact Josef 01/1,001
+  adaptive-depth-2 reversed pair was neutral to the millisecond: both control
+  and candidate averaged 53.425 CPU seconds.  Every run ended at
+  `(Given=1001, Generated=1628048, Kept=320239)`, all search/index counters
+  matched and process swap was zero.  Even the operation-level result projects
+  to only roughly 1--7 seconds over the completed run's 50.3 million tests,
+  which is immaterial against about 36,700 CPU seconds.  The prototype and its
+  roughly 5-KiB-per-index persistent state were removed completely.
 - A native `-O3 -march=native -flto` build used 77.60 CPU seconds in one
   pinned 1,000-given run versus 81.69 for the immediately following portable
   `-O2` control.  Earlier portable pairs averaged 78.83, so host-frequency
@@ -701,14 +731,14 @@ actually grows to the cap.  Only Josef's `TheRest` selector is large enough;
 the four-million-record scale gate observed a 34-MiB PSS increase including
 the associated mapping/page-cache effects.
 
-The optional refined adaptive unit strategy is the exception: it maintains
-compressed position features as well as the code tree.  Unlimited depth still
-projects to about 1.1 GB extra, but the staged depth-2 policy projects to about
-0.28 GB from the bounded population.  Both are excluded from the primary
-authority estimate.  Use `code_tree` for that run; if depth-2 adaptive is
-staged for CPU, measure rather than extrapolate its mature PSS.  The preliminary
-depth-2 projection would retain about a 79.5% saving, while unlimited adaptive
-would fall to roughly 77--78%.
+The adaptive unit strategy is the exception: it maintains compressed position
+features as well as the code tree.  Unlimited depth still projects to about
+1.1 GB extra, but the 1,501-given depth-2 policy projects to about 0.25 GiB
+from the bounded population.  The strict memory estimate below excludes both.
+For the CPU-first depth-2 authority candidate, measure rather than extrapolate
+mature PSS; the preliminary projection moves 8.76 GiB to about 9.01 GiB and
+retains approximately a 79.6% saving.  Unlimited adaptive would fall to
+roughly 77--78% and is not recommended.
 
 Starting from 9,083,561 KiB (8.66 GiB) PSS, charging the complete 64-MiB slab
 allowance and the observed 34-MiB selector increment gives roughly 8.76 GiB.
@@ -732,9 +762,12 @@ CPU estimates are less certain and the gains are not additive:
 - the direct symbol table is a measured 3.95% whole-prefix gain;
 - term-base caching saves about 12% only inside unit lookups;
 - sibling pruning saves about 38% only inside forward generalization;
-- direct two-position refinement cuts bounded Josef code-tree traversal by
-  26.7% at 1,001 givens while remaining within about 2% of `code_tree` total
-  CPU; its mature benefit is unknown and must be measured, not extrapolated;
+- depth-2 direct refinement reduces Josef unit-conflict tree traversal from
+  73.93 million to 4.72 million nodes at 1,501 givens (-93.6%), in exchange
+  for 3.05 million posting checks and 0.98 million exact tests; it wins the
+  reversed-pair total by 2.6% while adding 18.2 MiB RSS, but its full-run gain
+  and mature feature-store size still must be measured rather than
+  extrapolated;
 - sparse hint-plane population and first-edge reuse remove measured hot-path
   instructions with no new storage; their combined Josef 01/1,000 paired mean
   improved 2.6%, but frequency noise prevents a tighter full-run estimate;
@@ -812,8 +845,8 @@ set(compact_otter_unit_index).
 set(compact_otter_back_demod_index).
 set(compact_otter_nonunit_index).
 
-assign(compact_unit_strategy,code_tree).
-assign(compact_unit_feature_depth,2).  % Used only by position/adaptive.
+assign(compact_unit_strategy,adaptive).
+assign(compact_unit_feature_depth,2).  % Do not omit: zero means unlimited.
 set(compact_nonunit_path_filter).
 
 assign(compact_back_demod_strategy,adaptive32).
@@ -840,26 +873,26 @@ assign(stats,all).
 assign(report,900).
 ```
 
-Do not add the 64-MiB hint cache and do not select the adaptive unit strategy
-for this first authority run.  The primary comparison should isolate the
-already measured compact RAM design from the adaptive strategy's projected
-extra feature store.
+Do not add the 64-MiB hint cache and do not omit the depth-2 limit.  The
+adaptive configuration is now the CPU-first authority candidate because its
+paired 1,501-given crossover and mature work projection are stronger than the
+remaining code-tree case.  A bounded 4,000/10,000-given preflight on the large
+host is still advisable before committing a week to it.
 
-After that run, or as a bounded 4,000/10,000-given preflight on the large
-host, the refined CPU experiment changes exactly one line:
+The strict memory control changes exactly one line:
 
 ```prolog
-assign(compact_unit_strategy,adaptive).
+assign(compact_unit_strategy,code_tree).
 ```
 
-Keep every other option, including `clear(clocks)`, the 2-MiB cache, its
-128-candidate admission threshold and `compact_unit_feature_depth=2`,
-identical.  Continue only if the given/generated/kept/hint trajectory is
-exact, the interval CPU/given slope is no worse than `code_tree`, there is no
-swap, and the ratio of
-`position_refinement_rejects` to `position_refinement_checks` remains
-substantial.  Record feature bytes and PSS; an adaptive full run is a CPU/RAM
-tradeoff experiment, not the clean 80%-RAM authority result.
+Keep every other option identical so that code-tree remains a usable bounded
+control.  For the adaptive authority run, continue only if the
+given/generated/kept/hint trajectory is exact, the interval CPU/given slope
+remains no worse than the code-tree preflight, there is no swap, and the ratio
+of `position_refinement_rejects` to `position_refinement_checks` remains
+substantial.  Record feature bytes and PSS explicitly: the CPU-first run is a
+measured CPU/RAM tradeoff with a preliminary 79.6% RAM-saving projection, not
+a claim that the feature sidecar is free.
 
 If approximate internal phase attribution is needed, replace `clear(clocks)`
 with:
@@ -922,11 +955,14 @@ The new run is accepted only if all of the following hold:
 6. Inspect `Memory report` for cached/reused/evicted slabs.  If system CPU is
    still large despite high mapping reuse, the remaining cause is not slab
    churn.
-7. Inspect `Compact_unit_fanout` and unit query profiles.  If pending-subtree
-   traversal dominates in `code_tree`, compare the staged refined-adaptive
-   run.  For adaptive, record `position_refinement_queries/checks/rejects`,
-   position postings, conflict exact tests, code-tree nodes and feature bytes.
-   A low reject rate means the extra feature store is not buying selectivity.
+7. Inspect `Compact_unit_fanout` and the adaptive unit query profiles.  Record
+   `position_refinement_queries/checks/rejects`, position postings, conflict
+   exact tests, code-tree nodes and feature bytes at every report.  Continue
+   the adaptive authority run only while its interval CPU/given slope stays
+   competitive and refinement rejects a substantial fraction of checks.  A
+   collapsing reject rate or rapidly growing posting/exact work means the
+   feature sidecar is no longer buying selectivity; stop and use the otherwise
+   identical `code_tree` configuration as the strict-memory fallback.
 8. Inspect `Dense_passive_selector` flushes, merges and read/write bytes.  The
    1-Mi-entry policy should be far below the baseline's 551/546 merge counts;
    otherwise another selector is unexpectedly reaching the cap.
@@ -956,11 +992,14 @@ The next change should follow the mature telemetry, in this order:
 1. If system CPU remains the outlier, separate allocator mapping reuse from
    passive/selector/ancestor file I/O and page-cache eviction.  Increase no
    cache until this attribution is known.
-2. If unit pending-subtree work dominates, stage the direct-refinement
-   adaptive route with `compact_unit_feature_depth=2`.  If it wins CPU but its
-   measured feature store compromises the RAM target, make feature admission
-   selective or file-backed; do not restore the rejected two-posting
-   intersection or unlimited depth by accident.
+2. If unit retrieval still dominates under depth-2 adaptive, separate its
+   position postings, refinement checks/rejects, exact tests and residual
+   code-tree nodes.  If posting or exact work grows faster than the avoided
+   tree traversal, make feature admission more selective; if the feature
+   store itself compromises the RAM target, consider a file-backed sidecar.
+   Do not restore the rejected two-posting intersection or unlimited depth by
+   accident.  If adaptive's interval CPU/given slope loses to the bounded
+   `code_tree` control, fall back instead of carrying an unproductive sidecar.
 3. If packed hints remain near 4,250 seconds, first separate cache hit work,
    admission skips and conjunction candidates from authoritative exact tests.
    Stable keys and work-based admission address cache overhead; a larger cache
