@@ -10,6 +10,7 @@ max_megs=${5:-2048}
 wall_seconds=${6:-$((max_seconds + 60))}
 report_seconds=${CHAT_REPORT_SECONDS:-30}
 clock_sample_rate=${CHAT_CLOCK_SAMPLE_RATE:-1}
+clocks=${CHAT_CLOCKS:-1}
 cpu=${CHAT_CPU:-0}
 trace=${CHAT_TRACE:-0}
 compact_term_reclaim_kb=${CHAT_COMPACT_TERM_RECLAIM_KB:-8192}
@@ -35,6 +36,11 @@ compare_max_cpu_ratio=${CHAT_COMPARE_MAX_CPU_RATIO:-1.25}
 compare_min_ram_saving_pct=${CHAT_COMPARE_MIN_RAM_SAVING_PCT:-80}
 compare_max_back_slope_ratio=${CHAT_COMPARE_MAX_BACK_SLOPE_RATIO:-1.25}
 cgroup_accounting=${CHAT_CGROUP_ACCOUNTING:-0}
+
+case "$clocks" in
+  0|1) ;;
+  *) echo "CHAT_CLOCKS must be 0 or 1" >&2; exit 2 ;;
+esac
 
 if test ! -f "$input"; then
   echo "input not found: $input" >&2
@@ -88,6 +94,7 @@ esac
   echo "wall_seconds=$wall_seconds"
   echo "report_seconds=$report_seconds"
   echo "clock_sample_rate=$clock_sample_rate"
+  echo "clocks=$clocks"
   echo "cpu=$cpu"
   echo "trace=$trace"
   echo "compact_term_reclaim_kb=$compact_term_reclaim_kb"
@@ -137,6 +144,7 @@ awk '
   /^(set|clear)\(compact_back_edge_filter\)\./ { next }
   /^(set|clear)\(compact_nonunit_path_filter\)\./ { next }
   /^(set|clear)\(compress_disabled\)\./ { next }
+  /^(set|clear)\(clocks\)\./ { next }
   /^(set|clear)\(print_(gen|kept|given|initial_clauses)\)\./ { next }
   { print }
 ' "$input" > "$base_input"
@@ -161,8 +169,12 @@ write_case()
       echo 'clear(print_given).'
     fi
     echo 'clear(print_initial_clauses).'
-    echo 'set(clocks).'
-    if test "$name" != old_otter; then
+    if test "$clocks" = 1; then
+      echo 'set(clocks).'
+    else
+      echo 'clear(clocks).'
+    fi
+    if test "$clocks" = 1 && test "$name" != old_otter; then
       echo "assign(clock_sample_rate,$clock_sample_rate)."
     fi
     echo 'set(hint_match_stats).'

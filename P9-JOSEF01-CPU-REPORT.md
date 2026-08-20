@@ -2,17 +2,60 @@
 
 ## Status
 
-Branch `josef01-cpu` preserves the Josef 01 search trajectory on every bounded
-replay performed here and contains several general, non-Josef-specific CPU
-improvements.  It has **not** been run to the Josef 01 proof endpoint on this
-23-GiB development host.  The proof-endpoint CPU result therefore remains a
-user-run acceptance gate, not a completed claim.
+Branch `josef01-cpu-next` preserves the Josef 01 search trajectory on every
+bounded replay performed here and contains several general, non-Josef-specific
+CPU improvements.  It has **not** been run to the Josef 01 proof endpoint on
+this 23-GiB development host.  The proof-endpoint CPU result therefore remains
+a user-run acceptance gate, not a completed claim.
 
 The completed compact baseline is still an important result: it proves the
 same theorem after the same 30,827 given clauses while reducing measured
 resident memory by about 80%.  Its CPU cost, however, was 1.90 times old P9.
 The work on this branch attacks measured causes of that cost without changing
 clause selection, hint answers, or inference order.
+
+### 2026-08-20 measurement correction
+
+The 1.90-times full-run CPU comparison below is real as a record of the two
+supplied processes, but it is not a fair measure of the compact search engine.
+`Josef_01.out.new3` enabled exact detailed phase clocks with `set(clocks)` and
+the default `clock_sample_rate=1`; `Josef_01.out.old` did not enable clocks.
+The compact run consequently made kernel CPU-time queries around billions of
+search-phase intervals that the old-P9 run never made.
+
+This was isolated on `vmi3142790` with one process at a time, a 2-GiB hard
+limit, no swap activity by any measured process, and the exact 1,001-given
+endpoint `(Generated=1628048, Kept=320239, proofs=0)`.  All four runs have the
+same normalized given-clause SHA-256,
+`c23110e9918bbd442865e24d36de6dbc11e2406ceadde0dd36fd55e24bb7be75`.
+
+| Exact 1,001-given control | User CPU | System CPU | Total CPU | Peak RSS | old / control |
+|---|---:|---:|---:|---:|---:|
+| preserved old P9, clocks off | 111.38 s | 5.44 s | 116.82 s | 697,984 KiB | 1.00 |
+| current PGO, exact clocks | 45.90 s | 21.69 s | 67.59 s | 599,492 KiB | 1.73x faster |
+| current PGO, clocks sampled 1/16 | 41.16 s | 6.36 s | 47.52 s | 604,256 KiB | 2.46x faster |
+| current PGO, clocks off | 37.14 s | 3.71 s | 40.85 s | 609,000 KiB | 2.86x faster |
+
+Thus exact clocks added 26.74 CPU seconds, or 65.5% relative to the clocks-off
+process and 39.6% of the exact-clock total, at this prefix.  Sampling retained
+approximate phase attribution but still cost 6.67 seconds relative to clocks
+off.  `/usr/bin/time -v` remains the authority for total user/system CPU when
+internal clocks are disabled.
+
+The current PGO binary is SHA-256
+`dad5d12683bc8106f4bd43cff4cb7be5d66e200ab4ee7e145579639e209b98f2`;
+the preserved old binary is
+`bcdf6bafbf608fde463fd43ef541891813f5c49a2d5153711c54925e98d76bcc`.
+The clocks-off current output is SHA-256
+`164bcc74213885c7e67853dd479c65fa6192ffa83793b2daa65247f63a1248b3` and
+the new old-P9 control output is
+`2238f376324c7fd5010391063e7686646b914f7067fc7f0492eec89a6113f0a5`.
+They are bounded evidence, not substitutes for a proof-endpoint run.
+
+For a throughput comparison, use `clear(clocks)`.  For occasional approximate
+phase reports, use `set(clocks)` with `assign(clock_sample_rate,16)`.  Exact
+clocks are a diagnostic mode and must be enabled on both competitors if their
+process CPU is compared.
 
 ## Authoritative completed runs
 
@@ -216,6 +259,9 @@ reported separately.
 
 CPU estimates are less certain and the gains are not additive:
 
+- disabling exact detailed clocks removes a measured 39.6% of total CPU at
+  the exact 1,001-given gate; this corrects a configuration mismatch in the
+  completed full-run comparison rather than changing proof search;
 - the direct symbol table is a measured 3.95% whole-prefix gain;
 - term-base caching saves about 12% only inside unit lookups;
 - sibling pruning saves about 38% only inside forward generalization;
@@ -223,18 +269,17 @@ CPU estimates are less certain and the gains are not additive:
   post-warm-up slab unmaps by 2,000 givens;
 - native compilation may add 0--5% depending on the host.
 
-A defensible pre-run range is about **28,000--34,000 total CPU seconds** for
-the portable branch, or approximately 7--24% below the completed compact
-baseline.  The low end assumes that the recycler removes most of the excess
-system CPU; the high end assumes much of that CPU is instead file/page-cache
-work.  An optimistic native result could be around 27,000 seconds, but should
-not be budgeted as guaranteed.
-
-This range is still 1.4--1.8 times the old P9 total.  CPU competitiveness at a
-25% tolerance requires at most 24,191 seconds.  Thus the branch is ready for
-the decisive long run, but **CPU parity has not been demonstrated**.  The new
-full telemetry tells us which next structural change is justified if it
-misses that gate.
+The earlier 28,000--34,000-second estimate was made before the clock mismatch
+was discovered and is superseded.  It charged exact-clock work to the compact
+storage/index design.  A precise replacement cannot be obtained by scaling a
+1,001-given result across machines: the timer cost is approximately linear in
+phase intervals, while unit-tree, hint and selector work grow differently.
+The current clocks-off engine is 2.86 times old P9 at the bounded exact state,
+and current source also contains the slab recycler and mature index changes
+that were absent from `new3`.  It is therefore plausible that a clocks-off,
+current-PGO full run reaches the 24,191-second 1.25-times-old gate, but **CPU
+parity has not yet been demonstrated**.  Do not publish a tighter full-run
+estimate until that external acceptance run completes.
 
 ## Build and run the decisive Josef 01 comparison
 
@@ -304,14 +349,24 @@ assign(compact_index_stale_pct,25).
 assign(compact_term_reclaim_kb,8192).
 assign(compact_rewrite_deep_cache_kb,0).
 
-set(clocks).
+% Maximum-throughput authority run.  /usr/bin/time -v supplies total CPU.
+clear(clocks).
 set(hint_match_stats).
 assign(stats,all).
 assign(report,900).
 ```
 
 Do not add the 64-MiB hint cache and do not select the adaptive unit strategy
-for this first authority run.
+for this first authority run.  If approximate internal phase attribution is
+needed, replace `clear(clocks)` with:
+
+```prolog
+set(clocks).
+assign(clock_sample_rate,16).
+```
+
+Do not use exact rate 1 for a throughput comparison unless old P9 is also run
+with exact clocks.
 
 ### Invocation and temporary files
 
@@ -326,6 +381,11 @@ TMPDIR=/local/mptp/prover9-tmp \
   > /path/to/Josef_01.compact.latest.out \
   2> /path/to/Josef_01.compact.latest.time
 ```
+
+The matrix driver can generate the same throughput configuration with
+`CHAT_CLOCKS=0`; for example, set it alongside
+`CHAT_CASES=new_otter_compact_file_production`.  `CHAT_CLOCKS=1` remains the
+compatibility default for historical diagnostic matrices.
 
 The file-backed passive/selector/ancestor stores are normally created as
 unlinked temporary files.  `/proc/$pid/fd/*` can show them with a `(deleted)`
