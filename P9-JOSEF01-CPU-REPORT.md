@@ -141,6 +141,52 @@ and all authoritative/audit index strategies; the second covers legacy and
 file-backed compact variants on two distinct problems.  These tests establish
 bounded semantic compatibility, not long-run CPU performance.
 
+### Josef 01 packed-hint cache gate
+
+The production default allocates a 2-MiB exact result cache in
+`packed_fast`.  It is semantically transparent, but every eligible query must
+canonicalize and hash its shallow feature profile, validate dependencies and
+usually store a replacement.  The completed Josef 01 output made 2.09
+billion cache queries.  Its 8.15% hit rate avoided 26.82 billion raw posting
+candidates, but the low reuse rate made it unclear whether that work paid for
+the cache machinery.
+
+A clocks-off serial reversed pair now compares the default cache with
+`assign(hint_cache_kb,0)` at the exact 1,001-given Josef endpoint.  Every run
+used the current portable source binary, one pinned CPU, a 2-GiB limit and
+zero process swap:
+
+| Order | 2-MiB cache | cache disabled | cache-off change |
+|---|---:|---:|---:|
+| first orientation | 48.66 s | 46.11 s | -5.2% |
+| reversed orientation | 50.76 s | 49.02 s | -3.4% |
+| mean | 49.71 s | 47.57 s | **-4.3%** |
+
+All four runs ended at `(1001,1628048,320239,0)` and emitted the same 1,001
+selected-given digest,
+`d2c195ffae6f90a9dc63a31c8c1fd5c49d29d564669ad9799575e9febb5c316f`.
+Mean RSS changed from 591,826 to 594,932 KiB; that 3-MiB movement is opposite
+the 2-MiB allocation difference and is ordinary measurement noise rather
+than a RAM regression.  The prefix's 7.52% cache hit rate is close to the
+completed run's 8.15%, which makes the CPU result relevant to the mature
+workload, although only the full authority run can confirm its final effect.
+
+This is deliberately a **Josef 01 override, not a default change**.  CHAT/600
+had identical trajectories and means of 49.15 seconds cache-on versus 48.92
+cache-off (-0.5%); its pair orientations contradicted each other.  Josef
+02/600 also preserved its exact trajectory, but averaged 35.60 seconds
+cache-on and 36.63 cache-off, so disabling the cache was 2.9% slower on mean.
+Its pair orientations also contradicted each other, which is not proof of a
+cache win but does rule out a robust general cache-off win.  Josef 02's cache
+hit rate was 48.58% and it avoided 13.89 million candidates in only 215,118
+queries.  The existing 2-MiB default therefore remains appropriate for an
+unknown/general workload.
+
+`CHAT_HINT_CACHE_KB` has been added to `chat_test_matrix.sh` so external
+production cases can reproduce either policy without editing logical input.
+It is unset by default; `CHAT_HINT_CACHE_KB=0` emits the Josef override only
+for `new_otter_compact_file_production`.
+
 ## Authoritative completed runs
 
 The source files are:
@@ -346,6 +392,9 @@ CPU estimates are less certain and the gains are not additive:
 - disabling exact detailed clocks removes a measured 39.6% of total CPU at
   the exact 1,001-given gate; this corrects a configuration mismatch in the
   completed full-run comparison rather than changing proof search;
+- disabling the low-hit 2-MiB packed-hint result cache is a measured 4.3%
+  whole-prefix Josef 01 gain, but remains a problem-specific override because
+  the Josef 02 mean favors retaining the cache;
 - the direct symbol table is a measured 3.95% whole-prefix gain;
 - term-base caching saves about 12% only inside unit lookups;
 - sibling pruning saves about 38% only inside forward generalization;
@@ -432,6 +481,7 @@ assign(compact_back_tree_budget_pct,200).
 clear(compact_back_edge_filter).
 
 assign(compact_passive_cache,0).
+assign(hint_cache_kb,0).  % Josef 01 only; retain the 2048 default generally.
 assign(compact_index_stale_pct,25).
 assign(compact_term_reclaim_kb,8192).
 assign(compact_rewrite_deep_cache_kb,0).
@@ -470,9 +520,10 @@ TMPDIR=/local/mptp/prover9-tmp \
 ```
 
 The matrix driver can generate the same throughput configuration with
-`CHAT_CLOCKS=0`; for example, set it alongside
+`CHAT_CLOCKS=0` and `CHAT_HINT_CACHE_KB=0`; for example, set them alongside
 `CHAT_CASES=new_otter_compact_file_production`.  `CHAT_CLOCKS=1` remains the
-compatibility default for historical diagnostic matrices.
+compatibility default for historical diagnostic matrices, and an unset
+`CHAT_HINT_CACHE_KB` retains the general 2-MiB cache default.
 
 The file-backed passive/selector/ancestor stores are normally created as
 unlinked temporary files.  `/proc/$pid/fd/*` can show them with a `(deleted)`
@@ -513,7 +564,7 @@ The exact production case is now one command:
 
 ```sh
 CHAT_CASES=new_otter_compact_file_production \
-CHAT_CPU=0 CHAT_REPORT_SECONDS=30 \
+CHAT_CPU=0 CHAT_REPORT_SECONDS=30 CHAT_CLOCKS=0 \
 ./test.src/chat_test_matrix.sh /project/bob/chat_test.in \
   chat-production-300 300 240 2048 300
 ```

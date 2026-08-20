@@ -26,6 +26,7 @@ compact_back_demod_strategy=${CHAT_COMPACT_BACK_DEMOD_STRATEGY:-adaptive32}
 passive_selector_buffer=${CHAT_PASSIVE_SELECTOR_BUFFER:-65536}
 production_passive_selector_buffer=${CHAT_PRODUCTION_PASSIVE_SELECTOR_BUFFER:-1048576}
 hint_conjunction_kb=${CHAT_HINT_CONJUNCTION_KB:-}
+hint_cache_kb=${CHAT_HINT_CACHE_KB:-}
 compact_rewrite_deep_cache_kb=${CHAT_COMPACT_REWRITE_DEEP_CACHE_KB:-0}
 new_prover=${CHAT_NEW_PROVER:-"$repo_dir/bin/prover9"}
 old_prover=${CHAT_OLD_PROVER:-/project/Prover9-old-LADR-2026-6A/bin/prover9}
@@ -110,6 +111,7 @@ esac
   echo "passive_selector_buffer=$passive_selector_buffer"
   echo "production_passive_selector_buffer=$production_passive_selector_buffer"
   echo "hint_conjunction_kb=${hint_conjunction_kb:-default}"
+  echo "hint_cache_kb=${hint_cache_kb:-default}"
   echo "compact_rewrite_deep_cache_kb=$compact_rewrite_deep_cache_kb"
   echo "cases=$selected_cases"
   echo "reference_output=${reference_output:-none}"
@@ -129,6 +131,7 @@ awk '
   /^assign\((max_given|max_seconds|max_minutes|max_hours|max_days|max_megs|report|stats),/ { next }
   /^assign\((search_loop|passive_store|passive_directory|passive_selector_store|discount_demodulation|hint_index|inference_frontier|collective_scheduler|ancestor_store),/ { next }
   /^assign\(hint_conjunction_kb,/ { next }
+  /^assign\(hint_cache_kb,/ { next }
   /^assign\(passive_selector_buffer,/ { next }
   /^assign\(compact_term_reclaim_kb,/ { next }
   /^assign\(compact_index_stale_pct,/ { next }
@@ -188,6 +191,10 @@ write_case()
     if test "$name" = new_otter_compact_file_production &&
        test -n "$hint_conjunction_kb"; then
       echo "assign(hint_conjunction_kb,$hint_conjunction_kb)."
+    fi
+    if test "$name" = new_otter_compact_file_production &&
+       test -n "$hint_cache_kb"; then
+      echo "assign(hint_cache_kb,$hint_cache_kb)."
     fi
     case "$name" in
       new_otter_compact_file_linear|new_otter_compact_file_adaptive|new_otter_compact_file_adaptive32|new_otter_compact_file_production)
