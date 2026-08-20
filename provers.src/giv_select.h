@@ -50,6 +50,7 @@ typedef enum {
 
 struct dense_passive_directory_stats {
   Dense_passive_directory_mode mode;
+  unsigned entry_bytes;
   unsigned long long logical_bytes;
   unsigned long long allocated_bytes;
   unsigned long long file_eviction_passes;

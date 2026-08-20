@@ -500,6 +500,7 @@ struct dense_passive_directory_stats dense_passive_directory_stats(void)
   struct dense_passive_directory_stats stats;
   memset(&stats, 0, sizeof(stats));
   stats.mode = Dense_directory_mode;
+  stats.entry_bytes = (unsigned) sizeof(*Dense_records);
   stats.logical_bytes =
     (unsigned long long) Dense_record_count * sizeof(*Dense_records);
   stats.allocated_bytes =

@@ -42,9 +42,18 @@ static size_t parse_count(const char *text)
   return (size_t) value;
 }
 
+static size_t parse_buffer(const char *text, size_t count)
+{
+  size_t value = parse_count(text);
+  if (value > count / 2)
+    fatal_error("dense_selector_file_scale_test: buffer exceeds half count");
+  return value;
+}
+
 int main(int argc, char **argv)
 {
   size_t count = argc > 1 ? parse_count(argv[1]) : 2200000;
+  size_t buffer_entries = argc > 2 ? parse_buffer(argv[2], count) : 65536;
   Plist rules = NULL;
   Clist sos;
   struct dense_passive_directory_stats directory;
@@ -68,12 +77,12 @@ int main(int argc, char **argv)
     else if (fits)
       fatal_error("dense_selector_file_scale_test: oversized reference fit");
   }
-  if (argc > 2) {
-    fprintf(stderr, "usage: %s [records]\n", argv[0]);
+  if (argc > 3) {
+    fprintf(stderr, "usage: %s [records [buffer_entries]]\n", argv[0]);
     return 2;
   }
   init_standard_ladr();
-  configure_dense_passive_selectors(DENSE_SELECTOR_FILE, 65536);
+  configure_dense_passive_selectors(DENSE_SELECTOR_FILE, buffer_entries);
   configure_dense_passive_directory(DENSE_DIRECTORY_FILE);
   configure_dense_passive(TRUE, archive_clause, activate_clause);
   rules = plist_append(
@@ -91,7 +100,8 @@ int main(int argc, char **argv)
   dense_passive_memory(&record_bytes, &heap_bytes, &records);
   memory_get_process_stats(&process);
   if (records != count || record_bytes != 0 ||
-      directory.logical_bytes != count * 64ULL ||
+      directory.entry_bytes == 0 ||
+      directory.logical_bytes != count * directory.entry_bytes ||
       (directory.logical_bytes > 128ULL * 1024ULL * 1024ULL &&
        directory.file_eviction_passes == 0) ||
       selectors.mode != DENSE_SELECTOR_FILE || selectors.flushes == 0 ||
@@ -99,7 +109,9 @@ int main(int argc, char **argv)
       selectors.record_reference_bits != expected_reference_bits ||
       selectors.entry_bytes != 24 ||
       selectors.run_entries + selectors.buffered_entries != count ||
-      heap_bytes > 4ULL * 1024ULL * 1024ULL)
+      heap_bytes >
+        (unsigned long long) buffer_entries * selectors.entry_bytes +
+          1024ULL * 1024ULL)
     fatal_error("dense_selector_file_scale_test: accounting failure");
   {
     char *type = NULL;
@@ -119,9 +131,12 @@ int main(int argc, char **argv)
       after_select.file_run_checks != selectors.runs)
     fatal_error("dense_selector_file_scale_test: read cache eviction failure");
 #endif
-  printf("{\"records\":%llu,\"directory_logical\":%llu,"
+  printf("{\"records\":%llu,\"directory_entry_bytes\":%u,"
+         "\"directory_logical\":%llu,"
          "\"directory_allocated\":%llu,\"heap_bytes\":%llu,"
+         "\"selector_buffer_limit\":%llu,"
          "\"selector_runs\":%llu,\"selector_run_bytes\":%llu,"
+         "\"selector_flushes\":%llu,\"selector_merges\":%llu,"
          "\"selector_record_bits\":%u,\"selector_entry_bytes\":%u,"
          "\"selector_reads\":%llu,\"selector_read_bytes\":%llu,"
          "\"selector_read_evictions\":%llu,"
@@ -131,9 +146,12 @@ int main(int argc, char **argv)
          "\"selector_writes\":%llu,\"selector_write_bytes\":%llu,"
          "\"eviction_passes\":%llu,\"eviction_bytes\":%llu,"
          "\"pss_kib\":%llu,\"anonymous_kib\":%llu}\n",
-         (unsigned long long) count, directory.logical_bytes,
+         (unsigned long long) count, directory.entry_bytes,
+         directory.logical_bytes,
          directory.allocated_bytes, heap_bytes,
+         selectors.buffer_limit,
          selectors.runs, selectors.run_logical_bytes,
+         selectors.flushes, selectors.merges,
          selectors.record_reference_bits, selectors.entry_bytes,
          after_select.file_reads, after_select.file_read_bytes,
          after_select.file_read_evictions,
