@@ -125,10 +125,10 @@ struct giv_select {
 
 struct dense_passive_record {
   unsigned long long id;
-  unsigned long long hint_id;
   unsigned long long selector_mask;
   size_t store_position;
   double weight;
+  uint32_t hint_id;
   unsigned simplifier_epoch;
   unsigned rewrite_epoch;
   unsigned flags;
@@ -137,6 +137,13 @@ struct dense_passive_record {
   unsigned justification_bytes;
   unsigned logical_body_bytes;
 };
+
+/* Search and checkpoint initialization number hints with an int counter, and
+   packed hint indexing already addresses them with unsigned IDs.  Keeping a
+   64-bit copy in every passive directory record therefore added four bytes
+   plus four bytes of tail padding. */
+typedef char dense_passive_record_must_remain_64_bytes[
+  sizeof(struct dense_passive_record) == 64 ? 1 : -1];
 
 typedef struct select_state *Select_state;
 
@@ -1801,7 +1808,10 @@ static void dense_insert_passive(Topform c)
     set_semantics(c);
   memset(&r, 0, sizeof(r));
   r.id = c->id;
-  r.hint_id = c->matching_hint == NULL ? 0 : c->matching_hint->id;
+  if (c->matching_hint != NULL && c->matching_hint->id > UINT32_MAX)
+    fatal_error("dense_insert_passive: matching hint ID overflow");
+  r.hint_id = c->matching_hint == NULL ? 0 :
+    (uint32_t) c->matching_hint->id;
   r.selector_mask = dense_selector_mask(c);
   r.weight = c->weight;
   r.simplifier_epoch = c->simplifier_epoch;

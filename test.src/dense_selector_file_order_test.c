@@ -3,6 +3,8 @@
 #include "../ladr/ladr.h"
 #include "../provers.src/giv_select.h"
 
+#include <stdint.h>
+
 #define CLAUSES 3000
 #define SELECTORS 3
 
@@ -59,7 +61,8 @@ static void populate(Clist sos)
     c->weight = (double) ((i * 97U) % 101U);
     if (i % 5 == 0) {
       c->matching_hint = get_topform();
-      c->matching_hint->id = 10000 + ((i * 37U) % 113U);
+      c->matching_hint->id = i == 2500 ? UINT32_MAX :
+        10000 + ((i * 37U) % 113U);
     }
     insert_into_sos2(c, sos);
   }

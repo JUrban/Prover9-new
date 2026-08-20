@@ -100,7 +100,7 @@ int main(int argc, char **argv)
   dense_passive_memory(&record_bytes, &heap_bytes, &records);
   memory_get_process_stats(&process);
   if (records != count || record_bytes != 0 ||
-      directory.entry_bytes == 0 ||
+      directory.entry_bytes != 64 ||
       directory.logical_bytes != count * directory.entry_bytes ||
       (directory.logical_bytes > 128ULL * 1024ULL * 1024ULL &&
        directory.file_eviction_passes == 0) ||
