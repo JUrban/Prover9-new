@@ -345,9 +345,9 @@ BOOL para_into(Literals from_lit, int from_side, Context cf, Ilist from_pos,
 	       Topform_proc proc_proc)
 {
   /* Iterative subterm traversal for paramodulation-into.  The two leading
-     coordinates in into_pos are heap owned by para_into_lit().  Deeper
-     coordinates live in this depth-indexed stack array: every descended
-     frame has a complex parent, so path_nodes[top-1] is its exact predecessor.
+     coordinates in into_pos are owned by para_into_lit(); deeper coordinates
+     live in this depth-indexed stack array.  Every descended frame has a
+     complex parent, so path_nodes[top-1] is its exact predecessor.
      paramodulate() copies the live coordinate list into each justification
      before the consumer is called; no stack address escapes this routine. */
   struct { Term node; int child; BOOL skip; } stack[1000];
@@ -419,8 +419,7 @@ BOOL para_into(Literals from_lit, int from_side, Context cf, Ilist from_pos,
                                         copy_ilist(into_pos));
           if (!(*proc_proc)(p)) {
             /* The dynamic suffix consists of stack-owned traversal nodes.
-               Detach it before para_into_lit() frees the two heap-owned base
-               coordinates. */
+               Detach it before returning to para_into_lit(). */
             path_base->next = NULL;
             undo_subst(tr);
             return FALSE;
@@ -449,9 +448,13 @@ BOOL para_into_lit(Literals from_lit, int from_side, Context cf,
 {
   Term alpha = ARG(from_lit->atom, from_side);
   if (!VARIABLE(alpha) || Para_from_vars) {
-    /* Position vectors are constructed FORWARD. */
-    Ilist from_pos = ilist_prepend(ilist_prepend(NULL,0),0);
-    Ilist into_pos = ilist_prepend(ilist_prepend(NULL,0),0);
+    /* Position vectors are constructed FORWARD.  They are copied into every
+       retained justification before this call returns, so the fixed
+       literal/argument prefix can share the traversal's stack lifetime. */
+    struct ilist from_storage[2] = {{0, &from_storage[1]}, {0, NULL}};
+    struct ilist into_storage[2] = {{0, &into_storage[1]}, {0, NULL}};
+    Ilist from_pos = from_storage;
+    Ilist into_pos = into_storage;
     Term into_atom = into_lit->atom;
     Term from_atom = from_lit->atom;
     int i;
@@ -472,13 +475,9 @@ BOOL para_into_lit(Literals from_lit, int from_side, Context cf,
       if (!para_into(from_lit, from_side, cf, from_pos,
 		     into_clause, into_lit, ARG(into_atom,i), ci, into_pos,
 		     skip_top, proc_proc)) {
-        zap_ilist(from_pos);
-        zap_ilist(into_pos);
         return FALSE;
       }
     }
-    zap_ilist(from_pos);
-    zap_ilist(into_pos);
   }
   return TRUE;
 }  /* para_into_lit */
