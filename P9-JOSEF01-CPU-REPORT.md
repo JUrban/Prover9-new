@@ -632,6 +632,19 @@ generalization matrix all pass.  No Prover9 option changes are required.  The
 measured portable binary is SHA-256
 `55e42911d55d2f27174bf88259e9ec39d2cb603ba48fcaf55516dbbfb555a831`.
 
+A new isolated `-pg` build at the documented head reached the exact
+1,001-given endpoint and selected-given digest in 67.19 user and 2.60 system
+seconds, 602,520 KiB peak RSS and zero swap.  Profiler overhead again makes
+those process totals non-release measurements.  The iterative public
+generalization routine remained the largest scalable self entry, but fell
+from the predecessor's 2.96 sampled seconds (7.94%) to 2.58 seconds (6.90%).
+The next entries were one-time packed-hint posting construction and scalable
+unit-conflict retrieval: `posting_dense_add()` used 2.01 seconds and
+`collect_code_tree_candidates()` 1.96 seconds.  The raw output, GNU-time
+record and profile are `/tmp/josef01-iterative-gprof-1000.{out,time,txt}`;
+their SHA-256 values are respectively `2b5c0280...`, `1bdc06f8...` and
+`689bbf1d...`.
+
 ## Authoritative completed runs
 
 The source files are:
@@ -1121,6 +1134,19 @@ cost.
 These results are important because they prevent tuning a large run with
 plausible-looking options that were already negative.
 
+- A direct terminal-posting fast path for iterative generalization was
+  implemented and removed.  When a radix edge consumed the complete query,
+  it scanned the edge's postings immediately instead of pushing and revisiting
+  a terminal 32-byte DFS frame.  This preserved every answer and work counter,
+  and all four 301-given outputs shared selected-given SHA-256 `5b709a38...`
+  at `(Given=301, Generated=141040, Kept=38770, proofs=0)`.  Nevertheless it
+  lost both clocks-off placements: candidate totals were 13.08 and 14.33
+  seconds versus 12.73 and 13.34 for the controls.  Candidate/control means
+  were 13.705/13.035 seconds, a 5.1% regression; RSS was effectively equal
+  and every process used zero swap.  The larger branch/layout cost inside the
+  now-inlined hot traversal outweighed the removed frame operations.  Longer
+  gates were intentionally skipped, and source plus portable executable were
+  restored byte-for-byte to SHA-256 `55e42911...`.
 - The pre-`45ecaac` single-position, unlimited-depth
   `compact_unit_strategy=adaptive` reduced tree work but was about 8.5% slower
   at 2,000 givens and produced more exact tests.  Do not infer from the later
