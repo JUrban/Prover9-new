@@ -908,6 +908,20 @@ plausible-looking options that were already negative.
   fallback.  Both implementations and the temporary test were nevertheless
   removed: fewer allocations are useful telemetry, not a CPU win, and the
   production configuration plus a second Josef workload both regressed.
+- Avoiding the default clause weighter's unused substitution `Context` was
+  also implemented and removed.  With no ordinary weight rules the context
+  cannot be read; with rules, failed matches restore their entry trail and
+  successful matches are undone, so one clean context can safely serve a
+  whole clause.  A custom multi-literal `list(weights)` regression preserved
+  its endpoint, and the exact Josef 01/301 reversed pair looked strong at
+  14.23 versus 15.44 mean total seconds.  The established 1,501-given gate did
+  not confirm it: candidate/control mean user CPU was 70.70/70.32 seconds and
+  mean total CPU was 74.99/74.09 seconds (+0.5%/+1.2%); the candidate won the
+  first placement but lost the reverse.  Every search endpoint was exact and
+  process swap was zero.  The prototype was removed without a source commit,
+  and the accepted `b3cde19` binary was restored byte-for-byte.  Do not infer
+  mature prover CPU from the removed context count or the short 301-given
+  prefix.
 - Reusing exact-unifier binding state was rejected after a strict whole-engine
   gate.  The completed Josef 01 run made 50,318,558 conflict exact tests, and
   the compiler-generated prologue clears roughly 5.5 KiB of local binding
