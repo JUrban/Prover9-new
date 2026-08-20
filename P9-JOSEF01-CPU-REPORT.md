@@ -215,9 +215,11 @@ This is real merge amplification, not inference work, and motivates the
 
 The scale probe was first repaired to use the directory's authoritative
 runtime record width.  It had retained a historical 64-byte assertion after
-later metadata increased the record to 72 bytes.  The probe now accepts a
-buffer size and reports directory/selector entry widths, flushes and merges.
-Existing selector order, compaction and checkpoint tests remain green.
+the then-current metadata increased the record to 72 bytes.  The probe accepts
+a buffer size and reports directory/selector entry widths, flushes and merges;
+after the separately measured directory compaction below, it again asserts
+the intentional 64-byte record.  Existing selector order, compaction and
+checkpoint tests remain green.
 
 An optimized serial reversed pair inserted four million age-selected records
 with one file selector, selected the exact first ID and used zero swap:
@@ -275,6 +277,49 @@ processes used zero swap.  At the completed Josef 01 baseline's 36.11 million
 run entries, the representation alone would reduce the live selector run
 footprint by about 276 MiB; the authority run's larger buffer will determine
 the actual merge-byte and system-CPU savings.
+
+### Compact dense-passive directory records
+
+Commit `df7bfdb` reduces every dense passive directory record from 72 to 64
+bytes.  Search and checkpoint initialization assign hint IDs with an `int`
+counter, and packed hint tables already address them as unsigned IDs.  The
+directory nevertheless retained an eight-byte copy.  A checked `uint32_t`
+copy, moved after the naturally aligned 64-bit fields, removes four redundant
+ID bytes and four bytes of tail padding.  The external directory view and
+checkpoint format remain 64-bit, and insertion rejects an impossible wider
+ID instead of truncating it.  A compile-time size assertion and a differential
+`UINT32_MAX` hint-age test guard both boundaries.
+
+An optimized serial reversed scale pair inserted 16 million records with the
+same 16-byte selector entries and selected the exact first ID:
+
+| Directory entry | Mean user | Mean system | Mean total | Logical / reserved |
+|---:|---:|---:|---:|---:|
+| 72 bytes | 3.61 s | 3.63 s | 7.23 s | 1,152,000,000 / 1,323,886,464 B |
+| 64 bytes | 3.54 s | 3.36 s | 6.89 s | 1,024,000,000 / 1,176,787,968 B |
+| change | -1.9% | -7.4% | **-4.7%** | **-11.1% / -11.1%** |
+
+Selector run topology, selector bytes and all counts were identical; every
+process used zero swap.  Peak RSS was effectively unchanged because old mmap
+pages are explicitly evicted and the scale probe retains only a bounded hot
+window.  The deterministic logical/reserved sizes, rather than one
+instantaneous PSS sample, are the relevant mature-memory result.
+
+The exact Josef 01/1,501 reversed whole-process gate improved in both
+placements.  Candidate/control mean user CPU was 69.62/71.10 seconds (-2.1%)
+and mean total CPU was 73.38/74.90 seconds (-2.0%); peak RSS fell from 686,978
+to 683,580 KiB.  All runs ended at
+`(Given=1501, Generated=3603947, Kept=521972, proofs=0)`.  CHAT/601 and Josef
+02/601 likewise preserved `(497430,16974,0)` and `(524799,26671,0)`, including
+final hint and compact-index counters.  Differential ordering, maximum-width
+hint IDs, reactivation, compaction, checkpoint and compact-generalization
+tests pass.
+
+At the completed baseline's 36,164,363 directory records, the new width would
+reduce logical directory size by 289,314,904 bytes (275.9 MiB).  Applying the
+same width to that run's recorded capacity reduces reserved directory size by
+330,971,616 bytes (315.6 MiB).  The full authority run is still required to
+measure its page-cache residency and whole-process CPU contribution.
 
 ## Authoritative completed runs
 
@@ -1013,6 +1058,9 @@ CPU estimates are less certain and the gains are not additive:
 - compact selector entries then cut the remaining selector buffer, run and
   merge bytes by exactly one third; the 16-million-entry paired proxy improves
   total CPU by 1.9%, while its no-flush Josef prefix is CPU-neutral/noisy;
+- 64-byte dense passive directory records reduce that directory's logical and
+  reserved size by 11.1%; their scale pair improves total CPU by 4.7% and the
+  exact Josef 01/1,501 whole-process pair by 2.0%;
 - the slab recycler changes almost no bounded CPU but removes nearly all
   post-warm-up slab unmaps by 2,000 givens;
 - native compilation may add 0--5% depending on the host.
@@ -1048,10 +1096,10 @@ Do not reuse objects from a differently instrumented, sanitized, profiled, or
 `NATIVE=1` build.  If in doubt, use a fresh worktree or clean the build before
 compiling.  In particular, the repository's currently installed `bin/prover9`
 is intentionally the older PGO executable and does not contain commits
-`107665b`, `3f2f566`, `4c0d0b2`, or `b3cde19`; run the build and copy steps
-above before the authority run.  The fresh portable source binary measured at
-`b3cde19` has SHA-256
-`55f924df1cc6cdfe987470896fb4c5255acd41c33a3f0ec781f4325e1bb0bc30`.
+`107665b`, `3f2f566`, `4c0d0b2`, `b3cde19`, or `df7bfdb`; run the build and
+copy steps above before the authority run.  The fresh portable source binary
+measured at `df7bfdb` has SHA-256
+`f0d565d65824f6279573c1fa9f91f114e58a6b5b45470f011057db0e942858e5`.
 
 ### Prover9 options
 
@@ -1213,6 +1261,7 @@ The new run is accepted only if all of the following hold:
    entry width must be 16 bytes, and the 1-Mi-entry policy should be far below
    the baseline's 551/546 merge counts; otherwise the wrong binary is running
    or another selector is unexpectedly reaching the cap.
+   `Dense_passive` must independently report `directory_entry_bytes=64`.
 9. Inspect `Packed_fast_cache` for `min_candidates=128`, admission skips,
    stores and posting candidates avoided.  Compare interval deltas rather than
    only the cumulative hit rate; mature reuse was much more valuable than the
