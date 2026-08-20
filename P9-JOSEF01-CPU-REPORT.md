@@ -517,6 +517,55 @@ external authority run must measure
 the mature result.  The measured portable binary is SHA-256
 `4a32437f5ff84e98946ae1309b130d9d7b9b574dbd949ca76521d275be03ff92`.
 
+### Bitset-owned forward-generalization undo state
+
+Commit `b3d19f3` removes another recursive hot-path array without adding an
+index or cache.  Each compact-unit forward-generalization edge may bind a
+stored-pattern variable before recursing.  The old implementation recorded
+the variable numbers in an `unsigned new_bindings[MAX_VARS]` array and replayed
+that array to clear the bindings after the child returned.  With
+`MAX_VARS=100`, optimized `generalization_rec()` reserved 488 bytes per
+recursive frame even though undo only needs the exact set of newly bound
+slots.
+
+The current implementation records that set in two 64-bit words and clears
+set bits after the recursive call.  Binding order is immaterial because undo
+only writes independent slots to null; matching, repeated-variable checks,
+child order and returned proof IDs are unchanged.  A compile-time bound
+rejects any future `MAX_VARS > 128` configuration instead of silently losing
+a slot.  The optimized recursive frame is now 72 bytes, an 85.2% reduction.
+This is transient stack traffic only: there is no per-node, per-clause or
+per-index allocation.
+
+Strict clocks-off reversed gates against the previous accepted portable
+binary gave:
+
+| Josef 01 gate | Parent mean total | Bitset mean total | Change | Mean RSS change |
+|---|---:|---:|---:|---:|
+| 301 givens | 14.755 s | 14.480 s | **-1.86%** | +36 KiB |
+| 1,001 givens | 44.200 s | 44.235 s | +0.08% | +140 KiB |
+| 1,501 givens | 75.705 s | 74.485 s | **-1.61%** | +142 KiB |
+
+At 1,501 givens the candidate won both placements: 74.14 versus 76.24
+seconds, then 74.83 versus 75.17 after reversing core and launch order.  Mean
+user CPU fell from 71.770 to 70.600 seconds (-1.63%) and mean system CPU from
+3.935 to 3.885 seconds (-1.27%).  All four outputs had the same digest for
+every selected-given line and exact final
+`(Given=1501, Generated=3603947, Kept=521972, proofs=0)` rule, index, hint,
+passive, ancestor and allocator counters.  Every process used zero swap.
+
+Cross-workload checks also remained exact.  CHAT/301 used 25.23 total CPU
+seconds versus 25.54 for its adjacent parent and 464,680 versus 464,640 KiB
+RSS.  Josef 02/601 with the code-tree unit strategy used 35.93 versus 36.00
+total CPU seconds and 468,816 versus 468,760 KiB RSS.  These single placements
+are classified as non-regressions, not independent speedup claims.  The
+focused variable-64 regression forces a repeated-variable edge to fail after
+an upper-word binding and verifies that its next sibling succeeds;
+`compact_unit_index_test`, the long-run compaction/rebase test, the packed
+generalization smoke and ASan/UBSan all pass.  No Prover9 option changes are
+required.  The measured portable binary is SHA-256
+`639513c2cf019436460cd41556136e82ce20cef147960a126c3cfbdd8efa389a`.
+
 ## Authoritative completed runs
 
 The source files are:
@@ -1320,6 +1369,8 @@ Stack-owned paramodulation positions add no persistent search state.  Their
 dynamic traversal-stack reservation is unchanged because a smaller frame
 array makes room for the coordinate array; the complete current source adds
 only four 16-byte fixed coordinates to the transient `para_into_lit()` frame.
+The compact-unit generalization binding bitset likewise adds no persistent
+state and reduces each optimized recursive frame from 488 to 72 bytes.
 
 The adaptive unit strategy is the exception: it maintains compressed position
 features as well as the code tree.  Unlimited depth still projects to about
@@ -1392,6 +1443,10 @@ CPU estimates are less certain and the gains are not additive:
   allocations are in scope; stack-owning the four fixed coordinates then
   removes another 39.8% of the remaining Josef `Ilist` calls and improves its
   incremental mean by 1.02%, while incremental CHAT and Josef 02 are neutral;
+- bitset-owned forward-generalization undo state reduces its optimized
+  recursive frame by 85.2% with no persistent allocation; its exact
+  Josef 01/1,501 reversed mean improves total CPU by 1.61%, while bounded CHAT
+  and Josef 02 remain exact and neutral-to-positive;
 - the slab recycler changes almost no bounded CPU but removes nearly all
   post-warm-up slab unmaps by 2,000 givens;
 - native compilation may add 0--5% depending on the host.
@@ -1428,10 +1483,10 @@ Do not reuse objects from a differently instrumented, sanitized, profiled, or
 compiling.  In particular, the repository's currently installed `bin/prover9`
 is intentionally the older PGO executable and does not contain commits
 `107665b`, `3f2f566`, `4c0d0b2`, `b3cde19`, `df7bfdb`, `f4f4614`,
-`1b15b40`, `b1d8128`, or `9fecf54`; run the build and copy steps above before
-the authority run.  The fresh portable source binary measured at `9fecf54`
-has SHA-256
-`4a32437f5ff84e98946ae1309b130d9d7b9b574dbd949ca76521d275be03ff92`.
+`1b15b40`, `b1d8128`, `9fecf54`, or `b3d19f3`; run the build and copy steps
+above before the authority run.  The fresh portable source binary measured at
+`b3d19f3` has SHA-256
+`639513c2cf019436460cd41556136e82ce20cef147960a126c3cfbdd8efa389a`.
 
 ### Prover9 options
 
