@@ -52,6 +52,9 @@ struct compact_unit_index_stats {
   unsigned long long position_refinement_queries;
   unsigned long long position_refinement_checks;
   unsigned long long position_refinement_rejects;
+  unsigned long long position_tertiary_queries;
+  unsigned long long position_tertiary_checks;
+  unsigned long long position_tertiary_rejects;
   unsigned long long adaptive_route_hits;
   unsigned long long adaptive_route_misses;
   unsigned long long adaptive_route_replacements;

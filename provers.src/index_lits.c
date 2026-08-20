@@ -307,6 +307,9 @@ void fprint_compact_unit_index(FILE *fp)
           "position_refinement_queries=%llu, "
           "position_refinement_checks=%llu, "
           "position_refinement_rejects=%llu, "
+          "position_tertiary_queries=%llu, "
+          "position_tertiary_checks=%llu, "
+          "position_tertiary_rejects=%llu, "
           "adaptive_route_hits=%llu, adaptive_route_misses=%llu, "
           "adaptive_route_replacements=%llu, adaptive_route_bytes=%llu, "
           "node_items=%llu, posting_items=%llu, "
@@ -346,6 +349,9 @@ void fprint_compact_unit_index(FILE *fp)
           stats.position_refinement_queries,
           stats.position_refinement_checks,
           stats.position_refinement_rejects,
+          stats.position_tertiary_queries,
+          stats.position_tertiary_checks,
+          stats.position_tertiary_rejects,
           stats.adaptive_route_hits,
           stats.adaptive_route_misses,
           stats.adaptive_route_replacements,

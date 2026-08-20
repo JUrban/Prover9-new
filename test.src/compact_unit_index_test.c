@@ -416,13 +416,67 @@ int main(void)
     CHECK(count == 1 && ids != NULL && ids[0] == exact->id,
           "direct two-position refinement preserves the exact answer");
     CHECK(stats.position_refinement_queries == 1 &&
-          stats.position_refinement_checks == 2 &&
-          stats.position_refinement_rejects == 1,
+          stats.position_refinement_checks == 3 &&
+          stats.position_refinement_rejects == 1 &&
+          stats.position_tertiary_queries == 1 &&
+          stats.position_tertiary_checks == 1 &&
+          stats.position_tertiary_rejects == 0,
           "second rigid feature rejects one first-position near miss");
     safe_free(ids);
     delete_clause(exact);
     delete_clause(near_left);
     delete_clause(near_right);
+    delete_clause(query);
+    compact_unit_index_free(position_index);
+    compact_unit_index_set_strategy(COMPACT_UNIT_ROOT_SCAN);
+  }
+
+  {
+    Compact_unit_index position_index;
+    struct compact_unit_index_stats stats;
+    Topform exact, near_third, decoy, near_a1, near_a2, near_b1, near_b2;
+    Topform query;
+    unsigned long long *ids;
+    size_t count;
+
+    compact_unit_index_set_strategy(COMPACT_UNIT_POSITION);
+    position_index = compact_unit_index_init();
+    exact = indexed_unit("v(g(c137,a,a,a)).");
+    near_third = indexed_unit("v(g(c138,a,a,b)).");
+    decoy = indexed_unit("v(g(c139,b,b,a)).");
+    near_a1 = indexed_unit("v(g(c140,a,b,a)).");
+    near_a2 = indexed_unit("v(g(c141,a,b,a)).");
+    near_b1 = indexed_unit("v(g(c142,b,a,a)).");
+    near_b2 = indexed_unit("v(g(c143,b,a,a)).");
+    CHECK(compact_unit_index_add(position_index, exact) &&
+          compact_unit_index_add(position_index, near_third) &&
+          compact_unit_index_add(position_index, decoy) &&
+          compact_unit_index_add(position_index, near_a1) &&
+          compact_unit_index_add(position_index, near_a2) &&
+          compact_unit_index_add(position_index, near_b1) &&
+          compact_unit_index_add(position_index, near_b2),
+          "add three-position refinement family");
+    query = parse_clause_from_string("v(g(x,a,a,a)).");
+    ids = compact_unit_unifier_ids(
+      position_index, query->literals->atom, TRUE, 0, &count);
+    compact_unit_index_get_stats(position_index, &stats);
+    CHECK(count == 1 && ids != NULL && ids[0] == exact->id,
+          "direct three-position refinement preserves the exact answer");
+    CHECK(stats.position_refinement_queries == 1 &&
+          stats.position_refinement_checks == 6 &&
+          stats.position_refinement_rejects == 3 &&
+          stats.position_tertiary_queries == 1 &&
+          stats.position_tertiary_checks == 2 &&
+          stats.position_tertiary_rejects == 1,
+          "third rigid feature rejects a two-position near miss");
+    safe_free(ids);
+    delete_clause(exact);
+    delete_clause(near_third);
+    delete_clause(decoy);
+    delete_clause(near_a1);
+    delete_clause(near_a2);
+    delete_clause(near_b1);
+    delete_clause(near_b2);
     delete_clause(query);
     compact_unit_index_free(position_index);
     compact_unit_index_set_strategy(COMPACT_UNIT_ROOT_SCAN);
