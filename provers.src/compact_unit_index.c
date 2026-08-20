@@ -8,6 +8,7 @@
 #define CUI_GROWTH_STALE_FLOOR 16384ULL
 #define CUI_ADAPTIVE_ROUTE_CAPACITY 65536U
 #define CUI_ADAPTIVE_POSITION_FACTOR 12ULL
+#define CUI_ADAPTIVE_EMPTY_TREE_FLOOR 8ULL
 #define CUI_FEATURE_CHUNK_DATA 248U
 
 static unsigned Compaction_stale_pct = 25;
@@ -2116,12 +2117,17 @@ unsigned long long *compact_unit_unifier_ids(
       else
         index->adaptive_route_misses++;
     }
-    use_position = choice.found &&
-      (choice.score == 0 ||
-       (route_hit && route->tree_nodes != 0 &&
-        choice.score <=
-          ULLONG_MAX / CUI_ADAPTIVE_POSITION_FACTOR &&
-        choice.score * CUI_ADAPTIVE_POSITION_FACTOR < route->tree_nodes));
+    /* Even an empty position union has a lookup cost.  Measure a route's
+       tree traversal once, and keep remeasuring cheap routes as the index
+       grows.  This prevents shallow CHAT-like trees from paying for a
+       feature lookup whose complete code-tree rejection is only a handful
+       of nodes, without weakening the zero-union answer. */
+    use_position = choice.found && route_hit && route->tree_nodes != 0 &&
+      (choice.score == 0 ?
+         route->tree_nodes > CUI_ADAPTIVE_EMPTY_TREE_FLOOR :
+         (choice.score <=
+            ULLONG_MAX / CUI_ADAPTIVE_POSITION_FACTOR &&
+          choice.score * CUI_ADAPTIVE_POSITION_FACTOR < route->tree_nodes));
     use_tree = !use_position;
     if (use_position) {
       index->adaptive_position_choices++;

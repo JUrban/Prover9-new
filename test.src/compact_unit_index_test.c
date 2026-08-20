@@ -467,6 +467,48 @@ int main(void)
   }
 
   {
+    enum { FANOUT = 32 };
+    Compact_unit_index adaptive_index;
+    struct compact_unit_index_stats adaptive_stats;
+    Topform units[FANOUT];
+    Topform query;
+    unsigned long long *ids;
+    size_t count;
+    char text[96];
+    int i;
+
+    compact_unit_index_set_strategy(COMPACT_UNIT_ADAPTIVE);
+    adaptive_index = compact_unit_index_init();
+    for (i = 0; i < FANOUT; i++) {
+      (void) snprintf(text, sizeof(text), "w(f(c%d),a).", i);
+      units[i] = indexed_unit(text);
+      CHECK(compact_unit_index_add(adaptive_index, units[i]),
+            "add empty-route fanout unit");
+    }
+    query = parse_clause_from_string("w(x,b).");
+    ids = compact_unit_unifier_ids(
+      adaptive_index, query->literals->atom, TRUE, 0, &count);
+    CHECK(count == 0 && ids == NULL,
+          "measured empty route preserves its first negative answer");
+    ids = compact_unit_unifier_ids(
+      adaptive_index, query->literals->atom, TRUE, 0, &count);
+    CHECK(count == 0 && ids == NULL,
+          "learned empty route preserves its repeated negative answer");
+    compact_unit_index_get_stats(adaptive_index, &adaptive_stats);
+    CHECK(adaptive_stats.adaptive_tree_choices == 1 &&
+          adaptive_stats.adaptive_position_choices == 1 &&
+          adaptive_stats.adaptive_position_empty_choices == 1 &&
+          adaptive_stats.adaptive_route_misses == 1 &&
+          adaptive_stats.adaptive_route_hits == 1,
+          "costly empty route measures tree once before using position");
+    delete_clause(query);
+    compact_unit_index_free(adaptive_index);
+    for (i = 0; i < FANOUT; i++)
+      delete_clause(units[i]);
+    compact_unit_index_set_strategy(COMPACT_UNIT_ROOT_SCAN);
+  }
+
+  {
     const char *unit_text[] = {
       "p(x).", "p(a).", "p(f(x)).", "p(f(a)).",
       "p(f(x,x)).", "p(f(a,b)).", "p(g(f(a),y)).",

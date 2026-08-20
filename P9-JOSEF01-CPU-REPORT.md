@@ -442,6 +442,68 @@ conservative and must be replaced by measured mature PSS.  The next design
 step, if adaptive wins CPU, is selective or file-backed feature admission
 rather than accepting an unbounded duplicate resident index.
 
+### Depth-bounded adaptive unit features
+
+Commit `ff9ee62` supplies the selective admission step without making the
+index approximate.  The new option
+
+```prolog
+assign(compact_unit_feature_depth,2).
+```
+
+causes `position` and `adaptive` to store and query only rigid/variable
+position features at term depths 1 and 2.  Zero is the compatibility default
+and retains the previous unlimited-depth store.  A shallow feature union is
+still a complete necessary-condition filter because every resident record is
+indexed at every admitted position; queries that do not profit from that
+filter retain the complete code-tree route and final exact unification.  The
+configured coverage is captured by each index and survives compaction, rather
+than being reread from mutable process-global state.
+
+The first bounded gates exposed a separate general adaptive-policy defect.
+An empty posting union was always used immediately, even when the code tree
+could reject a CHAT-like query in one or two nodes.  Adaptive routing now
+measures that tree route once and uses an empty union only when the measured
+tree traversal exceeds eight nodes.  Cheap routes continue through the tree
+and are remeasured as it grows; expensive Josef wildcard routes still switch
+to the complete empty-position answer.  The focused regression includes a
+fanout query whose first call measures the costly tree and whose second call
+uses the learned empty union with the same negative answer.
+
+All clocks-off, pinned gates below used 2-GiB limits, stopped at the stated
+given count, preserved the exact generated/kept endpoint and reported zero
+process swap:
+
+| Gate | Strategy | Total CPU | Unit feature capacity | Conflict retrieval work |
+|---|---|---:|---:|---:|
+| Josef 01 / 1,001 | `code_tree` | 55.79 s | 0 | 35.05M tree nodes + 0.20M exact tests |
+| Josef 01 / 1,001 | adaptive, depth 1 | 58.44 s | 0.76 MB | 2.03M tree + 2.95M postings + 0.62M exact |
+| Josef 01 / 1,001 | adaptive, depth 2 | 56.47 s | 2.33 MB | 2.89M tree + 1.55M postings + 0.51M exact |
+| CHAT / 601 | `code_tree` | 48.19 s | 0 | 41,710 tree nodes |
+| CHAT / 601 | adaptive, depth 2 | 48.47 s | 0.13 MB | 32,485 tree nodes + 15 postings |
+| Josef 02 / 601 | `code_tree` | 37.43 s | 0 | 70,122 tree nodes |
+| Josef 02 / 601 | adaptive, depth 2 | 37.55 s | 0.20 MB | identical 70,122 tree nodes; no position route selected |
+
+The CPU differences are noise-scale and do **not** establish a prefix
+speedup.  The important long-run signal is work growth: at the Josef 01
+1,001 endpoint, depth 2 replaces roughly 35 million code-tree nodes with
+about 5 million combined tree/posting/exact items.  At 601 givens it also
+reduced feature capacity by 79.7% versus unlimited adaptive (767,744 versus
+3,777,032 bytes).  A naive linear extrapolation from depth 2 at 295,674 units
+to the completed 35,592,170-unit population is about 0.28 GB of feature
+capacity, versus the earlier 1.1-GB unlimited-depth projection.  This remains
+an estimate: posting popularity and allocator capacities can change at mature
+scale, so only a full PSS measurement is authoritative.
+
+Depth 2 is therefore a staged long-run CPU experiment, not the new primary
+authority mode.  Run the first full comparison with `code_tree`; an otherwise
+identical second run may use `adaptive` plus
+`compact_unit_feature_depth=2`.  Accept it only if the exact proof endpoint,
+hint trajectory and proof are unchanged and the interval CPU/given slope
+improves without compromising the RAM target.  Depth 1 saves another roughly
+1.6 MB at this prefix but scans many more common postings and is not the
+recommended long-run candidate.
+
 ### Sparse hint planes and reused generalization edge heads
 
 Commits `f13e552` and `3eb7c2b` remove two high-frequency pieces of redundant
