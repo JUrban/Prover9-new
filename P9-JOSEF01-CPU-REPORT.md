@@ -567,6 +567,18 @@ plausible-looking options that were already negative.
   This also explains why the proven Josef policy disables the result cache
   outright instead of retaining lookup/hash cost while selectively refusing
   stores.
+- Reusing the first literal's already computed structural mask for the
+  packed-fast clause profile was also rejected.  It removes one recursive
+  `packed_term_feature_mask` traversal per ordinary query without changing
+  any candidate or index state, but release-code layout outweighed that saved
+  work.  At the exact 601-given Josef 01 endpoint, a pinned clocks-off reversed
+  pair averaged 25.75 CPU seconds candidate versus 24.85 control (+3.6%).  An
+  adjacent 1,001-given check took 50.94 seconds candidate versus 49.66 control
+  (+2.6%).  All runs preserved `(Generated=560216, Kept=109842)` or
+  `(Generated=1628048, Kept=320239)`, every packed-hint counter, approximately
+  526/611 MiB peak RSS, and zero process swap.  The source was reverted
+  completely; eliminating a source-level recursive call is not sufficient
+  evidence when the whole optimized binary is slower at both bounded gates.
 - A native `-O3 -march=native -flto` build used 77.60 CPU seconds in one
   pinned 1,000-given run versus 81.69 for the immediately following portable
   `-O2` control.  Earlier portable pairs averaged 78.83, so host-frequency
