@@ -439,16 +439,22 @@ even when unification at that position failed and produced no conclusion.
 
 The traversal now keeps its dynamic position suffix in a depth-indexed array
 of `struct ilist` nodes on the existing bounded traversal stack.  Linking and
-unlinking are constant time.  The two literal/argument coordinates remain
-heap-owned by the caller.  `paramodulate()` reads the same live list, and
+unlinking are constant time.  `paramodulate()` reads the same live list, and
 `para_just()` copies it before the conclusion callback can retain anything;
 therefore no stack address enters a clause or justification.  Consumer
-cancellation detaches the stack suffix before the caller frees its two base
-nodes.  Inference eligibility, traversal order, substitutions, conclusion
-order and justification coordinates are unchanged.  The stack reservation is
-approximately the same as the previous frame array because the smaller frame
-and separate 16-byte coordinate array replace the old per-frame position
-pointer and padding.
+cancellation detaches the dynamic suffix before returning.  Inference
+eligibility, traversal order, substitutions, conclusion order and
+justification coordinates are unchanged.  The dynamic stack reservation is
+the same size as the previous frame array because the smaller frame and
+separate 16-byte coordinate array replace the old per-frame position pointer
+and padding.
+
+Commit `9fecf54` applies the same lifetime fact to the two fixed
+literal/argument coordinates in each of the `from` and `into` position lists.
+Those four nodes also exist only within `para_into_lit()` and are copied into
+every retained justification, so the current source keeps the complete live
+position on the stack.  This adds four small local nodes to that call frame,
+not to a clause, index, cache or passive record.
 
 The exact Josef 01/1,501 endpoint made the mechanism directly measurable:
 
@@ -468,6 +474,24 @@ pool.  Every run ended at
 `Generated_by_rule` counts and all normalized final operational statistics;
 RSS was effectively unchanged and process swap was zero.
 
+The fixed-prefix extension was then measured incrementally against
+`b1d8128`:
+
+| Gate | Stack-suffix parent | Complete stack position | Change | Additional `Ilist` reduction |
+|---|---:|---:|---:|---:|
+| Josef 01 / 1,501 | 77.775 s | 76.980 s | **-1.02%** | 39.8% |
+| CHAT / 601 | 40.040 s | 40.130 s | +0.22% | 46.6% |
+| Josef 02 / 601 | 32.825 s | 32.805 s | -0.06% | 43.9% |
+
+Josef won both placements and removed another 17,182,296 allocations plus
+274,916,736 cumulative object bytes.  CHAT and Josef 02 each had one win and
+one loss and are deliberately classified as neutral, not cross-workload CPU
+gains.  All endpoints, rule-generation counts and normalized final operation
+counters remained exact, with zero swap.  Relative to the exact-ring parent,
+the two commits together reduce Josef's `Ilist` gets from 74,720,701 to
+26,021,693 (-65.2%) and cumulative traffic by 779,184,128 bytes at 1,501
+givens.
+
 This is not a Josef-shaped fast path.  Reversed cross-workload gates gave:
 
 | Gate | Parent mean total | Stack-path mean total | Change | `Ilist` reduction |
@@ -475,21 +499,23 @@ This is not a Josef-shaped fast path.  Reversed cross-workload gates gave:
 | CHAT / 601 | 39.120 s | 38.635 s | **-1.24%** | 40.8% |
 | Josef 02 / 601 | 33.365 s | 32.860 s | **-1.51%** | 43.7% |
 
-The candidate won all four placements and preserved exact endpoints and
-rule-generation counts.  ASan/UBSan eager-versus-bounded iterator tests cover
-unit and multi-literal conclusions, ordered instance checks, every forced
-continuation boundary and consumer cancellation.  The hint regression,
-`iterator-tests` and `compact_generalization_smoke_test.sh` pass.
+The dynamic-suffix candidate won all four placements and preserved exact
+endpoints and rule-generation counts.  ASan/UBSan eager-versus-bounded
+iterator tests cover unit and multi-literal conclusions, ordered instance
+checks, every forced continuation boundary and consumer cancellation.  The
+hint regression, `iterator-tests` and
+`compact_generalization_smoke_test.sh` pass.
 
 The completed Josef output contains 32 periodic `Ilist` reports.  Reconstructing
 their 32-bit wraparound deltas gives 36,174,451,138 allocations over the run.
-The bounded change removes 8.91 traversal nodes per generated paramodulant;
-applying that ratio to 1.600 billion mature paramodulants suggests an order of
-14.25 billion eliminated calls and 212 GiB less cumulative object traffic.
-That is a scaling indication, not a CPU forecast: term depths and failed
-unifications change over the search.  The external authority run must measure
+The complete stack-position source removes 13.76 nodes per generated
+paramodulant at the bounded gate; applying that ratio to 1.600 billion mature
+paramodulants suggests an order of 22.02 billion eliminated calls and 328 GiB
+less cumulative object traffic.  That is a scaling indication, not a CPU
+forecast: term depths and failed unifications change over the search.  The
+external authority run must measure
 the mature result.  The measured portable binary is SHA-256
-`42c4abeb461bab56c180fcc5ca7a7ad6e11240935c78cd0af27d450644ce0f81`.
+`4a32437f5ff84e98946ae1309b130d9d7b9b574dbd949ca76521d275be03ff92`.
 
 ## Authoritative completed runs
 
@@ -1179,8 +1205,9 @@ The owner-free hint-cache ring remains exactly within the configured 2-MiB
 budget; it trades owner metadata and part of the old key arena for twice as
 many result slots, with no measurable whole-process RSS change.
 Stack-owned paramodulation positions add no persistent search state.  Their
-fixed traversal-stack reservation is approximately unchanged because a
-smaller frame array makes room for the separate coordinate array.
+dynamic traversal-stack reservation is unchanged because a smaller frame
+array makes room for the coordinate array; the complete current source adds
+only four 16-byte fixed coordinates to the transient `para_into_lit()` frame.
 
 The adaptive unit strategy is the exception: it maintains compressed position
 features as well as the code tree.  Unlimited depth still projects to about
@@ -1250,7 +1277,9 @@ CPU estimates are less certain and the gains are not additive:
   allocations at Josef 01/1,501 and improve its strict reversed whole-process
   mean by 3.05%; reversed CHAT and Josef 02 means improve by 1.24% and 1.51%,
   while the mature completed telemetry suggests billions of transient path
-  allocations are in scope;
+  allocations are in scope; stack-owning the four fixed coordinates then
+  removes another 39.8% of the remaining Josef `Ilist` calls and improves its
+  incremental mean by 1.02%, while incremental CHAT and Josef 02 are neutral;
 - the slab recycler changes almost no bounded CPU but removes nearly all
   post-warm-up slab unmaps by 2,000 givens;
 - native compilation may add 0--5% depending on the host.
@@ -1287,9 +1316,10 @@ Do not reuse objects from a differently instrumented, sanitized, profiled, or
 compiling.  In particular, the repository's currently installed `bin/prover9`
 is intentionally the older PGO executable and does not contain commits
 `107665b`, `3f2f566`, `4c0d0b2`, `b3cde19`, `df7bfdb`, `f4f4614`,
-`1b15b40`, or `b1d8128`; run the build and copy steps above before the authority
-run.  The fresh portable source binary measured at `b1d8128` has SHA-256
-`42c4abeb461bab56c180fcc5ca7a7ad6e11240935c78cd0af27d450644ce0f81`.
+`1b15b40`, `b1d8128`, or `9fecf54`; run the build and copy steps above before
+the authority run.  The fresh portable source binary measured at `9fecf54`
+has SHA-256
+`4a32437f5ff84e98946ae1309b130d9d7b9b574dbd949ca76521d275be03ff92`.
 
 ### Prover9 options
 
