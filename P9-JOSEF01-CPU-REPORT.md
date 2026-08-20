@@ -1099,6 +1099,25 @@ plausible-looking options that were already negative.
   `4a32437f5ff84e98946ae1309b130d9d7b9b574dbd949ca76521d275be03ff92`.
   Removing a source-level list walk can still worsen optimized hot-code layout;
   do not reintroduce this specialization without new mature evidence.
+- Guarding attribute inheritance calls against null parent lists was also
+  measured and rejected.  Temporary counters at the exact 301-given endpoint
+  observed 284,891 `inheritable_att_instances()` calls: 267,473 (93.9%) had a
+  null input, while the other 17,418 visited nodes were noninheritable labels
+  and copied nothing.  The release prototype therefore called the existing
+  routine only for non-null parent lists.  A focused paramodulation regression
+  verified substitution into an inheritable term attribute and exclusion of a
+  noninheritable string attribute.  Despite the high measured reach, the
+  clocks-off reversed gate lost both placements: 15.19 versus 14.96 seconds,
+  then 14.96 versus 14.38.  Candidate/control mean user CPU was
+  12.545/12.125 seconds (+3.46%), system CPU was 2.530/2.545 seconds, and total
+  CPU was 15.075/14.670 seconds (+2.76%).  All runs ended at
+  `(Given=301, Generated=141040, Kept=38770, proofs=0)` with identical
+  rule-generation counts, allocator traffic and normalized operation
+  statistics; mean RSS differed by only 24 KiB and process swap was zero.
+  The 1,501-given gate was intentionally skipped after this two-placement
+  early failure.  Instrumentation, guards and the temporary test were removed,
+  restoring the accepted binary to SHA-256
+  `4a32437f5ff84e98946ae1309b130d9d7b9b574dbd949ca76521d275be03ff92`.
 - A negative Bloom summary was slower and was removed completely.
 - A query-scoped binding trail preserved all answers but raised the sampled
   generalization timer from roughly 2.72--2.76 to 2.920 seconds.  It was
