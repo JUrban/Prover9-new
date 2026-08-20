@@ -294,7 +294,7 @@ ordinary live clauses:
 | compact unit index | 3.79 GB |
 | compact nonunit index | 0.16 GB |
 | live allocator objects | 0.066 GB |
-| process PSS | 9.08 GB |
+| process PSS | 9,083,561 KiB (8.66 GiB) |
 
 The dense passive directory, selector runs, and ancestor store are
 file-backed.  Their logical/physical files are much larger than their process
@@ -368,6 +368,80 @@ sampled generalization timer from a paired mean of 4.424 to 2.741 seconds
 and its sampled timer from 12.552 to 8.468 seconds (-32.5%).  The selected
 clauses and endpoint tuples remained exact.
 
+### Direct two-position unit-conflict refinement
+
+Commit `45ecaac` repairs the principal weakness of the experimental
+`compact_unit_strategy=adaptive` route.  The original route selected the
+rarest rigid query position, decoded the union of its exact-symbol and
+ancestor-variable postings, and sent every surviving record to the exact
+unifier.  At the mature completed endpoint, unit conflict retrieval had
+visited 68.168 billion code-tree nodes for 71.180 million queries, about 958
+nodes/query, while 95.8% of queries returned no candidate.  A route which can
+avoid that traversal without inflating exact work is therefore a plausible
+long-run CPU escape.
+
+The accepted refinement chooses a second rigid query position, but it does
+**not** read a second posting list.  It decodes only the rarest first-position
+union.  For each record in that union it walks the compact prefix term to the
+second position and requires either the same rigid symbol or a stored variable
+at that position or one of its ancestors.  This is a necessary condition for
+unification, so it can reject records but cannot reject a unifier.  The full
+unifier remains authoritative, and final proof IDs retain their historical
+descending order.  A zero-count first-position union is now an immediate
+negative answer, avoiding empty bucket and query-stamp work.
+
+The statistics line exposes the mechanism directly:
+
+```text
+position_refinement_queries=...
+position_refinement_checks=...
+position_refinement_rejects=...
+```
+
+At the exact Josef 01 601-given endpoint, the refined route performed 4,183
+two-position queries and rejected 15,505 of 23,960 first-union records before
+unification (64.7%).  Conflict exact tests fell from 36,232 in the prior
+single-position adaptive control to 20,727 (-42.8%).  Unlike the rejected
+two-posting prototype, posting scans stayed at roughly the single-position
+level: 23,960 rather than 71,706.
+
+Pinned, clocks-off, 2-GiB bounded gates preserved the exact search endpoints
+and used zero process swap:
+
+| Josef 01 gate | Refined adaptive | `code_tree` | Observation |
+|---|---:|---:|---|
+| 601 given, CPU | 22.47 and 24.81 s | 24.13 s | adaptive mean 23.64 s; effectively parity (-2.0%) |
+| 601 given, peak RSS | 541,496 and 542,832 KiB | 534,704 KiB | about 7--8 MiB extra |
+| 1,001 given, CPU | 48.68 s | 49.40 s | effectively parity (-1.5%) |
+| 1,001 given, peak RSS | 619,444 KiB | 612,400 KiB | about 7 MiB extra |
+| 1,001 given, code-tree nodes | 25,697,573 | 35,045,361 | -26.7% |
+
+The timings are too close and too few to claim a bounded speedup.  The work
+counters are the reason to retain the experiment: its avoided code-tree work
+grows with the mature index, while its direct checks are bounded by the
+rarest posting union.  A structurally different CHAT/601 smoke also preserved
+`(Generated=497430, Kept=16974)` and used 41.11 CPU seconds, versus 43.25 in a
+single adjacent control; only one query there exercised two-position
+refinement, while 31,437 zero-count choices exercised the fast-negative path.
+
+The focused regression constructs two first-position near misses and checks
+that the direct second feature rejects exactly one without losing the exact
+answer.  `compact_unit_index_test`, `compact_long_run_test`, an adaptive `x2`
+audit, and `compact_generalization_smoke_test.sh` all pass.  These are bounded
+semantic and scalability gates, not a proof-endpoint CPU result.
+
+This does not yet replace `code_tree` as the primary authority configuration.
+Adaptive must maintain compressed position features in addition to the code
+tree.  The 2,000-given store used 21,988,160 feature bytes for 695,604 active
+units, about 31.6 bytes/unit.  A linear extrapolation to the completed
+35,592,170-unit population is approximately 1.1 GB of extra resident index
+capacity.  That would move the measured 9,083,561-KiB compact PSS toward about
+10.2 million KiB (roughly 9.7 GiB) and reduce the estimated saving versus old
+P9 from about 80% to roughly 77--78%.  This estimate is deliberately
+conservative and must be replaced by measured mature PSS.  The next design
+step, if adaptive wins CPU, is selective or file-backed feature admission
+rather than accepting an unbounded duplicate resident index.
+
 ### Reproducible production CHAT smoke
 
 Commit `de55328` adds the `new_otter_compact_file_production` case to
@@ -384,9 +458,17 @@ cost.
 These results are important because they prevent tuning a large run with
 plausible-looking options that were already negative.
 
-- `compact_unit_strategy=adaptive` reduced tree work but was about 8.5%
-  slower at 2,000 givens and produced more exact tests.  Keep `code_tree` for
-  the first decisive run.
+- The pre-`45ecaac` single-position `compact_unit_strategy=adaptive` reduced
+  tree work but was about 8.5% slower at 2,000 givens and produced more exact
+  tests.  Keep `code_tree` for the first decisive run; the refined adaptive
+  route requires a separate staged gate.
+- A first attempt at two-position filtering marked the first posting union
+  and decoded a complete second union to intersect it.  At 1,000 givens it
+  reduced conflict exact tests from 293,410 in the compressed adaptive
+  baseline to 230,055, but raised position postings from 111,551 to 424,572.
+  It took 56.33 CPU seconds versus 49.40 for `code_tree` (+14.0%).  This
+  implementation was replaced completely by direct compact-term checking;
+  no second posting union is decoded in commit `45ecaac`.
 - A 64-MiB packed-hint result cache raised its hit rate only from 7.42% to
   9.03%, used about 63 MiB more RSS, and increased the 1,000-given CPU result
   from the current paired mean of 78.83 to 82.11 seconds.  Do not add
@@ -446,11 +528,18 @@ actually grows to the cap.  Only Josef's `TheRest` selector is large enough;
 the four-million-record scale gate observed a 34-MiB PSS increase including
 the associated mapping/page-cache effects.
 
-Starting from 9,083,561 KiB PSS, even charging the complete slab and selector
-allowances gives roughly 9.17 GiB-equivalent PSS.  The expected saving against
-the approximately 45,258-MiB old result therefore remains about 80%, subject
-to same-host measurement.  File-backed logical bytes and page cache must be
-reported separately.
+The optional refined adaptive unit strategy is the exception: it maintains
+compressed position features as well as the code tree.  Its full-population
+projection is about 1.1 GB extra and is therefore excluded from the primary
+80%-saving estimate.  Use `code_tree` for that authority run.  If adaptive is
+staged for CPU, measure its PSS separately and expect a preliminary saving of
+roughly 77--78% until selective/file-backed feature storage is implemented.
+
+Starting from 9,083,561 KiB (8.66 GiB) PSS, charging the complete 64-MiB slab
+allowance and the observed 34-MiB selector increment gives roughly 8.76 GiB.
+The expected saving against the approximately 45,258-MiB old result therefore
+remains about 80.2%, subject to same-host measurement.  File-backed logical
+bytes and page cache must be reported separately.
 
 ### CPU
 
@@ -465,6 +554,9 @@ CPU estimates are less certain and the gains are not additive:
 - the direct symbol table is a measured 3.95% whole-prefix gain;
 - term-base caching saves about 12% only inside unit lookups;
 - sibling pruning saves about 38% only inside forward generalization;
+- direct two-position refinement cuts bounded Josef code-tree traversal by
+  26.7% at 1,001 givens while remaining within about 2% of `code_tree` total
+  CPU; its mature benefit is unknown and must be measured, not extrapolated;
 - the 1-Mi-entry selector buffer cuts scale-probe selector CPU by 34% and
   read/write amplification by 87%/75%; its whole-prover contribution is
   unknown until the authority run;
@@ -564,8 +656,27 @@ assign(report,900).
 ```
 
 Do not add the 64-MiB hint cache and do not select the adaptive unit strategy
-for this first authority run.  If approximate internal phase attribution is
-needed, replace `clear(clocks)` with:
+for this first authority run.  The primary comparison should isolate the
+already measured compact RAM design from the adaptive strategy's projected
+extra feature store.
+
+After that run, or as a bounded 4,000/10,000-given preflight on the large
+host, the refined CPU experiment changes exactly one line:
+
+```prolog
+assign(compact_unit_strategy,adaptive).
+```
+
+Keep every other option, including `clear(clocks)` and
+`assign(hint_cache_kb,0)`, identical.  Continue only if the given/generated/
+kept/hint trajectory is exact, the interval CPU/given slope is no worse than
+`code_tree`, there is no swap, and the ratio of
+`position_refinement_rejects` to `position_refinement_checks` remains
+substantial.  Record feature bytes and PSS; an adaptive full run is a CPU/RAM
+tradeoff experiment, not the clean 80%-RAM authority result.
+
+If approximate internal phase attribution is needed, replace `clear(clocks)`
+with:
 
 ```prolog
 set(clocks).
@@ -625,8 +736,10 @@ The new run is accepted only if all of the following hold:
    still large despite high mapping reuse, the remaining cause is not slab
    churn.
 7. Inspect `Compact_unit_fanout` and unit query profiles.  If pending-subtree
-   traversal dominates, the next work is a lower-exact-test position or
-   substitution-tree route—not a larger result cache.
+   traversal dominates in `code_tree`, compare the staged refined-adaptive
+   run.  For adaptive, record `position_refinement_queries/checks/rejects`,
+   position postings, conflict exact tests, code-tree nodes and feature bytes.
+   A low reject rate means the extra feature store is not buying selectivity.
 8. Inspect `Dense_passive_selector` flushes, merges and read/write bytes.  The
    1-Mi-entry policy should be far below the baseline's 551/546 merge counts;
    otherwise another selector is unexpectedly reaching the cap.
@@ -652,10 +765,10 @@ The next change should follow the mature telemetry, in this order:
 1. If system CPU remains the outlier, separate allocator mapping reuse from
    passive/selector/ancestor file I/O and page-cache eviction.  Increase no
    cache until this attribution is known.
-2. If unit pending-subtree work dominates, redesign the adaptive position
-   route so it keeps the code tree's selectivity and canonical order without
-   inflating exact candidates.  The compressed complete postings already
-   solve its RAM representation.
+2. If unit pending-subtree work dominates, stage the direct-refinement
+   adaptive route from commit `45ecaac`.  If it wins CPU but its projected
+   feature store compromises the RAM target, make feature admission selective
+   or file-backed; do not restore the rejected two-posting intersection.
 3. If packed hints remain near 4,250 seconds, optimize profile intersection
    and dependency validation.  A larger result cache has already failed; a
    different key/profile representation is required.
