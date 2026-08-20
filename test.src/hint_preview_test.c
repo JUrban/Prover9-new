@@ -189,6 +189,87 @@ static void run_cache_admission_case(int bsub)
   delete_clause(hint);
 }
 
+static void run_cache_ring_wrap_case(int bsub)
+{
+  enum { PROBES = 700, REPLAYS = 64 };
+  Topform hints[PROBES];
+  Topform candidates[PROBES];
+  unsigned long long wraps = 0, expired = 0, hits = 0;
+  BOOL saw_cache = FALSE;
+  FILE *stats;
+  char text[160], line[4096];
+  int i;
+
+  set_hint_cache_min_candidates(0);
+  init_hints(ORDINARY_UNIF, bsub, FALSE, FALSE, 2,
+             TRUE, TRUE, TRUE, 64, 327680, 0, 8, NULL);
+  for (i = 0; i < PROBES; i++) {
+    snprintf(text, sizeof(text),
+             "ring_probe_%d(ring_symbol_%d(a,b,c,d,e,f,g,h,i,j)).", i, i);
+    hints[i] = parse_clause_from_string(text);
+    candidates[i] = parse_clause_from_string(text);
+    hints[i]->attributes = set_int_attribute(hints[i]->attributes, bsub, 6);
+    index_hint(hints[i]);
+  }
+  for (i = 0; i < PROBES; i++) {
+    adjust_weight_with_hints(candidates[i], FALSE, FALSE);
+    CHECK(candidates[i]->matching_hint == hints[i],
+          "cache-ring fill preserves exact hint identity");
+  }
+
+  /* The newest profiles should still be resident after wrapping.  Replaying
+     old profiles then forces exact generation checks wherever their direct
+     slots survived but their key segments have been overwritten. */
+  for (i = PROBES - REPLAYS; i < PROBES; i++)
+    adjust_weight_with_hints(candidates[i], FALSE, FALSE);
+  for (i = 0; i < REPLAYS; i++) {
+    adjust_weight_with_hints(candidates[i], FALSE, FALSE);
+    CHECK(candidates[i]->matching_hint == hints[i],
+          "expired cache-ring profile falls back to exact hint matching");
+  }
+
+  stats = tmpfile();
+  CHECK(stats != NULL, "open cache-ring statistics stream");
+  if (stats != NULL) {
+    fprint_packed_hint_operation_stats(stats);
+    rewind(stats);
+    while (fgets(line, sizeof(line), stats) != NULL)
+      if (strstr(line, "Packed_fast_cache:") != NULL) {
+        char *field;
+        saw_cache = TRUE;
+        field = strstr(line, "hits=");
+        if (field != NULL)
+          hits = strtoull(field + strlen("hits="), NULL, 10);
+        field = strstr(line, "arena_wraps=");
+        if (field != NULL)
+          wraps = strtoull(field + strlen("arena_wraps="), NULL, 10);
+        field = strstr(line, "arena_expired_misses=");
+        if (field != NULL)
+          expired = strtoull(
+            field + strlen("arena_expired_misses="), NULL, 10);
+      }
+    fclose(stats);
+  }
+  CHECK(saw_cache && wraps > 0,
+        "tiny exact-key arena exercises circular wraparound");
+  CHECK(hits > 0,
+        "current cache-ring generation retains exact reusable profiles");
+  CHECK(expired > 0,
+        "overwritten cache-ring generations are rejected before comparison");
+  if (!saw_cache || wraps == 0 || hits == 0 || expired == 0)
+    fprintf(stderr,
+            "cache-ring diagnostics: saw=%d wraps=%llu hits=%llu expired=%llu\n",
+            saw_cache, wraps, hits, expired);
+
+  for (i = 0; i < PROBES; i++)
+    unindex_hint(hints[i]);
+  done_with_hints();
+  for (i = 0; i < PROBES; i++) {
+    delete_clause(candidates[i]);
+    delete_clause(hints[i]);
+  }
+}
+
 static void run_observed_stale_rebuild_case(int bsub)
 {
   Topform stale = parse_clause_from_string("stale_probe(f(a)).");
@@ -517,6 +598,7 @@ int main(void)
   run_hint_lifecycle_case(TRUE, TRUE, FALSE, bsub);
   run_hint_lifecycle_case(TRUE, TRUE, TRUE, bsub);
   run_terminal_bulk_discard_case(bsub);
+  run_cache_ring_wrap_case(bsub);
   if (Failures != 0) {
     fprintf(stderr, "hint_preview_test: %d failure(s)\n", Failures);
     return 1;
