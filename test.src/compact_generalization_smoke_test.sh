@@ -47,7 +47,7 @@ P9_MATRIX_WALL_SECONDS=45 \
   "$repo_dir/test.src/compact_generalization_matrix.sh" "$old_tmp" \
   > "$old_tmp.log"
 test "$(awk -F '\t' 'NR == 2 { print $3 }' "$old_tmp/summary.tsv")" -eq 0
-if grep -Eq '^assign\((hint_cache_kb|hint_rebuild_scan_ratio),' \
+if grep -Eq '^assign\((hint_cache_kb|hint_cache_min_candidates|hint_rebuild_scan_ratio),' \
      "$old_tmp/x2-control.old_p9.in"; then
   echo 'new-only hint controls leaked into old_p9 input' >&2
   exit 1

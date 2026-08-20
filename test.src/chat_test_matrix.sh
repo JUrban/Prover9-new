@@ -27,6 +27,7 @@ passive_selector_buffer=${CHAT_PASSIVE_SELECTOR_BUFFER:-65536}
 production_passive_selector_buffer=${CHAT_PRODUCTION_PASSIVE_SELECTOR_BUFFER:-1048576}
 hint_conjunction_kb=${CHAT_HINT_CONJUNCTION_KB:-}
 hint_cache_kb=${CHAT_HINT_CACHE_KB:-}
+hint_cache_min_candidates=${CHAT_HINT_CACHE_MIN_CANDIDATES:-}
 compact_rewrite_deep_cache_kb=${CHAT_COMPACT_REWRITE_DEEP_CACHE_KB:-0}
 new_prover=${CHAT_NEW_PROVER:-"$repo_dir/bin/prover9"}
 old_prover=${CHAT_OLD_PROVER:-/project/Prover9-old-LADR-2026-6A/bin/prover9}
@@ -195,6 +196,10 @@ write_case()
     if test "$name" = new_otter_compact_file_production &&
        test -n "$hint_cache_kb"; then
       echo "assign(hint_cache_kb,$hint_cache_kb)."
+    fi
+    if test "$name" = new_otter_compact_file_production &&
+       test -n "$hint_cache_min_candidates"; then
+      echo "assign(hint_cache_min_candidates,$hint_cache_min_candidates)."
     fi
     case "$name" in
       new_otter_compact_file_linear|new_otter_compact_file_adaptive|new_otter_compact_file_adaptive32|new_otter_compact_file_production)

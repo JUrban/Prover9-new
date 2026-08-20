@@ -141,51 +141,69 @@ and all authoritative/audit index strategies; the second covers legacy and
 file-backed compact variants on two distinct problems.  These tests establish
 bounded semantic compatibility, not long-run CPU performance.
 
-### Josef 01 packed-hint cache gate
+### Packed-hint cache: mature correction and selective admission
 
-The production default allocates a 2-MiB exact result cache in
-`packed_fast`.  It is semantically transparent, but every eligible query must
-canonicalize and hash its shallow feature profile, validate dependencies and
-usually store a replacement.  The completed Josef 01 output made 2.09
-billion cache queries.  Its 8.15% hit rate avoided 26.82 billion raw posting
-candidates, but the low reuse rate made it unclear whether that work paid for
-the cache machinery.
+The production default allocates a 2-MiB exact result cache in `packed_fast`.
+It is semantically transparent, but every eligible query hashes its complete
+shallow feature profile, validates an index-generation dependency and may
+store a replacement.  Disabling it looked attractive on short Josef 01
+prefixes: with the current stable-key source, a clocks-off reversed pair at
+1,001 givens averaged 56.09 seconds cache-on versus 53.33 cache-off, a 5.2%
+prefix saving.  All runs ended at `(1001,1628048,320239,0)` with the same
+exact match counts and selected-given trajectory.
 
-A clocks-off serial reversed pair now compares the default cache with
-`assign(hint_cache_kb,0)` at the exact 1,001-given Josef endpoint.  Every run
-used the current portable source binary, one pinned CPU, a 2-GiB limit and
-zero process swap:
+That result does **not** justify disabling the cache for a day-long run.  The
+completed output's cumulative 8.15% hit rate hides improving late reuse.  Its
+last three reporting intervals hit 12.6%, 11.9% and 13.5%; each hit in those
+intervals avoided approximately 369, 345 and 426 conjunction candidates.
+The final cache had avoided 26.82 billion candidates.  Cache-off is therefore
+a short-prefix optimization whose mature effect is unknown, not the authority
+recommendation.
 
-| Order | 2-MiB cache | cache disabled | cache-off change |
+Commit `6a5d18c` removes avoidable cache overhead without weakening identity.
+When the complete conjunction sidecar is resident, deterministic feature
+collection order is already an exact key, so the query no longer sorts it.
+The memory-budget fallback retains canonical sorting and now restores that
+order before storing after sparse posting selection permutes its scratch
+vector.  Exact cache hits are regression-tested through both paths.  Reversed
+bounded means for the sort removal were:
+
+| Gate | sorted exact key | stable exact key | change |
 |---|---:|---:|---:|
-| first orientation | 48.66 s | 46.11 s | -5.2% |
-| reversed orientation | 50.76 s | 49.02 s | -3.4% |
-| mean | 49.71 s | 47.57 s | **-4.3%** |
+| Josef 01 / 1,001 | 51.17 s | 50.48 s | -1.3% |
+| CHAT / 601 | 45.21 s | 44.84 s | -0.8% |
+| Josef 02 / 601 | 35.76 s | 35.59 s | -0.5% |
 
-All four runs ended at `(1001,1628048,320239,0)` and emitted the same 1,001
-selected-given digest,
-`d2c195ffae6f90a9dc63a31c8c1fd5c49d29d564669ad9799575e9febb5c316f`.
-Mean RSS changed from 591,826 to 594,932 KiB; that 3-MiB movement is opposite
-the 2-MiB allocation difference and is ordinary measurement noise rather
-than a RAM regression.  The prefix's 7.52% cache hit rate is close to the
-completed run's 8.15%, which makes the CPU result relevant to the mature
-workload, although only the full authority run can confirm its final effect.
+Every gate preserved its exact generated/kept endpoint and used zero process
+swap.  The gains are small and frequency-sensitive, but they have the right
+sign on three different workloads and remove work proportional to cache
+queries rather than to a Josef-specific symbol pattern.
 
-This is deliberately a **Josef 01 override, not a default change**.  CHAT/600
-had identical trajectories and means of 49.15 seconds cache-on versus 48.92
-cache-off (-0.5%); its pair orientations contradicted each other.  Josef
-02/600 also preserved its exact trajectory, but averaged 35.60 seconds
-cache-on and 36.63 cache-off, so disabling the cache was 2.9% slower on mean.
-Its pair orientations also contradicted each other, which is not proof of a
-cache win but does rule out a robust general cache-off win.  Josef 02's cache
-hit rate was 48.58% and it avoided 13.89 million candidates in only 215,118
-queries.  The existing 2-MiB default therefore remains appropriate for an
-unknown/general workload.
+The new default-off control
 
-`CHAT_HINT_CACHE_KB` has been added to `chat_test_matrix.sh` so external
-production cases can reproduce either policy without editing logical input.
-It is unset by default; `CHAT_HINT_CACHE_KB=0` emits the Josef override only
-for `new_otter_compact_file_production`.
+```prolog
+assign(hint_cache_min_candidates,128).
+```
+
+admits a miss result only if obtaining it scanned at least 128 conjunction or
+posting candidates.  Lookups remain enabled, rejected results still pass
+through authoritative subsumption, and the compatibility default is zero.
+At Josef 01/1,001, 128 reduced stores from 1,804,420 to 203,283 (-88.7%) while
+retaining 19.45 million of 20.46 million avoided candidates (95.1%) and about
+12 MiB less touched RSS.  Its reversed CPU mean was 50.02 versus 50.43 seconds
+for threshold zero (-0.8%), although the individual orientations disagreed.
+
+The cross-workload gate prevents treating 128 as a universal default.  It was
+3.1% faster on Josef 02/601 but 1.7% slower on CHAT/601; all endpoints were
+exact and all process swap counts were zero.  Keep the general default at
+zero.  Threshold 128 is recommended only for the Josef 01 full-run candidate
+because it preserves almost all measured expensive reuse while avoiding most
+cheap stores, and because the mature output shows that valuable late reuse is
+real.  Only that full run can validate the choice.
+
+`CHAT_HINT_CACHE_KB` and `CHAT_HINT_CACHE_MIN_CANDIDATES` let the matrix driver
+emit either policy for `new_otter_compact_file_production`.  Both are unset by
+default, retaining the general 2-MiB/zero-threshold policy.
 
 ### Mature file-selector buffer gate
 
@@ -626,9 +644,11 @@ plausible-looking options that were already negative.
   from 13.40 to 14.13 seconds (+5.4%) with the exact same
   `(Given=101, Generated=13675, Kept=7309)` endpoint, approximately equal RSS,
   and zero swap.  The sketch and admission policy were reverted completely.
-  This also explains why the proven Josef policy disables the result cache
-  outright instead of retaining lookup/hash cost while selectively refusing
-  stores.
+  This rejects history/frequency admission: it cannot know whether the first
+  result was expensive and discarded useful first-repeat entries.  The later
+  `hint_cache_min_candidates` control is materially different: it uses exact
+  work already measured on the miss, retains 95.1% of avoided candidates at
+  the Josef 01/1,001 gate, needs no frequency table, and remains default-off.
 - Reusing the first literal's already computed structural mask for the
   packed-fast clause profile was also rejected.  It removes one recursive
   `packed_term_feature_mask` traversal per ordinary query without changing
@@ -682,11 +702,13 @@ the four-million-record scale gate observed a 34-MiB PSS increase including
 the associated mapping/page-cache effects.
 
 The optional refined adaptive unit strategy is the exception: it maintains
-compressed position features as well as the code tree.  Its full-population
-projection is about 1.1 GB extra and is therefore excluded from the primary
-80%-saving estimate.  Use `code_tree` for that authority run.  If adaptive is
-staged for CPU, measure its PSS separately and expect a preliminary saving of
-roughly 77--78% until selective/file-backed feature storage is implemented.
+compressed position features as well as the code tree.  Unlimited depth still
+projects to about 1.1 GB extra, but the staged depth-2 policy projects to about
+0.28 GB from the bounded population.  Both are excluded from the primary
+authority estimate.  Use `code_tree` for that run; if depth-2 adaptive is
+staged for CPU, measure rather than extrapolate its mature PSS.  The preliminary
+depth-2 projection would retain about a 79.5% saving, while unlimited adaptive
+would fall to roughly 77--78%.
 
 Starting from 9,083,561 KiB (8.66 GiB) PSS, charging the complete 64-MiB slab
 allowance and the observed 34-MiB selector increment gives roughly 8.76 GiB.
@@ -701,9 +723,12 @@ CPU estimates are less certain and the gains are not additive:
 - disabling exact detailed clocks removes a measured 39.6% of total CPU at
   the exact 1,001-given gate; this corrects a configuration mismatch in the
   completed full-run comparison rather than changing proof search;
-- disabling the low-hit 2-MiB packed-hint result cache is a measured 4.3%
-  whole-prefix Josef 01 gain, but remains a problem-specific override because
-  the Josef 02 mean favors retaining the cache;
+- disabling the 2-MiB packed-hint result cache saves about 5% at the short
+  Josef 01 prefix but is no longer recommended for the mature run: late
+  intervals reached 12--14% hits and avoided hundreds of candidates per hit;
+  stable exact keys remove 0.5--1.3% in three bounded workload means, while
+  the optional 128-candidate admission threshold removes 88.7% of Josef
+  stores and retains 95.1% of its avoided posting work;
 - the direct symbol table is a measured 3.95% whole-prefix gain;
 - term-base caching saves about 12% only inside unit lookups;
 - sibling pruning saves about 38% only inside forward generalization;
@@ -751,7 +776,9 @@ Do not reuse objects from a differently instrumented, sanitized, profiled, or
 `NATIVE=1` build.  If in doubt, use a fresh worktree or clean the build before
 compiling.  In particular, the repository's currently installed `bin/prover9`
 is intentionally the older PGO executable and does not contain commit
-`1c3c413`; run the build and copy steps above before the authority run.
+`6a5d18c`; run the build and copy steps above before the authority run.  The
+fresh portable source binary measured while writing this report has SHA-256
+`51dd69534b78d895062fd5392522160237f656ba48b911539d77770bb91ec6d3`.
 
 ### Prover9 options
 
@@ -786,6 +813,7 @@ set(compact_otter_back_demod_index).
 set(compact_otter_nonunit_index).
 
 assign(compact_unit_strategy,code_tree).
+assign(compact_unit_feature_depth,2).  % Used only by position/adaptive.
 set(compact_nonunit_path_filter).
 
 assign(compact_back_demod_strategy,adaptive32).
@@ -799,7 +827,8 @@ assign(compact_back_tree_budget_pct,200).
 clear(compact_back_edge_filter).
 
 assign(compact_passive_cache,0).
-assign(hint_cache_kb,0).  % Josef 01 only; retain the 2048 default generally.
+assign(hint_cache_kb,2048).
+assign(hint_cache_min_candidates,128).  % Josef 01 staged admission policy.
 assign(compact_index_stale_pct,25).
 assign(compact_term_reclaim_kb,8192).
 assign(compact_rewrite_deep_cache_kb,0).
@@ -823,10 +852,11 @@ host, the refined CPU experiment changes exactly one line:
 assign(compact_unit_strategy,adaptive).
 ```
 
-Keep every other option, including `clear(clocks)` and
-`assign(hint_cache_kb,0)`, identical.  Continue only if the given/generated/
-kept/hint trajectory is exact, the interval CPU/given slope is no worse than
-`code_tree`, there is no swap, and the ratio of
+Keep every other option, including `clear(clocks)`, the 2-MiB cache, its
+128-candidate admission threshold and `compact_unit_feature_depth=2`,
+identical.  Continue only if the given/generated/kept/hint trajectory is
+exact, the interval CPU/given slope is no worse than `code_tree`, there is no
+swap, and the ratio of
 `position_refinement_rejects` to `position_refinement_checks` remains
 substantial.  Record feature bytes and PSS; an adaptive full run is a CPU/RAM
 tradeoff experiment, not the clean 80%-RAM authority result.
@@ -856,11 +886,12 @@ TMPDIR=/local/mptp/prover9-tmp \
   2> /path/to/Josef_01.compact.latest.time
 ```
 
-The matrix driver can generate the same throughput configuration with
-`CHAT_CLOCKS=0` and `CHAT_HINT_CACHE_KB=0`; for example, set them alongside
+The matrix driver can generate the same throughput cache policy with
+`CHAT_CLOCKS=0`, `CHAT_HINT_CACHE_KB=2048` and
+`CHAT_HINT_CACHE_MIN_CANDIDATES=128`; set them alongside
 `CHAT_CASES=new_otter_compact_file_production`.  `CHAT_CLOCKS=1` remains the
-compatibility default for historical diagnostic matrices, and an unset
-`CHAT_HINT_CACHE_KB` retains the general 2-MiB cache default.
+compatibility default for historical diagnostic matrices.  Unset cache
+variables retain the general 2-MiB cache and zero admission threshold.
 
 The file-backed passive/selector/ancestor stores are normally created as
 unlinked temporary files.  `/proc/$pid/fd/*` can show them with a `(deleted)`
@@ -899,6 +930,10 @@ The new run is accepted only if all of the following hold:
 8. Inspect `Dense_passive_selector` flushes, merges and read/write bytes.  The
    1-Mi-entry policy should be far below the baseline's 551/546 merge counts;
    otherwise another selector is unexpectedly reaching the cap.
+9. Inspect `Packed_fast_cache` for `min_candidates=128`, admission skips,
+   stores and posting candidates avoided.  Compare interval deltas rather than
+   only the cumulative hit rate; mature reuse was much more valuable than the
+   first 1,001 givens suggested.
 
 ## Reproducing the bounded CHAT smoke
 
@@ -922,12 +957,15 @@ The next change should follow the mature telemetry, in this order:
    passive/selector/ancestor file I/O and page-cache eviction.  Increase no
    cache until this attribution is known.
 2. If unit pending-subtree work dominates, stage the direct-refinement
-   adaptive route from commit `45ecaac`.  If it wins CPU but its projected
-   feature store compromises the RAM target, make feature admission selective
-   or file-backed; do not restore the rejected two-posting intersection.
-3. If packed hints remain near 4,250 seconds, optimize profile intersection
-   and dependency validation.  A larger result cache has already failed; a
-   different key/profile representation is required.
+   adaptive route with `compact_unit_feature_depth=2`.  If it wins CPU but its
+   measured feature store compromises the RAM target, make feature admission
+   selective or file-backed; do not restore the rejected two-posting
+   intersection or unlimited depth by accident.
+3. If packed hints remain near 4,250 seconds, first separate cache hit work,
+   admission skips and conjunction candidates from authoritative exact tests.
+   Stable keys and work-based admission address cache overhead; a larger cache
+   has already failed.  Remaining profile-intersection cost needs a different
+   general representation, not a Josef-shaped special case.
 4. If selector read amplification dominates, tune run merging from measured
    run counts and bytes, not from the short-prefix 65,536/1,048,576 buffer
    difference.
