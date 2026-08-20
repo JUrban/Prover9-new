@@ -469,6 +469,23 @@ plausible-looking options that were already negative.
   It took 56.33 CPU seconds versus 49.40 for `code_tree` (+14.0%).  This
   implementation was replaced completely by direct compact-term checking;
   no second posting union is decoded in commit `45ecaac`.
+- Bypassing route learning for a complete one-posting union was rejected.
+  At 600 givens, serial reversed pairs were effectively neutral: the refined
+  control averaged 26.40 CPU seconds and cold admission 26.49 (+0.4%).  At
+  the more informative 1,000-given gate, cold admission took 56.83 CPU
+  seconds versus 52.05 for the adjacent control (+9.2%).  It reduced
+  code-tree nodes from 25,697,573 to 22,759,380 (-11.4%), but raised position
+  postings from 111,867 to 171,424 (+53.2%) and exact tests slightly from
+  230,055 to 230,494.  Even one hash/posting decode plus a compact path walk
+  costs more than dozens of contiguous radix nodes on this path; cold-score
+  thresholds 1 and 4 were removed completely.
+- Raising `CUI_ADAPTIVE_POSITION_FACTOR` from 12 to 24 was also rejected in
+  a 600-given serial reversed pair.  Factor 24 reduced direct checks from
+  23,960 to 8,045, but raised tree nodes from 3,074,870 to 3,364,559.  Its
+  paired mean was 26.54 CPU seconds versus 23.79 for factor 12 (+11.6%), and
+  it lost in both orientations.  The current learned factor 12 is therefore
+  retained; larger factors merely exchange cheap contiguous tree work for
+  too little avoided position work.
 - A 64-MiB packed-hint result cache raised its hit rate only from 7.42% to
   9.03%, used about 63 MiB more RSS, and increased the 1,000-given CPU result
   from the current paired mean of 78.83 to 82.11 seconds.  Do not add
