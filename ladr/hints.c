@@ -155,6 +155,8 @@ static unsigned long long Fast_conjunction_queries = 0;
 static unsigned long long Fast_conjunction_posting_candidates = 0;
 static unsigned long long Fast_conjunction_overflow_candidates = 0;
 static unsigned long long Fast_conjunction_profile_rejects = 0;
+static unsigned long long Fast_conjunction_summary_reject_queries = 0;
+static unsigned long long Fast_conjunction_summary_reject_candidates = 0;
 static unsigned long long Fast_conjunction_budget_bytes = 0;
 static unsigned long long Fast_conjunction_peak_bytes = 0;
 static unsigned long long Fast_conjunction_budget_denials = 0;
@@ -2242,7 +2244,22 @@ static BOOL fast_conjunction_collect_candidates(
     Packed_operation_stats[op].posting_candidates += view.count;
     Fast_conjunction_posting_candidates += view.count;
   }
-  {
+  /* A posting-wide OR and independent literal-count maxima are conservative
+     necessary conditions.  They let the mature packed index reject a whole
+     posting without touching its much larger bit-plane/count sidecars.  The
+     overflow vector is deliberately still checked below, and surviving IDs
+     retain their original order and pass the exact matcher as before. */
+  if (view.count != 0 &&
+      (((view.mask_union & first_mask) != first_mask) ||
+       view.maximum_positive < positive ||
+       view.maximum_negative < negative)) {
+    if (!Hint_preview_active) {
+      Fast_conjunction_summary_reject_queries++;
+      Fast_conjunction_summary_reject_candidates += view.count;
+      Fast_conjunction_profile_rejects += view.count;
+    }
+  }
+  else {
     unsigned block;
     unsigned mask_survivors = 0;
     for (block = 0; block < view.mask_blocks; block++) {
@@ -2533,6 +2550,8 @@ void done_with_hints(void)
   Fast_conjunction_posting_candidates = 0;
   Fast_conjunction_overflow_candidates = 0;
   Fast_conjunction_profile_rejects = 0;
+  Fast_conjunction_summary_reject_queries = 0;
+  Fast_conjunction_summary_reject_candidates = 0;
   Fast_conjunction_budget_bytes = 0;
   Fast_conjunction_peak_bytes = 0;
   Fast_conjunction_budget_denials = 0;
@@ -3910,6 +3929,7 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             "table_bytes=%llu, mask_words=%llu, "
             "negative_overflow=%u, positive_overflow=%u, queries=%llu, "
             "posting_candidates=%llu, profile_rejects=%llu, "
+            "summary_reject_queries=%llu, summary_reject_candidates=%llu, "
             "overflow_candidates=%llu.\n",
             Fast_conjunction_postings == NULL ? "no" : "yes",
             Fast_conjunction_budget_bytes,
@@ -3930,6 +3950,8 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             Fast_conjunction_queries,
             Fast_conjunction_posting_candidates,
             Fast_conjunction_profile_rejects,
+            Fast_conjunction_summary_reject_queries,
+            Fast_conjunction_summary_reject_candidates,
             Fast_conjunction_overflow_candidates);
     fprintf(fp,
             "Packed_fast_conjunction_histogram: keys=%llu/%llu/%llu/%llu/"

@@ -8,6 +8,7 @@
 
 struct hint_posting {
   unsigned long long key;
+  unsigned long long profile_mask_union;
   unsigned *references;
   unsigned long long *profile_mask_planes;
   unsigned *profile_literal_counts;
@@ -19,6 +20,8 @@ struct hint_posting {
   unsigned dense_summary_words;
   unsigned profile_mask_blocks;
   unsigned long long generation;
+  unsigned short profile_maximum_positive;
+  unsigned short profile_maximum_negative;
   unsigned char occupied;
   unsigned char profile;
 };
@@ -265,6 +268,11 @@ void hint_postings_add_profile(Hint_postings index, unsigned long long key,
   posting->references[posting->count] = id;
   posting->profile_literal_counts[posting->count] =
     (positive << 16) | negative;
+  posting->profile_mask_union |= mask;
+  if (positive > posting->profile_maximum_positive)
+    posting->profile_maximum_positive = (unsigned short) positive;
+  if (negative > posting->profile_maximum_negative)
+    posting->profile_maximum_negative = (unsigned short) negative;
   {
     unsigned block = posting->count / 64;
     unsigned long long flag = 1ULL << (posting->count % 64);
@@ -301,8 +309,11 @@ BOOL hint_postings_get_profile(Hint_postings index,
   view->ids = posting->references;
   view->mask_planes = posting->profile_mask_planes;
   view->literal_counts = posting->profile_literal_counts;
+  view->mask_union = posting->profile_mask_union;
   view->count = posting->count;
   view->mask_blocks = posting->profile_mask_blocks;
+  view->maximum_positive = posting->profile_maximum_positive;
+  view->maximum_negative = posting->profile_maximum_negative;
   return TRUE;
 }
 

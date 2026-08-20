@@ -102,6 +102,10 @@ int main(void)
             "profile posting spans three mask blocks");
     require(profile.mask_planes != NULL,
             "profile exposes its mask bit planes");
+    require(profile.mask_union == ((1ULL << 2) | (1ULL << 47)) &&
+            profile.maximum_positive == 10 &&
+            profile.maximum_negative == 6,
+            "profile exposes conservative posting-wide summaries");
     for (i = 0; i < profile.count; i++) {
       unsigned block = i / 64;
       unsigned long long flag = 1ULL << (i % 64);
@@ -122,6 +126,9 @@ int main(void)
             "absent profile posting returns an empty view");
     require(hint_postings_get_profile(index, 10001, &profile) &&
             profile.count == 1 &&
+            profile.mask_union == (1ULL << 1) &&
+            profile.maximum_positive == 1 &&
+            profile.maximum_negative == 1 &&
             (profile.mask_planes[1] & 1ULL) != 0,
             "singleton profile keeps its exact mask plane");
   }

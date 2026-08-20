@@ -28,8 +28,11 @@ struct hint_profile_view {
   const unsigned *ids;
   const unsigned long long *mask_planes;
   const unsigned *literal_counts;
+  unsigned long long mask_union;
   unsigned count;
   unsigned mask_blocks;
+  unsigned short maximum_positive;
+  unsigned short maximum_negative;
 };
 
 struct hint_dense_view {
