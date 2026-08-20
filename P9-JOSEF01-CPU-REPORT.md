@@ -683,6 +683,14 @@ plausible-looking options that were already negative.
   both core orientations.  The extra branch/counter and resulting optimized
   layout outweighed the avoided short query traversals.  The production code
   therefore has no hidden small-union threshold.
+- Selecting the second and third rigid refinements in one top-two traversal
+  was neutral and was reverted.  It reproduced every candidate, rejection,
+  exact-test and search counter, but its reversed Josef 01/1,501 mean was
+  90.60 CPU seconds versus 90.47 for the two simple minimum scans (+0.1%);
+  the core orientations disagreed.  The nominally smaller traversal count did
+  not repay a larger branch-heavy recursive selector, especially because the
+  simple scans stop early after zero-score features.  The current source and
+  portable binary were restored byte-for-byte to the committed two-pass form.
 - A 64-MiB packed-hint result cache raised its hit rate only from 7.42% to
   9.03%, used about 63 MiB more RSS, and increased the 1,000-given CPU result
   from the current paired mean of 78.83 to 82.11 seconds.  Do not add
