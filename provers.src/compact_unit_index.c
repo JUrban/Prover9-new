@@ -67,6 +67,17 @@ struct cui_query_term {
   uint32_t end;
 };
 
+/* A generalization edge can bind each stored-pattern variable at most once
+   before recursion.  Remember that exact set in two 64-bit words instead of
+   keeping a 100-element variable-number array in every recursive frame. */
+struct cui_new_bindings {
+  uint64_t low;
+  uint64_t high;
+};
+
+typedef char cui_new_bindings_cover_max_vars[
+  MAX_VARS <= 128 ? 1 : -1];
+
 struct cui_adaptive_route {
   uint64_t key;
   unsigned long long tree_nodes;
@@ -1107,14 +1118,15 @@ static void flatten_query(Compact_unit_index index, Term term,
 static BOOL match_generalization_edge(
   Compact_unit_index index, uint32_t node, uint32_t position, uint32_t end,
   int32_t first_code,
-  Term *bindings, unsigned *new_bindings, unsigned *new_count,
+  Term *bindings, struct cui_new_bindings *new_bindings,
   uint32_t *next_position)
 {
   struct cui_node *edge = &index->nodes[node];
   const int32_t *tokens = query_slice_tokens(index, edge->tokens);
   uint32_t length = query_slice_length(edge->tokens);
   uint32_t i = 0;
-  *new_count = 0;
+  new_bindings->low = 0;
+  new_bindings->high = 0;
   /* GENERALIZATION_REC has already read and classified the first token.
      For its equal rigid branch, the target is known rigid with this symbol;
      consume both without resolving and comparing them a second time. */
@@ -1136,7 +1148,10 @@ static BOOL match_generalization_edge(
         fatal_error("compact_unit_index: variable exceeds MAX_VARS");
       if (bindings[variable] == NULL) {
         bindings[variable] = query_term;
-        new_bindings[(*new_count)++] = variable;
+        if (variable < 64)
+          new_bindings->low |= UINT64_C(1) << variable;
+        else
+          new_bindings->high |= UINT64_C(1) << (variable - 64);
       }
       else if (!term_ident(bindings[variable], query_term))
         return FALSE;
@@ -1153,11 +1168,19 @@ static BOOL match_generalization_edge(
 }
 
 static void undo_generalization_bindings(Term *bindings,
-                                         const unsigned *new_bindings,
-                                         unsigned new_count)
+                                         struct cui_new_bindings new_bindings)
 {
-  while (new_count != 0)
-    bindings[new_bindings[--new_count]] = NULL;
+  while (new_bindings.low != 0) {
+    unsigned variable = (unsigned) __builtin_ctzll(new_bindings.low);
+    bindings[variable] = NULL;
+    new_bindings.low &= new_bindings.low - 1;
+  }
+  while (new_bindings.high != 0) {
+    unsigned variable =
+      64U + (unsigned) __builtin_ctzll(new_bindings.high);
+    bindings[variable] = NULL;
+    new_bindings.high &= new_bindings.high - 1;
+  }
 }
 
 static unsigned long long generalization_rec(
@@ -1202,17 +1225,16 @@ static unsigned long long generalization_rec(
        child = index->nodes[child].next_sibling) {
       int32_t code = query_first_code(index, child);
       if (code < 0 || (!target_variable && code == wanted)) {
-        unsigned new_bindings[MAX_VARS];
-        unsigned new_count = 0;
+        struct cui_new_bindings new_bindings;
         uint32_t next_position = position;
         unsigned long long found = 0;
         work->nodes++;
         if (match_generalization_edge(index, child, position, end, code,
-                                      bindings, new_bindings, &new_count,
+                                      bindings, &new_bindings,
                                       &next_position))
           found = generalization_rec(index, child, next_position, end,
                                      bindings, exclude_id, work);
-        undo_generalization_bindings(bindings, new_bindings, new_count);
+        undo_generalization_bindings(bindings, new_bindings);
         if (found != 0)
           return found;
       }

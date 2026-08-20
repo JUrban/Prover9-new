@@ -16,6 +16,31 @@ static Topform indexed_unit(const char *text)
   return c;
 }
 
+static void check_high_variable_generalization(void)
+{
+  Compact_unit_index index = compact_unit_index_init();
+  Topform repeated = indexed_unit("high_var(f(x,x)).");
+  Topform fallback = indexed_unit("high_var(f(x,b)).");
+  Topform target = parse_clause_from_string("high_var(f(a,b)).");
+  Term repeated_f = ARG(repeated->literals->atom, 0);
+  Term fallback_f = ARG(fallback->literals->atom, 0);
+
+  ARG(repeated_f, 0) = get_variable_term(64);
+  ARG(repeated_f, 1) = get_variable_term(64);
+  ARG(fallback_f, 0) = get_variable_term(64);
+  CHECK(compact_unit_index_add(index, repeated) &&
+        compact_unit_index_add(index, fallback),
+        "index patterns whose variable uses the upper undo word");
+  CHECK(compact_unit_generalization_first(
+          index, target->literals->atom, TRUE, 0) == fallback->id,
+        "a failed repeated high-variable edge is undone before its sibling");
+
+  compact_unit_index_free(index);
+  delete_clause(repeated);
+  delete_clause(fallback);
+  delete_clause(target);
+}
+
 static void check_high_base_strategy(Compact_unit_strategy strategy)
 {
   Compact_term_pool pool = compact_term_pool_init();
@@ -87,6 +112,7 @@ int main(void)
   size_t count;
 
   init_standard_ladr();
+  check_high_variable_generalization();
   index = compact_unit_index_init();
   general = indexed_unit("p(x).");
   exact = indexed_unit("p(a).");
