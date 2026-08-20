@@ -427,6 +427,70 @@ SHA-256 `0a55dcb64887ee964e70744b3a822c975cbec9d7031ac6d174aba1200941dbca`.
 This bounded evidence supports retaining the general mechanism; only the full
 authority run can quantify its mature CPU effect.
 
+### Stack-owned eager paramodulation paths
+
+Commit `b1d8128` removes a second long-run allocator loop from inference
+construction.  Eager `para_into()` traverses every eligible subterm while
+maintaining a position such as `(literal, argument, child, ...)`.  The old
+iterative traversal allocated one 16-byte `Ilist` node for every visited
+complex-term depth, scanned the linked position to append it, rescanned for
+its predecessor after visiting the children, and then freed it.  This happened
+even when unification at that position failed and produced no conclusion.
+
+The traversal now keeps its dynamic position suffix in a depth-indexed array
+of `struct ilist` nodes on the existing bounded traversal stack.  Linking and
+unlinking are constant time.  The two literal/argument coordinates remain
+heap-owned by the caller.  `paramodulate()` reads the same live list, and
+`para_just()` copies it before the conclusion callback can retain anything;
+therefore no stack address enters a clause or justification.  Consumer
+cancellation detaches the stack suffix before the caller frees its two base
+nodes.  Inference eligibility, traversal order, substitutions, conclusion
+order and justification coordinates are unchanged.  The stack reservation is
+approximately the same as the previous frame array because the smaller frame
+and separate 16-byte coordinate array replace the old per-frame position
+pointer and padding.
+
+The exact Josef 01/1,501 endpoint made the mechanism directly measurable:
+
+| Portable binary | Mean user | Mean system | Mean total | Mean RSS | `Ilist` gets |
+|---|---:|---:|---:|---:|---:|
+| exact-ring parent | 73.045 s | 4.305 s | 77.350 s | 683,532 KiB | 74,720,701 |
+| stack path | 70.760 s | 4.230 s | 74.990 s | 683,562 KiB | 43,203,989 |
+| change | **-3.13%** | -1.74% | **-3.05%** | +30 KiB | **-42.2%** |
+
+The candidate won both placements: 74.42 versus 76.64 seconds, then 75.56
+versus 78.06 seconds after reversing core/order assignment.  It removed
+31,516,712 allocator calls and exactly 504,267,392 bytes of cumulative object
+traffic.  Live, reserved, reclaimed and slab-reuse states were identical,
+because these short-lived nodes already returned to the bounded allocator
+pool.  Every run ended at
+`(Given=1501, Generated=3603947, Kept=521972, proofs=0)`, including identical
+`Generated_by_rule` counts and all normalized final operational statistics;
+RSS was effectively unchanged and process swap was zero.
+
+This is not a Josef-shaped fast path.  Reversed cross-workload gates gave:
+
+| Gate | Parent mean total | Stack-path mean total | Change | `Ilist` reduction |
+|---|---:|---:|---:|---:|
+| CHAT / 601 | 39.120 s | 38.635 s | **-1.24%** | 40.8% |
+| Josef 02 / 601 | 33.365 s | 32.860 s | **-1.51%** | 43.7% |
+
+The candidate won all four placements and preserved exact endpoints and
+rule-generation counts.  ASan/UBSan eager-versus-bounded iterator tests cover
+unit and multi-literal conclusions, ordered instance checks, every forced
+continuation boundary and consumer cancellation.  The hint regression,
+`iterator-tests` and `compact_generalization_smoke_test.sh` pass.
+
+The completed Josef output contains 32 periodic `Ilist` reports.  Reconstructing
+their 32-bit wraparound deltas gives 36,174,451,138 allocations over the run.
+The bounded change removes 8.91 traversal nodes per generated paramodulant;
+applying that ratio to 1.600 billion mature paramodulants suggests an order of
+14.25 billion eliminated calls and 212 GiB less cumulative object traffic.
+That is a scaling indication, not a CPU forecast: term depths and failed
+unifications change over the search.  The external authority run must measure
+the mature result.  The measured portable binary is SHA-256
+`42c4abeb461bab56c180fcc5ca7a7ad6e11240935c78cd0af27d450644ce0f81`.
+
 ## Authoritative completed runs
 
 The source files are:
@@ -1114,6 +1178,9 @@ its traversal stack exists only during `clause_weight()`.
 The owner-free hint-cache ring remains exactly within the configured 2-MiB
 budget; it trades owner metadata and part of the old key arena for twice as
 many result slots, with no measurable whole-process RSS change.
+Stack-owned paramodulation positions add no persistent search state.  Their
+fixed traversal-stack reservation is approximately unchanged because a
+smaller frame array makes room for the separate coordinate array.
 
 The adaptive unit strategy is the exception: it maintains compressed position
 features as well as the code tree.  Unlimited depth still projects to about
@@ -1179,6 +1246,11 @@ CPU estimates are less certain and the gains are not additive:
   at Josef 01/1,501; its strict clocks-off reversed whole-process mean improves
   by a much smaller 0.8% user and 0.6% total CPU, with exact independent CHAT
   and Josef 02 trajectories;
+- stack-owned eager paramodulation positions remove 42.2% of all `Ilist`
+  allocations at Josef 01/1,501 and improve its strict reversed whole-process
+  mean by 3.05%; reversed CHAT and Josef 02 means improve by 1.24% and 1.51%,
+  while the mature completed telemetry suggests billions of transient path
+  allocations are in scope;
 - the slab recycler changes almost no bounded CPU but removes nearly all
   post-warm-up slab unmaps by 2,000 givens;
 - native compilation may add 0--5% depending on the host.
@@ -1214,10 +1286,10 @@ Do not reuse objects from a differently instrumented, sanitized, profiled, or
 `NATIVE=1` build.  If in doubt, use a fresh worktree or clean the build before
 compiling.  In particular, the repository's currently installed `bin/prover9`
 is intentionally the older PGO executable and does not contain commits
-`107665b`, `3f2f566`, `4c0d0b2`, `b3cde19`, `df7bfdb`, `f4f4614`, or
-`1b15b40`; run the build and copy steps above before the authority run.  The
-fresh portable source binary measured at `1b15b40` has SHA-256
-`0a55dcb64887ee964e70744b3a822c975cbec9d7031ac6d174aba1200941dbca`.
+`107665b`, `3f2f566`, `4c0d0b2`, `b3cde19`, `df7bfdb`, `f4f4614`,
+`1b15b40`, or `b1d8128`; run the build and copy steps above before the authority
+run.  The fresh portable source binary measured at `b1d8128` has SHA-256
+`42c4abeb461bab56c180fcc5ca7a7ad6e11240935c78cd0af27d450644ce0f81`.
 
 ### Prover9 options
 
@@ -1391,6 +1463,11 @@ The new run is accepted only if all of the following hold:
     `summary_reject_candidates`.  Compare interval ratios against conjunction
     queries and posting candidates; a falling ratio is harmless semantically
     but limits the full-run CPU gain projected from the bounded prefix.
+11. Preserve every `Generated_by_rule` count.  Capture the periodic `ilist`
+    allocation lines as well: their 32-bit totals wrap, so reconstruct each
+    interval with modulo-2^32 deltas before comparing cumulative allocation
+    work.  The stack-path change should affect allocation traffic, never the
+    paramodulation result count or selected-given trajectory.
 
 ## Reproducing the bounded CHAT smoke
 
@@ -1419,6 +1496,12 @@ The focused hint-cache wrap and packed-index regressions are:
 make -C test.src hint-postings-test
 P9_MATRIX_PROVER=./bin/prover9 \
   ./test.src/compact_generalization_smoke_test.sh
+```
+
+The exact eager/bounded inference-order and cancellation regression is:
+
+```sh
+make -C test.src iterator-tests
 ```
 
 ## If the full run is still slow
