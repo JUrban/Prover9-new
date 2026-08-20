@@ -442,6 +442,47 @@ conservative and must be replaced by measured mature PSS.  The next design
 step, if adaptive wins CPU, is selective or file-backed feature admission
 rather than accepting an unbounded duplicate resident index.
 
+### Sparse hint planes and reused generalization edge heads
+
+Commits `f13e552` and `3eb7c2b` remove two high-frequency pieces of redundant
+work without changing an index, route, or answer.
+
+`hint_postings_add_profile()` previously tested all 64 feature-mask bits for
+every profile posting, even though clause feature masks are sparse.  The
+Josef 01/1,000 gprof run attributed about 5.5% of sampled self CPU to roughly
+8.1 million calls of this function.  It now iterates only the set bits with
+`ctz` and `mask &= mask - 1`; the same bit planes and flags are populated in
+the same posting order.
+
+Forward generalization already reads the first packed radix-edge token to
+choose a stored-variable edge or the equal rigid edge.  The exact edge matcher
+then resolved and compared that same rigid token again.  It now receives the
+classified head: equal rigid heads consume the known-equal query/token pair
+and matching resumes at token one, while variable heads retain the existing
+binding and repeated-variable logic.  This adds no state or RAM.
+
+Pinned, clocks-off, 2-GiB gates preserved exact endpoints and every reported
+search/index work counter.  In serial reversed Josef 01 pairs, the combined
+candidate averaged 23.97 versus 25.79 CPU seconds at 600 givens (-7.1%) and
+49.86 versus 51.22 at 1,000 (-2.6%).  Pair orientations disagreed at the
+1,000-given gate, so the latter is bounded evidence, not a robust standalone
+speedup claim.  An adjacent CHAT/600 pair favored the candidate 44.07 versus
+45.05 seconds (-2.2%).
+
+One combined Josef 02 orientation produced a 39.26-second candidate outlier;
+the other was 34.01 versus its 33.80-second control.  The changes were then
+isolated in separate binaries: hint-only and generalization-only each used
+33.14 CPU seconds at the exact Josef 02/600 endpoint, versus recent controls
+of 32.94 and 33.80 seconds.  Together with identical work counters, this
+supports treating the 39-second sample as host/code-layout noise rather than
+added logical work; the report does not use the outlier-skewed combined mean
+as evidence of a gain.
+
+`hint_postings_test`, `compact_unit_index_test`, `compact_long_run_test`, the
+adaptive `x2` audit, and `compact_generalization_smoke_test.sh` pass on the
+combined source.  Peak RSS was unchanged within measurement noise and every
+measured process reported zero swap.
+
 ### Reproducible production CHAT smoke
 
 Commit `de55328` adds the `new_otter_compact_file_production` case to
@@ -574,6 +615,9 @@ CPU estimates are less certain and the gains are not additive:
 - direct two-position refinement cuts bounded Josef code-tree traversal by
   26.7% at 1,001 givens while remaining within about 2% of `code_tree` total
   CPU; its mature benefit is unknown and must be measured, not extrapolated;
+- sparse hint-plane population and first-edge reuse remove measured hot-path
+  instructions with no new storage; their combined Josef 01/1,000 paired mean
+  improved 2.6%, but frequency noise prevents a tighter full-run estimate;
 - the 1-Mi-entry selector buffer cuts scale-probe selector CPU by 34% and
   read/write amplification by 87%/75%; its whole-prover contribution is
   unknown until the authority run;
