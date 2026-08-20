@@ -23,6 +23,8 @@ compact_back_edge_filter=${CHAT_COMPACT_BACK_EDGE_FILTER:-0}
 compact_back_tree_budget_kb=${CHAT_COMPACT_BACK_TREE_BUDGET_KB:-65536}
 compact_back_tree_budget_pct=${CHAT_COMPACT_BACK_TREE_BUDGET_PCT:-200}
 compact_back_demod_strategy=${CHAT_COMPACT_BACK_DEMOD_STRATEGY:-adaptive32}
+compact_unit_strategy=${CHAT_COMPACT_UNIT_STRATEGY:-code_tree}
+compact_unit_feature_depth=${CHAT_COMPACT_UNIT_FEATURE_DEPTH:-0}
 passive_selector_buffer=${CHAT_PASSIVE_SELECTOR_BUFFER:-65536}
 production_passive_selector_buffer=${CHAT_PRODUCTION_PASSIVE_SELECTOR_BUFFER:-1048576}
 hint_conjunction_kb=${CHAT_HINT_CONJUNCTION_KB:-}
@@ -43,6 +45,20 @@ case "$clocks" in
   0|1) ;;
   *) echo "CHAT_CLOCKS must be 0 or 1" >&2; exit 2 ;;
 esac
+case "$compact_unit_strategy" in
+  root_scan|position|code_tree|adaptive) ;;
+  *) echo "invalid CHAT_COMPACT_UNIT_STRATEGY" >&2; exit 2 ;;
+esac
+case "$compact_unit_feature_depth" in
+  ''|*[!0-9]*)
+    echo "CHAT_COMPACT_UNIT_FEATURE_DEPTH must be an integer from 0 to 32" >&2
+    exit 2
+    ;;
+esac
+if test "$compact_unit_feature_depth" -gt 32; then
+  echo "CHAT_COMPACT_UNIT_FEATURE_DEPTH must be an integer from 0 to 32" >&2
+  exit 2
+fi
 
 if test ! -f "$input"; then
   echo "input not found: $input" >&2
@@ -109,10 +125,13 @@ esac
   echo "compact_back_tree_budget_kb=$compact_back_tree_budget_kb"
   echo "compact_back_tree_budget_pct=$compact_back_tree_budget_pct"
   echo "compact_back_demod_strategy=$compact_back_demod_strategy"
+  echo "compact_unit_strategy=$compact_unit_strategy"
+  echo "compact_unit_feature_depth=$compact_unit_feature_depth"
   echo "passive_selector_buffer=$passive_selector_buffer"
   echo "production_passive_selector_buffer=$production_passive_selector_buffer"
   echo "hint_conjunction_kb=${hint_conjunction_kb:-default}"
   echo "hint_cache_kb=${hint_cache_kb:-default}"
+  echo "hint_cache_min_candidates=${hint_cache_min_candidates:-default}"
   echo "compact_rewrite_deep_cache_kb=$compact_rewrite_deep_cache_kb"
   echo "cases=$selected_cases"
   echo "reference_output=${reference_output:-none}"
@@ -138,7 +157,7 @@ awk '
   /^assign\(compact_index_stale_pct,/ { next }
   /^assign\(compact_rewrite_deep_cache_kb,/ { next }
   /^assign\(compact_passive_cache,/ { next }
-  /^assign\(compact_(unit_strategy|back_demod_strategy),/ { next }
+  /^assign\(compact_(unit_strategy|unit_feature_depth|back_demod_strategy),/ { next }
   /^assign\(compact_back_(position_(build_factor|budget_kb|budget_pct)|eager_position_depth),/ { next }
   /^assign\(compact_back_tree_(budget_kb|budget_pct),/ { next }
   /^assign\((collective_[a-z_]+|rewrite_refresh_[a-z_]+),/ { next }
@@ -358,7 +377,8 @@ set(compact_otter_demodulation).
 set(compact_otter_unit_index).
 set(compact_otter_back_demod_index).
 set(compact_otter_nonunit_index).
-assign(compact_unit_strategy,code_tree).
+assign(compact_unit_strategy,'"$compact_unit_strategy"').
+assign(compact_unit_feature_depth,'"$compact_unit_feature_depth"').
 set(compact_nonunit_path_filter).
 assign(compact_back_demod_strategy,'"$compact_back_demod_strategy"').
 set(compact_back_sparse_positions).

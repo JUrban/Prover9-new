@@ -919,10 +919,13 @@ TMPDIR=/local/mptp/prover9-tmp \
   2> /path/to/Josef_01.compact.latest.time
 ```
 
-The matrix driver can generate the same throughput cache policy with
-`CHAT_CLOCKS=0`, `CHAT_HINT_CACHE_KB=2048` and
+The matrix driver can generate the same candidate with `CHAT_CLOCKS=0`,
+`CHAT_COMPACT_UNIT_STRATEGY=adaptive`,
+`CHAT_COMPACT_UNIT_FEATURE_DEPTH=2`, `CHAT_HINT_CACHE_KB=2048` and
 `CHAT_HINT_CACHE_MIN_CANDIDATES=128`; set them alongside
-`CHAT_CASES=new_otter_compact_file_production`.  `CHAT_CLOCKS=1` remains the
+`CHAT_CASES=new_otter_compact_file_production`.  The production matrix case
+retains `code_tree` and feature depth zero when the new unit controls are
+unset, preserving historical invocations.  `CHAT_CLOCKS=1` remains the
 compatibility default for historical diagnostic matrices.  Unset cache
 variables retain the general 2-MiB cache and zero admission threshold.
 
