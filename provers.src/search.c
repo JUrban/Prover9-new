@@ -2153,6 +2153,8 @@ Prover_options init_prover_options(void)
     init_parm("compact_term_reclaim_kb", 8192, 1, INT_MAX);
   p->compact_index_stale_pct =
     init_parm("compact_index_stale_pct", 25, 1, 1000);
+  p->compact_unit_feature_depth =
+    init_parm("compact_unit_feature_depth", 0, 0, 32);
   p->compact_rewrite_deep_cache_kb =
     init_parm("compact_rewrite_deep_cache_kb", 0, 0, 8192);
   p->compact_back_tree_min_tokens =
@@ -11491,6 +11493,8 @@ static void configure_search_indexes(void)
     (unsigned) parm(Opt->compact_index_stale_pct));
   configure_compact_nonunit_stale_pct(
     (unsigned) parm(Opt->compact_index_stale_pct));
+  compact_unit_index_set_feature_depth(
+    (unsigned) parm(Opt->compact_unit_feature_depth));
   compact_unit_index_set_strategy(
     str_ident(stringparm1(Opt->compact_unit_strategy), "position") ?
       COMPACT_UNIT_POSITION :

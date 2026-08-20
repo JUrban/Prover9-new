@@ -286,7 +286,8 @@ void fprint_compact_unit_index(FILE *fp)
     return;
   compact_unit_index_get_stats(Compact_units, &stats);
   fprintf(fp,
-          "Compact_unit_index: mode=%s, strategy=%s, failures=%llu, active=%llu, "
+          "Compact_unit_index: mode=%s, strategy=%s, feature_depth=%u, "
+          "failures=%llu, active=%llu, "
           "peak=%llu, retired=%llu, physical=%llu, compactions=%llu, "
           "reclaimed=%llu, forward_queries=%llu, "
           "back_queries=%llu, back_exact_tests=%llu, "
@@ -318,6 +319,7 @@ void fprint_compact_unit_index(FILE *fp)
           stats.strategy == COMPACT_UNIT_CODE_TREE ? "code_tree" :
           stats.strategy == COMPACT_UNIT_ADAPTIVE ? "adaptive" :
           "root_scan",
+          stats.feature_depth,
           Compact_unit_audit_failures, stats.active, stats.peak,
           stats.retired, stats.physical, stats.compactions,
           stats.bytes_reclaimed, stats.generalization_queries,

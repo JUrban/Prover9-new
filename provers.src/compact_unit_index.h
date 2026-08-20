@@ -16,6 +16,7 @@ typedef enum {
 
 struct compact_unit_index_stats {
   Compact_unit_strategy strategy;
+  unsigned feature_depth;
   unsigned long long active;
   unsigned long long peak;
   unsigned long long retired;
@@ -93,6 +94,9 @@ Compact_unit_index compact_unit_index_init_with_pool(Compact_term_pool pool);
 void compact_unit_index_set_compaction_stale_pct(unsigned percentage);
 
 void compact_unit_index_set_strategy(Compact_unit_strategy strategy);
+
+/* Limit position features to this term depth; zero retains all depths. */
+void compact_unit_index_set_feature_depth(unsigned depth);
 
 BOOL compact_unit_index_add(Compact_unit_index index, Topform unit);
 

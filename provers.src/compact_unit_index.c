@@ -12,6 +12,7 @@
 
 static unsigned Compaction_stale_pct = 25;
 static Compact_unit_strategy Unit_strategy = COMPACT_UNIT_ROOT_SCAN;
+static unsigned Unit_feature_depth = 0;
 
 struct cui_node {
   Compact_term_slice tokens;
@@ -72,6 +73,7 @@ struct cui_adaptive_route {
 
 struct compact_unit_index {
   Compact_unit_strategy strategy;
+  unsigned feature_depth;
   struct cui_node *nodes;
   size_t node_count;
   size_t node_capacity;
@@ -385,14 +387,16 @@ static uint32_t index_token_features(Compact_unit_index index,
     fatal_error("compact_unit_index: truncated feature term");
   code = tokens[position++];
   if (code < 0) {
-    if (depth != 0)
+    if (depth != 0 &&
+        (index->feature_depth == 0 || depth <= index->feature_depth))
       append_feature_posting(index,
                              variable_feature_key(
                                path, index->records[record].sign),
                              record);
     return position;
   }
-  if (depth != 0)
+  if (depth != 0 &&
+      (index->feature_depth == 0 || depth <= index->feature_depth))
     append_feature_posting(index,
                            exact_feature_key(path, (unsigned) code,
                                              index->records[record].sign),
@@ -704,6 +708,7 @@ static Compact_unit_index compact_unit_index_init_with_pool_strategy(
     fatal_error("compact_unit_index_init_with_pool: null term pool");
   index->term_pool = pool;
   index->strategy = strategy;
+  index->feature_depth = Unit_feature_depth;
   index->id_map = compact_id_map_init(1);
   index->sort_clock = clock_init("compact_unit_sort");
   index->maintenance_clock = clock_init("compact_unit_maintenance");
@@ -877,6 +882,11 @@ void compact_unit_index_set_strategy(Compact_unit_strategy strategy)
   Unit_strategy = strategy;
 }
 
+void compact_unit_index_set_feature_depth(unsigned depth)
+{
+  Unit_feature_depth = depth;
+}
+
 static void compact_unit_index_compact_internal(Compact_unit_index index,
                                                 BOOL force)
 {
@@ -940,6 +950,9 @@ static void compact_unit_index_compact_internal(Compact_unit_index index,
   old.record_count = packed;
   replacement = compact_unit_index_init_with_pool_strategy(
     old.term_pool, old.strategy);
+  /* A live index owns its feature coverage contract.  Rebuilding must not
+     observe a later process-global option change. */
+  replacement->feature_depth = old.feature_depth;
   replacement->owns_term_pool = old.owns_term_pool;
   safe_free(replacement->records);
   replacement->records = old.records;
@@ -1871,7 +1884,8 @@ static void select_unifier_feature(Compact_unit_index index, Term term,
       path ^ UINT64_C(0x71756572795f7661));
     return;
   }
-  if (depth != 0) {
+  if (depth != 0 &&
+      (index->feature_depth == 0 || depth <= index->feature_depth)) {
     size_t ancestor;
     exact_key = exact_feature_key(path, (unsigned) SYMNUM(term), sign);
     score = feature_posting_count(index, exact_key);
@@ -1905,6 +1919,8 @@ static void select_unifier_feature(Compact_unit_index index, Term term,
       choice->found = TRUE;
     }
   }
+  if (index->feature_depth != 0 && depth >= index->feature_depth)
+    return;
   for (i = 0; i < ARITY(term); i++) {
     index->child_stack[depth] = (unsigned) i;
     select_unifier_feature(index, ARG(term, i), sign,
@@ -2242,6 +2258,7 @@ void compact_unit_index_get_stats(Compact_unit_index index,
     return;
   compact_term_pool_get_stats(index->term_pool, &terms);
   stats->strategy = index->strategy;
+  stats->feature_depth = index->feature_depth;
   stats->active = index->active;
   stats->peak = index->peak;
   stats->retired = index->retired;

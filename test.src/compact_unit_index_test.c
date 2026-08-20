@@ -429,6 +429,44 @@ int main(void)
   }
 
   {
+    Compact_unit_index shallow_index;
+    struct compact_unit_index_stats shallow_stats;
+    Topform shallow, deep, broad, query;
+    unsigned long long *ids;
+    size_t count;
+
+    compact_unit_index_set_feature_depth(2);
+    compact_unit_index_set_strategy(COMPACT_UNIT_ADAPTIVE);
+    shallow_index = compact_unit_index_init();
+    shallow = indexed_unit("u(f(a,g(c))).");
+    deep = indexed_unit("u(f(a,g(d))).");
+    broad = indexed_unit("u(x).");
+    CHECK(compact_unit_index_add(shallow_index, shallow) &&
+          compact_unit_index_add(shallow_index, deep) &&
+          compact_unit_index_add(shallow_index, broad),
+          "add shallow-feature differential units");
+    query = parse_clause_from_string("u(f(a,g(c))).");
+    ids = compact_unit_unifier_ids(
+      shallow_index, query->literals->atom, TRUE, 0, &count);
+    compact_unit_index_get_stats(shallow_index, &shallow_stats);
+    CHECK(count == 2 && ids != NULL && ids[0] == broad->id &&
+          ids[1] == shallow->id,
+          "depth-limited adaptive features preserve every unifier");
+    CHECK(shallow_stats.feature_depth == 2 &&
+          shallow_stats.feature_items == 4 &&
+          shallow_stats.feature_posting_items == 7,
+          "depth-limited adaptive index stores no deeper features");
+    safe_free(ids);
+    delete_clause(query);
+    delete_clause(shallow);
+    delete_clause(deep);
+    delete_clause(broad);
+    compact_unit_index_free(shallow_index);
+    compact_unit_index_set_feature_depth(0);
+    compact_unit_index_set_strategy(COMPACT_UNIT_ROOT_SCAN);
+  }
+
+  {
     const char *unit_text[] = {
       "p(x).", "p(a).", "p(f(x)).", "p(f(a)).",
       "p(f(x,x)).", "p(f(a,b)).", "p(g(f(a),y)).",

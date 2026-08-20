@@ -254,6 +254,7 @@ struct prover_options {
     passive_selector_buffer, // entries per file-backed selector buffer
     compact_term_reclaim_kb, // minimum estimated stale token payload to compact
     compact_index_stale_pct, // inactive physical records before index rebuild
+    compact_unit_feature_depth, // maximum indexed position depth (0=all)
     compact_rewrite_deep_cache_kb, // optional bounded internal radix cache
     compact_back_tree_min_tokens, // complete structural partition cutoff
     compact_back_tree_budget_kb, // hard structural metadata budget (0=unlimited)
