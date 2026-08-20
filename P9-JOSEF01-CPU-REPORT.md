@@ -359,6 +359,74 @@ generalization smoke passes.  Every measured process used zero swap.  This
 change adds only a fixed traversal stack during a weight call and no
 persistent per-clause or per-index RAM.
 
+### Owner-free exact hint-cache key ring
+
+Commit `1b15b40` removes the per-key owner array from the `packed_fast`
+result cache.  The previous implementation associated every exact profile
+key with its owning direct-mapped result slot.  Every admitted result walked
+all of its keys, read and rewrote those owners, and invalidated any overlapping
+result as the key arena wrapped.  This was exact, but its store-side work grew
+with both cache misses and profile width.
+
+The replacement keeps the complete profile keys in a circular arena and tags
+each result with the arena generation in which its contiguous segment was
+written.  A current-generation segment is live.  A segment from the immediately
+previous generation is live exactly while its starting offset is at or beyond
+the current write cursor; all older segments are expired.  Only after that
+check succeeds does lookup compare the complete key sequence with `memcmp`.
+The selected posting dependency is retained as an index into that same exact
+sequence and still receives its generation check.  Thus neither a hash
+collision nor stale key bytes can produce a hit.  A 32-bit generation rollover
+performs a complete cache invalidation; no search-lifetime approximation is
+introduced.
+
+The fixed 2-MiB budget is now balanced at six exact keys per 80-byte direct
+slot.  It contains 16,384 result slots and 98,304 keys, totalling exactly
+2,097,152 bytes, versus 8,192 result slots plus 120,149 keys and owners in
+2,097,148 bytes before the change.  Profiles longer than six keys remain fully
+supported; they merely advance the ring faster.  Bounded Josef profiles
+averaged 6.27 keys and reached nine.  Peak RSS was indistinguishable in the
+paired runs, so this is a CPU/working-set rebalance within the existing budget,
+not a new RAM allocation.
+
+The completed `Josef_01.out.new3` cache telemetry explains why the change is
+aimed at mature scaling rather than a single short input.  It recorded about
+2.092 billion queries, 1.922 billion misses, 1.921 billion stores, mean/max
+profiles of 6.48/9 keys, 103,751 arena wraps and 202,791,675 overlap
+invalidations.  The old owner loop therefore processed approximately 12.45
+billion key positions; each iteration read and then wrote owner metadata.
+The new store path removes that entire loop.  It adds one constant-time arena
+liveness check to a lookup and retains the exact profile comparison.
+
+Strict clocks-off Josef 01/1,501 serial reversed pairs gave:
+
+| Admission policy | Owner-array control | Exact key ring | Total change |
+|---|---:|---:|---:|
+| general default, `min_candidates=0` | 77.365 s | 76.585 s | **-1.01%** |
+| staged Josef policy, `min_candidates=128` | 77.130 s | 76.735 s | **-0.51%** |
+
+The zero-threshold candidate won both placements: 78.45 versus 78.67 seconds,
+then 74.72 versus 76.06 seconds after reversing core/order assignment.  Mean
+user CPU fell from 72.990 to 72.240 seconds (-1.03%).  Every process ended at
+`(Given=1501, Generated=3603947, Kept=521972, proofs=0)` and used zero swap.
+At that deterministic endpoint, exact-ring hits rose from 244,582 to 253,770
+and avoided posting candidates from 33,879,884 to 34,998,648.  The ring wrapped
+259 times and rejected 1,632 expired arena entries.  With threshold 128 it
+raised hits from 46,131 to 47,268 and avoided posting candidates from
+32,479,125 to 33,354,593.  One threshold-128 placement won and the other tied,
+so the whole-process claim there is deliberately limited to non-regression
+plus a deterministic reduction in underlying work.
+
+CHAT/601 and Josef 02/601 independently preserved their exact endpoints
+`(601,497430,16974,0)` and `(601,524799,26671,0)`.  The focused hint tests now
+fill a deliberately tiny cache, force circular wraps, verify reusable
+current-generation hits, reject overwritten generations and preserve the
+authoritative hint identity on fallback.  `hint-postings-test` and
+`compact_generalization_smoke_test.sh` pass.  The measured portable binary is
+SHA-256 `0a55dcb64887ee964e70744b3a822c975cbec9d7031ac6d174aba1200941dbca`.
+This bounded evidence supports retaining the general mechanism; only the full
+authority run can quantify its mature CPU effect.
+
 ## Authoritative completed runs
 
 The source files are:
@@ -1043,6 +1111,9 @@ posting fields: measured conjunction table, plan and peak bytes are identical
 to the previous source, so this optimization adds no index allocation.
 Exact-default clause weighting adds no persistent state beyond one Boolean;
 its traversal stack exists only during `clause_weight()`.
+The owner-free hint-cache ring remains exactly within the configured 2-MiB
+budget; it trades owner metadata and part of the old key arena for twice as
+many result slots, with no measurable whole-process RSS change.
 
 The adaptive unit strategy is the exception: it maintains compressed position
 features as well as the code tree.  Unlimited depth still projects to about
@@ -1071,7 +1142,10 @@ CPU estimates are less certain and the gains are not additive:
   intervals reached 12--14% hits and avoided hundreds of candidates per hit;
   stable exact keys remove 0.5--1.3% in three bounded workload means, while
   the optional 128-candidate admission threshold removes 88.7% of Josef
-  stores and retains 95.1% of its avoided posting work;
+  stores and retains 95.1% of its avoided posting work; the owner-free exact
+  key ring additionally removes a projected 12.45 billion mature owner-loop
+  iterations and improves the Josef 01/1,501 reversed mean by 1.01% at the
+  general zero threshold and 0.51% at threshold 128;
 - the direct symbol table is a measured 3.95% whole-prefix gain;
 - term-base caching saves about 12% only inside unit lookups;
 - sibling pruning saves about 38% only inside forward generalization;
@@ -1140,10 +1214,10 @@ Do not reuse objects from a differently instrumented, sanitized, profiled, or
 `NATIVE=1` build.  If in doubt, use a fresh worktree or clean the build before
 compiling.  In particular, the repository's currently installed `bin/prover9`
 is intentionally the older PGO executable and does not contain commits
-`107665b`, `3f2f566`, `4c0d0b2`, `b3cde19`, `df7bfdb`, or `f4f4614`; run the
-build and copy steps above before the authority run.  The fresh portable
-source binary measured at `f4f4614` has SHA-256
-`454bcfda53d435839d36344e571c8f2d16e30f9814deed71e24a7c9f3171b83e`.
+`107665b`, `3f2f566`, `4c0d0b2`, `b3cde19`, `df7bfdb`, `f4f4614`, or
+`1b15b40`; run the build and copy steps above before the authority run.  The
+fresh portable source binary measured at `1b15b40` has SHA-256
+`0a55dcb64887ee964e70744b3a822c975cbec9d7031ac6d174aba1200941dbca`.
 
 ### Prover9 options
 
@@ -1309,7 +1383,10 @@ The new run is accepted only if all of the following hold:
 9. Inspect `Packed_fast_cache` for `min_candidates=128`, admission skips,
    stores and posting candidates avoided.  Compare interval deltas rather than
    only the cumulative hit rate; mature reuse was much more valuable than the
-   first 1,001 givens suggested.
+   first 1,001 givens suggested.  The new binary must report 16,384 entries,
+   98,304 exact keys and `overlap_invalidations=0` for a 2-MiB cache.  Track
+   `arena_wraps` and `arena_expired_misses`; expiration is expected and causes
+   an authoritative miss/fallback, not a stale hit.
 10. Inspect `Packed_fast_conjunction` for `summary_reject_queries` and
     `summary_reject_candidates`.  Compare interval ratios against conjunction
     queries and posting candidates; a falling ratio is harmless semantically
@@ -1334,6 +1411,14 @@ The focused default-weight/fallback regression is:
 ```sh
 make -C test.src default_weight_test
 ./test.src/default_weight_test
+```
+
+The focused hint-cache wrap and packed-index regressions are:
+
+```sh
+make -C test.src hint-postings-test
+P9_MATRIX_PROVER=./bin/prover9 \
+  ./test.src/compact_generalization_smoke_test.sh
 ```
 
 ## If the full run is still slow
