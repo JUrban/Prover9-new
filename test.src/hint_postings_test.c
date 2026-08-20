@@ -106,14 +106,6 @@ int main(void)
             profile.maximum_positive == 10 &&
             profile.maximum_negative == 6,
             "profile exposes conservative posting-wide summaries");
-    require(profile.block_summaries[0] ==
-              ((1ULL << 2) | (1ULL << 47)) &&
-            (unsigned) profile.block_summaries[1] ==
-              ((10U << 16) | 6U) &&
-            profile.block_summaries[4] == (1ULL << 2) &&
-            (unsigned) profile.block_summaries[5] ==
-              ((8U << 16) | 3U),
-            "profile exposes exact block summaries");
     for (i = 0; i < profile.count; i++) {
       unsigned block = i / 64;
       unsigned long long flag = 1ULL << (i % 64);
@@ -144,51 +136,20 @@ int main(void)
   require(hint_postings_reference_count(index) == stats.references,
           "profile reference count matches full statistics");
   require(stats.keys == 1001 && stats.references == 1130 &&
-          stats.profile_bytes > 0 && stats.profile_summary_bytes > 0 &&
-          stats.profile_mask_words == 64192 &&
+          stats.profile_bytes > 0 && stats.profile_mask_words == 64192 &&
           stats.profile_key_histogram[0] == 1000 &&
           stats.profile_reference_histogram[0] == 1000 &&
           stats.profile_key_histogram[6] == 1 &&
           stats.profile_reference_histogram[6] == 130,
           "profile key, reference, and sidecar byte statistics");
-  require(hint_postings_drop_profile_block_summaries(index),
-          "profile block summaries can be dropped under budget pressure");
-  {
-    struct hint_profile_view profile;
-    require(hint_postings_get_profile(index, 700, &profile) &&
-            profile.block_summaries == NULL,
-            "dropped summaries retain the complete base profile");
-  }
-  hint_postings_get_stats(index, &stats);
-  require(stats.profile_summary_bytes == 0,
-          "dropped summaries leave exact zero-byte accounting");
   require(hint_postings_profile_allocated_bytes(index) ==
             stats.table_bytes + stats.reference_bytes + stats.profile_bytes,
           "profile resident accounting is exact and constant-time");
   require(hint_postings_profile_layout_bytes(
             2048, stats.reference_bytes / sizeof(unsigned),
-            stats.profile_mask_words / 64, FALSE) ==
+            stats.profile_mask_words / 64) ==
             hint_postings_profile_allocated_bytes(index),
           "lightweight profile layout estimate matches actual allocation");
-  hint_postings_destroy(index);
-
-  /* The memory planner can retain base profiles when optional block
-     summaries do not fit its caller's budget. */
-  index = hint_postings_init();
-  hint_postings_set_profile_block_summaries(index, FALSE);
-  hint_postings_add_profile(index, 700, 1, 1ULL << 9, 2, 3);
-  {
-    struct hint_profile_view profile;
-    require(hint_postings_get_profile(index, 700, &profile) &&
-            profile.block_summaries == NULL,
-            "profile block summaries can be omitted independently");
-  }
-  hint_postings_get_stats(index, &stats);
-  require(stats.profile_summary_bytes == 0 &&
-          hint_postings_profile_layout_bytes(
-            256, stats.reference_bytes / sizeof(unsigned), 1, FALSE) ==
-            hint_postings_profile_allocated_bytes(index),
-          "summary-free profile layout remains exactly budgeted");
   hint_postings_destroy(index);
 
   /* A dense cache that cannot grow must disappear rather than omit a later

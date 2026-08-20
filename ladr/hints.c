@@ -157,10 +157,6 @@ static unsigned long long Fast_conjunction_overflow_candidates = 0;
 static unsigned long long Fast_conjunction_profile_rejects = 0;
 static unsigned long long Fast_conjunction_summary_reject_queries = 0;
 static unsigned long long Fast_conjunction_summary_reject_candidates = 0;
-static unsigned long long Fast_conjunction_block_summary_checks = 0;
-static unsigned long long Fast_conjunction_block_summary_rejects = 0;
-static unsigned long long Fast_conjunction_block_summary_candidates = 0;
-static BOOL Fast_conjunction_block_summaries = FALSE;
 static unsigned long long Fast_conjunction_budget_bytes = 0;
 static unsigned long long Fast_conjunction_peak_bytes = 0;
 static unsigned long long Fast_conjunction_budget_denials = 0;
@@ -1198,12 +1194,11 @@ static void fast_conjunction_estimator_add(
 }
 
 static unsigned long long fast_conjunction_estimator_bytes(
-  const struct fast_conjunction_estimator *estimator,
-  BOOL block_summaries)
+  const struct fast_conjunction_estimator *estimator)
 {
   return hint_postings_profile_layout_bytes(
     estimator->capacity, estimator->reference_capacity,
-    estimator->mask_blocks, block_summaries);
+    estimator->mask_blocks);
 }
 
 static void fast_conjunction_estimator_done(
@@ -1227,21 +1222,10 @@ static BOOL fast_conjunction_enforce_budget(Hint_postings *postings)
   if (Fast_conjunction_budget_bytes != 0 &&
       bytes <= Fast_conjunction_budget_bytes)
     return TRUE;
-  /* Optional block summaries must never displace a complete base conjunction
-     index.  This also handles later hint additions that exhaust headroom
-     after the initial exact layout plan. */
-  if (hint_postings_drop_profile_block_summaries(*postings)) {
-    Fast_conjunction_block_summaries = FALSE;
-    bytes = hint_postings_profile_allocated_bytes(*postings);
-    if (Fast_conjunction_budget_bytes != 0 &&
-        bytes <= Fast_conjunction_budget_bytes)
-      return TRUE;
-  }
   hint_postings_destroy(*postings);
   *postings = NULL;
   fast_conjunction_release_overflow();
   Fast_conjunction_disabled = TRUE;
-  Fast_conjunction_block_summaries = FALSE;
   Fast_conjunction_budget_denials++;
   return FALSE;
 }
@@ -1409,7 +1393,6 @@ void finalize_hint_conjunction_index(void)
   unsigned i;
   BOOL denied = FALSE;
   BOOL estimator_live = TRUE;
-  BOOL block_summaries = FALSE;
   if (!Fast_conjunction_planning)
     return;
   fast_conjunction_estimator_init(&estimator);
@@ -1423,7 +1406,7 @@ void finalize_hint_conjunction_index(void)
         fast_conjunction_estimate_subset, &estimator);
       Fast_conjunction_plan_scans++;
       Fast_conjunction_projected_bytes =
-        fast_conjunction_estimator_bytes(&estimator, FALSE);
+        fast_conjunction_estimator_bytes(&estimator);
       if (Fast_conjunction_projected_bytes >
           Fast_conjunction_budget_bytes) {
         denied = TRUE;
@@ -1432,18 +1415,12 @@ void finalize_hint_conjunction_index(void)
     }
   }
   if (!denied) {
-    unsigned long long with_summaries =
-      fast_conjunction_estimator_bytes(&estimator, TRUE);
-    block_summaries = with_summaries <= Fast_conjunction_budget_bytes;
-    if (block_summaries)
-      Fast_conjunction_projected_bytes = with_summaries;
     /* The compact count table is no longer needed once its exact layout has
        passed the cap.  Release it before allocating the real sidecars so the
        planner does not inflate construction peak RSS or page-fault cost. */
     fast_conjunction_estimator_done(&estimator);
     estimator_live = FALSE;
     postings = hint_postings_init();
-    hint_postings_set_profile_block_summaries(postings, block_summaries);
     for (i = 0; i < Fast_conjunction_plan_count; i++) {
       struct fast_conjunction_plan_record *record =
         Fast_conjunction_plan + i;
@@ -1465,7 +1442,6 @@ void finalize_hint_conjunction_index(void)
       Fast_conjunction_budget_denials = 1;
   }
   Fast_conjunction_postings = postings;
-  Fast_conjunction_block_summaries = postings != NULL && block_summaries;
   Fast_conjunction_planned_profiles = Fast_conjunction_plan_count;
   Fast_conjunction_planning = FALSE;
   if (estimator_live)
@@ -1589,10 +1565,6 @@ static void better_rebuild_postings(void)
 {
   Hint_postings postings = hint_postings_init();
   Hint_postings conjunctions;
-  unsigned long long live = 0;
-  unsigned long long equivalence_live = 0;
-  unsigned long long anyconst_live = 0;
-  unsigned id;
   if (!Fast_conjunction_planning) {
     hint_postings_destroy(Fast_conjunction_postings);
     Fast_conjunction_postings = NULL;
@@ -1601,9 +1573,10 @@ static void better_rebuild_postings(void)
   conjunctions = Fast_packed_index && !Fast_conjunction_disabled &&
     !Fast_conjunction_planning ?
     hint_postings_init() : NULL;
-  if (conjunctions != NULL)
-    hint_postings_set_profile_block_summaries(
-      conjunctions, Fast_conjunction_block_summaries);
+  unsigned long long live = 0;
+  unsigned long long equivalence_live = 0;
+  unsigned long long anyconst_live = 0;
+  unsigned id;
   hint_postings_set_dense_budget(
     postings, Fast_packed_index ? FAST_DENSE_BUDGET_BYTES : 0);
   Better_anyconst_reference_count = 0;
@@ -2289,31 +2262,12 @@ static BOOL fast_conjunction_collect_candidates(
   else {
     unsigned block;
     unsigned mask_survivors = 0;
-    unsigned block_summary_checks = 0;
-    unsigned block_summary_rejects = 0;
-    unsigned block_summary_candidates = 0;
     for (block = 0; block < view.mask_blocks; block++) {
       unsigned base = block * 64;
       unsigned remaining = view.count - base;
-      const unsigned long long *summary = view.block_summaries == NULL ?
-        NULL : view.block_summaries + (size_t) block * 2;
       unsigned long long common = remaining >= 64 ? ~0ULL :
         ((1ULL << remaining) - 1);
       unsigned long long required = first_mask;
-      /* These are necessary conditions for the whole 64-ID block.  A reject
-         skips its bit planes and literal-count vector; a survivor follows
-         the original plane order and exact-matcher path unchanged. */
-      if (summary != NULL) {
-        unsigned maxima = (unsigned) summary[1];
-        block_summary_checks++;
-        if (((summary[0] & first_mask) != first_mask) ||
-            (maxima >> 16) < positive ||
-            (maxima & 0xffffU) < negative) {
-          block_summary_rejects++;
-          block_summary_candidates += remaining >= 64 ? 64 : remaining;
-          continue;
-        }
-      }
       while (required != 0 && common != 0) {
         unsigned bit = (unsigned) __builtin_ctzll(required);
         common &= view.mask_planes[(size_t) block * 64 + bit];
@@ -2340,12 +2294,8 @@ static BOOL fast_conjunction_collect_candidates(
         common &= common - 1;
       }
     }
-    if (!Hint_preview_active) {
+    if (!Hint_preview_active)
       Fast_conjunction_profile_rejects += view.count - mask_survivors;
-      Fast_conjunction_block_summary_checks += block_summary_checks;
-      Fast_conjunction_block_summary_rejects += block_summary_rejects;
-      Fast_conjunction_block_summary_candidates += block_summary_candidates;
-    }
   }
   for (i = 0; i < Fast_conjunction_overflow_count[sign]; i++) {
     unsigned id = Fast_conjunction_overflow[sign][i];
@@ -2489,7 +2439,6 @@ void init_hints(Uniftype utype,
   Fast_conjunction_projected_bytes = 0;
   Fast_conjunction_planned_profiles = 0;
   Fast_conjunction_plan_scans = 0;
-  Fast_conjunction_block_summaries = FALSE;
   Fast_conjunction_planning = Fast_packed_index &&
     conjunction_budget_kb != 0 && expected_hints != 0;
   Fast_conjunction_disabled = conjunction_budget_kb == 0;
@@ -2507,10 +2456,8 @@ void init_hints(Uniftype utype,
       Better_postings, Fast_packed_index ? FAST_DENSE_BUDGET_BYTES : 0);
     Better_rebuild_clock = clock_init("packed_hint_rebuild");
     if (Fast_packed_index && !Fast_conjunction_disabled &&
-        !Fast_conjunction_planning) {
+        !Fast_conjunction_planning)
       Fast_conjunction_postings = hint_postings_init();
-      Fast_conjunction_block_summaries = TRUE;
-    }
   }
   /* Keep an empty Lindex in packed mode so the established lifecycle and
      checkpoint code can use the same ownership boundary. */
@@ -2605,10 +2552,6 @@ void done_with_hints(void)
   Fast_conjunction_profile_rejects = 0;
   Fast_conjunction_summary_reject_queries = 0;
   Fast_conjunction_summary_reject_candidates = 0;
-  Fast_conjunction_block_summary_checks = 0;
-  Fast_conjunction_block_summary_rejects = 0;
-  Fast_conjunction_block_summary_candidates = 0;
-  Fast_conjunction_block_summaries = FALSE;
   Fast_conjunction_budget_bytes = 0;
   Fast_conjunction_peak_bytes = 0;
   Fast_conjunction_budget_denials = 0;
@@ -3981,14 +3924,12 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             "Packed_fast_conjunction: enabled=%s, budget_bytes=%llu, "
             "peak_bytes=%llu, budget_denials=%llu, expected_hints=%llu, "
             "planned_profiles=%llu, plan_scans=%llu, estimated_bytes=%llu, "
-            "max_keys=%u, block_summaries=%s, keys=%llu, "
+            "max_keys=%u, keys=%llu, "
             "references=%llu, reference_bytes=%llu, profile_bytes=%llu, "
-            "profile_summary_bytes=%llu, table_bytes=%llu, mask_words=%llu, "
+            "table_bytes=%llu, mask_words=%llu, "
             "negative_overflow=%u, positive_overflow=%u, queries=%llu, "
             "posting_candidates=%llu, profile_rejects=%llu, "
             "summary_reject_queries=%llu, summary_reject_candidates=%llu, "
-            "block_summary_checks=%llu, block_summary_rejects=%llu, "
-            "block_summary_candidates=%llu, "
             "overflow_candidates=%llu.\n",
             Fast_conjunction_postings == NULL ? "no" : "yes",
             Fast_conjunction_budget_bytes,
@@ -3998,13 +3939,10 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             Fast_conjunction_planned_profiles,
             Fast_conjunction_plan_scans,
             Fast_conjunction_projected_bytes,
-            FAST_CONJUNCTION_MAX_KEYS,
-            Fast_conjunction_block_summaries ? "yes" : "no",
-            conjunction_stats.keys,
+            FAST_CONJUNCTION_MAX_KEYS, conjunction_stats.keys,
             conjunction_stats.references,
             conjunction_stats.reference_bytes,
             conjunction_stats.profile_bytes,
-            conjunction_stats.profile_summary_bytes,
             conjunction_stats.table_bytes,
             conjunction_stats.profile_mask_words,
             Fast_conjunction_overflow_count[0],
@@ -4014,9 +3952,6 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             Fast_conjunction_profile_rejects,
             Fast_conjunction_summary_reject_queries,
             Fast_conjunction_summary_reject_candidates,
-            Fast_conjunction_block_summary_checks,
-            Fast_conjunction_block_summary_rejects,
-            Fast_conjunction_block_summary_candidates,
             Fast_conjunction_overflow_candidates);
     fprintf(fp,
             "Packed_fast_conjunction_histogram: keys=%llu/%llu/%llu/%llu/"

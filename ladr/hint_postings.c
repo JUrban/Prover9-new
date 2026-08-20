@@ -15,12 +15,7 @@ struct hint_posting {
     unsigned long long profile_mask_union;
     unsigned long long *dense_bits;
   } profile_or_dense;
-  union {
-    /* Profile postings use two words per 64 IDs; ordinary postings use the
-       same pointer slot for the optional dense hierarchy. */
-    unsigned long long *profile_block_summaries;
-    unsigned long long *dense_summary;
-  } summary;
+  unsigned long long *dense_summary;
   unsigned count;
   unsigned capacity;
   union {
@@ -47,12 +42,10 @@ struct hint_postings {
   unsigned long long reference_capacity;
   unsigned long long profile_reference_capacity;
   unsigned long long profile_mask_bytes;
-  unsigned long long profile_summary_bytes;
   unsigned long long maximum_posting;
   unsigned long long dense_bytes;
   unsigned long long dense_budget_bytes;
   unsigned long long dense_budget_denials;
-  BOOL profile_block_summaries;
 };
 
 static unsigned long long posting_hash(unsigned long long x)
@@ -98,37 +91,8 @@ Hint_postings hint_postings_init(void)
   struct hint_postings *index = safe_calloc(1, sizeof(struct hint_postings));
   index->capacity = 256;
   index->dense_budget_bytes = ~0ULL;
-  index->profile_block_summaries = TRUE;
   index->table = safe_calloc(index->capacity, sizeof(struct hint_posting));
   return index;
-}
-
-void hint_postings_set_profile_block_summaries(Hint_postings index,
-                                               BOOL enabled)
-{
-  if (index == NULL || index->references != 0)
-    fatal_error("hint_postings_set_profile_block_summaries: invalid state");
-  index->profile_block_summaries = enabled;
-}
-
-BOOL hint_postings_drop_profile_block_summaries(Hint_postings index)
-{
-  unsigned i;
-  BOOL removed = FALSE;
-  if (index == NULL || !index->profile_block_summaries)
-    return FALSE;
-  for (i = 0; i < index->capacity; i++) {
-    struct hint_posting *posting = index->table + i;
-    if (posting->profile &&
-        posting->summary.profile_block_summaries != NULL) {
-      safe_free(posting->summary.profile_block_summaries);
-      posting->summary.profile_block_summaries = NULL;
-      removed = TRUE;
-    }
-  }
-  index->profile_summary_bytes = 0;
-  index->profile_block_summaries = FALSE;
-  return removed;
 }
 
 void hint_postings_destroy(Hint_postings index)
@@ -146,9 +110,9 @@ void hint_postings_destroy(Hint_postings index)
     if (!index->table[i].profile) {
       if (index->table[i].profile_or_dense.dense_bits != NULL)
         safe_free(index->table[i].profile_or_dense.dense_bits);
+      if (index->table[i].dense_summary != NULL)
+        safe_free(index->table[i].dense_summary);
     }
-    if (index->table[i].summary.dense_summary != NULL)
-      safe_free(index->table[i].summary.dense_summary);
   }
   safe_free(index->table);
   safe_free(index);
@@ -182,10 +146,10 @@ static BOOL posting_dense_reserve(struct hint_postings *index,
   }
   if (summary_words > posting->counts_or_dense.dense.summary_words) {
     unsigned old_words = posting->counts_or_dense.dense.summary_words;
-    posting->summary.dense_summary = safe_realloc(
-      posting->summary.dense_summary,
+    posting->dense_summary = safe_realloc(
+      posting->dense_summary,
       (size_t) summary_words * sizeof(unsigned long long));
-    memset(posting->summary.dense_summary + old_words, 0,
+    memset(posting->dense_summary + old_words, 0,
            (size_t) (summary_words - old_words) *
              sizeof(unsigned long long));
     posting->counts_or_dense.dense.summary_words = summary_words;
@@ -206,10 +170,10 @@ static void posting_dense_discard(struct hint_postings *index,
     fatal_error("hint_postings: dense byte underflow");
   if (posting->profile_or_dense.dense_bits != NULL)
     safe_free(posting->profile_or_dense.dense_bits);
-  if (posting->summary.dense_summary != NULL)
-    safe_free(posting->summary.dense_summary);
+  if (posting->dense_summary != NULL)
+    safe_free(posting->dense_summary);
   posting->profile_or_dense.dense_bits = NULL;
-  posting->summary.dense_summary = NULL;
+  posting->dense_summary = NULL;
   posting->counts_or_dense.dense.words = 0;
   posting->counts_or_dense.dense.summary_words = 0;
   index->dense_bytes -= bytes;
@@ -223,7 +187,7 @@ static BOOL posting_dense_add(struct hint_postings *index,
       !posting_dense_reserve(index, posting, id + 1))
     return FALSE;
   posting->profile_or_dense.dense_bits[word] |= 1ULL << (id % 64);
-  posting->summary.dense_summary[word / 64] |= 1ULL << (word % 64);
+  posting->dense_summary[word / 64] |= 1ULL << (word % 64);
   return TRUE;
 }
 
@@ -309,16 +273,6 @@ void hint_postings_add_profile(Hint_postings index, unsigned long long key,
       (size_t) blocks * 64 * sizeof(unsigned long long));
     memset(posting->profile_mask_planes + (size_t) old_blocks * 64, 0,
            64 * sizeof(unsigned long long));
-    if (index->profile_block_summaries) {
-      posting->summary.profile_block_summaries = safe_realloc(
-        posting->summary.profile_block_summaries,
-        (size_t) blocks * 2 * sizeof(unsigned long long));
-      memset(posting->summary.profile_block_summaries +
-               (size_t) old_blocks * 2,
-             0, 2 * sizeof(unsigned long long));
-      index->profile_summary_bytes +=
-        2 * sizeof(unsigned long long);
-    }
     posting->profile_mask_blocks = blocks;
     index->profile_mask_bytes +=
       64 * sizeof(unsigned long long);
@@ -335,18 +289,7 @@ void hint_postings_add_profile(Hint_postings index, unsigned long long key,
       (unsigned short) negative;
   {
     unsigned block = posting->count / 64;
-    unsigned long long *summary = index->profile_block_summaries ?
-      posting->summary.profile_block_summaries + (size_t) block * 2 : NULL;
     unsigned long long flag = 1ULL << (posting->count % 64);
-    if (summary != NULL) {
-      unsigned maxima = (unsigned) summary[1];
-      summary[0] |= mask;
-      if (positive > (maxima >> 16))
-        maxima = (positive << 16) | (maxima & 0xffffU);
-      if (negative > (maxima & 0xffffU))
-        maxima = (maxima & 0xffff0000U) | negative;
-      summary[1] = maxima;
-    }
     while (mask != 0) {
       unsigned bit = (unsigned) __builtin_ctzll(mask);
       posting->profile_mask_planes[(size_t) block * 64 + bit] |= flag;
@@ -380,7 +323,6 @@ BOOL hint_postings_get_profile(Hint_postings index,
   view->ids = posting->references;
   view->mask_planes = posting->profile_mask_planes;
   view->literal_counts = posting->profile_literal_counts;
-  view->block_summaries = posting->summary.profile_block_summaries;
   view->mask_union = posting->profile_or_dense.profile_mask_union;
   view->count = posting->count;
   view->mask_blocks = posting->profile_mask_blocks;
@@ -400,20 +342,18 @@ unsigned long long hint_postings_profile_allocated_bytes(
     (unsigned long long) index->capacity * sizeof(struct hint_posting) +
     index->reference_capacity * sizeof(unsigned) +
     index->profile_reference_capacity * sizeof(unsigned) +
-    index->profile_mask_bytes + index->profile_summary_bytes;
+    index->profile_mask_bytes;
 }
 
 unsigned long long hint_postings_profile_layout_bytes(
   unsigned table_capacity,
   unsigned long long reference_capacity,
-  unsigned long long mask_blocks,
-  BOOL block_summaries)
+  unsigned long long mask_blocks)
 {
   return sizeof(struct hint_postings) +
     (unsigned long long) table_capacity * sizeof(struct hint_posting) +
     reference_capacity * 2 * sizeof(unsigned) +
-    mask_blocks * (block_summaries ? 66 : 64) *
-      sizeof(unsigned long long);
+    mask_blocks * 64 * sizeof(unsigned long long);
 }
 
 const unsigned *hint_postings_get(Hint_postings index,
@@ -496,7 +436,7 @@ BOOL hint_postings_dense_view(Hint_postings index,
       return FALSE;
   }
   view->bits = posting->profile_or_dense.dense_bits;
-  view->summary = posting->summary.dense_summary;
+  view->summary = posting->dense_summary;
   view->words = posting->counts_or_dense.dense.words;
   view->summary_words = posting->counts_or_dense.dense.summary_words;
   return TRUE;
@@ -523,8 +463,7 @@ void hint_postings_get_stats(Hint_postings index,
   stats->dense_budget_denials = index->dense_budget_denials;
   stats->profile_bytes =
     index->profile_reference_capacity * sizeof(unsigned) +
-    index->profile_mask_bytes + index->profile_summary_bytes;
-  stats->profile_summary_bytes = index->profile_summary_bytes;
+    index->profile_mask_bytes;
   for (i = 0; i < index->capacity; i++) {
     struct hint_posting *posting = index->table + i;
     if (posting->profile) {
