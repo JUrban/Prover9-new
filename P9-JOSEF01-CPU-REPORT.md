@@ -579,6 +579,27 @@ plausible-looking options that were already negative.
   526/611 MiB peak RSS, and zero process swap.  The source was reverted
   completely; eliminating a source-level recursive call is not sufficient
   evidence when the whole optimized binary is slower at both bounded gates.
+- Replacing KBO's temporary linked variable multisets with stack counters was
+  rejected even though it substantially reduced allocator traffic.  A first
+  direct 100-counter form fell back for the legal high variable numbers that
+  occur after standardization: at Josef 01/1,001 it removed only 3.17 million
+  of 180.03 million allocation calls and averaged 58.33 CPU seconds versus
+  55.93 control (+4.3%).  A sparse `(variable,count)` stack table handled
+  high numbers without allocation and removed 21.40 million calls plus 342.4
+  MB of cumulative object traffic at the same endpoint.  It looked excellent
+  in the shorter adaptive 601-given gate and improved the adaptive 1,001-given
+  reversed mean from 54.77 to 52.64 seconds (-3.9%).  That result did not
+  generalize to the primary `code_tree` authority configuration: its reversed
+  1,001-given mean was 49.31 seconds candidate versus 48.45 control (+1.8%).
+  Josef 02/601 also moved from 36.18 to 36.91 seconds (+2.0%) despite 7.70
+  million fewer allocation calls, while CHAT/601 was neutral at 45.47 versus
+  45.30 seconds with 2.45 million fewer calls.  All endpoints, search/index
+  counters and allocator live/reserved state were exact; RSS was unchanged
+  within layout noise and every process used zero swap.  A focused test also
+  covered multiplicities, high variable IDs, and the more-than-`MAX_VARS`
+  fallback.  Both implementations and the temporary test were nevertheless
+  removed: fewer allocations are useful telemetry, not a CPU win, and the
+  production configuration plus a second Josef workload both regressed.
 - A native `-O3 -march=native -flto` build used 77.60 CPU seconds in one
   pinned 1,000-given run versus 81.69 for the immediately following portable
   `-O2` control.  Earlier portable pairs averaged 78.83, so host-frequency
