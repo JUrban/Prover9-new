@@ -1167,7 +1167,7 @@ static void collect_back_structural_bitmap(
 
 static void collect_leaf(Compact_feature_index index, uint32_t node,
                          BOOL forward,
-                         struct compact_feature_structural_summary query,
+                         const struct compact_feature_structural_summary *query,
                          size_t *count)
 {
   uint32_t posting;
@@ -1184,13 +1184,13 @@ static void collect_leaf(Compact_feature_index index, uint32_t node,
           index->postings[posting].record];
       index->query_live++;
       if (index->structural_filter &&
-          (forward ? (stored.rigid & ~query.rigid) != 0 :
-                     (query.rigid & ~stored.rigid) != 0))
+          (forward ? (stored.rigid & ~query->rigid) != 0 :
+                     (query->rigid & ~stored.rigid) != 0))
         index->query_structural_rejects++;
       else if (index->structural_filter &&
                (forward ?
-                 (stored.variable_constraints & ~query.equal_positions) != 0 :
-                 (query.variable_constraints & ~stored.equal_positions) != 0))
+                 (stored.variable_constraints & ~query->equal_positions) != 0 :
+                 (query->variable_constraints & ~stored.equal_positions) != 0))
         index->query_variable_rejects++;
       else {
         ensure_results(index, *count + 1);
@@ -1202,23 +1202,17 @@ static void collect_leaf(Compact_feature_index index, uint32_t node,
   }
 }
 
-static void collect_candidates(Compact_feature_index index, uint32_t node,
-                               int level, const int *query, BOOL forward,
-                               struct compact_feature_structural_summary
-                                 structural,
-                               size_t *count)
+static void collect_forward_candidates(
+  Compact_feature_index index, uint32_t node, int level, const int *query,
+  const struct compact_feature_structural_summary *structural, size_t *count)
 {
   uint32_t child;
   if (level == index->feature_length) {
-    collect_leaf(index, node, forward, structural, count);
+    collect_leaf(index, node, TRUE, structural, count);
     return;
   }
   child = index->nodes[node].first_child;
-  if (!forward)
-    while (child != CFI_NONE && first_label(index, child) < query[level])
-      child = index->nodes[child].next_sibling;
-  while (child != CFI_NONE &&
-         (!forward || first_label(index, child) <= query[level])) {
+  while (child != CFI_NONE && first_label(index, child) <= query[level]) {
     struct cfi_node *edge = &index->nodes[child];
     uint32_t i;
     BOOL eligible = level + (int) edge->label_length <=
@@ -1227,11 +1221,43 @@ static void collect_candidates(Compact_feature_index index, uint32_t node,
     for (i = 0; eligible && i < edge->label_length; i++) {
       int32_t label = index->labels[edge->label_offset + i];
       int32_t bound = query[level + (int) i];
-      eligible = forward ? label <= bound : label >= bound;
+      eligible = label <= bound;
     }
     if (eligible)
-      collect_candidates(index, child, level + (int) edge->label_length,
-                         query, forward, structural, count);
+      collect_forward_candidates(
+        index, child, level + (int) edge->label_length,
+        query, structural, count);
+    child = index->nodes[child].next_sibling;
+  }
+}
+
+static void collect_back_candidates(
+  Compact_feature_index index, uint32_t node, int level, const int *query,
+  const struct compact_feature_structural_summary *structural, size_t *count)
+{
+  uint32_t child;
+  if (level == index->feature_length) {
+    collect_leaf(index, node, FALSE, structural, count);
+    return;
+  }
+  child = index->nodes[node].first_child;
+  while (child != CFI_NONE && first_label(index, child) < query[level])
+    child = index->nodes[child].next_sibling;
+  while (child != CFI_NONE) {
+    struct cfi_node *edge = &index->nodes[child];
+    uint32_t i;
+    BOOL eligible = level + (int) edge->label_length <=
+                    index->feature_length;
+    index->query_nodes++;
+    for (i = 0; eligible && i < edge->label_length; i++) {
+      int32_t label = index->labels[edge->label_offset + i];
+      int32_t bound = query[level + (int) i];
+      eligible = label >= bound;
+    }
+    if (eligible)
+      collect_back_candidates(
+        index, child, level + (int) edge->label_length,
+        query, structural, count);
     child = index->nodes[child].next_sibling;
   }
 }
@@ -1261,12 +1287,15 @@ static unsigned long long *candidates(Compact_feature_index index,
       collect_back_structural_bitmap(
         index, query, structural, selected_bit, count);
     else
-      collect_candidates(index, index->root, 0, query, forward, structural,
-                         count);
+      collect_back_candidates(
+        index, index->root, 0, query, &structural, count);
   }
+  else if (forward)
+    collect_forward_candidates(
+      index, index->root, 0, query, &structural, count);
   else
-    collect_candidates(index, index->root, 0, query, forward, structural,
-                       count);
+    collect_back_candidates(
+      index, index->root, 0, query, &structural, count);
   answer = *count == 0 ? NULL : safe_malloc(*count * sizeof(*answer));
   if (*count != 0)
     memcpy(answer, index->results, *count * sizeof(*answer));
