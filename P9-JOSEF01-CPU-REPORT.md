@@ -1354,6 +1354,21 @@ plausible-looking options that were already negative.
   source and release binary were restored byte-for-byte; raw pair directories
   are `/tmp/profile-prehashed-j01-1501-p1.ADW7yX` and
   `/tmp/profile-prehashed-j01-1501-p2.knwlot`.
+- Adding one conservative feature-mask OR to every 64-reference conjunction
+  block was implemented and rejected at the first CPU gate.  The summary let
+  a query skip all 64 bit planes whenever the block-wide OR lacked a required
+  bit.  It was complete, included in exact construction-budget accounting,
+  and passed the posting, compact-unit, long-run and multi-problem smoke tests.
+  At Josef 01/301 it rejected 53,517 blocks covering 2,511,002 of 13,943,330
+  posting references (18.0%) before plane reads, but enlarged the fixed hint
+  sidecar by 2,925,376 bytes.  It then lost both reversed placements: 13.72
+  versus 13.58 seconds and 13.01 versus 12.86, for means 13.365 versus 13.220
+  seconds (+1.10%).  Mean RSS rose from 511,736 to 513,112 KiB and process
+  swap was zero.  The extra summary load and larger working set cost more than
+  the avoided plane loads, so the sidecar, counters and focused assertions
+  were removed and the 1,501/held-out gates were skipped.  Raw directories
+  are `/tmp/hint-block-or-j01-301-p1.EmJzWA` and
+  `/tmp/hint-block-or-j01-301-p2.K6cMHI`.
 - Deferring exact-result cache lookup until after the already-required
   conjunction-directory lookup was implemented and removed.  With a nonzero
   admission threshold, profile/overflow populations grow monotonically until
