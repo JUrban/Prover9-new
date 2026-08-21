@@ -1354,6 +1354,32 @@ plausible-looking options that were already negative.
   source and release binary were restored byte-for-byte; raw pair directories
   are `/tmp/profile-prehashed-j01-1501-p1.ADW7yX` and
   `/tmp/profile-prehashed-j01-1501-p2.knwlot`.
+- Deferring exact-result cache lookup until after the already-required
+  conjunction-directory lookup was implemented and removed.  With a nonzero
+  admission threshold, profile/overflow populations grow monotonically until
+  a posting rebuild clears the complete cache.  A query whose current source
+  population is below the threshold therefore cannot have a live admitted
+  entry.  The prototype exploited that invariant without approximation; the
+  zero-threshold path retained its original order.  At Josef 01/1,501 it
+  skipped 3,798,448 of 4,316,937 lookups while preserving all 47,268 hits,
+  456,825 stores, dependency outcomes, avoided candidates, logical bytes and
+  the exact search endpoint.  It won both mature placements, averaging 71.54
+  versus 72.23 total CPU seconds (-0.96%) and 68.79 versus 69.48 user seconds
+  (-0.99%).  The much noisier 301-given reversed mean was 0.8% unfavorable.
+  Held-out evidence decisively rejected the changed hot layout.  CHAT/601
+  skipped 140,166 of 143,972 lookups and preserved all 523 hits, yet lost both
+  placements: 37.68 versus 36.31 mean total CPU seconds (+3.8%).  Josef 02
+  had no resident conjunction directory, correctly skipped no lookup and
+  retained every cache counter, but the logically inactive layout change also
+  lost both placements, 31.00 versus 30.22 seconds (+2.6%).  Every process
+  reproduced its exact endpoint and used zero swap.  The implementation,
+  telemetry and focused admission assertion were removed, and the accepted
+  binary was restored byte-for-byte.  Raw directories are
+  `/tmp/cache-deferred-j01-1501-p1.s02iZy`,
+  `/tmp/cache-deferred-j01-1501-p2.HxwzjC`,
+  `/tmp/cache-deferred-heldout-p1.uHBIUL` and
+  `/tmp/cache-deferred-heldout-p2.5Sct7m`.  Source-level eliminated hashes do
+  not justify cache-path reordering when a different large search slows down.
 - That required probe audit has now been run at the exact bounded endpoints,
   with temporary counters that were removed immediately afterward.  At Josef
   01/1,501 the ordinary table averaged 1.018 probes per lookup (maximum 33)
