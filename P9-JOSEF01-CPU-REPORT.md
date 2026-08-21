@@ -1224,6 +1224,28 @@ hint, long-run and proof-smoke gates also pass.  This is a small general
 per-clause saving, not a claim of radical CPU reduction; its value is that its
 work cannot grow superlinearly with a long search.
 
+A fresh isolated `-O2 -pg` build at `91a64f7` rechecked the exact
+`(1001,1628048,320239,0)` endpoint in 70.75 user and 2.65 system seconds,
+599,924 KiB peak RSS and zero swap.  The largest self-time entries were
+compact unit generalization 2.75 seconds (7.17%), dense posting construction
+2.32 (6.05%), packed clause-candidate collection 1.90 (4.95%), unit-conflict
+code-tree traversal 1.80 (4.69%), hint-profile construction 1.66 (4.33%),
+`slab_get` 1.61 (4.20%), packed matching 1.34 (3.49%), variable renumbering
+1.18 (3.08%), nonunit forward collection 1.11 (2.89%), and `apply` 1.04
+(2.71%).  In particular, renumber traversal self time is effectively
+unchanged from the pre-sentinel 1.19 seconds; the accepted change saves only
+caller initialization and layout work, consistent with its small whole-run
+effect.  The raw output/time/profile SHA-256 values are respectively
+`1994f341...`, `10309984...`, and `7375cff0...`.
+
+The same profile made 173,927,623 `sn_to_arity()` calls, but eliminating all
+of their measured 0.48 seconds is only a 1.25% upper bound.  Adding one arity
+byte beside every existing 32-bit compact term token would increase the term
+pool by 25%, directly opposing the RAM objective.  Symbol arity is immutable
+but general symbol numbers use the full signed token range, so it cannot be
+packed into spare token bits without narrowing valid inputs.  No per-token
+arity sidecar should be implemented on this evidence.
+
 ### Reproducible production CHAT smoke
 
 Commit `de55328` adds the `new_otter_compact_file_production` case to
@@ -1350,6 +1372,18 @@ plausible-looking options that were already negative.
   not specific to one extra argument: extending this value's lifetime across
   the large collector/direct-match boundary itself produces an unfavorable
   optimized layout on Josef 02.
+- Special-casing arities zero through three in `upward_term_links()` was
+  implemented and removed.  It preserved the exact historical right-to-left
+  stack order and retained the counted fallback for larger symbols, adding no
+  state or storage.  The focused paramodulation, hyper-resolution and
+  renumbering tests passed, and the Josef 01/301 endpoint and allocator
+  traffic were exact.  Nevertheless the first reversed performance gate was
+  negative: candidate/control mean total CPU was 15.505/15.170 seconds
+  (+2.21%), with one win and one loss, effectively equal RSS and zero swap.
+  The larger gates were intentionally skipped and the source executable was
+  restored byte-for-byte.  The original compact counted loop is better for
+  the optimized whole binary than a larger switch even when small arities
+  dominate.
 - Converting unit-conflict code-tree recursion to an explicit DFS was also
   implemented and removed.  The prototype shared a 32-byte union with the
   accepted generalization stack, retained pending-subtree, query-variable and
