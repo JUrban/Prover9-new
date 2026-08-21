@@ -1824,6 +1824,25 @@ plausible-looking options that were already negative.
   fallback.  Both implementations and the temporary test were nevertheless
   removed: fewer allocations are useful telemetry, not a CPU win, and the
   production configuration plus a second Josef workload both regressed.
+  The idea was re-audited after depth-2 adaptive became the CPU authority and
+  after the later index/layout changes.  A bounded four-variable table with a
+  64-term traversal stack retained arbitrary variable numbers and fell back
+  exactly for wider shapes.  At the production 1,501-given endpoint it
+  removed 373,714,912 bytes (4.05%) of cumulative allocator traffic, but its
+  reversed candidate totals were 66.95 and 81.79 seconds versus 67.77 and
+  79.83 for the controls.  Candidate/control means were 74.370/73.800 seconds
+  (+0.77%); one placement won and one lost.  A narrower one-variable form
+  then won both 301-given placements, but saved only 11,467,072 cumulative
+  bytes at 1,501 givens and lost both mature placements: 67.42 versus 66.86
+  seconds, then 66.58 versus 66.41.  Its mean was 67.000/66.635 seconds
+  (+0.55%).  Every mature process ended at
+  `(Given=1501, Generated=3603947, Kept=521972, proofs=0)`, preserved the
+  search and compact-index counters, used about 671.3--671.6 MiB peak RSS and
+  reported zero swap.  The four-variable source and focused high-ID,
+  multiplicity, ground, wide-fallback test, followed by the specialized
+  one-variable source, were removed completely.  Held-out runs were skipped
+  after the primary gate failed.  This repeat directly rejects reviving the
+  earlier adaptive-prefix result under the current production configuration.
 - Avoiding the default clause weighter's unused substitution `Context` was
   also implemented and removed.  With no ordinary weight rules the context
   cannot be read; with rules, failed matches restore their entry trail and
