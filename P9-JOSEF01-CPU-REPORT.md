@@ -1300,6 +1300,15 @@ plausible-looking options that were already negative.
   Query-scoped reuse must not be accepted merely because its saved work is
   frequent on Josef: passing another hot value can perturb register lifetime,
   inlining and instruction layout enough to hurt a different large search.
+  A second form left every existing call argument unchanged and returned the
+  Boolean from candidate collection.  Josef 02 was deliberately used as its
+  first performance gate.  It again lost both placements, now at 32.955
+  versus 32.005 seconds (+2.97%), with the same exact 601-given endpoint and
+  counters, about 0.2 MiB additional RSS and zero swap.  It was removed
+  without spending CPU on the other workloads.  The regression therefore is
+  not specific to one extra argument: extending this value's lifetime across
+  the large collector/direct-match boundary itself produces an unfavorable
+  optimized layout on Josef 02.
 - Converting unit-conflict code-tree recursion to an explicit DFS was also
   implemented and removed.  The prototype shared a 32-byte union with the
   accepted generalization stack, retained pending-subtree, query-variable and
