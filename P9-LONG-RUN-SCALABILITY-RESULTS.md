@@ -63,6 +63,23 @@ selected case as the comparison reference in `long-run-summary.md`.
 `--max-cpu-ratio`, `--min-ram-saving-pct`, and
 `--max-back-slope-ratio` make those thresholds explicit.
 
+Josef 01 has a stricter workload-specific live view in addition to the general
+back-demodulation reporter:
+
+```sh
+./test.src/josef01_progress_audit.py --tail 12 Josef_01.compact.out
+./test.src/josef01_progress_audit.py --json Josef_01.compact.out.gz
+```
+
+It checks the recommended OTTER/clauses, adaptive-depth-2, file-selector,
+packed-cache and report-polling configuration and derives interval total-CPU,
+adaptive conflict, refinement, hint-cache, conjunction and selector-I/O
+slopes.  It is safe to read an actively written plain output: an incomplete
+framed statistics tail is ignored.  Seven complete reports are required before
+its post-warm-up slope ratios are evidence.  Its terminal acceptance check is
+the exact Josef endpoint `(30827,1602769536,36195388,1)` with 48,968 matched
+hints; warnings before that point are triage signals rather than a proof claim.
+
 An archived reference can be prepended without rerunning it.  For the exact
 8,800-given current-adaptive versus `out41` CPU/slope crossover, use a 0% RAM
 threshold because both sides are compact implementations:

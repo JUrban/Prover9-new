@@ -199,6 +199,7 @@ symbol-table-test: symbol_table_test
 
 compact-long-run-report-test: comma-num-test
 	python3 compact_long_run_report_test.py
+	python3 josef01_progress_audit_test.py
 	sh -n cgroup_job_memory.sh
 	@probe=$$(mktemp /tmp/prover9-cgroup-probe.XXXXXX); \
 	status=0; ./cgroup_job_memory.sh $$probe /bin/true >/dev/null 2>&1 || status=$$?; \

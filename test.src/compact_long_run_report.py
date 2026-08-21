@@ -33,8 +33,17 @@ GNU_TIME_RSS_RE = re.compile(
     r"^\s*Maximum resident set size \(kbytes\):\s*([0-9]+)\s*$")
 DEMOD_RE = re.compile(
     r"^Demod_attempts=([0-9]+)\. Demod_rewrites=([0-9]+)\.$")
+HINT_STATS_RE = re.compile(
+    r"^\s*total=([0-9]+), redundant=([0-9]+), active=([0-9]+), "
+    r"matched=([0-9]+)\s*$")
 
 PREFIXES = (
+    ("Search_loop:", "search"),
+    ("Compact_unit_index:", "unit"),
+    ("Hint_index:", "hint_index"),
+    ("Packed_fast_conjunction:", "hint_conjunction"),
+    ("Packed_fast_cache:", "hint_cache"),
+    ("Periodic_report_poll:", "periodic_report"),
     ("Compact_back_demod:", "back"),
     ("Compact_back_edge:", "back_edge"),
     ("Compact_back_route:", "back_route"),
@@ -178,8 +187,18 @@ def parse_stream(lines, source="<stream>"):
     samples = []
     sample = None
     statistics_format = {}
+    expect_hint_stats = False
+    in_statistics_block = False
     for line_number, raw in enumerate(lines, 1):
         line = raw.rstrip("\n")
+        if line.startswith("============================== STATISTICS "):
+            in_statistics_block = True
+            continue
+        if line.startswith("============================== end of statistics "):
+            if sample is not None:
+                sample["statistics_complete"] = True
+            in_statistics_block = False
+            continue
         if line.startswith(STATISTICS_FORMAT_MARKER):
             statistics_format = {}
             add_prefixed(
@@ -198,7 +217,11 @@ def parse_stream(lines, source="<stream>"):
                 "kept": int(match.group(3)),
                 "proofs": int(match.group(4)),
             }
+            if in_statistics_block:
+                sample["statistics_framed"] = True
+                sample["statistics_complete"] = False
             sample.update(statistics_format)
+            expect_hint_stats = False
             continue
         if sample is None:
             continue
@@ -218,6 +241,30 @@ def parse_stream(lines, source="<stream>"):
             sample["user_cpu"] = values.get("User_CPU")
             sample["system_cpu"] = values.get("System_CPU")
             sample["wall_clock"] = values.get("Wall_clock")
+            continue
+        if line == "Hint match stats:":
+            expect_hint_stats = True
+            continue
+        if expect_hint_stats:
+            hint_match = HINT_STATS_RE.match(line)
+            if hint_match:
+                for key, value in zip(
+                        ("hint_total", "hint_redundant", "hint_active",
+                         "hint_matched"), hint_match.groups()):
+                    sample[key] = int(value)
+                expect_hint_stats = False
+                continue
+            if line.strip():
+                expect_hint_stats = False
+        if line.startswith("Generated_by_rule:"):
+            add_prefixed(sample, "rule", assignments(line.split(":", 1)[1]))
+            continue
+        if line.startswith("Packed_hint_operation:"):
+            values = assignments(line.split(":", 1)[1])
+            operation = values.get("op")
+            if operation in ("equivalence", "match", "flipped_match",
+                             "back_demod"):
+                add_prefixed(sample, "hint_operation_" + operation, values)
             continue
         demod_match = DEMOD_RE.match(line)
         if demod_match:

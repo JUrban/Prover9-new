@@ -2485,6 +2485,38 @@ suffix while the process is alive; the kernel removes them automatically when
 the process exits or is killed.  Logical file size, allocated blocks, process
 PSS, and filesystem free space are different quantities.
 
+### Live Josef 01 progress audit
+
+Run the dedicated interval auditor against the still-growing plain output at
+any time; it is read-only and does not signal or attach to Prover9:
+
+```sh
+./test.src/josef01_progress_audit.py --tail 12 \
+  /path/to/Josef_01.compact.latest.out
+```
+
+It also accepts completed `.out.gz` files and has a `--json` mode.  The three
+tables report total-CPU throughput, adaptive unit-conflict routing/selectivity,
+hint-cache and conjunction value, selector churn/I/O, PSS and process swap as
+interval deltas rather than misleading cumulative averages.  Its configuration
+audit checks the Josef authority settings: OTTER/clauses, adaptive depth 2,
+64-byte passive-directory records, the 1-Mi-entry/16-byte file selector, the
+16,384-entry cache with threshold 128 and zero overlap invalidations, and
+amortized report polling.  A currently incomplete final statistics block is
+discarded, so reading an actively written file does not create false warnings.
+
+At least seven complete reports are required for the post-warm-up slope gate.
+The auditor warns if given or generated throughput falls by more than 20%, if
+unit tree/posting/exact work per conflict grows by more than 25%, if secondary
+or tertiary refinement rejection falls below 25%, if swap appears, or if the
+terminal endpoint/hint total differs.  These are stop-and-inspect signals, not
+proof that an otherwise exact run is invalid.  Validation against the current
+1,501-given output recognizes adaptive depth 2, 71--72% final-interval
+secondary/tertiary rejection and zero swap.  Against historical `new3`, it
+correctly identifies the obsolete code-tree route, 65,536-entry/24-byte
+selector, old hint cache, exact clocks and increasing unit-tree work.  The
+focused parser tests are included in `make long-run-scalability-tests`.
+
 For an optional native comparison, build in a separate clean worktree with
 `NATIVE=1`.  Mixing portable and native objects is invalid.  Run it only after
 the portable LTO authority result so compilation variance cannot obscure
