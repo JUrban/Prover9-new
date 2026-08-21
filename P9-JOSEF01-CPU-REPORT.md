@@ -638,8 +638,9 @@ seconds, 602,520 KiB peak RSS and zero swap.  Profiler overhead again makes
 those process totals non-release measurements.  The iterative public
 generalization routine remained the largest scalable self entry, but fell
 from the predecessor's 2.96 sampled seconds (7.94%) to 2.58 seconds (6.90%).
-The next entries were one-time packed-hint posting construction and scalable
-unit-conflict retrieval: `posting_dense_add()` used 2.01 seconds and
+The next entries were hint-posting hash/probe lookup and scalable
+unit-conflict retrieval: the entry then reported as `posting_dense_add()`
+(later audited as `posting_slot()`) used 2.01 seconds and
 `collect_code_tree_candidates()` 1.96 seconds.  The raw output, GNU-time
 record and profile are `/tmp/josef01-iterative-gprof-1000.{out,time,txt}`;
 their SHA-256 values are respectively `2b5c0280...`, `1bdc06f8...` and
@@ -1251,7 +1252,7 @@ work cannot grow superlinearly with a long search.
 A fresh isolated `-O2 -pg` build at `91a64f7` rechecked the exact
 `(1001,1628048,320239,0)` endpoint in 70.75 user and 2.65 system seconds,
 599,924 KiB peak RSS and zero swap.  The largest self-time entries were
-compact unit generalization 2.75 seconds (7.17%), dense posting construction
+compact unit generalization 2.75 seconds (7.17%), hint-posting hash/probe lookup
 2.32 (6.05%), packed clause-candidate collection 1.90 (4.95%), unit-conflict
 code-tree traversal 1.80 (4.69%), hint-profile construction 1.66 (4.33%),
 `slab_get` 1.61 (4.20%), packed matching 1.34 (3.49%), variable renumbering
@@ -1292,7 +1293,7 @@ plausible-looking options that were already negative.
   KiB peak RSS and zero swap; profiler overhead makes those process times
   unsuitable as release comparisons.  Compact unit generalization was the
   largest scalable self entry at 6.27 sampled seconds (9.09%), followed by
-  `slab_get` at 3.52 (5.10%), dense posting construction at 3.04 (4.41%),
+  `slab_get` at 3.52 (5.10%), hint-posting hash/probe lookup at 3.04 (4.41%),
   packed candidate collection at 2.99 (4.33%), paramodulation entry at 2.92
   (4.23%), substitution at 2.57 (3.72%), renumber traversal at 2.40 (3.48%)
   and nonunit forward collection at 2.32 (3.36%).  Adaptive position-bucket
@@ -1306,6 +1307,22 @@ plausible-looking options that were already negative.
   raw output, GNU-time record and profile are
   `/tmp/josef01-adaptive2-gprof-1501.{out,time,txt}` with SHA-256 values
   `702747eb...`, `9a53e86d...`, and `8236ca17...`.
+- A subsequent symbol/call-graph audit corrected the profile label on the
+  45,748,737-call, 3.04-second entry above.  Its reported callers
+  (`hint_postings_get`, `hint_postings_generation`, profile lookup/add, and
+  rehash) all call `posting_slot()` and do not all call `posting_dense_add()`;
+  the optimized static-symbol attribution named the adjacent helper.  The
+  actual hot mechanism is hint-posting hash/probe lookup, not dense-bit
+  construction.  Replacing its two-multiply SplitMix finalizer with a
+  one-multiply high/low-folding finalizer preserved exact lookup semantics and
+  passed the posting, hint-preview, compact-unit and generalization tests, but
+  worsened probe/layout behavior at the first Josef 01/301 gate.  Candidate
+  totals were 14.16 and 14.20 seconds versus 13.96 and 13.94 for the controls;
+  the mean regression was 1.65%, both placements lost, RSS differed only by
+  about 0.3 MiB, and swap was zero.  The hash was restored and longer gates
+  were skipped.  Any future posting-table change must measure successful and
+  unsuccessful probe distributions rather than optimize hash instruction
+  count alone.
 - Moving compact-unit peak-byte recounting from every public query to the
   rare scratch-growth sites was implemented and removed.  The profile
   confirmed 2,118,509 full byte-accounting calls by the 1,501-given endpoint,
