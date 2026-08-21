@@ -2170,6 +2170,21 @@ plausible-looking options that were already negative.
   `-O2` control.  Earlier portable pairs averaged 78.83, so host-frequency
   variation is material.  `NATIVE=1` is an optional final-build experiment,
   not part of the algorithmic claim.
+- Current-source portable `-O3 -flto` was subsequently tested directly against
+  the accepted portable `-O2 -flto` build, isolating optimization level from
+  `-march=native`.  It looked excellent at the short Josef 01/301 gate: both
+  placements won and the reversed mean fell from 13.235 to 11.565 seconds
+  (-12.62%).  The exact 1,501-given gate reversed that conclusion.  The O3
+  totals were 63.54 and 70.09 seconds versus O2 totals of 64.35 and 66.35;
+  O3/O2 means were 66.815/65.350 seconds, a **2.24% O3 regression**, with one
+  win and one loss.  Mean O3 RSS was 496 KiB higher, every process used zero
+  swap, and every final search, rule, compact-index, hint and cache counter was
+  exact.  Heldouts were skipped after the primary mature gate failed.  This is
+  another concrete short-prefix-overfitting example: `-O3` is not supported
+  as the authority build merely because it wins at 301 givens.  The candidate
+  SHA-256 is `df09e6a2...`; raw gates are
+  `/tmp/o2lto-o3lto-j01-301.G3Icrv` and
+  `/tmp/o2lto-o3lto-j01-1501.8vage8`.
 
 ## Likely RAM and CPU effect
 
@@ -2293,7 +2308,9 @@ CPU estimates are less certain and the gains are not additive:
   8.16%, wins both placements, and also wins both CHAT/601 and Josef 02/601
   held-out placements by 1.81% and 4.24% in paired means, with no new search
   state and sub-megabyte RSS differences;
-- native compilation may add 0--5% depending on the host.
+- current-source portable `-O3 -flto` regresses the mature bounded mean by
+  2.24%, so portable `-O2 -flto` remains the authority; `NATIVE=1` is at most
+  an optional target-host experiment, not a recommended default.
 
 The earlier 28,000--34,000-second estimate was made before the clock mismatch
 was discovered and is superseded.  It charged exact-clock work to the compact
