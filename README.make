@@ -15,6 +15,8 @@ Building
 
     make all                Build all programs (release, -O2).
     make all DEBUG=1        Build with debug symbols (-g -O0 -DDEBUG).
+    make prover9-lto        Build and install Prover9 at portable -O2 -flto.
+    make all LTO=1          Build every release program at portable -O2 -flto.
 
 This compiles:
 
@@ -69,7 +71,16 @@ Notes
    memory tracking (safe_malloc/safe_free headers and counters) and
    additional assertions. Release builds omit all tracking overhead.
 
-4. Debian packaging. Earlier releases included a libtoolize.patch
+4. Link-time optimization. LTO=1 keeps the ordinary -O2 optimization level
+   and target-neutral instruction set, but lets the compiler optimize across
+   the LADR/Prover9 translation-unit boundary. `make prover9-lto` first checks
+   compiler/linker support and then updates `bin/prover9`. Do not combine
+   LTO=1 with DEBUG=1. The build-mode sentinels automatically rebuild objects
+   when switching between ordinary release, LTO, DEBUG, and NATIVE modes,
+   including under parallel make. NATIVE=1 already includes -flto together
+   with host-specific -O3/-march=native options.
+
+5. Debian packaging. Earlier releases included a libtoolize.patch
    (contributed by Peter Collingbourne) for building a shared LADR
    library. That patch was for the 2009 Makefiles and has been
    removed. Packagers should adapt the current Makefiles directly.

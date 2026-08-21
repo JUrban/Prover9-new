@@ -70,6 +70,17 @@ else
     _BMODE = release
   endif
 endif
+
+# Keep complete portable LTO builds in one mode.  NATIVE already has -flto.
+ifeq ($(LTO),1)
+  ifdef DEBUG
+    $(error LTO=1 is a release-build option; do not combine it with DEBUG=1)
+  endif
+  ifndef NATIVE
+    OPTFLAGS += -flto
+    _BMODE := $(_BMODE)-lto
+  endif
+endif
 MMD_TEST := $(shell rm -f /tmp/_mmd_test.o /tmp/_mmd_test.d; echo 'int x;' | $(CC) $(PLATFORM_FLAGS) -MMD -MP -x c -c - -o /tmp/_mmd_test.o 2>/dev/null && echo "-MMD -MP"; rm -f /tmp/_mmd_test.o /tmp/_mmd_test.d)
 CFLAGS = $(OPTFLAGS) -Wall $(MMD_TEST) $(PLATFORM_FLAGS) $(XFLAGS)
 ifdef STATIC
@@ -92,6 +103,9 @@ endif
 FORCE:
 
 PROGRAMS = latfilter olfilter clausefilter idfilter renamer unfast clausetester rewriter isofilter0 isofilter isofilter2 dprofiles interpfilter upper-covers miniscope interpformat prooftrans mirror-flip perm3 sigtest directproof test_clause_eval test_complex complex gen_trc_defs
+
+# Prevent parallel compilation from racing the mode sentinel's cleanup.
+$(addsuffix .o,$(PROGRAMS)): .build_mode
 
 all: .build_mode ladr apps install
 
@@ -202,4 +216,3 @@ DEPS := $(wildcard *.d)
 ifneq ($(DEPS),)
 -include $(DEPS)
 endif
-

@@ -70,6 +70,17 @@ else
     _BMODE = release
   endif
 endif
+
+# Keep complete portable LTO builds in one mode.  NATIVE already has -flto.
+ifeq ($(LTO),1)
+  ifdef DEBUG
+    $(error LTO=1 is a release-build option; do not combine it with DEBUG=1)
+  endif
+  ifndef NATIVE
+    OPTFLAGS += -flto
+    _BMODE := $(_BMODE)-lto
+  endif
+endif
 MMD_TEST := $(shell rm -f /tmp/_mmd_test.o /tmp/_mmd_test.d; echo 'int x;' | $(CC) $(PLATFORM_FLAGS) -MMD -MP -x c -c - -o /tmp/_mmd_test.o 2>/dev/null && echo "-MMD -MP"; rm -f /tmp/_mmd_test.o /tmp/_mmd_test.d)
 CFLAGS = $(OPTFLAGS) -Wall $(MMD_TEST) $(PLATFORM_FLAGS) $(XFLAGS)
 ifdef STATIC
@@ -94,6 +105,9 @@ FORCE:
 OBJECTS = estack.o util.o print.o syms.o ground.o arithmetic.o select.o \
 	propagate.o mstate.o negpropindex.o negprop.o ordercells.o \
 	commandline.o msearch.o sizesched.o
+
+# Prevent parallel compilation from racing the mode sentinel's cleanup.
+$(OBJECTS) mace4.o: .build_mode
 
 all: ladr lib mace4 install
 

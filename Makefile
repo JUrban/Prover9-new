@@ -11,6 +11,32 @@ all:
 	@echo "**** Now try 'make test1'. ****"
 	@echo ""
 
+.PHONY: lto-check prover9-lto
+
+# GNU make supplies `cc` as a built-in default even though the component
+# Makefiles default to gcc.  Use the same compiler for the probe and build,
+# while preserving an explicit `make ... CC=clang` override.
+LTO_CC = $(if $(filter default,$(origin CC)),gcc,$(CC))
+
+# Fail before rebuilding libraries if the selected compiler/linker does not
+# support portable link-time optimization.  Normal release builds are still
+# available on older toolchains.
+lto-check:
+	@tmp=$$(mktemp /tmp/prover9-lto-check.XXXXXX); \
+	trap '/bin/rm -f "$$tmp"' EXIT; \
+	if ! printf '%s\n' 'int main(void) { return 0; }' | \
+	     $(LTO_CC) -O2 -flto -x c - -o "$$tmp" >/dev/null 2>&1; then \
+	  echo "Compiler/linker does not support -flto; use the normal release build." >&2; \
+	  exit 1; \
+	fi
+
+# Build only the CPU-critical prover and LADR library at portable -O2 -flto,
+# then install the resulting executable in bin/.
+prover9-lto: lto-check
+	$(MAKE) -C ladr libladr.a LTO=1 CC="$(LTO_CC)"
+	$(MAKE) -C provers.src prover9 LTO=1 CC="$(LTO_CC)"
+	/bin/cp -p provers.src/prover9 bin/prover9
+
 ladr lib:
 	cd ladr         && $(MAKE) lib
 

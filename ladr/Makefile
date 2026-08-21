@@ -70,6 +70,18 @@ else
     _BMODE = release
   endif
 endif
+
+# Portable whole-program optimization.  NATIVE already includes -flto;
+# LTO=1 deliberately keeps release -O2 and a target-neutral instruction set.
+ifeq ($(LTO),1)
+  ifdef DEBUG
+    $(error LTO=1 is a release-build option; do not combine it with DEBUG=1)
+  endif
+  ifndef NATIVE
+    OPTFLAGS += -flto
+    _BMODE := $(_BMODE)-lto
+  endif
+endif
 # Test whether -MMD -MP works with the platform flags.
 # Old Apple GCC (10.4/10.5) rejects -MMD with multiple -arch flags.
 MMD_TEST := $(shell rm -f /tmp/_mmd_test.o /tmp/_mmd_test.d; echo 'int x;' | $(CC) $(PLATFORM_FLAGS) -MMD -MP -x c -c - -o /tmp/_mmd_test.o 2>/dev/null && echo "-MMD -MP"; rm -f /tmp/_mmd_test.o /tmp/_mmd_test.d)
@@ -121,6 +133,10 @@ MISC_OBJ = std_options.o banner.o ioutil.o tptp_trans.o top_input.o tptp_parse.o
 
 OBJECTS = $(BASE_OBJ) $(TERM_OBJ) $(UNIF_OBJ) $(CLAS_OBJ)\
           $(INFE_OBJ) $(MODL_OBJ) $(MISC_OBJ)
+
+# The mode sentinel can delete every object.  Make that ordering explicit so
+# a parallel mode switch cannot compile an object before the cleanup runs.
+$(OBJECTS): .build_mode
 
 libladr.a: .build_mode $(OBJECTS)
 	$(AR_CMD) libladr.a $(OBJECTS)

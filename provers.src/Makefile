@@ -70,6 +70,18 @@ else
     _BMODE = release
   endif
 endif
+
+# Portable whole-program optimization.  NATIVE already includes -flto;
+# LTO=1 deliberately keeps release -O2 and a target-neutral instruction set.
+ifeq ($(LTO),1)
+  ifdef DEBUG
+    $(error LTO=1 is a release-build option; do not combine it with DEBUG=1)
+  endif
+  ifndef NATIVE
+    OPTFLAGS += -flto
+    _BMODE := $(_BMODE)-lto
+  endif
+endif
 MMD_TEST := $(shell rm -f /tmp/_mmd_test.o /tmp/_mmd_test.d; echo 'int x;' | $(CC) $(PLATFORM_FLAGS) -MMD -MP -x c -c - -o /tmp/_mmd_test.o 2>/dev/null && echo "-MMD -MP"; rm -f /tmp/_mmd_test.o /tmp/_mmd_test.d)
 # Test for open_memstream (POSIX.1-2008; missing on macOS < 10.13)
 # Omit PLATFORM_FLAGS: universal-binary -arch flags cause link failure
@@ -121,6 +133,10 @@ OBJECTS = $(PRVR_OBJ)
 
 PROGRAMS = prover9 fof-prover9 autosketches4 newauto newsax\
 	   ladr_to_tptp tptp_to_ladr
+
+# The mode sentinel can delete every object.  Make that ordering explicit so
+# a parallel mode switch cannot compile an object before the cleanup runs.
+$(OBJECTS) $(addsuffix .o,$(PROGRAMS)): .build_mode
 
 ##############################################################################
 
