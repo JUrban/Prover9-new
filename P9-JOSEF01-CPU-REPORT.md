@@ -1887,6 +1887,21 @@ plausible-looking options that were already negative.
   change nor the broader short-prefix regression justifies production code.
   Both forms were removed and the portable executable restored byte-for-byte
   to accepted SHA-256 `69fadecd...`; held-out runs were intentionally skipped.
+- Prechecking repeated-variable target terms before `term_ident()` was
+  implemented and removed.  The mature audit observed 8,152,470 repeated
+  binding comparisons and 5,741,002 failures in forward generalization.  A
+  first form accepted identical pointers immediately and rejected different
+  root symbols before entering `term_ident()` and its 16-KiB local traversal
+  frame.  It failed the exact 301-given reversed gate: candidate/control mean
+  user CPU was 11.455/11.225 seconds (+2.05%) and mean total CPU was
+  12.960/12.715 seconds (+1.93%).  A narrower root-symbol-only form was neutral
+  at 301 givens, then lost both 1,501-given placements.  Its candidate totals
+  were 67.31 and 67.29 seconds versus 66.52 and 67.20 for the controls;
+  candidate/control mean user and total CPU were both 0.66% worse.  Every run
+  preserved `(Given=1501, Generated=3603947, Kept=521972, proofs=0)`, RSS
+  differed only by layout noise, and process swap was zero.  The extra hot
+  comparison cost more than avoiding root-mismatch calls under the optimized
+  whole engine.  Both forms were removed and held-out runs were skipped.
 - Avoiding the default clause weighter's unused substitution `Context` was
   also implemented and removed.  With no ordinary weight rules the context
   cannot be read; with rules, failed matches restore their entry trail and
