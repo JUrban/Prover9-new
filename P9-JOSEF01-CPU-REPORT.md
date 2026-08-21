@@ -4,9 +4,11 @@
 
 Branch `josef01-cpu-next` preserves the Josef 01 search trajectory on every
 bounded replay performed here and contains several general, non-Josef-specific
-CPU improvements.  It has **not** been run to the Josef 01 proof endpoint on
-this 23-GiB development host.  The proof-endpoint CPU result therefore remains
-a user-run acceptance gate, not a completed claim.
+CPU improvements.  At the exact 1,501-given bounded endpoint, the recommended
+portable-LTO build is now 2.30 times as fast as preserved old P9.  It has
+**not** been run to the Josef 01 proof endpoint on this 23-GiB development
+host.  The proof-endpoint CPU result therefore remains a user-run acceptance
+gate, not a completed claim.
 
 The completed compact baseline is still an important result: it proves the
 same theorem after the same 30,827 given clauses while reducing measured
@@ -209,6 +211,48 @@ Raw timing/output directories are
 `/tmp/o2-lto-j01-1501-p2.XUUIcD`,
 `/tmp/o2-lto-heldout-601-p1.Ne8dZh`, and
 `/tmp/o2-lto-heldout-601-p2.MPqlWe`.
+
+### Direct old-P9 gate at 1,501 givens
+
+The LTO result above isolates the build improvement, but competitiveness is a
+comparison with preserved old P9 rather than ordinary current-source O2.  A
+second audit therefore ran the accepted LTO executable and preserved old-P9
+SHA-256 `bcdf6baf...` serially under 2.2-GB address-space caps.  The two
+placements reversed CPU cores 2 and 3.  Both inputs disabled detailed clocks,
+retained the authoritative Josef search commands and stopped after the exact
+1,501st given clause:
+
+| Binary | placement totals | mean user | mean system | mean total | peak RSS |
+|---|---:|---:|---:|---:|---:|
+| preserved old P9 | 151.06 / 154.94 s | 149.53 s | 3.47 s | 153.00 s | 968,448 KiB |
+| current portable LTO | 66.30 / 67.02 s | 63.93 s | 2.73 s | 66.66 s | 671,276 KiB |
+
+The current engine used **56.43% less CPU**, or delivered **2.30 times old-P9
+throughput**, at this bounded state.  Its measured RSS was also 30.7% lower
+(297,172 KiB), and every process reported zero swap.  The result is much
+larger than placement noise and confirms that the compact engine is already
+CPU-competitive with old P9 in the early search; the remaining uncertainty is
+long-run scaling, not a prefix deficit.
+
+Every process ended at
+`(Given=1501, Generated=3603947, Kept=521972, proofs=0)`, with 3,522 matched
+hints and the same principal legacy counters.  The clauses printed at givens
+500, 1,000 and 1,500 are byte-identical, including clause IDs and
+justifications.  Combined with the earlier complete 1,001-given digest, this
+confirms the compared prefix follows the old trajectory.  Packed storage
+classifies six duplicate initial hints differently (`Active_Hints=96678`
+versus 96,684), a known representation-level difference; it does not change
+the matched-hint total, selected checkpoints, or generated/kept endpoint.
+
+The raw audit is `/tmp/lto-oldp9-j01-1501.TENVZe`.  Its initial LTO input
+extraction retained the warning printed immediately before the input footer,
+so two approximately three-second parser failures were discarded.  The
+corrected extraction stops at that warning, passed a one-given parse/search
+smoke, and produced the two complete LTO measurements above.  No failed run is
+included in a mean.  This bounded gate materially strengthens the CPU case,
+but it still cannot prove proof-endpoint parity because passive, selector,
+unit-index and hint-index costs scale differently over the remaining 29,326
+givens.
 
 ### Packed-hint cache: mature correction and selective admission
 
@@ -2257,14 +2301,17 @@ storage/index design.  A precise replacement cannot be obtained by scaling a
 1,001-given result across machines: the timer cost is approximately linear in
 phase intervals, while unit-tree, hint and selector work grow differently.
 The installed clocks-off engine is 2.86 times faster than old P9 at the
-bounded exact state, and current source additionally contains the amortized
-report polling, slab recycler and mature index changes that were absent from
-`new3`.  The supported portable LTO build then removes another measured 8.16%
-at the exact 1,501-given Josef gate and improves both held-out workloads.  It
-is therefore plausible that a clocks-off, LTO-built current-source full run
-reaches the 24,191-second 1.25-times-old gate, but **CPU parity has not yet
-been demonstrated**.  Do not publish a tighter full-run estimate until that
-external acceptance run completes.
+bounded 1,001-given state, and current source additionally contains the
+amortized report polling, slab recycler and mature index changes that were
+absent from `new3`.  The supported portable LTO build removes another measured
+8.16% at the exact 1,501-given Josef gate and improves both held-out workloads.
+Most importantly, the direct 1,501-given comparison now measures current LTO
+at 66.66 seconds versus old P9 at 153.00 seconds: current is 2.30 times as
+fast while using 30.7% less resident memory at that state.  It is therefore
+plausible that a clocks-off, LTO-built current-source full run reaches the
+24,191-second 1.25-times-old gate, but **CPU parity at the proof endpoint has
+not yet been demonstrated**.  Do not publish a tighter full-run estimate until
+that external acceptance run completes.
 
 ## Build and run the decisive Josef 01 comparison
 
