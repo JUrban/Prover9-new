@@ -1635,6 +1635,25 @@ plausible-looking options that were already negative.
   it lost in both orientations.  The current learned factor 12 is therefore
   retained; larger factors merely exchange cheap contiguous tree work for
   too little avoided position work.
+- Lowering `CUI_ADAPTIVE_POSITION_FACTOR` from 12 to 8 was tested separately
+  because the completed Josef 01 run shows that conflict retrieval becomes a
+  mature-run hotspot.  It was not accepted.  The exact 301-given reversed
+  pair averaged 13.955 CPU seconds for factor 8 versus 14.205 for factor 12
+  (-1.76%), but split one win and one loss.  At the exact 1,501-given endpoint
+  `(1501,3603947,521972,0)`, factor 8 averaged 72.160 versus 72.435 seconds
+  (-0.38%) and again split the two placements.  A bounded 2,001-given
+  tie-break reached the identical `(2001,6300491,739192,0)` endpoint in
+  112.44 seconds for factor 8 versus 111.79 for factor 12 (+0.58%).  Factor 8
+  reduced code-tree nodes from 7,364,013 to 6,356,234 (-13.7%) there, but
+  raised position postings from 4,456,360 to 4,681,679 (+5.1%) and exact tests
+  from 681,638 to 696,709 (+2.2%).  Peak RSS remained effectively unchanged
+  (769,872 versus 769,476 KiB) and neither process swapped.  Thus the more
+  position-aggressive policy merely moves work between the two retrieval
+  paths and does not improve mature CPU time.  Factor 12 remains the accepted
+  setting.  Raw serial-pair directories are
+  `/tmp/adaptive-factor8-j01-301-p{1.SyNTQs,2.XlvE8Q}`,
+  `/tmp/adaptive-factor8-j01-1501-p{1.6X43Rx,2.zCZxAG}`, and
+  `/tmp/adaptive-factor8-j01-2001-p1.67MDRm`.
 - Extending the resident feature sidecar from depth 2 to depth 3 was rejected
   at the exact 1,501-given endpoint.  It reduced position postings from
   2,988,159 to 1,438,042 (-51.9%) and exact tests from 958,845 to 750,933
