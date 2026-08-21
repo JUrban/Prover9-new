@@ -699,6 +699,17 @@ the compact generalization matrix and focused ASan/UBSan builds all pass.  The
 measured portable binary is SHA-256
 `02df874c53a55d5be5c53f5e1d9abb995e18c1aaff480e3cf817ab19362f39d6`.
 
+A fresh isolated `-pg` build of this exact source reached
+`(1001,1628048,320239,0)` in 69.53 user and 2.80 system seconds, 602,584 KiB
+peak RSS and zero swap.  `collect_forward_candidates()` fell to 0.95 sampled
+seconds (2.59%), from 1.34 seconds (3.58%) for the preceding common traversal.
+The next scalable entries were `compact_unit_generalization_first()` at 2.62
+seconds (7.15%) and `collect_code_tree_candidates()` at 2.08 seconds (5.68%).
+The output, GNU-time record and profile are
+`/tmp/josef01-bf7-gprof-1000.{out,time,txt}` with SHA-256 values
+`2c026e2e...`, `af0a705e...` and `d2ba3a29...`, respectively.  Profiler
+overhead makes its process total non-release evidence.
+
 ## Authoritative completed runs
 
 The source files are:
@@ -1201,6 +1212,25 @@ plausible-looking options that were already negative.
   now-inlined hot traversal outweighed the removed frame operations.  Longer
   gates were intentionally skipped, and source plus portable executable were
   restored byte-for-byte to SHA-256 `55e42911...`.
+- Bundling invariant unit-conflict query state and mutable work counters into
+  a stack-local context was implemented and removed.  This reduced the hot
+  recursive call from ten arguments to five, but repeatedly loaded the query
+  end from mutable context and regressed Josef 01/301 by 3.55%.  A corrected
+  six-register form kept the query end as a direct argument.  It was neutral
+  at 301 givens (13.150 versus 13.185 seconds), then appeared favorable but
+  placement-sensitive at 1,001: the serial reversed mean was 40.400 versus
+  41.405 seconds, while one control placement alone ranged to 43.11 seconds.
+  A core-swapped concurrent tie-break favored the candidate 42.550 versus
+  43.100 seconds and both placements, giving 41.475 versus 42.253 seconds
+  (-1.84%) across the four observations per binary.  CHAT/301 decisively
+  rejected the apparent Josef gain: the context candidate lost both
+  placements and averaged 24.760 versus 22.890 seconds (+8.17%).  Every
+  bounded endpoint, code-tree work counter and exact answer remained equal;
+  RSS moved by less than 0.4 MiB and every process used zero swap.  The
+  context and all call-site changes were removed, restoring source and
+  executable byte-for-byte to accepted SHA-256 `02df874c...`.  This result
+  also confirms that a smaller generated function or register-only recursive
+  call is not by itself sufficient whole-workload evidence.
 - Converting unit-conflict code-tree recursion to an explicit DFS was also
   implemented and removed.  The prototype shared a 32-byte union with the
   accepted generalization stack, retained pending-subtree, query-variable and
