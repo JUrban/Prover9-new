@@ -1250,6 +1250,20 @@ plausible-looking options that were already negative.
   `02df874c...`.  Avoiding unconditional stores was not worth the added
   bit-test branches on this workload, and scratch relocation introduced a
   mature cache/page-touch cost that its nominal 800 bytes did not predict.
+- Reusing the first literal's already computed packed feature mask while
+  accumulating the positive/negative clause masks was implemented and
+  removed.  In the better packed path the query-mode exception is disabled,
+  so this is exactly the same 64-bit value and removes one complete first-term
+  traversal per query.  It won both noisy Josef 01/301 placements, 13.075
+  versus 13.530 seconds (-3.36%), although mean user CPU was nearly tied.
+  At 1,001 givens it lost both placements and regressed from 43.570 to 44.800
+  seconds (+2.82%).  All four mature outputs ended at
+  `(1001,1628048,320239,0)` with identical packed-cache, conjunction,
+  candidate, materialization, exact-match and search counters; RSS was within
+  0.4 MiB and every process used zero swap.  The single-line reuse was removed
+  and the executable restored to `02df874c...`.  Its saved traversal was too
+  small to offset the changed inlining/register layout in the surrounding
+  19%-inclusive hint path.
 - Converting unit-conflict code-tree recursion to an explicit DFS was also
   implemented and removed.  The prototype shared a 32-byte union with the
   accepted generalization stack, retained pending-subtree, query-variable and
