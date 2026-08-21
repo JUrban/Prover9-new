@@ -1336,6 +1336,24 @@ plausible-looking options that were already negative.
   were skipped.  Any future posting-table change must measure successful and
   unsuccessful probe distributions rather than optimize hash instruction
   count alone.
+- Bypassing that finalizer only for already-finalized conjunction-profile keys
+  was also implemented and removed.  Unlike the rejected weak hash, this path
+  used the low bits of the full `fast_conjunction_key()` SplitMix result
+  directly and left every ordinary structural posting on the established
+  hash.  It therefore removed two multiplies from each profile add/read with
+  no added bytes, while rehash selected the same route by posting kind.
+  `hint_postings_test`, `hint_preview_test` and `compact_unit_index_test`
+  passed.  The Josef 01/301 reversed mean was directionally positive but
+  noisy, 13.645 versus 13.755 total CPU seconds (-0.8%), with one win and one
+  loss.  At the exact 1,501-given endpoint the result was neutral: candidate
+  totals were 72.41 and 73.27 seconds versus control totals 72.05 and 73.80;
+  means were 72.84/72.93 seconds (-0.12%), again one win and one loss.  Every
+  endpoint, hint/cache/conjunction counter and logical byte count was exact,
+  and all processes used zero swap.  Held-out gates were skipped because a
+  neutral primary result cannot justify changing the table layout.  The
+  source and release binary were restored byte-for-byte; raw pair directories
+  are `/tmp/profile-prehashed-j01-1501-p1.ADW7yX` and
+  `/tmp/profile-prehashed-j01-1501-p2.knwlot`.
 - That required probe audit has now been run at the exact bounded endpoints,
   with temporary counters that were removed immediately afterward.  At Josef
   01/1,501 the ordinary table averaged 1.018 probes per lookup (maximum 33)
