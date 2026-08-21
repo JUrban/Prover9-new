@@ -141,6 +141,75 @@ and all authoritative/audit index strategies; the second covers legacy and
 file-backed compact variants on two distinct problems.  These tests establish
 bounded semantic compatibility, not long-run CPU performance.
 
+### Portable `-O2 -flto`: accepted bounded CPU build candidate
+
+The corrected profile still has very high call volume across the LADR and
+Prover9 translation-unit boundary: allocation, term construction, matching,
+substitution and inference helpers are called hundreds of millions of times
+even at 1,501 givens.  Portable link-time optimization lets GCC inline and
+specialize across that boundary without changing a search data structure,
+instruction-set target, P9 option, or persistent RAM allocation.  Unlike the
+rejected PGO build, it uses no workload-derived profile.
+
+An isolated GCC 13.3.0 x86-64 build used exactly `-O2 -flto` for LADR and
+Prover9.  Strict clocks-off reversed pairs compared it with the same source at
+ordinary portable `-O2`; every process had a 2.2-GB address-space cap and
+reported zero swap:
+
+| Exact gate | ordinary `-O2` mean CPU | `-O2 -flto` mean CPU | change | mean RSS change |
+|---|---:|---:|---:|---:|
+| Josef 01 / 301 | 12.830 s | 12.010 s | **-6.39%** | +236 KiB |
+| Josef 01 / 1,501 | 72.830 s | 66.885 s | **-8.16%** | +262 KiB |
+| CHAT / 601 | 37.905 s | 37.220 s | **-1.81%** | +184 KiB |
+| Josef 02 / 601 | 32.300 s | 30.930 s | **-4.24%** | +148 KiB |
+
+LTO won all eight placements.  The individual Josef 01/1,501 totals were
+65.12 versus 69.68 seconds and 68.65 versus 75.98 after reversing cores and
+launch order.  Mean user CPU fell from 69.695 to 63.815 seconds (-8.44%);
+system CPU was effectively unchanged at 3.135 versus 3.070 seconds.  Both
+ended at `(1501,3603947,521972,0)` with identical unit, nonunit, hint, cache,
+selector and allocator work.  The executable contains no extra search state;
+its observed RSS changes are sub-megabyte layout noise.
+
+Normalized final operational-statistic digests were identical within every
+pair: `16949d6e...` at Josef 01/301, `b97ccd76...` at Josef 01/1,501,
+`f94b16b9...` for CHAT and `0eeb09c6...` for Josef 02.  The normalization
+excludes sampled clock values but includes the endpoint, rule counts and the
+principal compact/hint-index counters.  This is stronger evidence than the
+endpoint alone and confirms that LTO did not perturb the OTTER trajectory.
+
+The supported build is now:
+
+```sh
+make prover9-lto
+```
+
+It first compiles and links a probe with the selected compiler, rebuilds LADR
+and Prover9 in a distinct `release-lto` mode, and installs `bin/prover9`.
+`make all LTO=1` applies the same portable mode consistently to every program.
+`LTO=1 DEBUG=1` is rejected, while `NATIVE=1` retains its historical
+host-specific `-O3 -march=native -flto` behavior.  Mode-sentinel dependencies
+were made explicit after the first supported parallel build exposed a race in
+which cleanup could delete an object compiled concurrently; both O2-to-LTO
+and LTO-to-O2 `-j2` switches now complete and rebuild cleanly.
+
+The measured LTO executable is SHA-256
+`8401eed8a2060ae4ccebf7e75fe45e913c5ad226a5f3aaae2622b353ecddac4b`
+and is 1,287,224 bytes, versus 1,435,584 bytes for the measured O2 control.
+That hash is a toolchain-specific provenance value, not a cross-compiler
+expectation.  The supported build is byte-identical to the isolated benchmark
+candidate and passes the focused posting/unit/10,000-record long-run tests,
+the multi-problem compact-generalization smoke and the full compact OTTER
+audit matrix.  It is now the recommended CPU authority build, but only the
+external proof-endpoint run can establish mature CPU parity with old P9.
+Raw timing/output directories are
+`/tmp/o2-lto-j01-301-p1.mHBMUd`,
+`/tmp/o2-lto-j01-301-p2.E7kjhd`,
+`/tmp/o2-lto-j01-1501-p1.3TvsWK`,
+`/tmp/o2-lto-j01-1501-p2.XUUIcD`,
+`/tmp/o2-lto-heldout-601-p1.Ne8dZh`, and
+`/tmp/o2-lto-heldout-601-p2.MPqlWe`.
+
 ### Packed-hint cache: mature correction and selective admission
 
 The production default allocates a 2-MiB exact result cache in `packed_fast`.
@@ -2176,6 +2245,10 @@ CPU estimates are less certain and the gains are not additive:
   slower and remains an explicit caveat;
 - the slab recycler changes almost no bounded CPU but removes nearly all
   post-warm-up slab unmaps by 2,000 givens;
+- portable `-O2 -flto` improves the exact Josef 01/1,501 reversed mean by
+  8.16%, wins both placements, and also wins both CHAT/601 and Josef 02/601
+  held-out placements by 1.81% and 4.24% in paired means, with no new search
+  state and sub-megabyte RSS differences;
 - native compilation may add 0--5% depending on the host.
 
 The earlier 28,000--34,000-second estimate was made before the clock mismatch
@@ -2186,35 +2259,40 @@ phase intervals, while unit-tree, hint and selector work grow differently.
 The installed clocks-off engine is 2.86 times faster than old P9 at the
 bounded exact state, and current source additionally contains the amortized
 report polling, slab recycler and mature index changes that were absent from
-`new3`.  It is therefore plausible that a clocks-off, freshly built
-current-source full run reaches the 24,191-second 1.25-times-old gate, but
-**CPU parity has not yet been demonstrated**.  Do not publish a tighter
-full-run estimate until that external acceptance run completes.
+`new3`.  The supported portable LTO build then removes another measured 8.16%
+at the exact 1,501-given Josef gate and improves both held-out workloads.  It
+is therefore plausible that a clocks-off, LTO-built current-source full run
+reaches the 24,191-second 1.25-times-old gate, but **CPU parity has not yet
+been demonstrated**.  Do not publish a tighter full-run estimate until that
+external acceptance run completes.
 
 ## Build and run the decisive Josef 01 comparison
 
-### Portable baseline build
+### Recommended portable LTO build
 
 From this repository and branch:
 
 ```sh
 git switch josef01-cpu-next
-make -C ladr lib
-make -C provers.src prover9
-cp -p provers.src/prover9 bin/prover9
+make prover9-lto
 sha256sum bin/prover9
 ```
 
 Do not reuse objects from a differently instrumented, sanitized, profiled, or
-`NATIVE=1` build.  If in doubt, use a fresh worktree or clean the build before
-compiling.  In particular, the repository's currently installed `bin/prover9`
-is intentionally the older PGO executable and does not contain commits
+`NATIVE=1` build.  The build-mode sentinel automatically performs the needed
+object rebuild when entering `release-lto`; a fresh worktree remains useful
+for retaining multiple binaries side by side.  In particular, the repository's
+currently installed `bin/prover9` is intentionally the older PGO executable
+until the command above is run, and does not contain commits
 `107665b`, `3f2f566`, `4c0d0b2`, `b3cde19`, `df7bfdb`, `f4f4614`,
-`1b15b40`, `b1d8128`, `9fecf54`, or `b3d19f3`; run the build and copy steps
-above before the authority run.  It also lacks the iterative generalization
+`1b15b40`, `b1d8128`, `9fecf54`, or `b3d19f3`; run `make prover9-lto`
+before the authority run.  It also lacks the iterative generalization
 traversal in `7cb381b` and the direction-specialized nonunit traversal in
-`bf7bfb0`.  The current fresh portable source binary, including the
+`bf7bfb0`.  The current fresh portable LTO source binary, including the
 incremental renumbering sentinel from `823b7d6`, has SHA-256
+`8401eed8a2060ae4ccebf7e75fe45e913c5ad226a5f3aaae2622b353ecddac4b`
+when built by GCC 13.3.0 at `-O2 -flto`; other supported compilers can produce
+a different byte hash.  The corresponding ordinary-O2 control is
 `69fadecd3daaf2aa9f6179c54557c65199ef73838a4660f010fc31dc8c490d77`.
 The `bf7bfb0` control used by the final paired gates remains
 `02df874c53a55d5be5c53f5e1d9abb995e18c1aaff480e3cf817ab19362f39d6`.
@@ -2345,8 +2423,8 @@ PSS, and filesystem free space are different quantities.
 
 For an optional native comparison, build in a separate clean worktree with
 `NATIVE=1`.  Mixing portable and native objects is invalid.  Run it only after
-the portable authority result so compilation variance cannot obscure whether
-the algorithmic changes worked.
+the portable LTO authority result so compilation variance cannot obscure
+whether the algorithmic changes worked.
 
 ## Acceptance checklist
 
