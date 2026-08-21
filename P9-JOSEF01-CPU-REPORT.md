@@ -1843,6 +1843,23 @@ plausible-looking options that were already negative.
   one-variable source, were removed completely.  Held-out runs were skipped
   after the primary gate failed.  This repeat directly rejects reviving the
   earlier adaptive-prefix result under the current production configuration.
+- Caching each flattened compact-unit query node's variable/symbol code in
+  the existing four bytes of `struct cui_query_term` tail padding was
+  implemented and removed.  The cache was exact and kept the query record at
+  16 bytes, but extending it across generalization, instance and unification
+  traversal lost the first Josef 01/301 gate: candidate/control mean user CPU
+  was 11.835/11.705 seconds (+1.11%) and mean total CPU was 13.745/13.665
+  seconds (+0.59%).  A preceding narrower form used the cache only in forward
+  generalization and reduced its reusable DFS frame from 32 to 24 bytes.  It
+  looked slightly favorable at 301 givens (13.325 versus 13.380 seconds), but
+  the exact 1,501-given reversed pair was a tie: candidate totals were 66.98
+  and 67.74 seconds versus 67.13 and 67.65 for the controls; mean user CPU was
+  fractionally worse at 64.530 versus 64.480 seconds.  Every run preserved
+  its exact search endpoint and used zero swap.  The frame saved only 1 KiB
+  at the observed 128-frame scratch capacity, so neither a CPU-neutral layout
+  change nor the broader short-prefix regression justifies production code.
+  Both forms were removed and the portable executable restored byte-for-byte
+  to accepted SHA-256 `69fadecd...`; held-out runs were intentionally skipped.
 - Avoiding the default clause weighter's unused substitution `Context` was
   also implemented and removed.  With no ordinary weight rules the context
   cannot be read; with rules, failed matches restore their entry trail and
