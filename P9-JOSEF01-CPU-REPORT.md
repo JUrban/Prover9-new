@@ -645,6 +645,60 @@ record and profile are `/tmp/josef01-iterative-gprof-1000.{out,time,txt}`;
 their SHA-256 values are respectively `2b5c0280...`, `1bdc06f8...` and
 `689bbf1d...`.
 
+### Direction-specialized compact nonunit traversal
+
+Commit `bf7bfb0` specializes the compressed nonunit feature-index traversal
+for forward and back subsumption.  The preceding common recursive routine
+carried both a direction flag and a 16-byte structural summary through every
+recursive call.  At the exact Josef 01/1,001 endpoint, the fresh profile
+charged `collect_candidates()` 1.34 sampled seconds (3.58% of profiled self
+CPU) across 323,115 outer queries and 10,354,722 recursive calls.  On the
+measured x86-64 ABI, the old argument list also exceeded the integer argument
+registers.
+
+The two new kernels contain only their relevant ordered-label comparison and
+pass the read-only structural summary by pointer.  Their recursive calls have
+six integer/pointer arguments on x86-64, so the hot call path no longer spills
+arguments solely to support the other direction.  This is a traversal
+specialization, not a new index: node, label, posting, result order and exact
+subsumption tests are unchanged.  It adds no persistent or per-clause memory
+and requires no option change.
+
+Strict clocks-off serial reversed gates against the accepted iterative
+generalization binary gave:
+
+| Josef 01 gate | Common traversal mean total | Specialized mean total | Change | Mean RSS change |
+|---|---:|---:|---:|---:|
+| 301 givens | 13.050 s | 12.705 s | **-2.64%** | -38 KiB |
+| 1,001 givens | 45.260 s | 42.400 s | **-6.32%** | +120 KiB |
+| 1,501 givens | 77.080 s | 76.540 s | **-0.70%** | -410 KiB |
+
+At 1,501 givens, mean user CPU improved from 74.240 to 73.495 seconds
+(-1.00%), while system CPU moved from 2.840 to 3.045 seconds.  The total-CPU
+placements disagreed (76.10 versus 75.10 seconds and 76.98 versus 79.06
+seconds), so the -0.70% mature-prefix result is deliberately classified as a
+small gain rather than a precise projection.  Every process ended at
+`(Given=1501, Generated=3603947, Kept=521972, proofs=0)`, shared selected-given
+SHA-256 `41cae549c3acae5751600ee9fe9a7ec0f109c14882b0030679f8034e258e6310`,
+and had exact rule, hint, passive, ancestor, allocator and final nonunit query
+profiles.  All used zero swap.
+
+The reversed cross-workload checks expose both the benefit and its limit.
+Josef 02/601 improved from 30.315 to 29.300 mean total CPU (-3.35%) and won
+both placements, with exact `(601,524799,26671,0)` endpoints and query
+profiles.  CHAT/301 was effectively tied in the first placement (24.79 versus
+24.72 seconds) but slower in the second (29.44 versus 26.91 seconds), for
+27.115 versus 25.815 mean total CPU (+5.04%).  Its endpoint and query profile
+also remained exact.  Because CHAT performs only 135,908 forward-nonunit work
+units at this gate, compared with 21,944,639 at Josef 01/1,501, the CHAT
+difference cannot be attributed confidently to the much smaller affected
+path; it is retained as an explicit regression caveat rather than dismissed.
+
+`compact_feature_index_test`, the 10,000-record compact long-run stress test,
+the compact generalization matrix and focused ASan/UBSan builds all pass.  The
+measured portable binary is SHA-256
+`02df874c53a55d5be5c53f5e1d9abb995e18c1aaff480e3cf817ab19362f39d6`.
+
 ## Authoritative completed runs
 
 The source files are:
@@ -1551,7 +1605,10 @@ dynamic traversal-stack reservation is unchanged because a smaller frame
 array makes room for the coordinate array; the complete current source adds
 only four 16-byte fixed coordinates to the transient `para_into_lit()` frame.
 The compact-unit generalization binding bitset likewise adds no persistent
-state and reduces each optimized recursive frame from 488 to 72 bytes.
+state and reduces each optimized recursive frame from 488 to 72 bytes.  Its
+accepted iterative successor uses only a query-bounded reusable stack (4 KiB
+at the 1,501-given gate).  Direction-specializing the nonunit feature walk
+adds no index field, scratch allocation or per-clause state.
 
 The adaptive unit strategy is the exception: it maintains compressed position
 features as well as the code tree.  Unlimited depth still projects to about
@@ -1628,6 +1685,15 @@ CPU estimates are less certain and the gains are not additive:
   recursive frame by 85.2% with no persistent allocation; its exact
   Josef 01/1,501 reversed mean improves total CPU by 1.61%, while bounded CHAT
   and Josef 02 remain exact and neutral-to-positive;
+- replacing that generalization recursion with a reusable explicit stack then
+  improves the Josef 01/1,501 reversed mean by another 1.11%, with only 4 KiB
+  of query-bounded scratch and neutral-to-positive bounded cross-workload
+  results;
+- specializing the compact nonunit traversal by subsumption direction removes
+  a direction test and spilled arguments from millions of recursive calls;
+  its Josef 01 reversed means improve 2.64%, 6.32% and 0.70% at 301, 1,001 and
+  1,501 givens, and Josef 02/601 improves 3.35%, while noisy CHAT/301 is 5.04%
+  slower and remains an explicit caveat;
 - the slab recycler changes almost no bounded CPU but removes nearly all
   post-warm-up slab unmaps by 2,000 givens;
 - native compilation may add 0--5% depending on the host.
@@ -1666,9 +1732,10 @@ is intentionally the older PGO executable and does not contain commits
 `107665b`, `3f2f566`, `4c0d0b2`, `b3cde19`, `df7bfdb`, `f4f4614`,
 `1b15b40`, `b1d8128`, `9fecf54`, or `b3d19f3`; run the build and copy steps
 above before the authority run.  It also lacks the iterative generalization
-traversal in `7cb381b`.  The fresh portable source binary measured at
-`7cb381b` has SHA-256
-`55e42911d55d2f27174bf88259e9ec39d2cb603ba48fcaf55516dbbfb555a831`.
+traversal in `7cb381b` and the direction-specialized nonunit traversal in
+`bf7bfb0`.  The fresh portable source binary measured at `bf7bfb0` has
+SHA-256
+`02df874c53a55d5be5c53f5e1d9abb995e18c1aaff480e3cf817ab19362f39d6`.
 
 ### Prover9 options
 
@@ -1842,7 +1909,11 @@ The new run is accepted only if all of the following hold:
     `summary_reject_candidates`.  Compare interval ratios against conjunction
     queries and posting candidates; a falling ratio is harmless semantically
     but limits the full-run CPU gain projected from the bounded prefix.
-11. Preserve every `Generated_by_rule` count.  Capture the periodic `ilist`
+11. Preserve each periodic `Compact_query_profile` for nonunit forward and
+    back subsumption.  The specialized traversal must preserve query,
+    candidate, work, live/dead, exact-test and success counts; it changes only
+    how the same ordered radix edges are walked.
+12. Preserve every `Generated_by_rule` count.  Capture the periodic `ilist`
     allocation lines as well: their 32-bit totals wrap, so reconstruct each
     interval with modulo-2^32 deltas before comparing cumulative allocation
     work.  The stack-path change should affect allocation traffic, never the
