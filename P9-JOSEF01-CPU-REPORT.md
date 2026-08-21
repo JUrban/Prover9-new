@@ -1183,6 +1183,47 @@ adaptive `x2` audit, and `compact_generalization_smoke_test.sh` pass on the
 combined source.  Peak RSS was unchanged within measurement noise and every
 measured process reported zero swap.
 
+### Incremental variable-renumbering sentinel
+
+The fresh Josef 01/1,001 profile found 1,781,874 calls to
+`renumber_variables()` and 2,901,653 term traversals below it.  The old setup
+cleared all 100 entries of the first-occurrence map before every clause or
+term, even though lookup already stops at the first `-1` entry and ordinary
+clauses use far fewer than 100 distinct variables.  The accepted source now
+initializes only entry zero.  Whenever a new old-variable number is appended,
+`renum_vars_recurse()` writes the following `-1` sentinel.  Thus the map
+retains exactly the same first-occurrence order and overflow behavior while
+untouched tail entries receive no stores.  `renum_vars_map()` likewise stops
+at the maintained sentinel.  This adds no heap, index, clause or long-run
+state.
+
+Pinned, clocks-off reversed gates against `bf7bfb0` produced:
+
+| Gate | Full-clear map | Incremental sentinel | Change | Placement result |
+|---|---:|---:|---:|---|
+| Josef 01 / 301 | 14.165 s | 13.980 s | -1.31% | won both |
+| Josef 01 / 1,001 | 48.445 s | 48.190 s | -0.53% | one win, one loss |
+| CHAT / 601 | 40.815 s | 40.780 s | -0.09% | one win, one loss |
+| Josef 02 / 601 | 30.970 s | 31.015 s | +0.15% | one win, one loss |
+
+Every pair preserved its exact given/generated/kept endpoint, packed hint
+operation counts, rule/allocator traffic and proof count, and every process
+reported zero swap.  The held-out workloads are neutral rather than evidence
+of a universal speedup, but importantly neither shows the repeated two-sided
+loss that rejected the query-context prototypes.  Josef 01/1,001 peak RSS
+moved from 598,686 to 608,208 KiB even though logical memory is byte-for-byte
+unchanged; CHAT and Josef 02 moved by only about 1.2 MiB and 0.3 MiB.  Treat
+the 9.3-MiB difference as an optimized-layout/page-touch cost in RAM
+comparisons, not as hidden map storage.
+
+`renumber_variables_test` covers sparse old variable numbers shared across
+literals, the complete 100-distinct-variable boundary, and the returned
+renumbering map.  It passes in release mode and with AddressSanitizer plus
+UndefinedBehaviorSanitizer.  The broader compact index, inference iterator,
+hint, long-run and proof-smoke gates also pass.  This is a small general
+per-clause saving, not a claim of radical CPU reduction; its value is that its
+work cannot grow superlinearly with a long search.
+
 ### Reproducible production CHAT smoke
 
 Commit `de55328` adds the `new_otter_compact_file_production` case to

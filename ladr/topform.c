@@ -417,7 +417,6 @@ may contain variable indexes greater than max_vars.
 void renumber_variables(Topform c, int max_vars)
 {
   int a[MAX_VARS], *vmap;
-  int i;
   Literals lit;
 
   if (max_vars > MAX_VARS)
@@ -425,8 +424,11 @@ void renumber_variables(Topform c, int max_vars)
   else
     vmap = a;
 
-  for (i = 0; i < max_vars; i++)
-    vmap[i] = -1;
+  /* renum_vars_recurse() maintains the unused-slot sentinel as mappings are
+     appended.  Most inferred clauses use far fewer than MAX_VARS distinct
+     variables, so do not clear the untouched tail on every clause. */
+  if (max_vars > 0)
+    vmap[0] = -1;
 
   for (lit = c->literals; lit != NULL; lit = lit->next) {
     /* There's a special case in which the atom can be null. */
@@ -465,15 +467,14 @@ Do not use this to renumber variables of a clause (see renumber_variables).
 void term_renumber_variables(Term t, int max_vars)
 {
   int a[MAX_VARS], *vmap;
-  int i;
 
   if (max_vars > MAX_VARS)
     vmap = safe_malloc((max_vars * sizeof(int)));
   else
     vmap = a;
 
-  for (i = 0; i < max_vars; i++)
-    vmap[i] = -1;
+  if (max_vars > 0)
+    vmap[0] = -1;
 
   t = renum_vars_recurse(t, vmap, max_vars);
   
@@ -498,8 +499,7 @@ Plist renum_vars_map(Topform c)
   Literals lit;
   Plist pairs = NULL;
 
-  for (i = 0; i < MAX_VARS; i++)
-    a[i] = -1;
+  a[0] = -1;
 
   for (lit = c->literals; lit != NULL; lit = lit->next)
     lit->atom = renum_vars_recurse(lit->atom, a, MAX_VARS);
@@ -510,7 +510,7 @@ Plist renum_vars_map(Topform c)
 
   /* Build the list of pairs. */
 
-  for (i = 0; i < MAX_VARS; i++) {
+  for (i = 0; i < MAX_VARS && a[i] != -1; i++) {
     /* a[i] -> i */
     if (a[i] != -1 && a[i] != i) {
       Term v1 = get_variable_term(a[i]);

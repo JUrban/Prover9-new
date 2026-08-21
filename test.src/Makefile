@@ -11,7 +11,7 @@ CFLAGS = $(XFLAGS) -g  -O0 -Wall
 # CFLAGS = $(XFLAGS) -pg -O -Wall
 # CFLAGS = $(XFLAGS)  -Wall -pedantic
 
-PROGRAMS = avltest comma_num_test symbol_table_test default_weight_test memory_lifecycle_test allocator_churn_test bookkeeping_lifecycle_test ancestor_store_test ancestor_store_scale_test checkpoint_selector_test dense_selector_compaction_test dense_selector_file_scale_test dense_selector_file_order_test cold_passive_store_test hint_postings_test hint_preview_test compressed_unit_match_test paramod_iterator_test hyper_iterator_test rewrite_only_store_test compact_term_pool_test compact_id_map_test compact_rewrite_test compact_unit_index_test compact_back_demod_test compact_feature_index_test compact_long_run_test
+PROGRAMS = avltest comma_num_test symbol_table_test default_weight_test renumber_variables_test memory_lifecycle_test allocator_churn_test bookkeeping_lifecycle_test ancestor_store_test ancestor_store_scale_test checkpoint_selector_test dense_selector_compaction_test dense_selector_file_scale_test dense_selector_file_order_test cold_passive_store_test hint_postings_test hint_preview_test compressed_unit_match_test paramod_iterator_test hyper_iterator_test rewrite_only_store_test compact_term_pool_test compact_id_map_test compact_rewrite_test compact_unit_index_test compact_back_demod_test compact_feature_index_test compact_long_run_test
 
 all: ladr apps
 
@@ -47,6 +47,9 @@ symbol_table_test: symbol_table_test.o ../ladr/libladr.a
 
 default_weight_test: default_weight_test.o ../ladr/libladr.a
 	$(CC) $(CFLAGS) -o default_weight_test default_weight_test.o ../ladr/libladr.a -lm
+
+renumber_variables_test: renumber_variables_test.o ../ladr/libladr.a
+	$(CC) $(CFLAGS) -o renumber_variables_test renumber_variables_test.o ../ladr/libladr.a -lm
 
 memory_lifecycle_test: memory_lifecycle_test.o ../ladr/libladr.a
 	$(CC) $(CFLAGS) -o memory_lifecycle_test memory_lifecycle_test.o ../ladr/libladr.a -lm

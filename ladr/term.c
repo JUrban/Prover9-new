@@ -1582,8 +1582,11 @@ Term renum_vars_recurse(Term t, int vmap[], int max_vars)
       i++;
     if (i == max_vars)
       fatal_error("renum_vars_recurse: too many variables");
-    if (vmap[i] == -1)
+    if (vmap[i] == -1) {
       vmap[i] = VARNUM(t);
+      if (i + 1 < max_vars)
+        vmap[i + 1] = -1;
+    }
     free_term(t);
     return get_variable_term(i);
   }
@@ -1608,8 +1611,11 @@ Term renum_vars_recurse(Term t, int vmap[], int max_vars)
           i++;
         if (i == max_vars)
           fatal_error("renum_vars_recurse: too many variables");
-        if (vmap[i] == -1)
+        if (vmap[i] == -1) {
           vmap[i] = VARNUM(child);
+          if (i + 1 < max_vars)
+            vmap[i + 1] = -1;
+        }
         free_term(child);
         ARG(s,c) = get_variable_term(i);
       }
