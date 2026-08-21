@@ -1009,6 +1009,30 @@ Both strategies ended at `(Given=1501, Generated=3603947, Kept=521972)` with
 the same hint/search counters and zero process swap.  Mean RSS rose from
 675,562 to 693,762 KiB (+18.2 MiB).
 
+The current portable source at `91a64f7` independently reconfirmed this
+crossover after the iterative generalization, direction-specialized nonunit
+and incremental-renumbering changes.  A clocks-off, pinned reversed pair using
+the same binary for both policies gave:
+
+| Current-source Josef 01 / 1,501 | user | system | total | peak RSS |
+|---|---:|---:|---:|---:|
+| `code_tree` mean | 79.675 s | 4.070 s | 83.745 s | 668,524 KiB |
+| adaptive, depth 2 mean | 77.020 s | 3.925 s | 80.945 s | 668,162 KiB |
+| change | -3.33% | -3.56% | **-3.34%** | -362 KiB |
+
+Adaptive won both placements.  Every run ended at the exact
+`(1501,3603947,521972,0)` search endpoint with identical hint and allocator
+traffic and zero process swap.  Conflict code-tree work fell from 73,930,751
+to 4,609,594 nodes (-93.8%); adaptive additionally examined 3,052,672
+position postings and made 452,859 exact tests.  Secondary refinement rejected
+2,827,400 of 3,757,457 checks (75.2%), and tertiary refinement rejected
+530,510 of 704,785 (75.3%), so neither stage is currently degenerating into
+unproductive traversal.  Logical unit-index storage was 53,271,408 versus
+48,582,256 bytes (+4.47 MiB), although page-layout noise made process RSS
+slightly lower in this pair.  The exact code-tree/adaptive input SHA-256 values
+were `3cb3ead5...` and `2c6a41db...`; both used the current portable binary
+`69fadecd...` under independent 2-GiB limits.
+
 More important than the small elapsed win is the diverging work slope.  At
 1,001 givens, depth 2 replaces roughly 35 million code-tree nodes with about
 5 million combined tree/posting/exact items.  By 1,501, code-tree work has
