@@ -2,19 +2,67 @@
 
 ## Status
 
-Branch `josef01-cpu-next` preserves the Josef 01 search trajectory on every
-bounded replay performed here and contains several general, non-Josef-specific
-CPU improvements.  At the exact 1,501-given bounded endpoint, the recommended
-portable-LTO build is now 2.30 times as fast as preserved old P9.  It has
-**not** been run to the Josef 01 proof endpoint on this 23-GiB development
-host.  The proof-endpoint CPU result therefore remains a user-run acceptance
-gate, not a completed claim.
+Branch `josef01-cpu-next` now passes the external Josef 01 proof-endpoint CPU
+gate.  The supplied `Josef_01.out.new4` follows all 30,827 old-P9 selected
+givens byte for byte, reaches the identical generated/kept/proof endpoint and
+matches the same 48,968 hints.  It needs 13,536.94 seconds of total CPU versus
+19,352.46 seconds for preserved old P9: **30.05% less CPU, or 1.43 times old-P9
+throughput at the proof endpoint**.  Wall time improves by the same 30.0%, the
+sampled final PSS is 8,954.6 MiB, and sampled process swap is zero.
 
 The completed compact baseline is still an important result: it proves the
 same theorem after the same 30,827 given clauses while reducing measured
-resident memory by about 80%.  Its CPU cost, however, was 1.90 times old P9.
-The work on this branch attacks measured causes of that cost without changing
-clause selection, hint answers, or inference order.
+resident memory by about 80%.  Its CPU cost was 1.90 times old P9 under an
+unfair exact-clock configuration.  The accepted clocks-off, portable-LTO,
+adaptive-depth-2 result removes that CPU deficit without changing clause
+selection, hint answers or inference order.  The original goal -- retaining
+the radical RAM reduction while making Josef 01 CPU-competitive with old P9
+at the actual proof -- is therefore satisfied.
+
+### 2026-08-21 external proof-endpoint acceptance
+
+The two proof outputs used for the decisive comparison are
+`/project/bob/Josef_01.out.old` and
+`/project/bob/Josef_01.out.new4`.  The latter has SHA-256
+`94c8a69149dbcfb3ebcc98eefe2e2f30271191516ac9a306a645f0a8bd584e99`.
+It echoes the complete recommended option block: file-backed dense passive
+storage and selectors, the 1,048,576-entry selector buffer, `packed_fast`
+hints, adaptive unit indexing at feature depth 2, the 2-MiB staged hint cache,
+and detailed clocks disabled.  The text output cannot independently encode
+the executable hash, so binary provenance continues to depend on recording
+the hash produced immediately after `make prover9-lto`.
+
+| Proof-endpoint process | Given / generated / kept | matched hints | user CPU | system CPU | total CPU | wall | final memory |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| preserved old P9 | 30,827 / 1,602,769,536 / 36,195,388 | 48,968 | 19,064.46 s | 288.00 s | 19,352.46 s | 19,356 s | 45,258.48 MiB reported |
+| earlier compact `new3`, exact clocks/code tree | same | 48,968 | 28,163.94 s | 8,532.45 s | 36,696.39 s | 36,725 s | 8,870.7 MiB PSS |
+| accepted compact `new4`, clocks off/LTO/adaptive depth 2 | same | 48,968 | 13,491.09 s | 45.85 s | **13,536.94 s** | **13,551 s** | **8,954.6 MiB PSS; 0 swap** |
+
+The complete selected-given stream in all three files has 30,827 lines and
+the same SHA-256,
+`c13273c0ccc8a7e3e57306e6a7922952c2c41699575fa259968f45544dc4faa8`.
+This is stronger than endpoint equality: clause IDs, selected clauses and
+printed justifications all agree.  The terminal proof and principal search
+counters agree as well.  Thus the speed result is not due to a shorter or
+diverged search.
+
+Relative to old P9, `new4` uses 30.05% less total CPU (1.4296x throughput)
+and 29.99% less wall time.  Comparing old P9's reported 45,258.48 MiB with
+the sampled compact PSS gives an approximate 80.21% resident-memory saving;
+the metrics are not identical, so that RAM percentage remains appropriately
+labelled approximate.  Relative to `new3`, final PSS rises by only 83.9 MiB
+(0.95%) while total CPU falls by 63.11%.  That CPU difference must not be
+assigned solely to one optimization: `new3` paid exact-clock overhead and
+also predates the accepted source/build changes.
+
+The interval auditor reports increasing CPU per selected given late in the
+run, which is expected because generated work per given grows from about
+12,353 in the first reported interval to about 131,128 in the last.  Generated
+throughput is stable overall (late/early ratio 0.96).  Adaptive routing moves
+from 69.4% to 92.0% position-index use; although postings per conflict grow,
+the final secondary and tertiary rejection rates remain strong at 87.5% and
+90.2%.  The full proof endpoint, zero swap and 1.43x old-P9 result settle the
+acceptance question despite those useful long-run warnings.
 
 ### 2026-08-20 measurement correction
 
@@ -202,8 +250,9 @@ That hash is a toolchain-specific provenance value, not a cross-compiler
 expectation.  The supported build is byte-identical to the isolated benchmark
 candidate and passes the focused posting/unit/10,000-record long-run tests,
 the multi-problem compact-generalization smoke and the full compact OTTER
-audit matrix.  It is now the recommended CPU authority build, but only the
-external proof-endpoint run can establish mature CPU parity with old P9.
+audit matrix.  This made it the recommended CPU authority build; the external
+`new4` proof-endpoint result documented above subsequently established mature
+CPU competitiveness with old P9.
 Raw timing/output directories are
 `/tmp/o2-lto-j01-301-p1.mHBMUd`,
 `/tmp/o2-lto-j01-301-p2.E7kjhd`,
@@ -249,10 +298,10 @@ extraction retained the warning printed immediately before the input footer,
 so two approximately three-second parser failures were discarded.  The
 corrected extraction stops at that warning, passed a one-given parse/search
 smoke, and produced the two complete LTO measurements above.  No failed run is
-included in a mean.  This bounded gate materially strengthens the CPU case,
-but it still cannot prove proof-endpoint parity because passive, selector,
-unit-index and hint-index costs scale differently over the remaining 29,326
-givens.
+included in a mean.  At this stage the bounded gate materially strengthened
+the CPU case but could not prove proof-endpoint parity because passive,
+selector, unit-index and hint-index costs scale differently over the remaining
+29,326 givens.  The later `new4` full proof resolves that uncertainty.
 
 ### Packed-hint cache: mature correction and selective admission
 
@@ -2324,13 +2373,13 @@ absent from `new3`.  The supported portable LTO build removes another measured
 8.16% at the exact 1,501-given Josef gate and improves both held-out workloads.
 Most importantly, the direct 1,501-given comparison now measures current LTO
 at 66.66 seconds versus old P9 at 153.00 seconds: current is 2.30 times as
-fast while using 30.7% less resident memory at that state.  It is therefore
-plausible that a clocks-off, LTO-built current-source full run reaches the
-24,191-second 1.25-times-old gate, but **CPU parity at the proof endpoint has
-not yet been demonstrated**.  Do not publish a tighter full-run estimate until
-that external acceptance run completes.
+fast while using 30.7% less resident memory at that state.  The subsequent
+clocks-off full run finishes in 13,536.94 total CPU seconds, comfortably below
+the 24,191-second 1.25-times-old gate and also below old P9 itself.  The
+measured proof-endpoint result is the authority; the former extrapolation is
+retained here only to show what the bounded evidence predicted.
 
-## Build and run the decisive Josef 01 comparison
+## Build and reproduce the decisive Josef 01 comparison
 
 ### Recommended portable LTO build
 

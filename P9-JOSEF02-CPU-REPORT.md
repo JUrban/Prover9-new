@@ -1,5 +1,36 @@
 # Josef 02 compact-P9 CPU investigation
 
+## 2026-08-21 current-source full-run result
+
+The supplied `/project/bob/Josef_02.out.new4` proves Josef 02 at the same
+13,006-given trajectory and endpoint as the earlier compact `new3` baseline.
+Its SHA-256 is
+`ae460aa0f10d359280ce613c9a080167d51dae93ab22b5c0248c023415b63a24`.
+Both outputs contain 13,006 selected-given lines with the identical SHA-256
+`f5e0dfa2cbbaf6865656e2db16fd53e7827d4a0f1ff011da166b68abb5d3417a`
+and end at `(Given=13006, Generated=129776312, Kept=9226457, proofs=1)`.
+The new run therefore preserves the proof search rather than obtaining its
+speed from trajectory divergence.
+
+| compact proof | user CPU | system CPU | total CPU | wall | final PSS | swap |
+|---|---:|---:|---:|---:|---:|---:|
+| `Josef_02.out.new3` | 7,972.54 s | 868.76 s | 8,841.30 s | 8,873 s | 4,884.7 MiB | 0 |
+| `Josef_02.out.new4` | 5,645.24 s | 171.91 s | **5,817.15 s** | **5,843 s** | 5,018.1 MiB | 0 |
+
+Thus current `new4` uses **34.20% less total CPU**, or runs at 1.52 times the
+earlier compact proof throughput; wall time improves by 34.15%.  Final PSS
+rises by 133.4 MiB (2.73%), principally in the CPU-first adaptive unit sidecar
+and associated mature state.  This is a favorable CPU/RAM trade on Josef 02,
+but it is not a full old-P9 comparison: no complete old-P9 Josef 02 proof
+output has been supplied.
+
+`josef01_progress_audit.py` deliberately embeds the Josef 01 terminal
+endpoint and packed-conjunction expectation.  Running it on Josef 02 will
+therefore print a terminal `mismatch` and may flag the absent conjunction
+sidecar even though the Josef 02 run is correct.  The selected-given digest
+and exact `new3`/`new4` endpoint comparison above are the relevant Josef 02
+authorities.
+
 Status: source changes implemented and bounded-validated on branch
 `josef02-cpu` through `4fac006`, including low-overhead detailed clocks and
 frequency-gated admission to the mature mask-result cache.  A fresh balanced
@@ -7,9 +38,9 @@ PGO build from that exact source is installed locally.  The current compact
 prover is already 3.9--5.4 times faster than
 the preserved old-P9 binary on exact 300/600-given Josef 02 prefixes.  A full
 old-P9 Josef 02 proof output was not supplied, so this report does not claim a
-measured proof-to-proof old/new CPU ratio.  The existing compact proof is the
-full-run baseline; the next full run is an external acceptance test, not
-something attempted on the low-RAM development machine.
+measured proof-to-proof old/new CPU ratio.  The earlier `new3` compact proof is
+the historical full-run baseline; the `new4` external acceptance run is now
+complete and is summarized above.
 
 ## Reproducible inputs and binaries
 
@@ -771,8 +802,8 @@ At Josef 02/600, that retained PGO candidate is 4.04 times faster in total CPU
 than the preserved old-P9 observation (36.35 versus 146.73 seconds), and 4.21
 times faster in user CPU.  Its roughly 8--12% bounded PGO advantage is useful,
 but must not be extrapolated as a guaranteed full-proof percentage.  The
-1,000-given gate is the longest new Josef 02 run attempted locally; the
-13,006-given proof remains the external acceptance test.
+1,000-given gate was the longest new Josef 02 run attempted locally at that
+stage.  The later `new4` 13,006-given external proof now completes that test.
 
 ### Frequency-gated mature mask-result admission (`4fac006`)
 
