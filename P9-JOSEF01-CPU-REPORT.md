@@ -1231,6 +1231,25 @@ plausible-looking options that were already negative.
   executable byte-for-byte to accepted SHA-256 `02df874c...`.  This result
   also confirms that a smaller generated function or register-only recursive
   call is not by itself sufficient whole-workload evidence.
+- A live-binding bitmap for iterative generalization was also rejected in two
+  storage forms.  It made two 64-bit words authoritative for the 100 possible
+  stored-pattern variables, so query startup did not need to zero 100 pointer
+  slots and branch undo became two mask clears instead of a loop over newly
+  bound variables.  The first form moved the 800-byte binding array from a
+  936-byte public-call frame to reusable index scratch, reducing the generated
+  frame to 136 bytes.  It won both Josef 01/301 placements and averaged 12.410
+  versus 12.925 seconds (-3.98%), but lost both 1,001-given placements and
+  regressed from 44.535 to 45.685 seconds (+2.58%).  Its measured RSS also
+  rose unexpectedly from 598,684 to 608,250 KiB even though authoritative
+  index bytes increased by exactly 800.  A second form kept the array on the
+  stack, removed only the clear/undo work, and retained the 936-byte frame; it
+  already regressed at 301 givens, 14.310 versus 14.000 seconds (+2.21%).
+  Every endpoint, candidate/work/success count and exact answer remained
+  equal, and every process used zero swap.  Both variants were removed and
+  the source executable restored byte-for-byte to accepted SHA-256
+  `02df874c...`.  Avoiding unconditional stores was not worth the added
+  bit-test branches on this workload, and scratch relocation introduced a
+  mature cache/page-touch cost that its nominal 800 bytes did not predict.
 - Converting unit-conflict code-tree recursion to an explicit DFS was also
   implemented and removed.  The prototype shared a 32-byte union with the
   accepted generalization stack, retained pending-subtree, query-variable and
