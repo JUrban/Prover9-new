@@ -1286,6 +1286,78 @@ cost.
 These results are important because they prevent tuning a large run with
 plausible-looking options that were already negative.
 
+- A fresh adaptive-depth-2 `-pg` run at the exact 1,501-given endpoint showed
+  where the accepted crossover actually spends time.  It reached
+  `(1501,3603947,521972,0)` in 123.21 user and 3.77 system seconds, 685,972
+  KiB peak RSS and zero swap; profiler overhead makes those process times
+  unsuitable as release comparisons.  Compact unit generalization was the
+  largest scalable self entry at 6.27 sampled seconds (9.09%), followed by
+  `slab_get` at 3.52 (5.10%), dense posting construction at 3.04 (4.41%),
+  packed candidate collection at 2.99 (4.33%), paramodulation entry at 2.92
+  (4.23%), substitution at 2.57 (3.72%), renumber traversal at 2.40 (3.48%)
+  and nonunit forward collection at 2.32 (3.36%).  Adaptive position-bucket
+  collection was only about 1.5% inclusive, feature selection about 0.9%, and
+  record/path exact checking about 0.9%.  Consequently, merging the secondary
+  and tertiary direct-path traversals was rejected before implementation:
+  only 704,785 tertiary records could share a prefix walk, out of roughly
+  4.4 million position checks, and the complete token-end helper accounted
+  for only about 0.4% across all callers.  Its realistic whole-process upper
+  bound is far below 1% and does not justify another coupled traversal.  The
+  raw output, GNU-time record and profile are
+  `/tmp/josef01-adaptive2-gprof-1501.{out,time,txt}` with SHA-256 values
+  `702747eb...`, `9a53e86d...`, and `8236ca17...`.
+- Moving compact-unit peak-byte recounting from every public query to the
+  rare scratch-growth sites was implemented and removed.  The profile
+  confirmed 2,118,509 full byte-accounting calls by the 1,501-given endpoint,
+  but their visible callees consumed only about 0.06 sampled seconds.  The
+  exact two-placement gate rejected the changed hot layout: candidate totals
+  were 77.76 and 77.22 seconds versus 76.61 and 77.11 for the controls.
+  Candidate/control means were 77.49/76.86 seconds (+0.82%); the candidate
+  lost both placements.  Every run preserved the exact endpoint and
+  allocator/index state, mean RSS differed by only tens of KiB, and swap was
+  zero.  The mutation-point implementation was removed completely.
+- Replacing the profile histogram's data-dependent shift loop with an exact
+  count-leading-zeros bucket computation was also rejected.  A focused test
+  proved identical buckets for the first million values, every 64-bit
+  power-of-two boundary and `ULLONG_MAX`; release assembly used `bsr` instead
+  of the loops.  Four same-core reversed Josef 01/1,501 placements nevertheless
+  averaged 75.285 seconds candidate versus 74.765 control (+0.70%), with
+  three candidate losses and one win.  Endpoints and logical memory were
+  exact, RSS was effectively equal and swap was zero.  The helper and its
+  temporary test were removed.
+- Removing all compact-unit query histograms and sampled timers established a
+  small upper bound rather than a useful production mode.  Across four
+  same-core reversed 1,501-given placements, the no-profile prototype
+  averaged 76.588 seconds versus 76.898 for the fully instrumented control
+  (-0.40%), split two wins and two losses.  Search, index and allocator work
+  remained exact; only the intentionally disabled diagnostic profiles
+  differed.  Sacrificing mature observability for a noisy sub-percent result
+  is counterproductive, so no profile-disable option was added.
+- An old-P9-shaped global size-class free list layered over reclaimable slabs
+  was implemented and removed.  It retained slab ownership and live counts,
+  filtered free-list entries during a pressure/terminal purge, and passed a
+  focused 100,000-object test covering high-water reuse, a live pointer among
+  purged neighbors, exact accounting and complete final reclamation.  This
+  tested whether making allocation/free look more like old P9 could beat the
+  accepted per-slab locality without reviving unbounded passive storage.  It
+  did not.  A four-placement gate averaged 75.255 seconds in fast mode versus
+  74.888 for the same binary's default mode (+0.49%), split two wins and two
+  losses.  Removing redundant internal pop validation still produced 74.525
+  versus 74.250 seconds in the next placement wave.  Fast mode retained 602
+  slabs versus 452 at the endpoint and raised peak RSS by about 37 MiB;
+  logical live/peak bytes, 278,479,565 allocation calls, 9,233,538,528
+  cumulative allocator bytes, the full search endpoint and every proof/index
+  counter were exact, with zero swap.  The existing 256-slab cross-class
+  cache has already removed post-warm-up kernel churn; the global list merely
+  traded locality for retained pages.  All allocator, environment and test
+  code was removed.
+- Expanding the slab size-class table from 128 to the historical 500 was
+  rejected analytically after tracing the apparent 1.63-billion-context
+  signal.  `get_context()` already owns a private clean-context free list, so
+  reported context gets are pointer pops; only the tiny simultaneous context
+  high-water reaches `get_cmem()`.  Expanding slab coverage would therefore
+  add warm-class footprint without removing those operations.
+
 - A direct terminal-posting fast path for iterative generalization was
   implemented and removed.  When a radix edge consumed the complete query,
   it scanned the edge's postings immediately instead of pushing and revisiting
