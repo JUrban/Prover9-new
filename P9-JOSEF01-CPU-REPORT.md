@@ -6,9 +6,13 @@ Branch `josef01-cpu-next` now passes the external Josef 01 proof-endpoint CPU
 gate.  The supplied `Josef_01.out.new4` follows all 30,827 old-P9 selected
 givens byte for byte, reaches the identical generated/kept/proof endpoint and
 matches the same 48,968 hints.  It needs 13,536.94 seconds of total CPU versus
-19,352.46 seconds for preserved old P9: **30.05% less CPU, or 1.43 times old-P9
-throughput at the proof endpoint**.  Wall time improves by the same 30.0%, the
-sampled final PSS is 8,954.6 MiB, and sampled process swap is zero.
+19,352.46 seconds for preserved old P9 according to the final Prover9
+statistics.  The subsequently supplied GNU `time -v` record is the more
+conservative process authority: 13,492.74 user + 47.90 system = 13,540.64
+seconds total, still **30.03% less CPU, or 1.43 times old-P9 throughput at the
+proof endpoint**.  Wall time improves by the same 30.0%.  Peak RSS is
+10,062,044 KiB (9.596 GiB), sampled final PSS is 8,954.6 MiB, and the internal
+`/proc` samples report zero swapped residency.
 
 The completed compact baseline is still an important result: it proves the
 same theorem after the same 30,827 given clauses while reducing measured
@@ -20,6 +24,9 @@ the radical RAM reduction while making Josef 01 CPU-competitive with old P9
 at the actual proof -- is therefore satisfied.
 
 ### 2026-08-21 external proof-endpoint acceptance
+
+`P9-JOSEF-NEW4-FULL-RUN-RESULTS.md` gives the consolidated Josef 01--03
+correctness, GNU-time, peak-memory and concurrency audit.
 
 The two proof outputs used for the decisive comparison are
 `/project/bob/Josef_01.out.old` and
@@ -36,7 +43,8 @@ the hash produced immediately after `make prover9-lto`.
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | preserved old P9 | 30,827 / 1,602,769,536 / 36,195,388 | 48,968 | 19,064.46 s | 288.00 s | 19,352.46 s | 19,356 s | 45,258.48 MiB reported |
 | earlier compact `new3`, exact clocks/code tree | same | 48,968 | 28,163.94 s | 8,532.45 s | 36,696.39 s | 36,725 s | 8,870.7 MiB PSS |
-| accepted compact `new4`, clocks off/LTO/adaptive depth 2 | same | 48,968 | 13,491.09 s | 45.85 s | **13,536.94 s** | **13,551 s** | **8,954.6 MiB PSS; 0 swap** |
+| accepted compact `new4`, clocks off/LTO/adaptive depth 2, internal | same | 48,968 | 13,491.09 s | 45.85 s | 13,536.94 s | 13,551 s | 8,954.6 MiB final PSS; 0 sampled swap |
+| accepted compact `new4`, GNU `time -v` authority | same | 48,968 | 13,492.74 s | 47.90 s | **13,540.64 s** | **13,555 s** | **9,826.2 MiB peak RSS** |
 
 The complete selected-given stream in all three files has 30,827 lines and
 the same SHA-256,
@@ -46,14 +54,16 @@ printed justifications all agree.  The terminal proof and principal search
 counters agree as well.  Thus the speed result is not due to a shorter or
 diverged search.
 
-Relative to old P9, `new4` uses 30.05% less total CPU (1.4296x throughput)
-and 29.99% less wall time.  Comparing old P9's reported 45,258.48 MiB with
-the sampled compact PSS gives an approximate 80.21% resident-memory saving;
-the metrics are not identical, so that RAM percentage remains appropriately
-labelled approximate.  Relative to `new3`, final PSS rises by only 83.9 MiB
-(0.95%) while total CPU falls by 63.11%.  That CPU difference must not be
-assigned solely to one optimization: `new3` paid exact-clock overhead and
-also predates the accepted source/build changes.
+Relative to old P9, the external `new4` total uses 30.03% less CPU (1.4292x
+throughput) and 29.97% less wall time.  Comparing old P9's reported 45,258.48
+MiB with the externally measured compact peak RSS gives an approximate 78.29%
+peak-memory saving; comparing it with final sampled PSS gives 80.21%.  The old
+and new memory metrics are not identical, so the defensible conclusion is a
+roughly 78--80% radical saving rather than one over-precise percentage.
+Relative to `new3`, final PSS rises by only 83.9 MiB (0.95%) while internal
+total CPU falls by 63.11%.  That CPU difference must not be assigned solely to
+one optimization: `new3` paid exact-clock overhead and also predates the
+accepted source/build changes.
 
 The interval auditor reports increasing CPU per selected given late in the
 run, which is expected because generated work per given grows from about
@@ -2374,10 +2384,11 @@ absent from `new3`.  The supported portable LTO build removes another measured
 Most importantly, the direct 1,501-given comparison now measures current LTO
 at 66.66 seconds versus old P9 at 153.00 seconds: current is 2.30 times as
 fast while using 30.7% less resident memory at that state.  The subsequent
-clocks-off full run finishes in 13,536.94 total CPU seconds, comfortably below
-the 24,191-second 1.25-times-old gate and also below old P9 itself.  The
-measured proof-endpoint result is the authority; the former extrapolation is
-retained here only to show what the bounded evidence predicted.
+clocks-off full run reports 13,536.94 internal total CPU seconds and 13,540.64
+seconds under GNU `time -v`, comfortably below the 24,191-second
+1.25-times-old gate and also below old P9 itself.  The external
+proof-endpoint result is the authority; the former extrapolation is retained
+here only to show what the bounded evidence predicted.
 
 ## Build and reproduce the decisive Josef 01 comparison
 

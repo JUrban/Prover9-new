@@ -2,6 +2,9 @@
 
 ## 2026-08-21 current-source full-run result
 
+`P9-JOSEF-NEW4-FULL-RUN-RESULTS.md` gives the consolidated Josef 01--03
+correctness, GNU-time, peak-memory and concurrency audit.
+
 The supplied `/project/bob/Josef_02.out.new4` proves Josef 02 at the same
 13,006-given trajectory and endpoint as the earlier compact `new3` baseline.
 Its SHA-256 is
@@ -12,17 +15,20 @@ and end at `(Given=13006, Generated=129776312, Kept=9226457, proofs=1)`.
 The new run therefore preserves the proof search rather than obtaining its
 speed from trajectory divergence.
 
-| compact proof | user CPU | system CPU | total CPU | wall | final PSS | swap |
+| compact proof | user CPU | system CPU | total CPU | wall | memory | swap |
 |---|---:|---:|---:|---:|---:|---:|
 | `Josef_02.out.new3` | 7,972.54 s | 868.76 s | 8,841.30 s | 8,873 s | 4,884.7 MiB | 0 |
-| `Josef_02.out.new4` | 5,645.24 s | 171.91 s | **5,817.15 s** | **5,843 s** | 5,018.1 MiB | 0 |
+| `Josef_02.out.new4`, internal | 5,645.24 s | 171.91 s | 5,817.15 s | 5,843 s | 5,018.1 MiB final PSS | 0 sampled |
+| `Josef_02.out.new4`, GNU `time -v` authority | 5,669.69 s | 173.31 s | **5,843.00 s** | **5,868 s** | **5,010.9 MiB peak RSS** | `ru_nswap=0` |
 
-Thus current `new4` uses **34.20% less total CPU**, or runs at 1.52 times the
-earlier compact proof throughput; wall time improves by 34.15%.  Final PSS
-rises by 133.4 MiB (2.73%), principally in the CPU-first adaptive unit sidecar
-and associated mature state.  This is a favorable CPU/RAM trade on Josef 02,
-but it is not a full old-P9 comparison: no complete old-P9 Josef 02 proof
-output has been supplied.
+Using the conservative external current total, `new4` uses **33.91% less total
+CPU**, or runs at 1.51 times the earlier compact proof throughput; wall time
+improves by 33.87%.  The externally measured peak RSS is 126.2 MiB (2.58%)
+above `new3`'s final PSS; the final-PSS comparison is +133.4 MiB (2.73%).  The
+small increase is principally the CPU-first adaptive unit sidecar and
+associated mature state.  This is a favorable CPU/RAM trade on Josef 02, but
+it is not a full old-P9 comparison: no complete old-P9 Josef 02 proof output
+has been supplied.
 
 `josef01_progress_audit.py` deliberately embeds the Josef 01 terminal
 endpoint and packed-conjunction expectation.  Running it on Josef 02 will
