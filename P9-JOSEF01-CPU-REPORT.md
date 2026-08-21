@@ -1671,6 +1671,33 @@ plausible-looking options that were already negative.
   implementation, telemetry and temporary tests were removed completely;
   the accepted binary is again SHA-256
   `4a32437f5ff84e98946ae1309b130d9d7b9b574dbd949ca76521d275be03ff92`.
+- A zero-allocation inline version of that route cache was also implemented
+  and removed.  Prefix-encoded complete terms are prefix-free, so an internal
+  radix parent cannot have terminal postings; the prototype reused its idle
+  posting head/tail words for one exact `(rigid symbol, child-or-miss)` entry
+  and invalidated it on child insertion or edge splitting.  Focused negative
+  cache, insertion and split tests, long-run compaction/rebase, and the
+  multi-problem generalization smoke all passed.  Exact 1,501-given telemetry
+  nevertheless showed why this must not be accepted from Josef alone:
+  generalization read 41,781,684 sibling heads, of which 22,702,862 were
+  incompatible rigid seek steps, and the inline cache obtained 4,309,712
+  hits in 7,349,731 lookups.  The unconditional cache improved Josef 01 mean
+  user/total CPU from 65.435/68.145 to 64.680/67.445 seconds
+  (-1.15%/-1.03%) and won both placements.  CHAT/601 was neutral at 34.095
+  versus 34.080 seconds, but Josef 02/601 rejected it in both placements:
+  30.655 versus 30.260 mean total CPU (+1.31%).
+  A second form enabled the overlay only beyond 131,072 nodes (3 MiB of live
+  node records).  This left the small held-out indexes on their original
+  logical path, but retained only a 0.26% Josef 01 gain (68.315 versus 68.490
+  seconds) while Josef 02 still gave an unfavorable 28.825 versus 28.445
+  seconds (+1.34%, with placements disagreeing).  Skip-distance telemetry did
+  not reveal a principled discriminator: cache-miss seek distributions were
+  similar on all three workloads, and Josef 02 actually had the highest hit
+  rate.  Every endpoint and final search/index/hint/allocator counter was
+  exact, all processes used zero swap, and the node remained 24 bytes.  The
+  workload-size gate therefore hid neither enough mechanism cost nor enough
+  optimized-layout risk to justify a sub-percent primary gain.  Both cache
+  forms, counters and tests were removed completely.
 - Removing the slab allocator's redundant `free_count` writes was also
   rejected.  The count is exactly `next_unused - live_count`, so the prototype
   derived reusable-space reports from those existing fields and removed one
