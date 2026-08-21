@@ -1280,6 +1280,26 @@ plausible-looking options that were already negative.
   restored to `02df874c...`.  Smaller hot assembly did not improve the full
   optimized instruction/cache layout, so this should not be accepted from an
   allocator-only microbenchmark.
+- Hoisting the packed hint query's `AnyConst` test out of the direct-candidate
+  loop was implemented and removed.  The packed collector already scans the
+  query once for this exact Boolean, whereas the direct compressed-unit path
+  tested the same immutable clause again for every eligible candidate.  At
+  Josef 01/1,001 this exposed 3,726,328 match/flipped direct attempts.  Passing
+  the collector's Boolean through the query scope preserved every endpoint,
+  packed operation/cache/conjunction counter and exact answer, and added no
+  logical index or clause bytes.  It looked useful on Josef 01: the 301-given
+  reversed mean was 13.915 versus 14.270 seconds (-2.49%, one win and one
+  loss), and the 1,001-given candidate won both placements at 42.065 versus
+  42.465 seconds (-0.94%).  CHAT/601 confirmed the effect in both placements,
+  40.720 versus 41.570 seconds (-2.04%).  Josef 02/601 rejected the changed
+  hot-function layout in both placements: 32.765 versus 32.110 seconds
+  (+2.04%).  Josef 01 peak RSS also rose from 598,686 to 608,196 KiB despite
+  identical logical memory, while CHAT and Josef 02 moved by only about 1.1
+  MiB and 0.2 MiB.  Every process reported zero swap.  The code was removed
+  and the accepted executable restored byte-for-byte to `02df874c...`.
+  Query-scoped reuse must not be accepted merely because its saved work is
+  frequent on Josef: passing another hot value can perturb register lifetime,
+  inlining and instruction layout enough to hurt a different large search.
 - Converting unit-conflict code-tree recursion to an explicit DFS was also
   implemented and removed.  The prototype shared a 32-byte union with the
   accepted generalization stack, retained pending-subtree, query-variable and
