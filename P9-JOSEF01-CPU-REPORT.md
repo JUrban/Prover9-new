@@ -1323,6 +1323,21 @@ plausible-looking options that were already negative.
   were skipped.  Any future posting-table change must measure successful and
   unsuccessful probe distributions rather than optimize hash instruction
   count alone.
+- That required probe audit has now been run at the exact bounded endpoints,
+  with temporary counters that were removed immediately afterward.  At Josef
+  01/1,501 the ordinary table averaged 1.018 probes per lookup (maximum 33)
+  and the conjunction-profile table averaged 1.324 (maximum 87).  CHAT/601
+  averaged 1.121 and 1.291 respectively (maxima 36/84); Josef 02/601's sole
+  ordinary table averaged 1.099 (maximum 32).  The longer chains were almost
+  entirely unsuccessful conjunction lookups, not a degrading successful
+  lookup regime.  Consecutive-key reuse was also too workload-specific for a
+  universal last-slot cache: ordinary/profile repeats were 4.28%/6.31% on
+  Josef 01, 0.08%/0.39% on CHAT, and only 0.01% on Josef 02.  A cache would
+  add a hot comparison to effectively every held-out lookup to bypass at most
+  a few percent on Josef.  It was therefore rejected analytically before
+  changing production layout.  All three audit processes used zero swap; raw
+  outputs are under `/tmp/posting-repeat-audit.xiIx9q` and the preceding
+  distribution-only outputs under `/tmp/posting-probe-audit.uS4Ri1`.
 - Moving compact-unit peak-byte recounting from every public query to the
   rare scratch-growth sites was implemented and removed.  The profile
   confirmed 2,118,509 full byte-accounting calls by the 1,501-given endpoint,
