@@ -1882,8 +1882,10 @@ is intentionally the older PGO executable and does not contain commits
 `1b15b40`, `b1d8128`, `9fecf54`, or `b3d19f3`; run the build and copy steps
 above before the authority run.  It also lacks the iterative generalization
 traversal in `7cb381b` and the direction-specialized nonunit traversal in
-`bf7bfb0`.  The fresh portable source binary measured at `bf7bfb0` has
-SHA-256
+`bf7bfb0`.  The current fresh portable source binary, including the
+incremental renumbering sentinel from `823b7d6`, has SHA-256
+`69fadecd3daaf2aa9f6179c54557c65199ef73838a4660f010fc31dc8c490d77`.
+The `bf7bfb0` control used by the final paired gates remains
 `02df874c53a55d5be5c53f5e1d9abb995e18c1aaff480e3cf817ab19362f39d6`.
 
 ### Prover9 options
