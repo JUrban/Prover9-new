@@ -1166,6 +1166,23 @@ plausible-looking options that were already negative.
   and zero swap.  Explicit state traffic was costlier than compiler-managed
   recursion even as the tree grew.  Source, focused tests and executable were
   restored byte-for-byte to accepted SHA-256 `55e42911...`.
+- An internal-edge pending-subtree summary was likewise rejected.  While a
+  resident query variable covers a serialized stored subterm, the code tree
+  updates an open-slot count for every packed token.  The prototype cached
+  each internal radix edge's signed final slot delta and greatest prefix
+  deficit in the two posting words that are structurally unused by internal
+  nodes.  It could then skip the complete token walk whenever the incoming
+  slot count proved the covered subterm could not end in that edge.  Split
+  invalidation and terminal-posting guards made the overlay exact, and it
+  added zero node bytes.  Lazy summary construction did not amortize: the
+  301-given mean was already 13.880 versus 13.460 seconds (+3.1%, placements
+  disagreed), and at 1,001 givens the candidate lost both placements, 44.045
+  versus 42.285 seconds (+4.2%).  Mean RSS unexpectedly rose from 599,026 to
+  608,230 KiB despite unchanged allocated index bytes, demonstrating another
+  optimized-layout/page-touch effect.  Every 1,001-given output shared digest
+  `d2c195ff...`, endpoint `(1001,1628048,320239,0)`, exact unifier profiles
+  and zero swap.  The summary, guards and split handling were removed and the
+  accepted executable restored byte-for-byte to `55e42911...`.
 - The pre-`45ecaac` single-position, unlimited-depth
   `compact_unit_strategy=adaptive` reduced tree work but was about 8.5% slower
   at 2,000 givens and produced more exact tests.  Do not infer from the later
