@@ -1287,28 +1287,41 @@ cost.
 These results are important because they prevent tuning a large run with
 plausible-looking options that were already negative.
 
-- A fresh adaptive-depth-2 `-pg` run at the exact 1,501-given endpoint showed
-  where the accepted crossover actually spends time.  It reached
-  `(1501,3603947,521972,0)` in 123.21 user and 3.77 system seconds, 685,972
-  KiB peak RSS and zero swap; profiler overhead makes those process times
-  unsuitable as release comparisons.  Compact unit generalization was the
-  largest scalable self entry at 6.27 sampled seconds (9.09%), followed by
-  `slab_get` at 3.52 (5.10%), hint-posting hash/probe lookup at 3.04 (4.41%),
-  packed candidate collection at 2.99 (4.33%), paramodulation entry at 2.92
-  (4.23%), substitution at 2.57 (3.72%), renumber traversal at 2.40 (3.48%)
-  and nonunit forward collection at 2.32 (3.36%).  Adaptive position-bucket
-  collection was only about 1.5% inclusive, feature selection about 0.9%, and
-  record/path exact checking about 0.9%.  Consequently, merging the secondary
-  and tertiary direct-path traversals was rejected before implementation:
-  only 704,785 tertiary records could share a prefix walk, out of roughly
-  4.4 million position checks, and the complete token-end helper accounted
-  for only about 0.4% across all callers.  Its realistic whole-process upper
-  bound is far below 1% and does not justify another coupled traversal.  The
-  raw output, GNU-time record and profile are
-  `/tmp/josef01-adaptive2-gprof-1501.{out,time,txt}` with SHA-256 values
-  `702747eb...`, `9a53e86d...`, and `8236ca17...`.
+- The first adaptive-depth-2 `-pg` run at the exact 1,501-given endpoint was
+  later found to have omitted the Josef authority's
+  `hint_cache_min_candidates=128` assignment.  It therefore used the general
+  zero threshold, made 4,037,686 result-cache stores instead of roughly
+  454,000, and performed about 25.4 million ordinary posting reads while
+  choosing a dependency for almost every store.  Its earlier hotspot ranking
+  remains useful for that general policy but is not an authority-profile
+  ranking; in particular, it overstated posting lookup and cache-store work.
+  The raw files remain `/tmp/josef01-adaptive2-gprof-1501.{out,time,txt}` so
+  that this correction is auditable rather than silently replacing them.
+- A corrected isolated `-O2 -pg` run used the complete authority input and
+  reached the exact `(1501,3603947,521972,0)` endpoint in 120.92 user and 3.41
+  system seconds, 681,288 KiB peak RSS and zero process swap.  It reported
+  453,807 stores, 47,665 hits and `min_candidates=128`.  Compact unit
+  generalization was the largest self entry at 5.68 sampled seconds (8.62%),
+  followed by `slab_get` at 3.50 (5.31%), packed candidate collection at 3.01
+  (4.57%), renumber traversal at 3.00 (4.55%), substitution at 2.50 (3.79%),
+  hint-posting hash/probe lookup at 2.46 (3.73%), paramodulation entry at 2.33
+  (3.54%) and nonunit forward collection at 2.03 (3.08%).  Of 19,073,786
+  posting-table lookups, 8,087,125 and 3,501,676 construct the two immutable
+  initial indexes; search made 4,269,272 conjunction-profile reads, only
+  2,341,855 ordinary reads and 501,472 dependency-generation reads.  This
+  separates one-time startup cost from scalable query cost.  Profiler overhead
+  makes process time unsuitable as a release comparison.  The raw directory
+  is `/tmp/josef01-authority-gprof.2XDaA6`; output/time/profile SHA-256 values
+  are `e8bf4b07...`, `79160e7b...`, and `6a20c72e...`.
+- The corrected profile still supports rejecting a merged secondary/tertiary
+  direct-path traversal before implementation: only 704,785 tertiary records
+  could share a prefix walk out of roughly 4.4 million position checks, and
+  the complete token-end helper accounts for only about 0.4% across callers.
+  Its realistic whole-process upper bound is far below 1% and does not justify
+  another coupled traversal.
 - A subsequent symbol/call-graph audit corrected the profile label on the
-  45,748,737-call, 3.04-second entry above.  Its reported callers
+  original zero-threshold profile's 45,748,737-call, 3.04-second entry.  Its
+  reported callers
   (`hint_postings_get`, `hint_postings_generation`, profile lookup/add, and
   rehash) all call `posting_slot()` and do not all call `posting_dense_add()`;
   the optimized static-symbol attribution named the adjacent helper.  The
