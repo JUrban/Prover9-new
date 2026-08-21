@@ -1264,6 +1264,22 @@ plausible-looking options that were already negative.
   and the executable restored to `02df874c...`.  Its saved traversal was too
   small to offset the changed inlining/register layout in the surrounding
   19%-inclusive hint path.
+- Forcing the rare allocator `new_slab()` path out of `slab_get()` was also
+  rejected.  The accepted `-O2` build inlines slab construction, making the
+  generated allocator about 724 bytes and forcing five callee-saved register
+  pairs around every call even though only 592 of 159,493,326 allocations at
+  Josef 01/1,001 needed the slow path.  A portable no-inline annotation
+  reduced the hot function to about 237 bytes and two saved register pairs.
+  It won both 301-given placements, 12.875 versus 13.770 seconds (-6.50%),
+  with mean user CPU down 3.84%.  The mature result reversed: it lost both
+  1,001-given placements, 44.440 versus 43.430 seconds (+2.33%), with mean
+  user CPU up 2.45%.  All four mature runs reported the exact same
+  `(1001,1628048,320239,0)` endpoint and allocator totals, including
+  `cumulative=5387728984`, `reused=172`, `cache_evictions=140`; RSS was within
+  0.4 MiB and swap was zero.  The annotation was removed and the binary
+  restored to `02df874c...`.  Smaller hot assembly did not improve the full
+  optimized instruction/cache layout, so this should not be accepted from an
+  allocator-only microbenchmark.
 - Converting unit-conflict code-tree recursion to an explicit DFS was also
   implemented and removed.  The prototype shared a 32-byte union with the
   accepted generalization stack, retained pending-subtree, query-variable and
