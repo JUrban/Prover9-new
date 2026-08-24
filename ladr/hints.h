@@ -110,6 +110,10 @@ void set_hint_compiled_term_table(BOOL on);
    needs a retained unit hint.  Valid only for non-authoritative filtering. */
 void set_hint_compiled_lazy(BOOL on);
 
+/* Apply the compiled SAME program while packed candidates are emitted.
+   Experimental; the compressed matcher remains final authority. */
+void set_hint_compiled_fused(BOOL on);
+
 void set_hint_compiled_paths(BOOL on);
 
 void set_hint_compiled_min_candidates(unsigned minimum);

@@ -34,6 +34,11 @@ set(hint_trace).' "$repo_dir/test.src/discount_loop.in" |
   "$prover9" > "$test_tmp/packed-compiled.out" \
                2> "$test_tmp/packed-compiled.err"
 
+sed '/assign(hint_index,compact)./a assign(hint_index,packed_compiled_blocks).\
+set(hint_trace).' "$repo_dir/test.src/discount_loop.in" |
+  "$prover9" > "$test_tmp/packed-compiled-blocks.out" \
+               2> "$test_tmp/packed-compiled-blocks.err"
+
 sed '/assign(hint_index,compact)./a assign(hint_index,packed_compiled_lazy).\
 set(hint_trace).' "$repo_dir/test.src/discount_loop.in" |
   "$prover9" > "$test_tmp/packed-compiled-lazy.out" \
@@ -62,6 +67,8 @@ grep '^HINT_TRACE ' "$test_tmp/packed-compiled-shadow.out" \
   > "$test_tmp/packed-compiled-shadow.trace"
 grep '^HINT_TRACE ' "$test_tmp/packed-compiled.out" \
   > "$test_tmp/packed-compiled.trace"
+grep '^HINT_TRACE ' "$test_tmp/packed-compiled-blocks.out" \
+  > "$test_tmp/packed-compiled-blocks.trace"
 grep '^HINT_TRACE ' "$test_tmp/packed-compiled-lazy.out" \
   > "$test_tmp/packed-compiled-lazy.trace"
 grep '^HINT_TRACE ' "$test_tmp/packed-compiled-paths.out" \
@@ -75,6 +82,7 @@ diff -u "$test_tmp/fpa.trace" "$test_tmp/packed.trace"
 diff -u "$test_tmp/fpa.trace" "$test_tmp/packed-fast.trace"
 diff -u "$test_tmp/fpa.trace" "$test_tmp/packed-compiled-shadow.trace"
 diff -u "$test_tmp/fpa.trace" "$test_tmp/packed-compiled.trace"
+diff -u "$test_tmp/fpa.trace" "$test_tmp/packed-compiled-blocks.trace"
 diff -u "$test_tmp/fpa.trace" "$test_tmp/packed-compiled-lazy.trace"
 diff -u "$test_tmp/fpa.trace" "$test_tmp/packed-compiled-paths.trace"
 diff -u "$test_tmp/fpa.trace" "$test_tmp/hybrid.trace"
@@ -85,6 +93,7 @@ grep -q 'THEOREM PROVED' "$test_tmp/packed.out"
 grep -q 'THEOREM PROVED' "$test_tmp/packed-fast.out"
 grep -q 'THEOREM PROVED' "$test_tmp/packed-compiled-shadow.out"
 grep -q 'THEOREM PROVED' "$test_tmp/packed-compiled.out"
+grep -q 'THEOREM PROVED' "$test_tmp/packed-compiled-blocks.out"
 grep -q 'THEOREM PROVED' "$test_tmp/packed-compiled-lazy.out"
 grep -q 'THEOREM PROVED' "$test_tmp/packed-compiled-paths.out"
 grep -q 'THEOREM PROVED' "$test_tmp/hybrid.out"
@@ -112,6 +121,8 @@ grep -Eq '^Compiled_hint_term_table: authoritative=0, shadow=1, filter=0, finali
   "$test_tmp/packed-compiled-shadow.out"
 grep -Eq '^Compiled_hint_term_table: authoritative=0, shadow=0, filter=1, finalized=1, active=[1-9][0-9]*,' \
   "$test_tmp/packed-compiled.out"
+grep -Eq '^Compiled_hint_blocks: enabled=1, queries=[0-9]+, activations=[0-9]+, prefix_candidates=[0-9]+, early_rejects=[0-9]+,' \
+  "$test_tmp/packed-compiled-blocks.out"
 grep -Eq '^Compiled_hint_term_table: authoritative=0, shadow=0, filter=1, finalized=0, active=0,.*base_nodes=0,.*total_bytes=0, lazy=1, lazy_root_requests=0, lazy_root_builds=0,' \
   "$test_tmp/packed-compiled-lazy.out"
 grep -q '^Compiled_hint_same_filter:' "$test_tmp/packed-compiled.out"
@@ -122,7 +133,7 @@ grep -q '^Compiled_hint_path_index:' \
 
 "$prover9" -f "$repo_dir/test.src/hint_anyconst.in" \
   > "$test_tmp/anyconst-compact.out" 2> "$test_tmp/anyconst-compact.err"
-for hint_mode in packed packed_fast packed_compiled_shadow packed_compiled packed_compiled_lazy packed_compiled_paths hybrid packed_legacy; do
+for hint_mode in packed packed_fast packed_compiled_shadow packed_compiled packed_compiled_blocks packed_compiled_lazy packed_compiled_paths hybrid packed_legacy; do
   sed "/assign(hint_index,compact)./a assign(hint_index,$hint_mode)." \
     "$repo_dir/test.src/hint_anyconst.in" |
     "$prover9" > "$test_tmp/anyconst-$hint_mode.out" \
@@ -141,6 +152,8 @@ diff -u "$test_tmp/anyconst-compact.trace" \
   "$test_tmp/anyconst-packed_compiled_shadow.trace"
 diff -u "$test_tmp/anyconst-compact.trace" \
   "$test_tmp/anyconst-packed_compiled.trace"
+diff -u "$test_tmp/anyconst-compact.trace" \
+  "$test_tmp/anyconst-packed_compiled_blocks.trace"
 diff -u "$test_tmp/anyconst-compact.trace" \
   "$test_tmp/anyconst-packed_compiled_lazy.trace"
 diff -u "$test_tmp/anyconst-compact.trace" \
@@ -228,13 +241,19 @@ sed 's/packed_compiled/packed_compiled_lazy/' \
   "$prover9" > "$test_tmp/navigation-lazy.out" \
                2> "$test_tmp/navigation-lazy.err" || navigation_lazy_status=$?
 navigation_lazy_status=${navigation_lazy_status:-0}
+sed 's/packed_compiled/packed_compiled_blocks/' \
+  "$repo_dir/test.src/hint_compiled_navigation.in" |
+  "$prover9" > "$test_tmp/navigation-blocks.out" \
+               2> "$test_tmp/navigation-blocks.err" || navigation_blocks_status=$?
+navigation_blocks_status=${navigation_blocks_status:-0}
 if [ "$navigation_control_status" -ne 2 ] || \
    [ "$navigation_compiled_status" -ne 2 ] || \
-   [ "$navigation_lazy_status" -ne 2 ]; then
-  echo "hint_index_trace_test: navigation statuses control=$navigation_control_status compiled=$navigation_compiled_status lazy=$navigation_lazy_status" >&2
+   [ "$navigation_lazy_status" -ne 2 ] || \
+   [ "$navigation_blocks_status" -ne 2 ]; then
+  echo "hint_index_trace_test: navigation statuses control=$navigation_control_status compiled=$navigation_compiled_status lazy=$navigation_lazy_status blocks=$navigation_blocks_status" >&2
   exit 1
 fi
-for navigation_mode in control compiled lazy; do
+for navigation_mode in control compiled lazy blocks; do
   grep '^HINT_TRACE ' "$test_tmp/navigation-$navigation_mode.out" \
     > "$test_tmp/navigation-$navigation_mode.trace"
 done
@@ -243,9 +262,39 @@ diff -u "$test_tmp/navigation-control.trace" \
   "$test_tmp/navigation-compiled.trace"
 diff -u "$test_tmp/navigation-control.trace" \
   "$test_tmp/navigation-lazy.trace"
+diff -u "$test_tmp/navigation-control.trace" \
+  "$test_tmp/navigation-blocks.trace"
 grep -Eq '^Compiled_hint_same_filter: queries=1, query_tests=1, candidates_before=2, candidates_after=1, candidates_rejected=1, candidate_tests=2, navigation_rejects=1,' \
   "$test_tmp/navigation-compiled.out"
 grep -Eq '^Compiled_hint_same_filter: queries=1, query_tests=1, candidates_before=2, candidates_after=1, candidates_rejected=1, candidate_tests=2, navigation_rejects=1,' \
   "$test_tmp/navigation-lazy.out"
+grep -Eq '^Compiled_hint_same_filter: queries=1, query_tests=1, candidates_before=2, candidates_after=1, candidates_rejected=1, candidate_tests=2, navigation_rejects=1,' \
+  "$test_tmp/navigation-blocks.out"
+grep -Eq '^Compiled_hint_blocks: enabled=1, queries=1, activations=1, prefix_candidates=0, early_rejects=1,' \
+  "$test_tmp/navigation-blocks.out"
+
+sed 's/packed_compiled_blocks/packed_fast/' \
+  "$repo_dir/test.src/hint_compiled_blocks_cache.in" |
+  "$prover9" > "$test_tmp/blocks-cache-control.out" \
+               2> "$test_tmp/blocks-cache-control.err" || blocks_cache_control_status=$?
+blocks_cache_control_status=${blocks_cache_control_status:-0}
+"$prover9" < "$repo_dir/test.src/hint_compiled_blocks_cache.in" \
+  > "$test_tmp/blocks-cache-blocks.out" \
+  2> "$test_tmp/blocks-cache-blocks.err" || blocks_cache_status=$?
+blocks_cache_status=${blocks_cache_status:-0}
+if [ "$blocks_cache_control_status" -ne 2 ] || \
+   [ "$blocks_cache_status" -ne 2 ]; then
+  echo "hint_index_trace_test: blocks cache statuses control=$blocks_cache_control_status blocks=$blocks_cache_status" >&2
+  exit 1
+fi
+for blocks_cache_mode in control blocks; do
+  grep '^HINT_TRACE ' "$test_tmp/blocks-cache-$blocks_cache_mode.out" \
+    > "$test_tmp/blocks-cache-$blocks_cache_mode.trace"
+done
+test -s "$test_tmp/blocks-cache-control.trace"
+diff -u "$test_tmp/blocks-cache-control.trace" \
+  "$test_tmp/blocks-cache-blocks.trace"
+grep -Eq '^Packed_fast_cache: .*hits=[1-9][0-9]*,' \
+  "$test_tmp/blocks-cache-blocks.out"
 
 echo 'hint_index_trace_test: PASS'

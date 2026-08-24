@@ -275,6 +275,7 @@ static BOOL packed_hint_bank_mode(void)
      str_ident(stringparm1(Opt->hint_index), "packed_fast") ||
      str_ident(stringparm1(Opt->hint_index), "packed_compiled_shadow") ||
      str_ident(stringparm1(Opt->hint_index), "packed_compiled") ||
+     str_ident(stringparm1(Opt->hint_index), "packed_compiled_blocks") ||
      str_ident(stringparm1(Opt->hint_index), "packed_compiled_lazy") ||
      str_ident(stringparm1(Opt->hint_index), "packed_compiled_paths") ||
      str_ident(stringparm1(Opt->hint_index), "hybrid") ||
@@ -288,6 +289,7 @@ static BOOL better_packed_hint_mode(void)
      str_ident(stringparm1(Opt->hint_index), "packed_fast") ||
      str_ident(stringparm1(Opt->hint_index), "packed_compiled_shadow") ||
      str_ident(stringparm1(Opt->hint_index), "packed_compiled") ||
+     str_ident(stringparm1(Opt->hint_index), "packed_compiled_blocks") ||
      str_ident(stringparm1(Opt->hint_index), "packed_compiled_lazy") ||
      str_ident(stringparm1(Opt->hint_index), "packed_compiled_paths") ||
      str_ident(stringparm1(Opt->hint_index), "hybrid"));
@@ -299,6 +301,7 @@ static BOOL fast_packed_hint_mode(void)
     (str_ident(stringparm1(Opt->hint_index), "packed_fast") ||
      str_ident(stringparm1(Opt->hint_index), "packed_compiled_shadow") ||
      str_ident(stringparm1(Opt->hint_index), "packed_compiled") ||
+     str_ident(stringparm1(Opt->hint_index), "packed_compiled_blocks") ||
      str_ident(stringparm1(Opt->hint_index), "packed_compiled_lazy") ||
      str_ident(stringparm1(Opt->hint_index), "packed_compiled_paths"));
 }
@@ -308,6 +311,7 @@ static BOOL compiled_hint_table_mode(void)
   return Opt != NULL &&
     (str_ident(stringparm1(Opt->hint_index), "packed_compiled_shadow") ||
      str_ident(stringparm1(Opt->hint_index), "packed_compiled") ||
+     str_ident(stringparm1(Opt->hint_index), "packed_compiled_blocks") ||
      str_ident(stringparm1(Opt->hint_index), "packed_compiled_lazy") ||
      str_ident(stringparm1(Opt->hint_index), "packed_compiled_paths"));
 }
@@ -322,6 +326,7 @@ static BOOL compiled_hint_filter_mode(void)
 {
   return Opt != NULL &&
     (str_ident(stringparm1(Opt->hint_index), "packed_compiled") ||
+     str_ident(stringparm1(Opt->hint_index), "packed_compiled_blocks") ||
      str_ident(stringparm1(Opt->hint_index), "packed_compiled_lazy") ||
      str_ident(stringparm1(Opt->hint_index), "packed_compiled_paths"));
 }
@@ -330,6 +335,12 @@ static BOOL compiled_hint_lazy_mode(void)
 {
   return Opt != NULL &&
     str_ident(stringparm1(Opt->hint_index), "packed_compiled_lazy");
+}
+
+static BOOL compiled_hint_fused_mode(void)
+{
+  return Opt != NULL &&
+    str_ident(stringparm1(Opt->hint_index), "packed_compiled_blocks");
 }
 
 static BOOL compiled_hint_path_mode(void)
@@ -2347,7 +2358,7 @@ Prover_options init_prover_options(void)
 			"eager_legacy",
 			"eager_interreduced");
 
-  p->hint_index = init_stringparm("hint_index", 11,
+  p->hint_index = init_stringparm("hint_index", 12,
 				  "fpa",
 				  "compact",
 				  "shallow",
@@ -2355,6 +2366,7 @@ Prover_options init_prover_options(void)
 				  "packed_fast",
 				  "packed_compiled_shadow",
 				  "packed_compiled",
+				  "packed_compiled_blocks",
 				  "packed_compiled_lazy",
 				  "packed_compiled_paths",
 				  "hybrid",
@@ -11679,6 +11691,7 @@ void index_and_process_initial_clauses(void)
   set_hint_compiled_lazy(compiled_hint_lazy_mode());
   set_hint_compiled_shadow(compiled_hint_shadow_mode());
   set_hint_compiled_filter(compiled_hint_filter_mode());
+  set_hint_compiled_fused(compiled_hint_fused_mode());
   set_hint_compiled_paths(compiled_hint_path_mode());
   set_hint_compiled_authoritative(FALSE);
   set_hint_match_once(flag(Opt->hint_match_once));
@@ -16236,6 +16249,7 @@ void load_checkpoint_into_loop(void)
   set_hint_compiled_lazy(compiled_hint_lazy_mode());
   set_hint_compiled_shadow(compiled_hint_shadow_mode());
   set_hint_compiled_filter(compiled_hint_filter_mode());
+  set_hint_compiled_fused(compiled_hint_fused_mode());
   set_hint_compiled_paths(compiled_hint_path_mode());
   set_hint_compiled_authoritative(FALSE);
   set_hint_match_once(flag(Opt->hint_match_once));

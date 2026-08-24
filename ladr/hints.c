@@ -191,6 +191,39 @@ static unsigned Compiled_plan_maximum_same = 0;
 static unsigned Compiled_plan_maximum_rigid = 0;
 static unsigned Compiled_plan_maximum_total = 0;
 static BOOL Compiled_rigid_program_applied = FALSE;
+static BOOL Compiled_fused_enabled = FALSE;
+static BOOL Compiled_fused_prepared = FALSE;
+static BOOL Compiled_fused_active = FALSE;
+static BOOL Compiled_fused_finished = FALSE;
+static BOOL Compiled_plan_collect_rigid = FALSE;
+static unsigned Compiled_fused_seen = 0;
+static unsigned Compiled_fused_structural_kept = 0;
+static unsigned Compiled_fused_direct_count = 0;
+static unsigned Compiled_fused_program_count = 0;
+static unsigned Compiled_fused_same_program_count = 0;
+static unsigned Compiled_fused_direct_indices[
+  COMPILED_PROGRAM_MAX_CONDITIONS];
+static unsigned long long Compiled_fused_direct_work[
+  COMPILED_PROGRAM_MAX_CONDITIONS];
+static struct compiled_same_cache_entry *Compiled_fused_direct_entries[
+  COMPILED_PROGRAM_MAX_CONDITIONS];
+static struct compiled_same_cache_entry *Compiled_fused_program[
+  COMPILED_PROGRAM_MAX_CONDITIONS];
+static unsigned Compiled_fused_current_word = UINT_MAX;
+static unsigned long long Compiled_fused_current_bits = 0;
+static unsigned long long Compiled_fused_candidate_tests = 0;
+static unsigned long long Compiled_fused_navigation_rejects = 0;
+static unsigned long long Compiled_fused_unequal_rejects = 0;
+static unsigned long long Compiled_fused_word_ops = 0;
+static unsigned long long Compiled_fused_queries = 0;
+static unsigned long long Compiled_fused_activations = 0;
+static unsigned long long Compiled_fused_prefix_candidates = 0;
+static unsigned long long Compiled_fused_early_rejects = 0;
+static unsigned long long *Compiled_query_identity = NULL;
+static unsigned Compiled_query_identity_count = 0;
+static unsigned Compiled_query_identity_capacity = 0;
+static unsigned long long *Compiled_fast_identity_keys = NULL;
+static unsigned Compiled_fast_identity_capacity = 0;
 
 #define COMPILED_RIGID_SAMPLE_CANDIDATES 8U
 #define COMPILED_RIGID_SAMPLE_MAX_TESTS 32U
@@ -369,6 +402,7 @@ struct fast_match_cache_entry {
   unsigned long long source_posting_candidates;
   uint32_t key_offset;
   uint32_t key_count;
+  uint32_t posting_key_count;
   uint32_t key_generation;
   uint32_t seed_key_index;
   unsigned candidates[FAST_MATCH_CACHE_CANDIDATES];
@@ -1224,12 +1258,28 @@ static void packed_index_hint_terms(Topform h, BOOL anyconst)
   }
 }
 
+static void compiled_fused_activate(void);
+static BOOL compiled_fused_candidate_accept(unsigned id);
+
 static void packed_add_candidate(unsigned id)
 {
   if (id == 0 || id >= Packed_hint_capacity ||
       !Packed_hint_active[id] || Packed_candidate_mark[id] == Packed_candidate_serial)
     return;
   Packed_candidate_mark[id] = Packed_candidate_serial;
+  if (Compiled_fused_prepared) {
+    Compiled_fused_seen++;
+    if (!Compiled_fused_active &&
+        Compiled_fused_seen >= Compiled_same_min_candidates)
+      compiled_fused_activate();
+    if (Compiled_fused_active) {
+      if (!compiled_fused_candidate_accept(id)) {
+        Compiled_fused_early_rejects++;
+        return;
+      }
+      Compiled_fused_structural_kept++;
+    }
+  }
   if (Packed_candidates_count == Packed_candidates_capacity) {
     unsigned cap = Packed_candidates_capacity == 0 ? 1024 :
                                                    Packed_candidates_capacity * 2;
@@ -2520,15 +2570,53 @@ static unsigned long long fast_profile_hash(
 }
 
 static BOOL fast_cache_profile(const unsigned long long **keys,
-                               unsigned *key_count)
+                               unsigned *key_count,
+                               unsigned *posting_key_count)
 {
+  unsigned required;
   if (Fast_match_cache == NULL)
     return FALSE;
-  *key_count = Better_key_scratch_count;
+  *posting_key_count = Better_key_scratch_count;
+  if (Compiled_fused_prepared) {
+    required = Better_key_scratch_count + 1 +
+      Compiled_query_identity_count;
+    if (required < Better_key_scratch_count)
+      fatal_error("compiled fast-cache identity overflow");
+    if (required > Compiled_fast_identity_capacity) {
+      unsigned capacity = Compiled_fast_identity_capacity == 0 ? 128 :
+        Compiled_fast_identity_capacity;
+      while (capacity < required) {
+        if (capacity > UINT_MAX / 2)
+          fatal_error("compiled fast-cache identity capacity overflow");
+        capacity *= 2;
+      }
+      Compiled_fast_identity_keys = safe_realloc(
+        Compiled_fast_identity_keys,
+        (size_t) capacity * sizeof(*Compiled_fast_identity_keys));
+      Compiled_fast_identity_capacity = capacity;
+    }
+    if (Better_key_scratch_count != 0)
+      memcpy(Compiled_fast_identity_keys, Better_key_scratch,
+             (size_t) Better_key_scratch_count *
+               sizeof(*Compiled_fast_identity_keys));
+    Compiled_fast_identity_keys[Better_key_scratch_count] =
+      UINT64_C(0xf17edc0de0000000) |
+      (unsigned long long) Compiled_query_identity_count;
+    if (Compiled_query_identity_count != 0)
+      memcpy(Compiled_fast_identity_keys + Better_key_scratch_count + 1,
+             Compiled_query_identity,
+             (size_t) Compiled_query_identity_count *
+               sizeof(*Compiled_fast_identity_keys));
+    *keys = Compiled_fast_identity_keys;
+    *key_count = required;
+  }
+  else {
+    *keys = Better_key_scratch;
+    *key_count = Better_key_scratch_count;
+  }
   /* Feature collection order is deterministic and neither the conjunction
      nor ordinary fallback path mutates it.  It is therefore an exact cache
      identity without a per-query comparison sort. */
-  *keys = Better_key_scratch;
   return TRUE;
 }
 
@@ -2558,6 +2646,7 @@ static BOOL fast_cache_keys_live(const struct fast_match_cache_entry *e)
 
 static BOOL fast_cache_lookup(
   const unsigned long long *keys, unsigned key_count,
+  unsigned posting_key_count,
   unsigned long long first_mask, unsigned positive, unsigned negative)
 {
   struct fast_match_cache_entry *e = fast_cache_slot(
@@ -2572,7 +2661,8 @@ static BOOL fast_cache_lookup(
   }
   if (!e->valid || e->first_mask != first_mask ||
       e->positive != positive || e->negative != negative ||
-      e->key_count != key_count) {
+      e->key_count != key_count ||
+      e->posting_key_count != posting_key_count) {
     if (!Hint_preview_active) {
       Fast_cache_misses++;
       Fast_cache_profile_misses++;
@@ -2587,7 +2677,8 @@ static BOOL fast_cache_lookup(
     }
     return FALSE;
   }
-  if (e->seed_key_index >= e->key_count && e->key_count != 0) {
+  if (e->seed_key_index >= e->posting_key_count &&
+      e->posting_key_count != 0) {
     if (!Hint_preview_active) {
       Fast_cache_misses++;
       Fast_cache_profile_misses++;
@@ -2602,7 +2693,8 @@ static BOOL fast_cache_lookup(
     }
     return FALSE;
   }
-  if ((key_count == 0 ? e->seed_generation != Hint_state_epoch :
+  if ((posting_key_count == 0 ?
+       e->seed_generation != Hint_state_epoch :
        e->seed_generation !=
          hint_postings_generation(
            Better_postings,
@@ -2625,6 +2717,7 @@ static BOOL fast_cache_lookup(
 
 static void fast_cache_store(
   const unsigned long long *keys, unsigned key_count,
+  unsigned posting_key_count,
   unsigned long long first_mask, unsigned positive, unsigned negative,
   unsigned long long source_posting_candidates)
 {
@@ -2657,10 +2750,10 @@ static void fast_cache_store(
   }
   e = fast_cache_slot(keys, key_count, first_mask, positive, negative);
   memset(e, 0, sizeof(*e));
-  if (key_count == 0)
+  if (posting_key_count == 0)
     e->seed_generation = Hint_state_epoch;
   else {
-    for (i = 0; i < key_count; i++) {
+    for (i = 0; i < posting_key_count; i++) {
       unsigned count;
       hint_postings_get(Better_postings, keys[i], &count);
       if (count < seed_count) {
@@ -2685,6 +2778,7 @@ static void fast_cache_store(
   e->positive = (unsigned short) positive;
   e->negative = (unsigned short) negative;
   e->key_count = key_count;
+  e->posting_key_count = posting_key_count;
   e->candidate_count = (unsigned char) Packed_candidates_count;
   e->valid = 1;
   Fast_cache_stores++;
@@ -3162,6 +3256,27 @@ void init_hints(Uniftype utype,
   Compiled_plan_maximum_same = 0;
   Compiled_plan_maximum_rigid = 0;
   Compiled_plan_maximum_total = 0;
+  Compiled_fused_enabled = FALSE;
+  Compiled_fused_prepared = FALSE;
+  Compiled_fused_active = FALSE;
+  Compiled_fused_finished = FALSE;
+  Compiled_plan_collect_rigid = FALSE;
+  Compiled_fused_seen = 0;
+  Compiled_fused_structural_kept = 0;
+  Compiled_fused_direct_count = 0;
+  Compiled_fused_program_count = 0;
+  Compiled_fused_same_program_count = 0;
+  Compiled_fused_current_word = UINT_MAX;
+  Compiled_fused_current_bits = 0;
+  Compiled_fused_candidate_tests = 0;
+  Compiled_fused_navigation_rejects = 0;
+  Compiled_fused_unequal_rejects = 0;
+  Compiled_fused_word_ops = 0;
+  Compiled_fused_queries = 0;
+  Compiled_fused_activations = 0;
+  Compiled_fused_prefix_candidates = 0;
+  Compiled_fused_early_rejects = 0;
+  Compiled_query_identity_count = 0;
   Compiled_rigid_test_count = 0;
   Compiled_rigid_queries = 0;
   Compiled_rigid_sampled_queries = 0;
@@ -3285,6 +3400,8 @@ void done_with_hints(void)
   if (Compiled_plan_paths) safe_free(Compiled_plan_paths);
   if (Compiled_same_tests) safe_free(Compiled_same_tests);
   if (Compiled_rigid_tests) safe_free(Compiled_rigid_tests);
+  if (Compiled_query_identity) safe_free(Compiled_query_identity);
+  if (Compiled_fast_identity_keys) safe_free(Compiled_fast_identity_keys);
   for (i = 0; i < Compiled_same_cache_count; i++)
     if (Compiled_same_cache_entries[i].dense_bits != NULL)
       safe_free(Compiled_same_cache_entries[i].dense_bits);
@@ -3322,6 +3439,8 @@ void done_with_hints(void)
   Compiled_plan_paths = NULL;
   Compiled_same_tests = NULL;
   Compiled_rigid_tests = NULL;
+  Compiled_query_identity = NULL;
+  Compiled_fast_identity_keys = NULL;
   Compiled_same_cache_entries = NULL;
   Compiled_same_cache_buckets = NULL;
   Compiled_same_cache_paths = NULL;
@@ -3447,6 +3566,8 @@ void done_with_hints(void)
   Compiled_plan_path_count = Compiled_plan_path_capacity = 0;
   Compiled_same_test_count = Compiled_same_test_capacity = 0;
   Compiled_rigid_test_count = Compiled_rigid_test_capacity = 0;
+  Compiled_query_identity_count = Compiled_query_identity_capacity = 0;
+  Compiled_fast_identity_capacity = 0;
   Compiled_same_queries = 0;
   Compiled_same_query_tests = 0;
   Compiled_same_candidates_before = 0;
@@ -3478,6 +3599,34 @@ void done_with_hints(void)
   Compiled_program_word_ops = 0;
   Compiled_program_candidate_tests = 0;
   Compiled_program_maximum_conditions = 0;
+  Compiled_plan_queries = 0;
+  Compiled_plan_same_conditions = 0;
+  Compiled_plan_rigid_conditions = 0;
+  Compiled_plan_multi_condition_queries = 0;
+  Compiled_plan_mixed_queries = 0;
+  Compiled_plan_maximum_same = 0;
+  Compiled_plan_maximum_rigid = 0;
+  Compiled_plan_maximum_total = 0;
+  Compiled_fused_enabled = FALSE;
+  Compiled_fused_prepared = FALSE;
+  Compiled_fused_active = FALSE;
+  Compiled_fused_finished = FALSE;
+  Compiled_plan_collect_rigid = FALSE;
+  Compiled_fused_seen = 0;
+  Compiled_fused_structural_kept = 0;
+  Compiled_fused_direct_count = 0;
+  Compiled_fused_program_count = 0;
+  Compiled_fused_same_program_count = 0;
+  Compiled_fused_current_word = UINT_MAX;
+  Compiled_fused_current_bits = 0;
+  Compiled_fused_candidate_tests = 0;
+  Compiled_fused_navigation_rejects = 0;
+  Compiled_fused_unequal_rejects = 0;
+  Compiled_fused_word_ops = 0;
+  Compiled_fused_queries = 0;
+  Compiled_fused_activations = 0;
+  Compiled_fused_prefix_candidates = 0;
+  Compiled_fused_early_rejects = 0;
   Compiled_rigid_queries = 0;
   Compiled_rigid_sampled_queries = 0;
   Compiled_rigid_sample_tests = 0;
@@ -3731,7 +3880,8 @@ static void compiled_plan_note_rigid(Term t, unsigned depth)
   /* Candidate count is already known before query-plan construction.  Do
      not copy deep routes for the overwhelmingly common cheap queries that
      cannot pass the collective-filter admission threshold. */
-  if (Packed_candidates_count < Compiled_same_min_candidates)
+  if (!Compiled_plan_collect_rigid &&
+      Packed_candidates_count < Compiled_same_min_candidates)
     return;
   if (depth <= FAST_MATCH_FEATURE_DEPTH)
     return;  /* Existing exact postings already enforce these positions. */
@@ -3758,6 +3908,42 @@ static void compiled_plan_note_rigid(Term t, unsigned depth)
   test->symbol = (unsigned) SYMNUM(t);
 }
 
+static void compiled_query_identity_add(unsigned long long token)
+{
+  if (Compiled_query_identity_count == Compiled_query_identity_capacity) {
+    unsigned old = Compiled_query_identity_capacity;
+    unsigned capacity = old == 0 ? 64 : old * 2;
+    if (capacity <= old)
+      fatal_error("compiled query identity capacity overflow");
+    Compiled_query_identity = safe_realloc(
+      Compiled_query_identity,
+      (size_t) capacity * sizeof(*Compiled_query_identity));
+    Compiled_query_identity_capacity = capacity;
+  }
+  Compiled_query_identity[Compiled_query_identity_count++] = token;
+}
+
+static void compiled_query_identity_term(Term t)
+{
+  int i;
+  if (VARIABLE(t)) {
+    compiled_query_identity_add(
+      UINT64_C(0x1000000000000000));
+    compiled_query_identity_add(
+      (unsigned long long) (uint32_t) VARNUM(t));
+  }
+  else {
+    compiled_query_identity_add(
+      UINT64_C(0x2000000000000000));
+    compiled_query_identity_add(
+      (unsigned long long) (uint32_t) SYMNUM(t));
+    compiled_query_identity_add(
+      (unsigned long long) (uint32_t) ARITY(t));
+    for (i = 0; i < ARITY(t); i++)
+      compiled_query_identity_term(ARG(t,i));
+  }
+}
+
 static void compiled_plan_begin(void)
 {
   unsigned i;
@@ -3766,6 +3952,7 @@ static void compiled_plan_begin(void)
   Compiled_same_test_count = 0;
   Compiled_rigid_test_count = 0;
   Compiled_rigid_program_applied = FALSE;
+  Compiled_query_identity_count = 0;
   for (i = 0; i < MAX_VARS; i++)
     Compiled_variable_path_offset[i] = UINT_MAX;
 }
@@ -4036,6 +4223,9 @@ static BOOL compiled_cache_budget_allows(unsigned long long additional)
 }
 
 static void compiled_same_cache_index_hint(unsigned id);
+static void compiled_condition_cache_note_work(
+  struct compiled_same_cache_entry *entry,
+  unsigned long long candidate_tests);
 
 /* Resolve one retained unit hint into the canonical arena only after the
    compiled filter has admitted a broad query.  Missing roots remain an
@@ -4199,6 +4389,186 @@ static BOOL compiled_condition_program_filter(
   return TRUE;
 }
 
+static BOOL compiled_fused_candidate_accept(unsigned id)
+{
+  BOOL account = !Hint_preview_active;
+  uint32_t root = compiled_hint_root(id, account);
+  unsigned j;
+  if (root == 0)
+    return TRUE;
+  if (Compiled_fused_program_count != 0) {
+    unsigned word = id / 64;
+    if (word != Compiled_fused_current_word) {
+      unsigned long long bits = ULLONG_MAX;
+      for (j = 0; j < Compiled_fused_program_count; j++) {
+        struct compiled_same_cache_entry *entry =
+          Compiled_fused_program[j];
+        bits &= word < entry->dense_words ? entry->dense_bits[word] : 0;
+      }
+      Compiled_fused_current_word = word;
+      Compiled_fused_current_bits = bits;
+      if (account)
+        Compiled_fused_word_ops += Compiled_fused_program_count;
+    }
+    if ((Compiled_fused_current_bits & (1ULL << (id % 64))) == 0)
+      return FALSE;
+  }
+  for (j = 0; j < Compiled_fused_direct_count; j++) {
+    struct compiled_same_test *test =
+      Compiled_same_tests + Compiled_fused_direct_indices[j];
+    int comparison;
+    if (account) {
+      Compiled_fused_candidate_tests++;
+      Compiled_fused_direct_work[j]++;
+    }
+    comparison = hint_term_table_compare_paths(
+      Compiled_term_table, root,
+      test->first_length == 0 ? NULL :
+        Compiled_plan_paths + test->first_offset, test->first_length,
+      test->second_length == 0 ? NULL :
+        Compiled_plan_paths + test->second_offset, test->second_length);
+    if (comparison < 0) {
+      if (account)
+        Compiled_fused_navigation_rejects++;
+      return FALSE;
+    }
+    else if (comparison == 0) {
+      if (account)
+        Compiled_fused_unequal_rejects++;
+      return FALSE;
+    }
+  }
+  return TRUE;
+}
+
+static void compiled_fused_activate(void)
+{
+  BOOL account = !Hint_preview_active;
+  unsigned i, keep = 0;
+  if (Compiled_fused_active || !Compiled_fused_prepared)
+    return;
+  Compiled_fused_active = TRUE;
+  Compiled_fused_current_word = UINT_MAX;
+  Compiled_fused_current_bits = 0;
+  compiled_plan_sort_same_tests();
+  for (i = 0; i < Compiled_same_test_count; i++) {
+    struct compiled_same_cache_entry *entry =
+      Compiled_same_cache_ready ? compiled_same_cache_lookup(
+        Compiled_same_tests + i,
+        account && i < COMPILED_PROGRAM_MAX_CONDITIONS) : NULL;
+    if (account && Compiled_same_cache_ready) {
+      Compiled_same_cache_lookups++;
+      if (entry != NULL)
+        entry->queries++;
+    }
+    if (entry != NULL && entry->built)
+      compiled_program_consider(
+        Compiled_fused_program, &Compiled_fused_program_count, entry);
+    else if (Compiled_fused_direct_count <
+             COMPILED_PROGRAM_MAX_CONDITIONS) {
+      unsigned position = Compiled_fused_direct_count++;
+      Compiled_fused_direct_indices[position] = i;
+      Compiled_fused_direct_entries[position] = entry;
+      Compiled_fused_direct_work[position] = 0;
+    }
+  }
+  if (Compiled_same_cache_ready)
+    for (i = 0; i < Compiled_rigid_test_count; i++) {
+      struct compiled_same_cache_entry *entry =
+        compiled_rigid_cache_lookup(Compiled_rigid_tests + i, FALSE);
+      if (entry != NULL && entry->built) {
+        if (account) {
+          Compiled_same_cache_lookups++;
+          entry->queries++;
+        }
+        compiled_program_consider(
+          Compiled_fused_program, &Compiled_fused_program_count, entry);
+      }
+    }
+  for (i = 0; i < Compiled_fused_program_count; i++) {
+    if (Compiled_fused_program[i]->kind == COMPILED_CONDITION_SAME)
+      Compiled_fused_same_program_count++;
+    else
+      Compiled_rigid_program_applied = TRUE;
+  }
+  if (account) {
+    Compiled_fused_activations++;
+    Compiled_fused_prefix_candidates += Packed_candidates_count;
+  }
+  for (i = 0; i < Packed_candidates_count; i++) {
+    unsigned id = Packed_candidates[i];
+    if (compiled_fused_candidate_accept(id))
+      Packed_candidates[keep++] = id;
+    else if (account)
+      Compiled_fused_early_rejects++;
+  }
+  Packed_candidates_count = keep;
+  Compiled_fused_structural_kept = keep;
+}
+
+static void compiled_fused_finish(void)
+{
+  BOOL account = !Hint_preview_active;
+  unsigned i;
+  if (!Compiled_fused_prepared || Compiled_fused_finished)
+    return;
+  Compiled_fused_finished = TRUE;
+  if (!account)
+    return;
+  if (!Compiled_fused_active) {
+    Compiled_same_admission_skips++;
+    Compiled_same_skipped_candidates += Compiled_fused_seen;
+    return;
+  }
+  Compiled_fused_queries++;
+  Compiled_plan_queries++;
+  Compiled_plan_same_conditions += Compiled_same_test_count;
+  Compiled_plan_rigid_conditions += Compiled_rigid_test_count;
+  if (Compiled_same_test_count + Compiled_rigid_test_count >= 2)
+    Compiled_plan_multi_condition_queries++;
+  if (Compiled_same_test_count != 0 && Compiled_rigid_test_count != 0)
+    Compiled_plan_mixed_queries++;
+  if (Compiled_same_test_count > Compiled_plan_maximum_same)
+    Compiled_plan_maximum_same = Compiled_same_test_count;
+  if (Compiled_rigid_test_count > Compiled_plan_maximum_rigid)
+    Compiled_plan_maximum_rigid = Compiled_rigid_test_count;
+  if (Compiled_same_test_count + Compiled_rigid_test_count >
+      Compiled_plan_maximum_total)
+    Compiled_plan_maximum_total =
+      Compiled_same_test_count + Compiled_rigid_test_count;
+  Compiled_same_queries++;
+  Compiled_same_query_tests +=
+    Compiled_fused_same_program_count + Compiled_fused_direct_count;
+  Compiled_same_candidates_before += Compiled_fused_seen;
+  Compiled_same_candidates_after += Compiled_fused_structural_kept;
+  Compiled_same_candidate_tests += Compiled_fused_candidate_tests;
+  Compiled_same_navigation_rejects +=
+    Compiled_fused_navigation_rejects;
+  Compiled_same_unequal_rejects += Compiled_fused_unequal_rejects;
+  if (Compiled_fused_program_count != 0) {
+    Compiled_program_queries++;
+    Compiled_program_conditions += Compiled_fused_program_count;
+    if (Compiled_fused_program_count > Compiled_program_maximum_conditions)
+      Compiled_program_maximum_conditions = Compiled_fused_program_count;
+    Compiled_program_word_ops += Compiled_fused_word_ops;
+    Compiled_same_cache_hits += Compiled_fused_program_count;
+    for (i = 0; i < Compiled_fused_program_count; i++) {
+      if (Compiled_fused_program[i]->kind == COMPILED_CONDITION_SAME)
+        Compiled_same_cache_same_hits++;
+      else
+        Compiled_same_cache_rigid_hits++;
+    }
+  }
+  for (i = 0; i < Compiled_fused_direct_count; i++)
+    compiled_condition_cache_note_work(
+      Compiled_fused_direct_entries[i], Compiled_fused_direct_work[i]);
+  if (Compiled_rigid_program_applied) {
+    Compiled_rigid_queries++;
+    Compiled_rigid_candidates_before += Compiled_fused_seen;
+    Compiled_rigid_candidates_after += Compiled_fused_structural_kept;
+  }
+}
+
 static void compiled_same_cache_index_hint(unsigned id)
 {
   uint32_t root;
@@ -4298,6 +4668,48 @@ static void compiled_path_collect_query(Term t, BOOL sign,
     compiled_path_collect_query(
       ARG(t,i), sign, compiled_path_child(path, i), depth + 1);
   }
+}
+
+static void compiled_fused_query_begin(
+  Topform c, enum packed_hint_operation op)
+{
+  Compiled_fused_prepared = FALSE;
+  Compiled_fused_active = FALSE;
+  Compiled_fused_finished = FALSE;
+  Compiled_fused_seen = 0;
+  Compiled_fused_structural_kept = 0;
+  Compiled_fused_direct_count = 0;
+  Compiled_fused_program_count = 0;
+  Compiled_fused_same_program_count = 0;
+  Compiled_fused_current_word = UINT_MAX;
+  Compiled_fused_current_bits = 0;
+  Compiled_fused_candidate_tests = 0;
+  Compiled_fused_navigation_rejects = 0;
+  Compiled_fused_unequal_rejects = 0;
+  Compiled_fused_word_ops = 0;
+  if (!Compiled_fused_enabled || !Compiled_filter_enabled ||
+      Compiled_term_table_lazy || op == PACKED_HINT_BACK_DEMOD ||
+      c->literals == NULL || c->literals->next != NULL ||
+      (MATCH_HINTS_ANYCONST && AnyConstsEnabled &&
+       hint_contains_anyconst(c)))
+    return;
+  compiled_plan_begin();
+  compiled_path_collect_query(
+    c->literals->atom, c->literals->sign,
+    UINT64_C(0x243f6a8885a308d3), 0);
+  compiled_query_identity_term(c->literals->atom);
+  Compiled_fused_prepared = Compiled_same_test_count != 0;
+  if (Compiled_fused_prepared && Compiled_same_min_candidates == 0)
+    compiled_fused_activate();
+}
+
+static void compiled_fused_query_clear(void)
+{
+  Compiled_fused_prepared = FALSE;
+  Compiled_fused_active = FALSE;
+  Compiled_fused_finished = FALSE;
+  Compiled_plan_collect_rigid = FALSE;
+  Compiled_query_identity_count = 0;
 }
 
 static void compiled_path_index_term(Term t, BOOL sign,
@@ -4631,37 +5043,46 @@ static void compiled_path_filter_candidates(
   if (op == PACKED_HINT_BACK_DEMOD || !Compiled_filter_enabled ||
       (Compiled_term_table_lazy && !Compiled_same_cache_ready) ||
       c->literals == NULL ||
-      c->literals->next != NULL || Packed_candidates_count == 0 ||
+      c->literals->next != NULL ||
       (MATCH_HINTS_ANYCONST && AnyConstsEnabled &&
-       hint_contains_anyconst(c)))
+       hint_contains_anyconst(c))) {
+    compiled_fused_query_clear();
     return;
-
-  compiled_plan_begin();
-  compiled_path_collect_query(
-    c->literals->atom, c->literals->sign,
-    UINT64_C(0x243f6a8885a308d3), 0);
-  if (account && Packed_candidates_count >= Compiled_same_min_candidates) {
-    unsigned total = Compiled_same_test_count + Compiled_rigid_test_count;
-    Compiled_plan_queries++;
-    Compiled_plan_same_conditions += Compiled_same_test_count;
-    Compiled_plan_rigid_conditions += Compiled_rigid_test_count;
-    if (total >= 2)
-      Compiled_plan_multi_condition_queries++;
-    if (Compiled_same_test_count != 0 && Compiled_rigid_test_count != 0)
-      Compiled_plan_mixed_queries++;
-    if (Compiled_same_test_count > Compiled_plan_maximum_same)
-      Compiled_plan_maximum_same = Compiled_same_test_count;
-    if (Compiled_rigid_test_count > Compiled_plan_maximum_rigid)
-      Compiled_plan_maximum_rigid = Compiled_rigid_test_count;
-    if (total > Compiled_plan_maximum_total)
-      Compiled_plan_maximum_total = total;
   }
-  compiled_same_filter_candidates();
+
+  if (Compiled_fused_prepared)
+    compiled_fused_finish();
+  else {
+    compiled_plan_begin();
+    Compiled_plan_collect_rigid =
+      Packed_candidates_count >= Compiled_same_min_candidates;
+    compiled_path_collect_query(
+      c->literals->atom, c->literals->sign,
+      UINT64_C(0x243f6a8885a308d3), 0);
+    Compiled_plan_collect_rigid = FALSE;
+    if (account && Packed_candidates_count >= Compiled_same_min_candidates) {
+      unsigned total = Compiled_same_test_count + Compiled_rigid_test_count;
+      Compiled_plan_queries++;
+      Compiled_plan_same_conditions += Compiled_same_test_count;
+      Compiled_plan_rigid_conditions += Compiled_rigid_test_count;
+      if (total >= 2)
+        Compiled_plan_multi_condition_queries++;
+      if (Compiled_same_test_count != 0 && Compiled_rigid_test_count != 0)
+        Compiled_plan_mixed_queries++;
+      if (Compiled_same_test_count > Compiled_plan_maximum_same)
+        Compiled_plan_maximum_same = Compiled_same_test_count;
+      if (Compiled_rigid_test_count > Compiled_plan_maximum_rigid)
+        Compiled_plan_maximum_rigid = Compiled_rigid_test_count;
+      if (total > Compiled_plan_maximum_total)
+        Compiled_plan_maximum_total = total;
+    }
+    compiled_same_filter_candidates();
+  }
   compiled_rigid_filter_candidates();
   before = Packed_candidates_count;
   if (Compiled_path_postings == NULL ||
       Compiled_path_key_count == 0 || before == 0)
-    return;
+    goto compiled_filter_done;
 
   for (i = 0; i < Compiled_path_key_count; i++) {
     unsigned count;
@@ -4687,7 +5108,7 @@ static void compiled_path_filter_candidates(
       Compiled_path_admission_skips++;
       Compiled_path_skipped_posting_ids += best_count;
     }
-    return;
+    goto compiled_filter_done;
   }
 
   if (++Compiled_path_serial == 0) {
@@ -4721,6 +5142,8 @@ static void compiled_path_filter_candidates(
     Compiled_path_candidates_after += keep;
     Compiled_path_candidates_rejected += before - keep;
   }
+compiled_filter_done:
+  compiled_fused_query_clear();
 }
 
 static void better_collect_clause_candidates(
@@ -4734,6 +5157,7 @@ static void better_collect_clause_candidates(
   unsigned long long positive_mask = 0, negative_mask = 0;
   const unsigned long long *fast_keys = NULL;
   unsigned fast_key_count = 0;
+  unsigned fast_posting_key_count = 0;
   unsigned long long posting_candidates_before = 0;
   BOOL fast_eligible = FALSE;
   struct fast_candidate_filter fast_filter;
@@ -4754,6 +5178,7 @@ static void better_collect_clause_candidates(
     }
   }
   packed_begin_candidates();
+  compiled_fused_query_begin(c, op);
   if (equivalence) {
     unsigned long long key = better_equivalence_key(
       positive_mask, negative_mask, positive, negative,
@@ -4786,12 +5211,15 @@ static void better_collect_clause_candidates(
     fast_filter.sign = first->sign ? 1 : 0;
     if (Fast_packed_index) {
       fast_eligible = positive <= USHRT_MAX && negative <= USHRT_MAX &&
-                      fast_cache_profile(&fast_keys, &fast_key_count);
+                      fast_cache_profile(
+                        &fast_keys, &fast_key_count,
+                        &fast_posting_key_count);
       if (!fast_eligible && !Hint_preview_active) {
         Fast_cache_queries++;
       }
       if (fast_eligible && fast_cache_lookup(
-            fast_keys, fast_key_count, first_mask, positive, negative)) {
+            fast_keys, fast_key_count, fast_posting_key_count,
+            first_mask, positive, negative)) {
         compiled_census_candidate_stages(
           op, Packed_candidates_count, Packed_candidates_count);
         packed_operation_candidate_generation_end(op);
@@ -4851,7 +5279,8 @@ static void better_collect_clause_candidates(
     op, pre_profile, Packed_candidates_count);
   if (fast_eligible) {
     fast_cache_store(
-      fast_keys, fast_key_count, first_mask, positive, negative,
+      fast_keys, fast_key_count, fast_posting_key_count,
+      first_mask, positive, negative,
       Packed_operation_stats[op].posting_candidates -
         posting_candidates_before);
   }
@@ -5775,6 +6204,16 @@ void set_hint_compiled_lazy(BOOL on)
 }
 
 /* PUBLIC */
+void set_hint_compiled_fused(BOOL on)
+{
+  if (on && Compiled_term_table == NULL)
+    fatal_error("fused compiled hints require term table");
+  if (on && Compiled_term_table_lazy)
+    fatal_error("fused compiled hints require eager term table");
+  Compiled_fused_enabled = on;
+}
+
+/* PUBLIC */
 void set_hint_compiled_paths(BOOL on)
 {
   if (on && Compiled_term_table == NULL)
@@ -6000,7 +6439,11 @@ void packed_hint_index_stats(unsigned long long *node_bytes,
       (unsigned long long) Compiled_same_test_capacity *
         sizeof(*Compiled_same_tests) +
       (unsigned long long) Compiled_rigid_test_capacity *
-        sizeof(*Compiled_rigid_tests);
+        sizeof(*Compiled_rigid_tests) +
+      (unsigned long long) Compiled_query_identity_capacity *
+        sizeof(*Compiled_query_identity) +
+      (unsigned long long) Compiled_fast_identity_capacity *
+        sizeof(*Compiled_fast_identity_keys);
   }
   if (Compiled_path_postings != NULL) {
     struct hint_postings_stats path_stats;
@@ -6346,6 +6789,19 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             COMPILED_PROGRAM_MAX_CONDITIONS,
             Compiled_program_word_ops,
             Compiled_program_candidate_tests);
+  }
+  if (Compiled_fused_enabled) {
+    fprintf(fp,
+            "Compiled_hint_blocks: enabled=1, queries=%llu, "
+            "activations=%llu, prefix_candidates=%llu, "
+            "early_rejects=%llu, query_identity_bytes=%llu, "
+            "cache_identity_bytes=%llu.\n",
+            Compiled_fused_queries, Compiled_fused_activations,
+            Compiled_fused_prefix_candidates, Compiled_fused_early_rejects,
+            (unsigned long long) Compiled_query_identity_capacity *
+              sizeof(*Compiled_query_identity),
+            (unsigned long long) Compiled_fast_identity_capacity *
+              sizeof(*Compiled_fast_identity_keys));
   }
   if (Compiled_filter_enabled) {
     unsigned i, built = 0, denied = 0;
