@@ -124,6 +124,7 @@ static unsigned long long Compiled_same_skipped_candidates = 0;
   (32ULL * 1024ULL * 1024ULL)
 #define COMPILED_SAME_CACHE_MAX_ENTRIES 4096U
 #define COMPILED_SAME_CACHE_MAX_PATH_WORDS (256U * 1024U)
+#define COMPILED_PROGRAM_MAX_CONDITIONS 8U
 enum compiled_condition_kind {
   COMPILED_CONDITION_SAME = 1,
   COMPILED_CONDITION_RIGID = 2
@@ -170,6 +171,13 @@ static unsigned long long Compiled_same_cache_same_hits = 0;
 static unsigned long long Compiled_same_cache_rigid_hits = 0;
 static unsigned Compiled_same_cache_build_factor =
   COMPILED_SAME_CACHE_BUILD_FACTOR;
+static unsigned long long *Compiled_program_bits = NULL;
+static unsigned Compiled_program_bit_capacity = 0;
+static unsigned long long Compiled_program_queries = 0;
+static unsigned long long Compiled_program_conditions = 0;
+static unsigned long long Compiled_program_word_ops = 0;
+static unsigned long long Compiled_program_candidate_tests = 0;
+static unsigned Compiled_program_maximum_conditions = 0;
 
 #define COMPILED_RIGID_SAMPLE_CANDIDATES 8U
 #define COMPILED_RIGID_SAMPLE_MAX_TESTS 32U
@@ -3065,6 +3073,11 @@ void init_hints(Uniftype utype,
   Compiled_same_cache_metadata_denials = 0;
   Compiled_same_cache_same_hits = 0;
   Compiled_same_cache_rigid_hits = 0;
+  Compiled_program_queries = 0;
+  Compiled_program_conditions = 0;
+  Compiled_program_word_ops = 0;
+  Compiled_program_candidate_tests = 0;
+  Compiled_program_maximum_conditions = 0;
   Compiled_rigid_test_count = 0;
   Compiled_rigid_queries = 0;
   Compiled_rigid_sampled_queries = 0;
@@ -3188,6 +3201,7 @@ void done_with_hints(void)
   if (Compiled_plan_paths) safe_free(Compiled_plan_paths);
   if (Compiled_same_tests) safe_free(Compiled_same_tests);
   if (Compiled_rigid_tests) safe_free(Compiled_rigid_tests);
+  if (Compiled_program_bits) safe_free(Compiled_program_bits);
   for (i = 0; i < Compiled_same_cache_count; i++)
     if (Compiled_same_cache_entries[i].dense_bits != NULL)
       safe_free(Compiled_same_cache_entries[i].dense_bits);
@@ -3225,6 +3239,7 @@ void done_with_hints(void)
   Compiled_plan_paths = NULL;
   Compiled_same_tests = NULL;
   Compiled_rigid_tests = NULL;
+  Compiled_program_bits = NULL;
   Compiled_same_cache_entries = NULL;
   Compiled_same_cache_buckets = NULL;
   Compiled_same_cache_paths = NULL;
@@ -3344,6 +3359,7 @@ void done_with_hints(void)
   Compiled_plan_path_count = Compiled_plan_path_capacity = 0;
   Compiled_same_test_count = Compiled_same_test_capacity = 0;
   Compiled_rigid_test_count = Compiled_rigid_test_capacity = 0;
+  Compiled_program_bit_capacity = 0;
   Compiled_same_queries = 0;
   Compiled_same_query_tests = 0;
   Compiled_same_candidates_before = 0;
@@ -3370,6 +3386,11 @@ void done_with_hints(void)
   Compiled_same_cache_metadata_denials = 0;
   Compiled_same_cache_same_hits = 0;
   Compiled_same_cache_rigid_hits = 0;
+  Compiled_program_queries = 0;
+  Compiled_program_conditions = 0;
+  Compiled_program_word_ops = 0;
+  Compiled_program_candidate_tests = 0;
+  Compiled_program_maximum_conditions = 0;
   Compiled_rigid_queries = 0;
   Compiled_rigid_sampled_queries = 0;
   Compiled_rigid_sample_tests = 0;
@@ -3918,6 +3939,23 @@ static int compiled_same_cache_compare(
   return -1;
 }
 
+static unsigned long long compiled_program_scratch_bytes(void)
+{
+  return (unsigned long long) Compiled_program_bit_capacity *
+    sizeof(*Compiled_program_bits);
+}
+
+static BOOL compiled_cache_budget_allows(unsigned long long additional)
+{
+  unsigned long long scratch = compiled_program_scratch_bytes();
+  if (Compiled_same_cache_dense_bytes > Compiled_same_cache_budget_bytes ||
+      scratch > Compiled_same_cache_budget_bytes -
+                  Compiled_same_cache_dense_bytes)
+    return FALSE;
+  return additional <= Compiled_same_cache_budget_bytes -
+    Compiled_same_cache_dense_bytes - scratch;
+}
+
 static void compiled_same_cache_build(
   struct compiled_same_cache_entry *entry)
 {
@@ -3928,8 +3966,7 @@ static void compiled_same_cache_build(
   unsigned id;
   if (entry->build_denied || entry->built)
     return;
-  if (bytes > Compiled_same_cache_budget_bytes -
-              Compiled_same_cache_dense_bytes) {
+  if (!compiled_cache_budget_allows(bytes)) {
     entry->build_denied = 1;
     Compiled_same_cache_dense_denials++;
     return;
@@ -3953,28 +3990,99 @@ static void compiled_same_cache_build(
   Compiled_same_cache_builds++;
 }
 
-static BOOL compiled_same_cache_filter(
+static void compiled_program_consider(
+  struct compiled_same_cache_entry **entries, unsigned *count,
   struct compiled_same_cache_entry *entry)
 {
+  unsigned i, position;
+  if (entry == NULL || !entry->built || entry->dense_bits == NULL)
+    return;
+  for (i = 0; i < *count; i++)
+    if (entries[i] == entry)
+      return;
+  position = 0;
+  while (position < *count &&
+         (entries[position]->match_count < entry->match_count ||
+          (entries[position]->match_count == entry->match_count &&
+           entries[position]->hash <= entry->hash)))
+    position++;
+  if (position >= COMPILED_PROGRAM_MAX_CONDITIONS)
+    return;
+  if (*count < COMPILED_PROGRAM_MAX_CONDITIONS)
+    (*count)++;
+  for (i = *count - 1; i > position; i--)
+    entries[i] = entries[i - 1];
+  entries[position] = entry;
+}
+
+static BOOL compiled_condition_program_filter(
+  struct compiled_same_cache_entry **entries, unsigned count)
+{
   unsigned before = Packed_candidates_count;
-  unsigned i, keep = 0;
-  if (!entry->built || entry->dense_bits == NULL)
+  unsigned i, j, keep = 0, words = 0;
+  unsigned long long candidate_tests = 0;
+  BOOL aggregate = count == 1;
+  if (count == 0)
     return FALSE;
+  for (j = 0; j < count; j++)
+    if (entries[j]->dense_words > words)
+      words = entries[j]->dense_words;
+  if (count > 1 && words > Compiled_program_bit_capacity) {
+    unsigned long long old_bytes = compiled_program_scratch_bytes();
+    unsigned long long bytes =
+      (unsigned long long) words * sizeof(*Compiled_program_bits);
+    if (bytes >= old_bytes &&
+        compiled_cache_budget_allows(bytes - old_bytes)) {
+      Compiled_program_bits = safe_realloc(
+        Compiled_program_bits, (size_t) bytes);
+      Compiled_program_bit_capacity = words;
+    }
+  }
+  if (count > 1 && words <= Compiled_program_bit_capacity) {
+    aggregate = TRUE;
+    for (i = 0; i < words; i++) {
+      unsigned long long bits = ULLONG_MAX;
+      for (j = 0; j < count; j++)
+        bits &= i < entries[j]->dense_words ?
+          entries[j]->dense_bits[i] : 0;
+      Compiled_program_bits[i] = bits;
+    }
+  }
   for (i = 0; i < before; i++) {
     unsigned id = Packed_candidates[i];
     uint32_t root = hint_term_table_root(Compiled_term_table, id);
-    if (root == 0 ||
-        (id / 64 < entry->dense_words &&
-         (entry->dense_bits[id / 64] & (1ULL << (id % 64))) != 0))
+    unsigned word = id / 64;
+    BOOL member = count == 1 ?
+      word < entries[0]->dense_words &&
+        (entries[0]->dense_bits[word] & (1ULL << (id % 64))) != 0 :
+      aggregate ? word < words &&
+        (Compiled_program_bits[word] & (1ULL << (id % 64))) != 0 : TRUE;
+    if (root != 0 && count > 1 && !aggregate)
+      for (j = 0; j < count && member; j++) {
+        candidate_tests++;
+        member = word < entries[j]->dense_words &&
+          (entries[j]->dense_bits[word] & (1ULL << (id % 64))) != 0;
+      }
+    if (root == 0 || member)
       Packed_candidates[keep++] = id;
   }
   Packed_candidates_count = keep;
   if (!Hint_preview_active) {
-    Compiled_same_cache_hits++;
-    if (entry->kind == COMPILED_CONDITION_SAME)
-      Compiled_same_cache_same_hits++;
-    else if (entry->kind == COMPILED_CONDITION_RIGID)
-      Compiled_same_cache_rigid_hits++;
+    Compiled_program_queries++;
+    Compiled_program_conditions += count;
+    if (count > Compiled_program_maximum_conditions)
+      Compiled_program_maximum_conditions = count;
+    if (count > 1 && aggregate)
+      Compiled_program_word_ops +=
+        (unsigned long long) words * count;
+    Compiled_program_candidate_tests += candidate_tests;
+    Compiled_same_cache_hits += count;
+    for (j = 0; j < count; j++) {
+      if (entries[j]->kind == COMPILED_CONDITION_SAME)
+        Compiled_same_cache_same_hits++;
+      else if (entries[j]->kind == COMPILED_CONDITION_RIGID)
+        Compiled_same_cache_rigid_hits++;
+    }
     Compiled_same_cache_filter_candidates += before;
     Compiled_same_cache_filter_rejects += before - keep;
   }
@@ -4002,8 +4110,7 @@ static void compiled_same_cache_index_hint(unsigned id)
             sizeof(*entry->dense_bits);
         unsigned long long bytes =
           (unsigned long long) words * sizeof(*entry->dense_bits);
-        if (bytes - old_bytes > Compiled_same_cache_budget_bytes -
-                                  Compiled_same_cache_dense_bytes) {
+        if (!compiled_cache_budget_allows(bytes - old_bytes)) {
           safe_free(entry->dense_bits);
           Compiled_same_cache_dense_bytes -= old_bytes;
           entry->dense_bits = NULL;
@@ -4116,11 +4223,14 @@ static void compiled_path_index_hint(Topform c)
 static void compiled_same_filter_candidates(void)
 {
   unsigned before = Packed_candidates_count;
-  unsigned i, keep = 0;
+  unsigned i, keep = 0, direct_before;
+  unsigned program_count = 0;
   unsigned long long candidate_tests = 0;
   unsigned long long navigation_rejects = 0;
   unsigned long long unequal_rejects = 0;
   struct compiled_same_cache_entry *cache_entry = NULL;
+  struct compiled_same_cache_entry *program[
+    COMPILED_PROGRAM_MAX_CONDITIONS];
   BOOL account = !Hint_preview_active;
 
   if (Compiled_same_test_count == 0 || before == 0)
@@ -4133,41 +4243,47 @@ static void compiled_same_filter_candidates(void)
     return;
   }
   compiled_plan_sort_same_tests();
-  /* One cheap equality condition captures the dominant rejection without
-     recreating the full matcher as a sequence of root-to-path walks.  The
-     authoritative compressed matcher confirms every survivor and checks all
-     remaining repeated occurrences. */
-  Compiled_same_test_count = 1;
   if (Compiled_same_cache_ready) {
-    cache_entry = compiled_same_cache_lookup(
-      Compiled_same_tests, account);
-    if (account) {
-      Compiled_same_cache_lookups++;
-      if (cache_entry != NULL)
-        cache_entry->queries++;
+    /* Execute every previously learned condition exposed by this query in
+       one bounded program.  Only the cheapest uncached SAME test is scanned
+       directly and allowed to create new metadata. */
+    for (i = 0; i < Compiled_same_test_count; i++) {
+      struct compiled_same_cache_entry *entry =
+        compiled_same_cache_lookup(Compiled_same_tests + i,
+                                   account && i == 0);
+      if (i == 0)
+        cache_entry = entry;
+      if (i == 0 || (entry != NULL && entry->built)) {
+        if (account) {
+          Compiled_same_cache_lookups++;
+          if (entry != NULL)
+            entry->queries++;
+        }
+        compiled_program_consider(program, &program_count, entry);
+      }
     }
-    if (cache_entry != NULL && cache_entry->built &&
-        compiled_same_cache_filter(cache_entry)) {
+    if (compiled_condition_program_filter(program, program_count) &&
+        cache_entry != NULL && cache_entry->built) {
       if (account) {
         Compiled_same_queries++;
-        Compiled_same_query_tests++;
+        Compiled_same_query_tests += program_count;
         Compiled_same_candidates_before += before;
         Compiled_same_candidates_after += Packed_candidates_count;
       }
       return;
     }
   }
-  for (i = 0; i < before; i++) {
+  direct_before = Packed_candidates_count;
+  for (i = 0; i < direct_before; i++) {
     unsigned id = Packed_candidates[i];
     uint32_t root = hint_term_table_root(Compiled_term_table, id);
-    unsigned j;
     BOOL accepted = TRUE;
     if (root == 0) {
       Packed_candidates[keep++] = id;
       continue;
     }
-    for (j = 0; j < Compiled_same_test_count; j++) {
-      struct compiled_same_test *test = Compiled_same_tests + j;
+    {
+      struct compiled_same_test *test = Compiled_same_tests;
       int comparison;
       candidate_tests++;
       comparison = hint_term_table_compare_paths(
@@ -4184,7 +4300,6 @@ static void compiled_same_filter_candidates(void)
       if (comparison == 0) {
         unequal_rejects++;
         accepted = FALSE;
-        break;
       }
     }
     if (accepted)
@@ -4193,7 +4308,7 @@ static void compiled_same_filter_candidates(void)
   Packed_candidates_count = keep;
   if (account) {
     Compiled_same_queries++;
-    Compiled_same_query_tests += Compiled_same_test_count;
+    Compiled_same_query_tests += program_count + 1;
     Compiled_same_candidates_before += before;
     Compiled_same_candidates_after += keep;
     Compiled_same_candidate_tests += candidate_tests;
@@ -4208,10 +4323,13 @@ static void compiled_rigid_filter_candidates(void)
   unsigned before = Packed_candidates_count;
   unsigned samples, i, j;
   unsigned selected = UINT_MAX;
+  unsigned program_count = 0;
   unsigned best_rejects = 0, best_supported = 1;
   unsigned keep = 0;
   unsigned long long candidate_tests = 0;
   struct compiled_same_cache_entry *cache_entry = NULL;
+  struct compiled_same_cache_entry *program[
+    COMPILED_PROGRAM_MAX_CONDITIONS];
   BOOL account = !Hint_preview_active;
 
   if (Compiled_rigid_test_count == 0 || before == 0)
@@ -4222,25 +4340,24 @@ static void compiled_rigid_filter_candidates(void)
     return;
   }
 
-  /* Reuse an already-built instruction without re-sampling.  The globally
-     smallest membership population is a conservative selectivity estimate;
-     the packed sign/root candidate stream remains the actual population. */
+  /* Execute all applicable learned rigid conditions as one bounded dense
+     program.  Their intersection is exact as a necessary precondition; the
+     packed sign/root stream remains the actual ordered population. */
   if (Compiled_same_cache_ready) {
     for (i = 0; i < Compiled_rigid_test_count; i++) {
       struct compiled_same_cache_entry *entry =
         compiled_rigid_cache_lookup(Compiled_rigid_tests + i, FALSE);
-      if (entry != NULL && entry->built &&
-          (cache_entry == NULL || entry->match_count <
-                                  cache_entry->match_count)) {
-        cache_entry = entry;
-        selected = i;
+      if (entry != NULL && entry->built) {
+        if (account) {
+          Compiled_same_cache_lookups++;
+          entry->queries++;
+        }
+        compiled_program_consider(program, &program_count, entry);
       }
     }
   }
-  if (cache_entry != NULL && compiled_same_cache_filter(cache_entry)) {
+  if (compiled_condition_program_filter(program, program_count)) {
     if (account) {
-      Compiled_same_cache_lookups++;
-      cache_entry->queries++;
       Compiled_rigid_queries++;
       Compiled_rigid_candidates_before += before;
       Compiled_rigid_candidates_after += Packed_candidates_count;
@@ -5690,7 +5807,9 @@ void packed_hint_index_stats(unsigned long long *node_bytes,
       (unsigned long long) Compiled_same_test_capacity *
         sizeof(*Compiled_same_tests) +
       (unsigned long long) Compiled_rigid_test_capacity *
-        sizeof(*Compiled_rigid_tests);
+        sizeof(*Compiled_rigid_tests) +
+      (unsigned long long) Compiled_program_bit_capacity *
+        sizeof(*Compiled_program_bits);
   }
   if (Compiled_path_postings != NULL) {
     struct hint_postings_stats path_stats;
@@ -5992,6 +6111,20 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             Compiled_rigid_truncated_tests,
             (unsigned long long) Compiled_rigid_test_capacity *
               sizeof(*Compiled_rigid_tests));
+  }
+  if (Compiled_filter_enabled) {
+    fprintf(fp,
+            "Compiled_hint_program: queries=%llu, conditions=%llu, "
+            "maximum_conditions=%u, maximum_allowed=%u, "
+            "word_operations=%llu, candidate_membership_tests=%llu, "
+            "scratch_words=%u, scratch_bytes=%llu.\n",
+            Compiled_program_queries, Compiled_program_conditions,
+            Compiled_program_maximum_conditions,
+            COMPILED_PROGRAM_MAX_CONDITIONS,
+            Compiled_program_word_ops,
+            Compiled_program_candidate_tests,
+            Compiled_program_bit_capacity,
+            compiled_program_scratch_bytes());
   }
   if (Compiled_filter_enabled) {
     unsigned i, built = 0, denied = 0;

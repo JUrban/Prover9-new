@@ -6,7 +6,8 @@ prover9=${PROVER9:-"$script_dir/../provers.src/prover9"}
 tmp=${TMPDIR:-/tmp}/hint-compiled-census.$$
 trap 'rm -f "$tmp.out" "$tmp.err" "$tmp.path.out" "$tmp.path.err" \
   "$tmp.same.out" "$tmp.same.err" "$tmp.cache.out" "$tmp.cache.err" \
-  "$tmp.deny.out" "$tmp.deny.err" "$tmp.rigid.out" "$tmp.rigid.err"' \
+  "$tmp.deny.out" "$tmp.deny.err" "$tmp.rigid.out" "$tmp.rigid.err" \
+  "$tmp.program.out" "$tmp.program.err"' \
   EXIT HUP INT TERM
 
 "$prover9" < "$script_dir/hint_compiled_census.in" \
@@ -118,5 +119,20 @@ printf '%s\n' "$rigid_cache" | grep -Eq \
   'entries=1, built=1, same_entries=0, rigid_entries=1, same_built=0, rigid_built=1, build_factor=0,'
 printf '%s\n' "$rigid_cache" | grep -Eq \
   'cache_hits=[1-9][0-9]*, same_hits=0, rigid_hits=[1-9][0-9]*, builds=1,'
+
+"$prover9" < "$script_dir/hint_compiled_program.in" \
+  > "$tmp.program.out" 2> "$tmp.program.err" || program_status=$?
+program_status=${program_status:-0}
+if [ "$program_status" -ne 2 ] && [ "$program_status" -ne 5 ]; then
+  cat "$tmp.program.err" >&2
+  echo "hint_compiled_census_test: program run returned $program_status" >&2
+  exit 1
+fi
+program_line=$(grep '^Compiled_hint_program:' "$tmp.program.out")
+program_cache=$(grep '^Compiled_hint_same_cache:' "$tmp.program.out")
+printf '%s\n' "$program_line" | grep -Eq \
+  'queries=2, conditions=3, maximum_conditions=2, maximum_allowed=8, word_operations=[1-9][0-9]*, candidate_membership_tests=0, scratch_words=[1-9][0-9]*, scratch_bytes=[1-9][0-9]*\.'
+printf '%s\n' "$program_cache" | grep -Eq \
+  'entries=3, built=2, same_entries=3, rigid_entries=0, same_built=2, rigid_built=0,.*cache_hits=3, same_hits=3, rigid_hits=0, builds=2,'
 
 echo "hint_compiled_census_test: PASS"

@@ -160,4 +160,28 @@ diff -u "$test_tmp/rigid-control.trace" \
 grep -Eq '^Compiled_hint_same_cache: .*rigid_built=1,.*rigid_hits=[1-9][0-9]*,' \
   "$test_tmp/rigid-compiled.out"
 
+sed 's/packed_compiled/packed_fast/' \
+  "$repo_dir/test.src/hint_compiled_program.in" |
+  "$prover9" > "$test_tmp/program-control.out" \
+               2> "$test_tmp/program-control.err" || program_control_status=$?
+program_control_status=${program_control_status:-0}
+"$prover9" < "$repo_dir/test.src/hint_compiled_program.in" \
+  > "$test_tmp/program-compiled.out" \
+  2> "$test_tmp/program-compiled.err" || program_compiled_status=$?
+program_compiled_status=${program_compiled_status:-0}
+if [ "$program_control_status" -ne 2 ] || \
+   [ "$program_compiled_status" -ne 2 ]; then
+  echo "hint_index_trace_test: program statuses control=$program_control_status compiled=$program_compiled_status" >&2
+  exit 1
+fi
+grep '^HINT_TRACE ' "$test_tmp/program-control.out" \
+  > "$test_tmp/program-control.trace"
+grep '^HINT_TRACE ' "$test_tmp/program-compiled.out" \
+  > "$test_tmp/program-compiled.trace"
+test -s "$test_tmp/program-control.trace"
+diff -u "$test_tmp/program-control.trace" \
+  "$test_tmp/program-compiled.trace"
+grep -Eq '^Compiled_hint_program: queries=2, conditions=3, maximum_conditions=2,.*word_operations=[1-9][0-9]*,' \
+  "$test_tmp/program-compiled.out"
+
 echo 'hint_index_trace_test: PASS'
