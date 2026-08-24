@@ -277,6 +277,9 @@ static void run_adaptive_mask_filter_case(int bsub)
   enum { DISTRACTORS = 600, HINTS = DISTRACTORS + 1 };
   Topform hints[HINTS];
   Topform candidate;
+  Topform inactive_candidate;
+  Topform replacement;
+  Topform rewritten_candidate;
   unsigned long long bitmap_bytes = 0, filtered_words = 0;
   unsigned long long property_reads = 0, input_ids = 0, survivor_ids = 0;
   FILE *stats;
@@ -338,10 +341,34 @@ static void run_adaptive_mask_filter_case(int bsub)
   CHECK(input_ids > survivor_ids,
         "bulk checklist removes deep-feature near misses before enumeration");
 
+  unindex_hint(hints[DISTRACTORS]);
+  inactive_candidate =
+    parse_clause_from_string("bulk_probe(f(g(bulk_target))).");
+  adjust_weight_with_hints(inactive_candidate, FALSE, FALSE);
+  CHECK(inactive_candidate->matching_hint == NULL,
+        "stale property bits cannot revive a deactivated hint");
+
+  CHECK(materialize_clause(hints[DISTRACTORS]),
+        "materialize the target hint for a simulated rewrite");
+  replacement =
+    parse_clause_from_string("bulk_probe(f(g(bulk_rewritten_target))).");
+  zap_literals(hints[DISTRACTORS]->literals);
+  hints[DISTRACTORS]->literals = replacement->literals;
+  replacement->literals = NULL;
+  delete_clause(replacement);
+  index_hint(hints[DISTRACTORS]);
+  rewritten_candidate =
+    parse_clause_from_string("bulk_probe(f(g(bulk_rewritten_target))).");
+  adjust_weight_with_hints(rewritten_candidate, FALSE, FALSE);
+  CHECK(rewritten_candidate->matching_hint == hints[DISTRACTORS],
+        "reindexing publishes every property required by a rewritten hint");
+
   for (i = HINTS - 1; i >= 0; i--)
     unindex_hint(hints[i]);
   done_with_hints();
   delete_clause(candidate);
+  delete_clause(inactive_candidate);
+  delete_clause(rewritten_candidate);
   for (i = 0; i < HINTS; i++)
     delete_clause(hints[i]);
 
