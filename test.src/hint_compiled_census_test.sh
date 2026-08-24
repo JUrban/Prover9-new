@@ -17,10 +17,15 @@ fi
 
 line=$(grep '^Compiled_hint_census: op=match,' "$tmp.out")
 bank=$(grep '^Compiled_hint_bank_census:' "$tmp.out")
+table=$(grep '^Compiled_hint_term_table:' "$tmp.out")
+grep -Eq '^Hint_index: mode=packed_compiled_shadow,' "$tmp.out"
 printf '%s\n' "$bank" | grep -Eq 'finalized=1, retained=9, units=8, ordinary_units=8, anyconst_units=0, nonunits=1'
 printf '%s\n' "$bank" | grep -Eq 'positive_units=6, negative_units=2, equations=1, disequations=1'
 printf '%s\n' "$bank" | grep -Eq 'repeated_variable_occurrences=2, units_with_repeated_variables=2'
 printf '%s\n' "$bank" | grep -Eq 'subterm_occurrences=[1-9][0-9]*, subterm_fingerprint_distinct=[1-9][0-9]*'
+printf '%s\n' "$table" | grep -Eq 'finalized=1, active=8, additions=8, removals=0, reinsertions=0'
+printf '%s\n' "$table" | grep -Eq 'base_nodes=[1-9][0-9]*, base_children=[1-9][0-9]*'
+printf '%s\n' "$table" | grep -Eq 'hash_bytes=0, hash_peak_bytes=[1-9][0-9]*, scratch_bytes=0, total_bytes=[1-9][0-9]*'
 printf '%s\n' "$line" | grep -Eq 'profiled_units=[1-9][0-9]*'
 printf '%s\n' "$line" | grep -Eq 'exact_matches=[1-9][0-9]*'
 printf '%s\n' "$line" | grep -Eq 'repeated_rejects=[1-9][0-9]*'

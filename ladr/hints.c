@@ -20,6 +20,7 @@
 #include "compress.h"
 #include "clock.h"
 #include "hint_postings.h"
+#include "hint_term_table.h"
 #include <stdint.h>
 
 /* Private definitions and types */
@@ -55,6 +56,11 @@ static unsigned *Packed_candidates = NULL;
 static unsigned Packed_candidates_count = 0, Packed_candidates_capacity = 0;
 static BOOL Packed_candidates_nondecreasing = TRUE;
 static unsigned long long Packed_candidate_checks = 0;
+
+/* Construction-only precursor of the compiled matcher.  Ordinary unit hints
+   receive canonical roots; packed_fast remains authoritative. */
+static BOOL Compiled_term_table_enabled = FALSE;
+static Hint_term_table Compiled_term_table = NULL;
 
 /* Dedicated read-only-preview query workspace.  It is allocated alongside
    the packed bank, never aliases authoritative matcher scratch, and is not
@@ -1749,6 +1755,8 @@ void finalize_hint_conjunction_index(void)
   BOOL denied = FALSE;
   BOOL estimator_live = TRUE;
   compiled_census_finalize_bank();
+  if (Compiled_term_table != NULL)
+    hint_term_table_finalize(Compiled_term_table);
   if (!Fast_conjunction_planning)
     return;
   fast_conjunction_estimator_init(&estimator);
@@ -2877,6 +2885,7 @@ void init_hints(Uniftype utype,
   Hint_state_epoch = 1;
   Hint_match_stats = FALSE;
   Hint_compiled_census = FALSE;
+  Compiled_term_table_enabled = FALSE;
   Hint_match_once = FALSE;
   memset(Compiled_census, 0, sizeof(Compiled_census));
   memset(Compiled_census_printed, 0, sizeof(Compiled_census_printed));
@@ -2982,6 +2991,7 @@ void done_with_hints(void)
   if (Preview_key_scratch) safe_free(Preview_key_scratch);
   if (Fast_match_cache) safe_free(Fast_match_cache);
   if (Fast_match_cache_keys) safe_free(Fast_match_cache_keys);
+  hint_term_table_destroy(Compiled_term_table);
   if (Compiled_subterm_fingerprints != NULL)
     safe_free(Compiled_subterm_fingerprints);
   hint_postings_destroy(Better_postings);
@@ -3098,6 +3108,8 @@ void done_with_hints(void)
   Compiled_subterm_fingerprint_capacity = 0;
   Compiled_subterm_fingerprint_count = 0;
   Hint_compiled_census = FALSE;
+  Compiled_term_table_enabled = FALSE;
+  Compiled_term_table = NULL;
   Packed_index = FALSE;
   Better_packed_index = FALSE;
   Fast_packed_index = FALSE;
@@ -3613,6 +3625,12 @@ void index_hint(Topform c)
       packed_index_hint_terms(c, anyconst);
       better_index_hint_terms(c, anyconst);
       compiled_census_observe_hint(c, anyconst);
+      if (Compiled_term_table_enabled && !anyconst &&
+          c->literals != NULL && c->literals->next == NULL &&
+          !hint_term_table_add(
+            Compiled_term_table, (unsigned) c->id, c->literals->sign,
+            c->literals->atom))
+        fatal_error("index_hint: cannot add compiled unit-hint term");
       if (compress_clause(c) == CLAUSE_COMPRESS_INVALID)
         fatal_error("index_hint: cannot compact active packed hint");
     }
@@ -3656,6 +3674,11 @@ void unindex_hint(Topform c)
         fatal_error("unindex_hint: packed active-state mismatch");
       Packed_hint_active[c->id] = 0;
       better_deactivate_hint((unsigned) c->id);
+      if (Compiled_term_table != NULL &&
+          hint_term_table_root(Compiled_term_table, (unsigned) c->id) != 0 &&
+          !hint_term_table_remove(
+            Compiled_term_table, (unsigned) c->id))
+        fatal_error("unindex_hint: compiled term-table lifecycle mismatch");
     }
     else
       lindex_update(Hints_idx, c, DELETE);
@@ -4166,6 +4189,22 @@ void set_hint_compiled_census(BOOL on)
 
 /*************
  *
+ *   set_hint_compiled_term_table()
+ *
+ *************/
+
+/* PUBLIC */
+void set_hint_compiled_term_table(BOOL on)
+{
+  if (on && !Fast_packed_index)
+    fatal_error("compiled hint term table requires packed_fast");
+  if (on && Compiled_term_table == NULL)
+    Compiled_term_table = hint_term_table_init();
+  Compiled_term_table_enabled = on;
+}  /* set_hint_compiled_term_table */
+
+/*************
+ *
  *   set_hint_match_once()
  *
  *************/
@@ -4489,6 +4528,26 @@ void fprint_packed_hint_operation_stats(FILE *fp)
       p->timing_sample_active = FALSE;
       p->timing_sample_started = 0.0;
     }
+  }
+  if (Compiled_term_table != NULL) {
+    struct hint_term_table_stats s;
+    hint_term_table_get_stats(Compiled_term_table, &s);
+    fprintf(fp,
+            "Compiled_hint_term_table: finalized=%d, active=%llu, "
+            "additions=%llu, removals=%llu, reinsertions=%llu, "
+            "base_nodes=%llu, base_children=%llu, "
+            "base_occurrences=%llu, base_intern_hits=%llu, "
+            "delta_nodes=%llu, delta_children=%llu, "
+            "delta_occurrences=%llu, delta_intern_hits=%llu, "
+            "node_bytes=%llu, child_bytes=%llu, record_bytes=%llu, "
+            "hash_bytes=%llu, hash_peak_bytes=%llu, scratch_bytes=%llu, "
+            "total_bytes=%llu.\n",
+            s.finalized, s.active_records, s.additions, s.removals,
+            s.reinsertions, s.base_nodes, s.base_children,
+            s.base_occurrences, s.base_intern_hits, s.delta_nodes,
+            s.delta_children, s.delta_occurrences, s.delta_intern_hits,
+            s.node_bytes, s.child_bytes, s.record_bytes, s.hash_bytes,
+            s.hash_peak_bytes, s.scratch_bytes, s.total_bytes);
   }
   fprintf(fp,
           "Packed_hint_preview_workspace: initialized=%d, bytes=%llu.\n",

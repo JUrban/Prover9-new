@@ -102,6 +102,10 @@ void set_hint_match_stats(BOOL on);
    matcher.  Disabled production matching retains its existing hot path. */
 void set_hint_compiled_census(BOOL on);
 
+/* Construct the immutable/delta unit-hint term table while packed_fast
+   remains authoritative. */
+void set_hint_compiled_term_table(BOOL on);
+
 void set_hint_match_once(BOOL on);
 
 unsigned long long hint_state_epoch(void);

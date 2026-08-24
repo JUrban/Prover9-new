@@ -273,6 +273,7 @@ static BOOL packed_hint_bank_mode(void)
   return Opt != NULL &&
     (str_ident(stringparm1(Opt->hint_index), "packed") ||
      str_ident(stringparm1(Opt->hint_index), "packed_fast") ||
+     str_ident(stringparm1(Opt->hint_index), "packed_compiled_shadow") ||
      str_ident(stringparm1(Opt->hint_index), "hybrid") ||
      str_ident(stringparm1(Opt->hint_index), "packed_legacy"));
 }
@@ -282,13 +283,21 @@ static BOOL better_packed_hint_mode(void)
   return Opt != NULL &&
     (str_ident(stringparm1(Opt->hint_index), "packed") ||
      str_ident(stringparm1(Opt->hint_index), "packed_fast") ||
+     str_ident(stringparm1(Opt->hint_index), "packed_compiled_shadow") ||
      str_ident(stringparm1(Opt->hint_index), "hybrid"));
 }
 
 static BOOL fast_packed_hint_mode(void)
 {
   return Opt != NULL &&
-    str_ident(stringparm1(Opt->hint_index), "packed_fast");
+    (str_ident(stringparm1(Opt->hint_index), "packed_fast") ||
+     str_ident(stringparm1(Opt->hint_index), "packed_compiled_shadow"));
+}
+
+static BOOL compiled_hint_shadow_mode(void)
+{
+  return Opt != NULL &&
+    str_ident(stringparm1(Opt->hint_index), "packed_compiled_shadow");
 }
 
 static BOOL live_clash_index_needed(void)
@@ -2294,12 +2303,13 @@ Prover_options init_prover_options(void)
 			"eager_legacy",
 			"eager_interreduced");
 
-  p->hint_index = init_stringparm("hint_index", 7,
+  p->hint_index = init_stringparm("hint_index", 8,
 				  "fpa",
 				  "compact",
 				  "shallow",
 				  "packed",
 				  "packed_fast",
+				  "packed_compiled_shadow",
 				  "hybrid",
 				  "packed_legacy");
 
@@ -11612,6 +11622,7 @@ void index_and_process_initial_clauses(void)
 	     current_demodulate_clause);
   set_hint_match_stats(flag(Opt->hint_match_stats));
   set_hint_compiled_census(flag(Opt->hint_compiled_census));
+  set_hint_compiled_term_table(compiled_hint_shadow_mode());
   set_hint_match_once(flag(Opt->hint_match_once));
   init_semantics(Glob.interps, Clocks.semantics,
 		 stringparm1(Opt->multiple_interps),
@@ -16157,6 +16168,7 @@ void load_checkpoint_into_loop(void)
              current_demodulate_clause);
   set_hint_match_stats(flag(Opt->hint_match_stats));
   set_hint_compiled_census(flag(Opt->hint_compiled_census));
+  set_hint_compiled_term_table(compiled_hint_shadow_mode());
   set_hint_match_once(flag(Opt->hint_match_once));
   init_semantics(Glob.interps, Clocks.semantics,
                  stringparm1(Opt->multiple_interps),
