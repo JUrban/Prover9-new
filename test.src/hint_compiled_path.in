@@ -1,0 +1,36 @@
+clear(auto_denials).
+clear(auto_inference).
+clear(predicate_elim).
+clear(print_initial_clauses).
+clear(print_given).
+clear(print_kept).
+clear(back_demod).
+clear(back_demod_hints).
+assign(search_loop,discount).
+assign(passive_store,compressed).
+assign(hint_index,packed_compiled).
+assign(ancestor_store,memory).
+assign(stats,all).
+assign(max_given,1).
+
+% These two targets have identical shallow paths.  The wide term under the
+% query variable deliberately saturates the old 64-bit necessary-feature
+% mask, so that both reach the new index.  Only the ordering of the constants
+% below depth two differs.  The deep-path posting must retain the first and
+% collectively reject the second.
+formulas(hints).
+  p(f(pad(k1,k2,k3,k4,k5,k6,k7,k8,k9,k10,k11,k12,k13,k14,k15,k16,
+          k17,k18,k19,k20,k21,k22,k23,k24,k25,k26,k27,k28,k29,k30,k31,k32,
+          k33,k34,k35,k36,k37,k38,k39,k40,k41,k42,k43,k44,k45,k46,k47,k48,
+          k49,k50,k51,k52,k53,k54,k55,k56,k57,k58,k59,k60,k61,k62,k63,k64),
+      g(a,b))).
+  p(f(pad(k1,k2,k3,k4,k5,k6,k7,k8,k9,k10,k11,k12,k13,k14,k15,k16,
+          k17,k18,k19,k20,k21,k22,k23,k24,k25,k26,k27,k28,k29,k30,k31,k32,
+          k33,k34,k35,k36,k37,k38,k39,k40,k41,k42,k43,k44,k45,k46,k47,k48,
+          k49,k50,k51,k52,k53,k54,k55,k56,k57,k58,k59,k60,k61,k62,k63,k64),
+      g(b,a))).
+end_of_list.
+
+formulas(sos).
+  p(f(x,g(a,b))).
+end_of_list.

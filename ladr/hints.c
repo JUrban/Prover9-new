@@ -63,6 +63,28 @@ static BOOL Compiled_term_table_enabled = FALSE;
 static BOOL Compiled_term_table_authoritative = FALSE;
 static Hint_term_table Compiled_term_table = NULL;
 
+/* The first collective compiled-matcher index.  packed_fast already indexes
+   exact symbols through depth two.  This table extends the same necessary
+   condition to rigid symbols at depths three through six, then uses the
+   rarest posting to discard a group of impossible unit hints before any
+   per-hint term walk.  Hash collisions are conservative false positives. */
+#define COMPILED_PATH_MIN_DEPTH 3U
+#define COMPILED_PATH_MAX_DEPTH 6U
+static Hint_postings Compiled_path_postings = NULL;
+static unsigned *Compiled_path_mark = NULL;
+static unsigned Compiled_path_serial = 1;
+static unsigned long long *Compiled_path_key_scratch = NULL;
+static unsigned Compiled_path_key_count = 0;
+static unsigned Compiled_path_key_capacity = 0;
+static unsigned long long Compiled_path_references_added = 0;
+static unsigned long long Compiled_path_queries = 0;
+static unsigned long long Compiled_path_query_keys = 0;
+static unsigned long long Compiled_path_zero_postings = 0;
+static unsigned long long Compiled_path_seed_candidates = 0;
+static unsigned long long Compiled_path_candidates_before = 0;
+static unsigned long long Compiled_path_candidates_after = 0;
+static unsigned long long Compiled_path_candidates_rejected = 0;
+
 /* Dedicated read-only-preview query workspace.  It is allocated alongside
    the packed bank, never aliases authoritative matcher scratch, and is not
    part of persistent hint semantics or authoritative operation accounting. */
@@ -813,6 +835,9 @@ static void packed_reserve_hints(unsigned id)
       Packed_hint_neg_features, (size_t) cap * sizeof(unsigned long long));
     Packed_candidate_mark = safe_realloc(Packed_candidate_mark,
                                          (size_t) cap * sizeof(unsigned));
+    if (Compiled_term_table_enabled)
+      Compiled_path_mark = safe_realloc(
+        Compiled_path_mark, (size_t) cap * sizeof(unsigned));
     if (Preview_candidate_mark != NULL)
       Preview_candidate_mark = safe_realloc(
         Preview_candidate_mark, (size_t) cap * sizeof(unsigned));
@@ -864,6 +889,9 @@ static void packed_reserve_hints(unsigned id)
            (size_t) (cap - old) * sizeof(unsigned long long));
     memset(Packed_candidate_mark + old, 0,
            (size_t) (cap - old) * sizeof(unsigned));
+    if (Compiled_term_table_enabled)
+      memset(Compiled_path_mark + old, 0,
+             (size_t) (cap - old) * sizeof(unsigned));
     if (Preview_candidate_mark != NULL)
       memset(Preview_candidate_mark + old, 0,
              (size_t) (cap - old) * sizeof(unsigned));
@@ -2888,6 +2916,16 @@ void init_hints(Uniftype utype,
   Hint_compiled_census = FALSE;
   Compiled_term_table_enabled = FALSE;
   Compiled_term_table_authoritative = FALSE;
+  Compiled_path_serial = 1;
+  Compiled_path_key_count = 0;
+  Compiled_path_references_added = 0;
+  Compiled_path_queries = 0;
+  Compiled_path_query_keys = 0;
+  Compiled_path_zero_postings = 0;
+  Compiled_path_seed_candidates = 0;
+  Compiled_path_candidates_before = 0;
+  Compiled_path_candidates_after = 0;
+  Compiled_path_candidates_rejected = 0;
   Hint_match_once = FALSE;
   memset(Compiled_census, 0, sizeof(Compiled_census));
   memset(Compiled_census_printed, 0, sizeof(Compiled_census_printed));
@@ -2993,11 +3031,14 @@ void done_with_hints(void)
   if (Preview_key_scratch) safe_free(Preview_key_scratch);
   if (Fast_match_cache) safe_free(Fast_match_cache);
   if (Fast_match_cache_keys) safe_free(Fast_match_cache_keys);
+  if (Compiled_path_mark) safe_free(Compiled_path_mark);
+  if (Compiled_path_key_scratch) safe_free(Compiled_path_key_scratch);
   hint_term_table_destroy(Compiled_term_table);
   if (Compiled_subterm_fingerprints != NULL)
     safe_free(Compiled_subterm_fingerprints);
   hint_postings_destroy(Better_postings);
   hint_postings_destroy(Fast_conjunction_postings);
+  hint_postings_destroy(Compiled_path_postings);
   if (Better_rebuild_clock != NULL)
     free_clock(Better_rebuild_clock);
   if (Better_equivalence_buckets) safe_free(Better_equivalence_buckets);
@@ -3016,6 +3057,9 @@ void done_with_hints(void)
   Preview_candidates = NULL;
   Better_postings = NULL;
   Fast_conjunction_postings = NULL;
+  Compiled_path_postings = NULL;
+  Compiled_path_mark = NULL;
+  Compiled_path_key_scratch = NULL;
   Better_equivalence_buckets = NULL;
   Better_equivalence_references = NULL;
   Better_anyconst_references = NULL;
@@ -3113,6 +3157,16 @@ void done_with_hints(void)
   Compiled_term_table_enabled = FALSE;
   Compiled_term_table_authoritative = FALSE;
   Compiled_term_table = NULL;
+  Compiled_path_serial = 1;
+  Compiled_path_key_count = Compiled_path_key_capacity = 0;
+  Compiled_path_references_added = 0;
+  Compiled_path_queries = 0;
+  Compiled_path_query_keys = 0;
+  Compiled_path_zero_postings = 0;
+  Compiled_path_seed_candidates = 0;
+  Compiled_path_candidates_before = 0;
+  Compiled_path_candidates_after = 0;
+  Compiled_path_candidates_rejected = 0;
   Packed_index = FALSE;
   Better_packed_index = FALSE;
   Fast_packed_index = FALSE;
@@ -3238,6 +3292,168 @@ Topform find_matching_hint(Topform c, Lindex idx)
 
 static BOOL hint_contains_anyconst(Topform c);
 
+static unsigned long long compiled_path_mix(unsigned long long x)
+{
+  x ^= x >> 30;
+  x *= UINT64_C(0xbf58476d1ce4e5b9);
+  x ^= x >> 27;
+  x *= UINT64_C(0x94d049bb133111eb);
+  x ^= x >> 31;
+  return x;
+}
+
+static unsigned long long compiled_path_child(unsigned long long path,
+                                              unsigned child)
+{
+  return compiled_path_mix(
+    path ^ ((unsigned long long) child + 1) *
+      UINT64_C(0x9e3779b97f4a7c15));
+}
+
+static unsigned long long compiled_path_key(BOOL sign,
+                                            unsigned long long path,
+                                            int symbol)
+{
+  return compiled_path_mix(
+    path ^ ((unsigned long long) (uint32_t) symbol << 1) ^
+    (sign ? UINT64_C(0xd6e8feb86659fd93) :
+            UINT64_C(0xa5a3564e27f8862b)));
+}
+
+static void compiled_path_scratch_add(unsigned long long key)
+{
+  if (Compiled_path_key_count == Compiled_path_key_capacity) {
+    unsigned old = Compiled_path_key_capacity;
+    unsigned capacity = old == 0 ? 32 : old * 2;
+    if (capacity <= old)
+      fatal_error("compiled hint path-key capacity overflow");
+    Compiled_path_key_scratch = safe_realloc(
+      Compiled_path_key_scratch,
+      (size_t) capacity * sizeof(*Compiled_path_key_scratch));
+    Compiled_path_key_capacity = capacity;
+  }
+  Compiled_path_key_scratch[Compiled_path_key_count++] = key;
+}
+
+static void compiled_path_collect_query(Term t, BOOL sign,
+                                        unsigned long long path,
+                                        unsigned depth)
+{
+  unsigned i;
+  if (VARIABLE(t))
+    return;
+  if (depth >= COMPILED_PATH_MIN_DEPTH)
+    compiled_path_scratch_add(compiled_path_key(sign, path, SYMNUM(t)));
+  if (depth >= COMPILED_PATH_MAX_DEPTH)
+    return;
+  for (i = 0; i < (unsigned) ARITY(t); i++)
+    compiled_path_collect_query(
+      ARG(t,i), sign, compiled_path_child(path, i), depth + 1);
+}
+
+static void compiled_path_index_term(Term t, BOOL sign,
+                                     unsigned long long path,
+                                     unsigned depth, unsigned id)
+{
+  unsigned i;
+  if (VARIABLE(t))
+    return;
+  if (depth >= COMPILED_PATH_MIN_DEPTH) {
+    hint_postings_add(
+      Compiled_path_postings,
+      compiled_path_key(sign, path, SYMNUM(t)), id);
+    Compiled_path_references_added++;
+  }
+  if (depth >= COMPILED_PATH_MAX_DEPTH)
+    return;
+  for (i = 0; i < (unsigned) ARITY(t); i++)
+    compiled_path_index_term(
+      ARG(t,i), sign, compiled_path_child(path, i), depth + 1, id);
+}
+
+static void compiled_path_index_hint(Topform c)
+{
+  if (Compiled_path_postings == NULL || c->literals == NULL ||
+      c->literals->next != NULL)
+    return;
+  compiled_path_index_term(
+    c->literals->atom, c->literals->sign,
+    UINT64_C(0x243f6a8885a308d3), 0, (unsigned) c->id);
+}
+
+/* Apply one rare, exact deep-path condition collectively.  A missing posting
+   proves that no compiled unit target can match.  Candidates without a
+   canonical unit root are retained for the established nonunit/AnyConst
+   fallback. */
+static void compiled_path_filter_candidates(
+  Topform c, enum packed_hint_operation op)
+{
+  const unsigned *ids = NULL;
+  unsigned best_count = UINT_MAX;
+  unsigned i, keep, before;
+  BOOL account = !Hint_preview_active;
+
+  (void) op;
+  if (!Compiled_term_table_authoritative ||
+      Compiled_path_postings == NULL || c->literals == NULL ||
+      c->literals->next != NULL ||
+      (MATCH_HINTS_ANYCONST && AnyConstsEnabled &&
+       hint_contains_anyconst(c)))
+    return;
+
+  Compiled_path_key_count = 0;
+  compiled_path_collect_query(
+    c->literals->atom, c->literals->sign,
+    UINT64_C(0x243f6a8885a308d3), 0);
+  if (Compiled_path_key_count == 0)
+    return;
+
+  for (i = 0; i < Compiled_path_key_count; i++) {
+    unsigned count;
+    const unsigned *posting = hint_postings_get(
+      Compiled_path_postings, Compiled_path_key_scratch[i], &count);
+    if (count < best_count) {
+      best_count = count;
+      ids = posting;
+      if (count == 0)
+        break;
+    }
+  }
+
+  if (++Compiled_path_serial == 0) {
+    memset(Compiled_path_mark, 0,
+           (size_t) Packed_hint_capacity * sizeof(unsigned));
+    Compiled_path_serial = 1;
+  }
+  for (i = 0; i < best_count; i++) {
+    unsigned id = ids[i];
+    if (id < Packed_hint_capacity)
+      Compiled_path_mark[id] = Compiled_path_serial;
+  }
+
+  before = Packed_candidates_count;
+  keep = 0;
+  for (i = 0; i < before; i++) {
+    unsigned id = Packed_candidates[i];
+    if (hint_term_table_root(Compiled_term_table, id) == 0 ||
+        (best_count != 0 &&
+         Compiled_path_mark[id] == Compiled_path_serial))
+      Packed_candidates[keep++] = id;
+  }
+  Packed_candidates_count = keep;
+
+  if (account) {
+    Compiled_path_queries++;
+    Compiled_path_query_keys += Compiled_path_key_count;
+    if (best_count == 0)
+      Compiled_path_zero_postings++;
+    Compiled_path_seed_candidates += best_count;
+    Compiled_path_candidates_before += before;
+    Compiled_path_candidates_after += keep;
+    Compiled_path_candidates_rejected += before - keep;
+  }
+}
+
 static void better_collect_clause_candidates(
   Topform c, enum packed_hint_operation op)
 {
@@ -3309,6 +3525,7 @@ static void better_collect_clause_candidates(
             fast_keys, fast_key_count, first_mask, positive, negative)) {
         compiled_census_candidate_stages(
           op, Packed_candidates_count, Packed_candidates_count);
+        compiled_path_filter_candidates(c, op);
         packed_operation_candidates(op);
         return;
       }
@@ -3367,6 +3584,7 @@ static void better_collect_clause_candidates(
       Packed_operation_stats[op].posting_candidates -
         posting_candidates_before);
   }
+  compiled_path_filter_candidates(c, op);
   packed_operation_candidates(op);
 }
 
@@ -3685,11 +3903,13 @@ void index_hint(Topform c)
       better_index_hint_terms(c, anyconst);
       compiled_census_observe_hint(c, anyconst);
       if (Compiled_term_table_enabled && !anyconst &&
-          c->literals != NULL && c->literals->next == NULL &&
-          !hint_term_table_add(
-            Compiled_term_table, (unsigned) c->id, c->literals->sign,
-            c->literals->atom))
-        fatal_error("index_hint: cannot add compiled unit-hint term");
+          c->literals != NULL && c->literals->next == NULL) {
+        if (!hint_term_table_add(
+              Compiled_term_table, (unsigned) c->id, c->literals->sign,
+              c->literals->atom))
+          fatal_error("index_hint: cannot add compiled unit-hint term");
+        compiled_path_index_hint(c);
+      }
       if (compress_clause(c) == CLAUSE_COMPRESS_INVALID)
         fatal_error("index_hint: cannot compact active packed hint");
     }
@@ -4259,6 +4479,11 @@ void set_hint_compiled_term_table(BOOL on)
     fatal_error("compiled hint term table requires packed_fast");
   if (on && Compiled_term_table == NULL)
     Compiled_term_table = hint_term_table_init();
+  if (on && Compiled_path_postings == NULL)
+    Compiled_path_postings = hint_postings_init();
+  if (on && Compiled_path_mark == NULL && Packed_hint_capacity != 0)
+    Compiled_path_mark = safe_calloc(
+      Packed_hint_capacity, sizeof(*Compiled_path_mark));
   Compiled_term_table_enabled = on;
 }  /* set_hint_compiled_term_table */
 
@@ -4424,6 +4649,21 @@ void packed_hint_index_stats(unsigned long long *node_bytes,
                             Fast_conjunction_overflow_capacity[1]) *
         sizeof(unsigned);
     }
+  if (Compiled_term_table != NULL) {
+    struct hint_term_table_stats term_stats;
+    hint_term_table_get_stats(Compiled_term_table, &term_stats);
+    *table_bytes += term_stats.total_bytes;
+  }
+  if (Compiled_path_postings != NULL) {
+    struct hint_postings_stats path_stats;
+    hint_postings_get_stats(Compiled_path_postings, &path_stats);
+    *node_bytes += path_stats.table_bytes;
+    *reference_bytes += path_stats.reference_bytes;
+    *table_bytes +=
+      (unsigned long long) Packed_hint_capacity * sizeof(unsigned) +
+      (unsigned long long) Compiled_path_key_capacity *
+        sizeof(*Compiled_path_key_scratch);
+  }
 }
 
 static unsigned long long packed_preview_workspace_bytes(void)
@@ -4624,6 +4864,28 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             s.match_rigid_tests, s.match_rigid_rejects,
             s.match_first_bindings, s.match_repeated_tests,
             s.match_repeated_rejects);
+  }
+  if (Compiled_path_postings != NULL) {
+    struct hint_postings_stats s;
+    hint_postings_get_stats(Compiled_path_postings, &s);
+    fprintf(fp,
+            "Compiled_hint_path_index: minimum_depth=%u, maximum_depth=%u, "
+            "keys=%llu, references=%llu, references_added=%llu, "
+            "table_bytes=%llu, reference_bytes=%llu, maximum_posting=%llu, "
+            "mark_bytes=%llu, scratch_bytes=%llu, queries=%llu, "
+            "query_keys=%llu, zero_postings=%llu, seed_candidates=%llu, "
+            "candidates_before=%llu, candidates_after=%llu, "
+            "candidates_rejected=%llu.\n",
+            COMPILED_PATH_MIN_DEPTH, COMPILED_PATH_MAX_DEPTH,
+            s.keys, s.references, Compiled_path_references_added,
+            s.table_bytes, s.reference_bytes, s.maximum_posting,
+            (unsigned long long) Packed_hint_capacity * sizeof(unsigned),
+            (unsigned long long) Compiled_path_key_capacity *
+              sizeof(*Compiled_path_key_scratch),
+            Compiled_path_queries, Compiled_path_query_keys,
+            Compiled_path_zero_postings, Compiled_path_seed_candidates,
+            Compiled_path_candidates_before, Compiled_path_candidates_after,
+            Compiled_path_candidates_rejected);
   }
   fprintf(fp,
           "Packed_hint_preview_workspace: initialized=%d, bytes=%llu.\n",

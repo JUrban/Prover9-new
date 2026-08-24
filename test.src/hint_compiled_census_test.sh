@@ -4,7 +4,8 @@ set -eu
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 prover9=${PROVER9:-"$script_dir/../provers.src/prover9"}
 tmp=${TMPDIR:-/tmp}/hint-compiled-census.$$
-trap 'rm -f "$tmp.out" "$tmp.err"' EXIT HUP INT TERM
+trap 'rm -f "$tmp.out" "$tmp.err" "$tmp.path.out" "$tmp.path.err"' \
+  EXIT HUP INT TERM
 
 "$prover9" < "$script_dir/hint_compiled_census.in" \
   > "$tmp.out" 2> "$tmp.err" || status=$?
@@ -36,5 +37,21 @@ printf '%s\n' "$line" | grep -Eq 'rigid_rejects=[0-9]+'
 printf '%s\n' "$line" | grep -Eq 'combined=[0-9]+'
 printf '%s\n' "$line" | grep -Eq 'skipped_subterms=[1-9][0-9]*'
 grep -Eq '^Compiled_hint_census_interval: op=match,' "$tmp.out"
+
+"$prover9" < "$script_dir/hint_compiled_path.in" \
+  > "$tmp.path.out" 2> "$tmp.path.err" || path_status=$?
+path_status=${path_status:-0}
+if [ "$path_status" -ne 2 ] && [ "$path_status" -ne 5 ]; then
+  cat "$tmp.path.err" >&2
+  echo "hint_compiled_census_test: path run returned $path_status" >&2
+  exit 1
+fi
+path_line=$(grep '^Compiled_hint_path_index:' "$tmp.path.out")
+printf '%s\n' "$path_line" | grep -Eq \
+  'keys=[1-9][0-9]*, references=[1-9][0-9]*, references_added=[1-9][0-9]*'
+printf '%s\n' "$path_line" | grep -Eq \
+  'queries=[1-9][0-9]*, query_keys=[1-9][0-9]*,'
+printf '%s\n' "$path_line" | grep -Eq \
+  'candidates_before=[1-9][0-9]*, candidates_after=[0-9]+, candidates_rejected=[1-9][0-9]*'
 
 echo "hint_compiled_census_test: PASS"
