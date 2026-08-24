@@ -26,6 +26,8 @@ printf '%s\n' "$bank" | grep -Eq 'subterm_occurrences=[1-9][0-9]*, subterm_finge
 printf '%s\n' "$table" | grep -Eq 'finalized=1, active=8, additions=8, removals=0, reinsertions=0'
 printf '%s\n' "$table" | grep -Eq 'base_nodes=[1-9][0-9]*, base_children=[1-9][0-9]*'
 printf '%s\n' "$table" | grep -Eq 'hash_bytes=0, hash_peak_bytes=[1-9][0-9]*, scratch_bytes=0, total_bytes=[1-9][0-9]*'
+printf '%s\n' "$table" | grep -Eq 'match_attempts=[1-9][0-9]*, match_successes=[1-9][0-9]*'
+printf '%s\n' "$table" | grep -Eq 'match_repeated_tests=[1-9][0-9]*, match_repeated_rejects=[1-9][0-9]*'
 printf '%s\n' "$line" | grep -Eq 'profiled_units=[1-9][0-9]*'
 printf '%s\n' "$line" | grep -Eq 'exact_matches=[1-9][0-9]*'
 printf '%s\n' "$line" | grep -Eq 'repeated_rejects=[1-9][0-9]*'

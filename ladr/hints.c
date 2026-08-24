@@ -3397,6 +3397,7 @@ static Topform packed_find_equivalent_hint(Topform c)
     BOOL was_compressed;
     BOOL c_sub_h = FALSE, h_sub_c = FALSE;
     BOOL direct = FALSE;
+    BOOL compiled_supported = FALSE, compiled_match = FALSE;
     BOOL profiled = FALSE;
     struct compressed_unit_match_profile profile;
     if (h == NULL || h == c)
@@ -3409,6 +3410,13 @@ static Topform packed_find_equivalent_hint(Topform c)
         !(MATCH_HINTS_ANYCONST && AnyConstsEnabled &&
           hint_contains_anyconst(c))) {
       Packed_operation_stats[op].direct_attempts++;
+      if (Compiled_term_table != NULL && !Hint_preview_active) {
+        compiled_supported = hint_term_table_matches(
+          Compiled_term_table, (unsigned) h->id, c->literals->sign,
+          c->literals->atom, &compiled_match);
+        if (!compiled_supported)
+          fatal_error("packed equivalent hint: compiled unit missing");
+      }
       if (Hint_compiled_census && !Hint_preview_active) {
         direct = compressed_unit_target_match_profile(
           c->literals, h, &c_sub_h, &profile);
@@ -3416,6 +3424,8 @@ static Topform packed_find_equivalent_hint(Topform c)
       }
       else
         direct = compressed_unit_target_matches(c->literals, h, &c_sub_h);
+      if (compiled_supported && direct && compiled_match != c_sub_h)
+        fatal_error("packed equivalent hint: compiled match mismatch");
       if (direct && c_sub_h)
         direct = compressed_unit_pattern_matches(h, c->literals, &h_sub_c);
       if (direct) {
@@ -3472,6 +3482,7 @@ static Topform packed_find_matching_hint(Topform c, BOOL flipped)
     BOOL was_compressed;
     BOOL c_sub_h = FALSE, equivalent = FALSE;
     BOOL direct = FALSE;
+    BOOL compiled_supported = FALSE, compiled_match = FALSE;
     BOOL profiled = FALSE;
     struct compressed_unit_match_profile profile;
     if (h == NULL || h == c)
@@ -3485,6 +3496,13 @@ static Topform packed_find_matching_hint(Topform c, BOOL flipped)
           hint_contains_anyconst(c))) {
       BOOL h_sub_c = FALSE;
       Packed_operation_stats[op].direct_attempts++;
+      if (Compiled_term_table != NULL && !Hint_preview_active) {
+        compiled_supported = hint_term_table_matches(
+          Compiled_term_table, (unsigned) h->id, c->literals->sign,
+          c->literals->atom, &compiled_match);
+        if (!compiled_supported)
+          fatal_error("packed matching hint: compiled unit missing");
+      }
       if (Hint_compiled_census && !Hint_preview_active) {
         direct = compressed_unit_target_match_profile(
           c->literals, h, &c_sub_h, &profile);
@@ -3492,6 +3510,8 @@ static Topform packed_find_matching_hint(Topform c, BOOL flipped)
       }
       else
         direct = compressed_unit_target_matches(c->literals, h, &c_sub_h);
+      if (compiled_supported && direct && compiled_match != c_sub_h)
+        fatal_error("packed matching hint: compiled match mismatch");
       if (direct && c_sub_h)
         direct = compressed_unit_pattern_matches(h, c->literals, &h_sub_c);
       if (direct) {
@@ -4541,13 +4561,20 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             "delta_occurrences=%llu, delta_intern_hits=%llu, "
             "node_bytes=%llu, child_bytes=%llu, record_bytes=%llu, "
             "hash_bytes=%llu, hash_peak_bytes=%llu, scratch_bytes=%llu, "
-            "total_bytes=%llu.\n",
+            "total_bytes=%llu, match_attempts=%llu, match_successes=%llu, "
+            "match_nodes=%llu, match_rigid_tests=%llu, "
+            "match_rigid_rejects=%llu, match_first_bindings=%llu, "
+            "match_repeated_tests=%llu, match_repeated_rejects=%llu.\n",
             s.finalized, s.active_records, s.additions, s.removals,
             s.reinsertions, s.base_nodes, s.base_children,
             s.base_occurrences, s.base_intern_hits, s.delta_nodes,
             s.delta_children, s.delta_occurrences, s.delta_intern_hits,
             s.node_bytes, s.child_bytes, s.record_bytes, s.hash_bytes,
-            s.hash_peak_bytes, s.scratch_bytes, s.total_bytes);
+            s.hash_peak_bytes, s.scratch_bytes, s.total_bytes,
+            s.match_attempts, s.match_successes, s.match_nodes,
+            s.match_rigid_tests, s.match_rigid_rejects,
+            s.match_first_bindings, s.match_repeated_tests,
+            s.match_repeated_rejects);
   }
   fprintf(fp,
           "Packed_hint_preview_workspace: initialized=%d, bytes=%llu.\n",
