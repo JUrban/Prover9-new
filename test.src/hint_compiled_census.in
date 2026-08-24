@@ -1,0 +1,27 @@
+clear(auto_denials).
+clear(auto_inference).
+clear(predicate_elim).
+clear(print_initial_clauses).
+clear(print_given).
+clear(print_kept).
+clear(back_demod).
+clear(back_demod_hints).
+assign(search_loop,discount).
+assign(passive_store,compressed).
+assign(hint_index,packed_fast).
+assign(ancestor_store,memory).
+assign(stats,all).
+assign(max_given,1).
+set(clocks).
+set(hint_compiled_census).
+
+formulas(hints).
+  p(f(h(c),h(c),g(a))) # label(match).
+  p(f(h(c),h(d),g(a))) # label(repeated_only).
+  p(f(h(c),h(c),g(b))) # label(rigid_only).
+  p(f(h(c),h(d),g(b))) # label(combined).
+end_of_list.
+
+formulas(sos).
+  p(f(x,x,g(a))).
+end_of_list.

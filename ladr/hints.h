@@ -98,6 +98,10 @@ void set_hints_given_count(unsigned long long n);
 
 void set_hint_match_stats(BOOL on);
 
+/* Enable the diagnostic-only Phase-0 census for a future compiled hint
+   matcher.  Disabled production matching retains its existing hot path. */
+void set_hint_compiled_census(BOOL on);
+
 void set_hint_match_once(BOOL on);
 
 unsigned long long hint_state_epoch(void);

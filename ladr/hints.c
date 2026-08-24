@@ -321,6 +321,47 @@ struct packed_hint_operation_stats {
 static struct packed_hint_operation_stats
   Packed_operation_stats[PACKED_HINT_OPERATIONS];
 
+/* Preview queries are excluded from every authoritative operation census. */
+static BOOL Hint_preview_active = FALSE;
+
+/* Phase-0 measurements for the proposed compiled instance matcher.  These
+   counters are explicitly opt-in because profiling continues after an early
+   repeated-variable mismatch to discover independent rigid-path rejection.
+   The normal packed_fast path remains byte-for-byte separate. */
+struct compiled_hint_census_stats {
+  unsigned long long pre_profile_candidates;
+  unsigned long long post_profile_candidates;
+  unsigned long long exact_candidates;
+  unsigned long long profiled_units;
+  unsigned long long fallback_candidates;
+  unsigned long long exact_matches;
+  unsigned long long sign_rejects;
+  unsigned long long rigid_rejects;
+  unsigned long long repeated_rejects;
+  unsigned long long rigid_only_rejects;
+  unsigned long long repeated_only_rejects;
+  unsigned long long combined_rejects;
+  unsigned long long stream_nodes;
+  unsigned long long rigid_tests;
+  unsigned long long first_bindings;
+  unsigned long long repeated_tests;
+  unsigned long long skipped_subterms;
+  unsigned long long skipped_nodes;
+  unsigned long long skipped_bytes;
+  unsigned long long repeated_compare_nodes;
+  unsigned long long timing_queries;
+  unsigned long long timing_samples;
+  double timing_sample_seconds;
+  double timing_sample_started;
+  BOOL timing_sample_active;
+};
+
+static BOOL Hint_compiled_census = FALSE;
+static struct compiled_hint_census_stats
+  Compiled_census[PACKED_HINT_OPERATIONS];
+static struct compiled_hint_census_stats
+  Compiled_census_printed[PACKED_HINT_OPERATIONS];
+
 /* Per-query getrusage pairs scale to millions of avoidable system calls on
    hint-heavy AIM searches.  Sample a deterministic, input-derived 1/64 of
    authoritative operations at microsecond precision; all logical work
@@ -345,11 +386,101 @@ static double packed_estimated_seconds(
       (double) s->timing_samples;
 }
 
+static double compiled_census_estimated_seconds(
+  const struct compiled_hint_census_stats *s)
+{
+  return s->timing_samples == 0 ? 0.0 :
+    s->timing_sample_seconds * (double) s->timing_queries /
+      (double) s->timing_samples;
+}
+
+static void compiled_census_candidate_stages(
+  enum packed_hint_operation op, unsigned pre_profile, unsigned post_profile)
+{
+  if (Hint_compiled_census && !Hint_preview_active) {
+    Compiled_census[op].pre_profile_candidates += pre_profile;
+    Compiled_census[op].post_profile_candidates += post_profile;
+  }
+}
+
+static void compiled_census_exact_begin(enum packed_hint_operation op)
+{
+  if (Hint_compiled_census && !Hint_preview_active) {
+    struct compiled_hint_census_stats *s = Compiled_census + op;
+    s->timing_queries++;
+    s->timing_sample_active = FALSE;
+    if (clocks_enabled() && packed_timing_sample(s->timing_queries)) {
+      s->timing_samples++;
+      s->timing_sample_active = TRUE;
+      s->timing_sample_started = user_seconds();
+    }
+  }
+}
+
+static void compiled_census_exact_end(enum packed_hint_operation op)
+{
+  if (Hint_compiled_census && !Hint_preview_active) {
+    struct compiled_hint_census_stats *s = Compiled_census + op;
+    if (s->timing_sample_active) {
+      double elapsed = user_seconds() - s->timing_sample_started;
+      if (elapsed > 0.0)
+        s->timing_sample_seconds += elapsed;
+      s->timing_sample_active = FALSE;
+    }
+  }
+}
+
+static void compiled_census_candidate(
+  enum packed_hint_operation op, BOOL profiled, BOOL matched,
+  const struct compressed_unit_match_profile *profile)
+{
+  struct compiled_hint_census_stats *s;
+  unsigned reasons;
+  if (!Hint_compiled_census || Hint_preview_active)
+    return;
+  s = Compiled_census + op;
+  s->exact_candidates++;
+  if (matched)
+    s->exact_matches++;
+  if (!profiled) {
+    s->fallback_candidates++;
+    return;
+  }
+  s->profiled_units++;
+  reasons = profile->reject_reasons;
+  if (reasons & COMPRESSED_UNIT_REJECT_SIGN)
+    s->sign_rejects++;
+  if (reasons & COMPRESSED_UNIT_REJECT_RIGID)
+    s->rigid_rejects++;
+  if (reasons & COMPRESSED_UNIT_REJECT_REPEATED)
+    s->repeated_rejects++;
+  if ((reasons & (COMPRESSED_UNIT_REJECT_RIGID |
+                  COMPRESSED_UNIT_REJECT_REPEATED)) ==
+      COMPRESSED_UNIT_REJECT_RIGID)
+    s->rigid_only_rejects++;
+  else if ((reasons & (COMPRESSED_UNIT_REJECT_RIGID |
+                       COMPRESSED_UNIT_REJECT_REPEATED)) ==
+           COMPRESSED_UNIT_REJECT_REPEATED)
+    s->repeated_only_rejects++;
+  else if ((reasons & (COMPRESSED_UNIT_REJECT_RIGID |
+                       COMPRESSED_UNIT_REJECT_REPEATED)) ==
+           (COMPRESSED_UNIT_REJECT_RIGID |
+            COMPRESSED_UNIT_REJECT_REPEATED))
+    s->combined_rejects++;
+  s->stream_nodes += profile->stream_nodes;
+  s->rigid_tests += profile->rigid_tests;
+  s->first_bindings += profile->first_bindings;
+  s->repeated_tests += profile->repeated_tests;
+  s->skipped_subterms += profile->skipped_subterms;
+  s->skipped_nodes += profile->skipped_nodes;
+  s->skipped_bytes += profile->skipped_bytes;
+  s->repeated_compare_nodes += profile->repeated_compare_nodes;
+}
+
 /* Preview queries use the same exact matcher and tie breaking as the
    authoritative path, but operation counters and clocks must describe only
    authoritative search work.  Candidate arrays and serial marks are scratch
    index state and may be reused by a preview. */
-static BOOL Hint_preview_active = FALSE;
 
 static const char *Packed_operation_names[PACKED_HINT_OPERATIONS] = {
   "equivalence", "match", "flipped_match", "back_demod"
@@ -2532,7 +2663,10 @@ void init_hints(Uniftype utype,
   Current_given_for_hints = 0;
   Hint_state_epoch = 1;
   Hint_match_stats = FALSE;
+  Hint_compiled_census = FALSE;
   Hint_match_once = FALSE;
+  memset(Compiled_census, 0, sizeof(Compiled_census));
+  memset(Compiled_census_printed, 0, sizeof(Compiled_census_printed));
   memset(Delta_bucket, 0, sizeof(Delta_bucket));
   Delta_total = 0;
   Delta_min = Delta_max = 0;
@@ -2736,6 +2870,9 @@ void done_with_hints(void)
   memset(Packed_feature_counts, 0, sizeof(Packed_feature_counts));
   Packed_candidate_checks = 0;
   memset(Packed_operation_stats, 0, sizeof(Packed_operation_stats));
+  memset(Compiled_census, 0, sizeof(Compiled_census));
+  memset(Compiled_census_printed, 0, sizeof(Compiled_census_printed));
+  Hint_compiled_census = FALSE;
   Packed_index = FALSE;
   Better_packed_index = FALSE;
   Fast_packed_index = FALSE;
@@ -2868,6 +3005,7 @@ static void better_collect_clause_candidates(
   Literals first = c->literals;
   unsigned positive = 0, negative = 0;
   unsigned i, keep;
+  unsigned pre_profile;
   unsigned long long positive_mask = 0, negative_mask = 0;
   const unsigned long long *fast_keys = NULL;
   unsigned fast_key_count = 0;
@@ -2929,6 +3067,8 @@ static void better_collect_clause_candidates(
       }
       if (fast_eligible && fast_cache_lookup(
             fast_keys, fast_key_count, first_mask, positive, negative)) {
+        compiled_census_candidate_stages(
+          op, Packed_candidates_count, Packed_candidates_count);
         packed_operation_candidates(op);
         return;
       }
@@ -2959,6 +3099,7 @@ static void better_collect_clause_candidates(
   }
   packed_finish_candidates(!equivalence && !query_anyconst &&
                            MATCH_HINTS_ANYCONST, op);
+  pre_profile = Packed_candidates_count;
   keep = 0;
   for (i = 0; i < Packed_candidates_count; i++) {
     unsigned id = Packed_candidates[i];
@@ -2978,6 +3119,8 @@ static void better_collect_clause_candidates(
       Packed_candidates[keep++] = id;
   }
   Packed_candidates_count = keep;
+  compiled_census_candidate_stages(
+    op, pre_profile, Packed_candidates_count);
   if (fast_eligible) {
     fast_cache_store(
       fast_keys, fast_key_count, first_mask, positive, negative,
@@ -2999,6 +3142,8 @@ static void packed_collect_clause_candidates(Topform c,
   if (first != NULL)
     packed_collect_term_candidates(first->atom, first->sign ? 1 : 0, op);
   packed_finish_candidates(MATCH_HINTS_ANYCONST, op);
+  compiled_census_candidate_stages(
+    op, Packed_candidates_count, Packed_candidates_count);
   packed_operation_candidates(op);
 }
 
@@ -3009,11 +3154,14 @@ static Topform packed_find_equivalent_hint(Topform c)
   enum packed_hint_operation op = PACKED_HINT_EQUIVALENCE;
   packed_operation_begin(op);
   packed_collect_clause_candidates(c, op);
+  compiled_census_exact_begin(op);
   for (i = 0; i < Packed_candidates_count; i++) {
     Topform h = Packed_hint_by_id[Packed_candidates[i]];
     BOOL was_compressed;
     BOOL c_sub_h = FALSE, h_sub_c = FALSE;
     BOOL direct = FALSE;
+    BOOL profiled = FALSE;
+    struct compressed_unit_match_profile profile;
     if (h == NULL || h == c)
       continue;
     was_compressed = h->compressed != NULL;
@@ -3024,7 +3172,13 @@ static Topform packed_find_equivalent_hint(Topform c)
         !(MATCH_HINTS_ANYCONST && AnyConstsEnabled &&
           hint_contains_anyconst(c))) {
       Packed_operation_stats[op].direct_attempts++;
-      direct = compressed_unit_target_matches(c->literals, h, &c_sub_h);
+      if (Hint_compiled_census && !Hint_preview_active) {
+        direct = compressed_unit_target_match_profile(
+          c->literals, h, &c_sub_h, &profile);
+        profiled = direct;
+      }
+      else
+        direct = compressed_unit_target_matches(c->literals, h, &c_sub_h);
       if (direct && c_sub_h)
         direct = compressed_unit_pattern_matches(h, c->literals, &h_sub_c);
       if (direct) {
@@ -3049,12 +3203,16 @@ static Topform packed_find_equivalent_hint(Topform c)
     }
     else
       Packed_candidate_checks++;
+    compiled_census_candidate(
+      op, profiled, c_sub_h, profiled ? &profile : NULL);
     if (h_sub_c) {
       Packed_operation_stats[op].exact_positives++;
+      compiled_census_exact_end(op);
       packed_operation_end(op);
       return h;
     }
   }
+  compiled_census_exact_end(op);
   packed_operation_end(op);
   return NULL;
 }
@@ -3068,6 +3226,7 @@ static Topform packed_find_matching_hint(Topform c, BOOL flipped)
                                             PACKED_HINT_MATCH;
   packed_operation_begin(op);
   packed_collect_clause_candidates(c, op);
+  compiled_census_exact_begin(op);
   /* Legacy back_subsume() returns hints in decreasing clause-ID order.
      It chooses the first equivalent hint, or the last proper subsumee.
      Preserve that tie-breaking exactly, independent of trie traversal. */
@@ -3076,6 +3235,8 @@ static Topform packed_find_matching_hint(Topform c, BOOL flipped)
     BOOL was_compressed;
     BOOL c_sub_h = FALSE, equivalent = FALSE;
     BOOL direct = FALSE;
+    BOOL profiled = FALSE;
+    struct compressed_unit_match_profile profile;
     if (h == NULL || h == c)
       continue;
     was_compressed = h->compressed != NULL;
@@ -3087,7 +3248,13 @@ static Topform packed_find_matching_hint(Topform c, BOOL flipped)
           hint_contains_anyconst(c))) {
       BOOL h_sub_c = FALSE;
       Packed_operation_stats[op].direct_attempts++;
-      direct = compressed_unit_target_matches(c->literals, h, &c_sub_h);
+      if (Hint_compiled_census && !Hint_preview_active) {
+        direct = compressed_unit_target_match_profile(
+          c->literals, h, &c_sub_h, &profile);
+        profiled = direct;
+      }
+      else
+        direct = compressed_unit_target_matches(c->literals, h, &c_sub_h);
       if (direct && c_sub_h)
         direct = compressed_unit_pattern_matches(h, c->literals, &h_sub_c);
       if (direct) {
@@ -3111,6 +3278,8 @@ static Topform packed_find_matching_hint(Topform c, BOOL flipped)
     }
     else
       Packed_candidate_checks++;
+    compiled_census_candidate(
+      op, profiled, c_sub_h, profiled ? &profile : NULL);
     if (c_sub_h) {
       Packed_operation_stats[op].exact_positives++;
       match_hint = h;
@@ -3120,6 +3289,7 @@ static Topform packed_find_matching_hint(Topform c, BOOL flipped)
     if (equivalent)
       break;
   }
+  compiled_census_exact_end(op);
   packed_operation_end(op);
   return match_hint;
 }
@@ -3758,6 +3928,18 @@ void set_hint_match_stats(BOOL on)
 
 /*************
  *
+ *   set_hint_compiled_census()
+ *
+ *************/
+
+/* PUBLIC */
+void set_hint_compiled_census(BOOL on)
+{
+  Hint_compiled_census = on;
+}  /* set_hint_compiled_census */
+
+/*************
+ *
  *   set_hint_match_once()
  *
  *************/
@@ -3967,6 +4149,74 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             s->candidate_buckets[2], s->candidate_buckets[3],
             s->candidate_buckets[4], s->candidate_buckets[5],
             s->candidate_buckets[6], s->candidate_buckets[7]);
+  }
+  if (Hint_compiled_census) {
+    for (i = 0; i < PACKED_HINT_OPERATIONS; i++) {
+      struct compiled_hint_census_stats *s = Compiled_census + i;
+      struct compiled_hint_census_stats *p =
+        Compiled_census_printed + i;
+      unsigned long long interval_queries =
+        s->timing_queries - p->timing_queries;
+      unsigned long long interval_samples =
+        s->timing_samples - p->timing_samples;
+      double interval_sample_seconds =
+        s->timing_sample_seconds - p->timing_sample_seconds;
+      double interval_seconds = interval_samples == 0 ? 0.0 :
+        interval_sample_seconds * (double) interval_queries /
+          (double) interval_samples;
+      fprintf(fp,
+              "Compiled_hint_census: op=%s, exact_seconds=%.3f, "
+              "pre_profile=%llu, post_profile=%llu, exact_candidates=%llu, "
+              "profiled_units=%llu, fallback_candidates=%llu, "
+              "exact_matches=%llu, sign_rejects=%llu, rigid_rejects=%llu, "
+              "repeated_rejects=%llu, rigid_only=%llu, repeated_only=%llu, "
+              "combined=%llu, stream_nodes=%llu, rigid_tests=%llu, "
+              "first_bindings=%llu, repeated_tests=%llu, "
+              "skipped_subterms=%llu, skipped_nodes=%llu, "
+              "skipped_bytes=%llu, repeated_compare_nodes=%llu, "
+              "timing=sampled, timing_eligible=%llu, timing_samples=%llu, "
+              "timing_rate=1/%llu.\n",
+              Packed_operation_names[i],
+              compiled_census_estimated_seconds(s),
+              s->pre_profile_candidates, s->post_profile_candidates,
+              s->exact_candidates, s->profiled_units,
+              s->fallback_candidates, s->exact_matches,
+              s->sign_rejects, s->rigid_rejects, s->repeated_rejects,
+              s->rigid_only_rejects, s->repeated_only_rejects,
+              s->combined_rejects, s->stream_nodes, s->rigid_tests,
+              s->first_bindings, s->repeated_tests,
+              s->skipped_subterms, s->skipped_nodes, s->skipped_bytes,
+              s->repeated_compare_nodes, s->timing_queries,
+              s->timing_samples, PACKED_HINT_TIMING_SAMPLE_RATE);
+      fprintf(fp,
+              "Compiled_hint_census_interval: op=%s, exact_seconds=%.3f, "
+              "pre_profile=%llu, post_profile=%llu, exact_candidates=%llu, "
+              "profiled_units=%llu, fallback_candidates=%llu, "
+              "exact_matches=%llu, rigid_rejects=%llu, "
+              "repeated_rejects=%llu, combined=%llu, stream_nodes=%llu, "
+              "skipped_subterms=%llu, skipped_nodes=%llu, "
+              "skipped_bytes=%llu, repeated_compare_nodes=%llu, "
+              "timing_eligible=%llu, timing_samples=%llu.\n",
+              Packed_operation_names[i], interval_seconds,
+              s->pre_profile_candidates - p->pre_profile_candidates,
+              s->post_profile_candidates - p->post_profile_candidates,
+              s->exact_candidates - p->exact_candidates,
+              s->profiled_units - p->profiled_units,
+              s->fallback_candidates - p->fallback_candidates,
+              s->exact_matches - p->exact_matches,
+              s->rigid_rejects - p->rigid_rejects,
+              s->repeated_rejects - p->repeated_rejects,
+              s->combined_rejects - p->combined_rejects,
+              s->stream_nodes - p->stream_nodes,
+              s->skipped_subterms - p->skipped_subterms,
+              s->skipped_nodes - p->skipped_nodes,
+              s->skipped_bytes - p->skipped_bytes,
+              s->repeated_compare_nodes - p->repeated_compare_nodes,
+              interval_queries, interval_samples);
+      *p = *s;
+      p->timing_sample_active = FALSE;
+      p->timing_sample_started = 0.0;
+    }
   }
   fprintf(fp,
           "Packed_hint_preview_workspace: initialized=%d, bytes=%llu.\n",

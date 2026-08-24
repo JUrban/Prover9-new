@@ -84,6 +84,7 @@ struct prover_options {
     back_demod_hints,
     collect_hint_labels,
     hint_match_stats,        // print hint match count stats at end of search
+    hint_compiled_census,    // profile exact packed-fast candidate rejection
     hint_match_once,         // unindex hint immediately after first match
     hint_trace,              // exact committed-candidate hint tuple
     search_event_trace,      // lightweight kept/given identity oracle

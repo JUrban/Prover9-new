@@ -1941,6 +1941,7 @@ Prover_options init_prover_options(void)
   p->back_demod_hints       = init_flag("back_demod_hints",        TRUE);
   p->collect_hint_labels    = init_flag("collect_hint_labels",    FALSE);
   p->hint_match_stats       = init_flag("hint_match_stats",       FALSE);
+  p->hint_compiled_census   = init_flag("hint_compiled_census",   FALSE);
   p->hint_match_once        = init_flag("hint_match_once",        FALSE);
   p->hint_trace             = init_flag("hint_trace",             FALSE);
   p->search_event_trace     = init_flag("search_event_trace",     FALSE);
@@ -11610,6 +11611,7 @@ void index_and_process_initial_clauses(void)
 	     (unsigned) parm(Opt->hint_rebuild_scan_ratio),
 	     current_demodulate_clause);
   set_hint_match_stats(flag(Opt->hint_match_stats));
+  set_hint_compiled_census(flag(Opt->hint_compiled_census));
   set_hint_match_once(flag(Opt->hint_match_once));
   init_semantics(Glob.interps, Clocks.semantics,
 		 stringparm1(Opt->multiple_interps),
@@ -16154,6 +16156,7 @@ void load_checkpoint_into_loop(void)
              (unsigned) parm(Opt->hint_rebuild_scan_ratio),
              current_demodulate_clause);
   set_hint_match_stats(flag(Opt->hint_match_stats));
+  set_hint_compiled_census(flag(Opt->hint_compiled_census));
   set_hint_match_once(flag(Opt->hint_match_once));
   init_semantics(Glob.interps, Clocks.semantics,
                  stringparm1(Opt->multiple_interps),
