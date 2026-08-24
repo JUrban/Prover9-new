@@ -238,6 +238,8 @@ On the latest corrected bounded runs:
 | Osborn/100 | RIGID | 63 | 9,632 | 6,192 | 3,440 |
 | Josef 01/300 | SAME | 970 | 966,789 | 95,899 | 870,890 |
 | Josef 01/300 | RIGID | 56 | 24,701 | 5,152 | 19,549 |
+| Josef 01/1,000 | SAME | 3,093 | 3,215,969 | 213,670 | 3,002,299 |
+| Josef 01/1,000 | RIGID | 119 | 56,188 | 6,348 | 49,840 |
 | Josef 02/300 | SAME | 626 | 299,127 | 85,279 | 213,848 |
 | Josef 02/300 | RIGID | 18 | 2,955 | 943 | 2,012 |
 | Josef 02/1,000 | SAME | 2,872 | 1,110,410 | 321,525 | 788,885 |
@@ -259,6 +261,12 @@ earned a set, and every executed program still had width one.  The collective
 executor therefore remained functionally a one-condition lookup on this
 prefix; it did not yet exercise a word-wise intersection.
 
+Josef 01/1,000 showed the same qualitative limitation at greater scale.  Three
+SAME conditions earned dense sets and served 730 queries, rejecting 1,493,035
+candidates through the cache.  No RIGID condition matured and every program
+again had width one.  The direct structural pass nevertheless rejected more
+than three million candidates before exact matching.
+
 ### CPU and RAM
 
 Short-prefix wall/CPU measurements remain noisy and are not a promotion case.
@@ -278,6 +286,15 @@ Kept=65,416.  `packed_compiled` reduced ordinary-match direct attempts from
 1,515,546 to 860,556 (43.2%) but used 71.54 user seconds versus 71.51 for
 `packed_fast`.  Peak RSS was 248,612 KiB versus 235,128 KiB.  This passes the
 semantic and bounded-resource gates but supplies no CPU promotion case.
+
+The adjacent Josef 01/1,000 pair also had identical search counters:
+Given=1,001, Generated=1,628,048, and Kept=320,239.  Here the compiled mode
+reduced ordinary-match direct attempts from 3,632,023 to 656,968 (81.9%) and
+the sampled ordinary-match time from 9.881 to 6.732 seconds (1.47x).  Whole
+user CPU improved only from 50.95 to 50.13 seconds, while combined user and
+system CPU was effectively unchanged (70.79 versus 70.82 seconds).  Peak RSS
+rose from 600,912 to 620,216 KiB.  This is a real matcher-level improvement,
+but it misses both the 2x matcher target and the material whole-run target.
 
 On Osborn, lazy constructed 103,171 of 248,809 cumulative canonical
 additions and used 15.2 MiB for the term table versus eager's 20.0 MiB.  Both
