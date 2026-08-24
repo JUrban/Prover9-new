@@ -62,23 +62,54 @@ runs is:
 Exit status 5 is expected here: it is Prover9's normal `max_given` exit, not a
 crash.
 
-The uploaded ar-2 control took 262.53 user seconds, but it is not used as the
-denominator because it ran on a different CPU.  The paired local control is the
-only valid timing baseline for the 5.83% result.
+The first uploaded ar-2 control took 262.53 user seconds, but it was not used as
+the denominator above because it ran on a different CPU from that candidate.
+The local pair established the initial 5.83% result.
+
+## Paired ar-2 result without input echo
+
+The control and candidate were subsequently rebuilt as pinned binaries and run
+sequentially on ar-2.  Both inputs began with `clear(echo_input)` and
+`clear(print_initial_clauses)`.  This suppresses output only; all search options
+and the 1,000-given endpoint remained unchanged.
+
+| Measurement | Control `be72aa6` | Candidate `74363b1` | Change |
+|---|---:|---:|---:|
+| User CPU | 260.35 s | 240.62 s | -19.73 s (-7.58%) |
+| System CPU | 1.81 s | 1.91 s | +0.10 s (+5.52%) |
+| Total CPU | 262.16 s | 242.53 s | -19.63 s (-7.49%) |
+| Wall time | 262.18 s | 242.56 s | -19.62 s (-7.48%) |
+| Maximum RSS | 2,041,088 KiB | 2,040,192 KiB | -896 KiB (-0.044%) |
+| Given counter | 1001 | 1001 | identical |
+| Generated | 2,435,141 | 2,435,141 | identical |
+| Kept | 5,815 | 5,815 | identical |
+| Matched hints | 5,700 | 5,700 | identical |
+
+The 1,000 printed given clauses are byte-identical and have the same SHA-256
+shown above.  Both runs ended normally at `max_given`, with no swapping.
+
+Suppressing the echo reduced the control output from 130,849,417 bytes to
+127,434 bytes, a factor of 1,026.8.  However, it reduced control user CPU by
+only 2.18 seconds (0.83%) and wall time by 3.78 seconds (1.42%).  Therefore the
+large delay before the given loop is not primarily output dumping: it is hint
+parsing, compression, indexing, and initial equivalence processing.
 
 ## What the new counters show
 
 At the common endpoint, the candidate performed 2,832,866,041 early profile
 checks.  Literal counts rejected 589,635 IDs and feature masks rejected
 2,713,711,947 IDs before result-vector insertion.  Despite that very large
-rejection count, total CPU improved by only 5.83%.  Most of the cost is paid
+rejection count, whole-run user CPU improved by 5.83% locally and 7.58% on
+ar-2.  Most of the remaining matcher cost is paid
 before that point while reading and combining posting bitplanes, and the
 authoritative matching work and generated search are unchanged.
 
-This is a safe, measurable improvement, but it is not the hoped-for radical
-speedup.  It should not be represented as solving Josef 04's long-run CPU
-problem.  The result directs the next optimization toward avoiding bitplane
-reads/intersections themselves (or changing their representation), rather than
+This is a safe, measurable improvement, but the 1,000-given data alone do not
+establish a radical speedup.  The fixed hint initialization cost is paid once,
+whereas the optimized fallback queries accumulate with generated clauses.  A
+paired 3,000-given ar-2 run is therefore the next scaling measurement.  If its
+relative gain does not grow, the next optimization should avoid bitplane
+reads/intersections themselves (or change their representation), rather than
 only making result materialization cheaper.
 
 ## How to run the candidate on ar-2
