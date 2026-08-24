@@ -5607,6 +5607,7 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             "base_occurrences=%llu, base_intern_hits=%llu, "
             "delta_nodes=%llu, delta_children=%llu, "
             "delta_occurrences=%llu, delta_intern_hits=%llu, "
+            "base_rehashes=%llu, delta_rehashes=%llu, "
             "node_bytes=%llu, child_bytes=%llu, record_bytes=%llu, "
             "hash_bytes=%llu, hash_peak_bytes=%llu, scratch_bytes=%llu, "
             "total_bytes=%llu, match_attempts=%llu, match_successes=%llu, "
@@ -5619,6 +5620,7 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             s.reinsertions, s.base_nodes, s.base_children,
             s.base_occurrences, s.base_intern_hits, s.delta_nodes,
             s.delta_children, s.delta_occurrences, s.delta_intern_hits,
+            s.base_rehashes, s.delta_rehashes,
             s.node_bytes, s.child_bytes, s.record_bytes, s.hash_bytes,
             s.hash_peak_bytes, s.scratch_bytes, s.total_bytes,
             s.match_attempts, s.match_successes, s.match_nodes,

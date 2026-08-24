@@ -68,6 +68,8 @@ int main(void)
   CHECK(before.base_intern_hits != 0 &&
         before.base_occurrences > before.base_nodes,
         "construction reports cross-hint and within-term sharing");
+  CHECK(before.base_rehashes != 0,
+        "construction reports canonical hash rebuilds");
   CHECK(before.hash_bytes != 0 && before.scratch_bytes != 0,
         "construction workspace is visible before finalization");
 

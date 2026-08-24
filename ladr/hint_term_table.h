@@ -28,6 +28,8 @@ struct hint_term_table_stats {
   unsigned long long delta_children;
   unsigned long long delta_occurrences;
   unsigned long long delta_intern_hits;
+  unsigned long long base_rehashes;
+  unsigned long long delta_rehashes;
   unsigned long long node_bytes;
   unsigned long long child_bytes;
   unsigned long long record_bytes;

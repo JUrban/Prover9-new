@@ -35,6 +35,7 @@ struct hint_term_arena {
   unsigned long long occurrences;
   unsigned long long intern_hits;
   unsigned long long hash_peak_bytes;
+  unsigned long long rehashes;
   uint32_t handle_tag;
   BOOL finalized;
 };
@@ -164,6 +165,7 @@ static BOOL hint_term_rehash(struct hint_term_arena *arena,
       arena->hash_peak_bytes)
     arena->hash_peak_bytes =
       (unsigned long long) capacity * sizeof(*arena->hash_slots);
+  arena->rehashes++;
   return TRUE;
 }
 
@@ -602,6 +604,8 @@ void hint_term_table_get_stats(Hint_term_table table,
   stats->delta_children = table->delta.child_count;
   stats->delta_occurrences = table->delta.occurrences;
   stats->delta_intern_hits = table->delta.intern_hits;
+  stats->base_rehashes = table->base.rehashes;
+  stats->delta_rehashes = table->delta.rehashes;
   stats->node_bytes =
     (unsigned long long) (table->base.node_capacity +
                           table->delta.node_capacity) *
