@@ -279,7 +279,14 @@ static BOOL packed_hint_bank_mode(void)
      str_ident(stringparm1(Opt->hint_index), "packed_compiled_lazy") ||
      str_ident(stringparm1(Opt->hint_index), "packed_compiled_paths") ||
      str_ident(stringparm1(Opt->hint_index), "hybrid") ||
-     str_ident(stringparm1(Opt->hint_index), "packed_legacy"));
+     str_ident(stringparm1(Opt->hint_index), "packed_legacy") ||
+     str_ident(stringparm1(Opt->hint_index), "generalized_hash"));
+}
+
+static BOOL generalized_hint_hash_mode(void)
+{
+  return Opt != NULL &&
+    str_ident(stringparm1(Opt->hint_index), "generalized_hash");
 }
 
 static BOOL better_packed_hint_mode(void)
@@ -292,7 +299,8 @@ static BOOL better_packed_hint_mode(void)
      str_ident(stringparm1(Opt->hint_index), "packed_compiled_blocks") ||
      str_ident(stringparm1(Opt->hint_index), "packed_compiled_lazy") ||
      str_ident(stringparm1(Opt->hint_index), "packed_compiled_paths") ||
-     str_ident(stringparm1(Opt->hint_index), "hybrid"));
+     str_ident(stringparm1(Opt->hint_index), "hybrid") ||
+     str_ident(stringparm1(Opt->hint_index), "generalized_hash"));
 }
 
 static BOOL fast_packed_hint_mode(void)
@@ -303,7 +311,8 @@ static BOOL fast_packed_hint_mode(void)
      str_ident(stringparm1(Opt->hint_index), "packed_compiled") ||
      str_ident(stringparm1(Opt->hint_index), "packed_compiled_blocks") ||
      str_ident(stringparm1(Opt->hint_index), "packed_compiled_lazy") ||
-     str_ident(stringparm1(Opt->hint_index), "packed_compiled_paths"));
+     str_ident(stringparm1(Opt->hint_index), "packed_compiled_paths") ||
+     str_ident(stringparm1(Opt->hint_index), "generalized_hash"));
 }
 
 static BOOL compiled_hint_table_mode(void)
@@ -2267,6 +2276,12 @@ Prover_options init_prover_options(void)
     init_parm("hint_conjunction_kb", 327680, 0, INT_MAX);
   p->hint_rebuild_scan_ratio =
     init_parm("hint_rebuild_scan_ratio", 8, 0, INT_MAX);
+  p->hint_hash_complete_nodes =
+    init_parm("hint_hash_complete_nodes", 8, 1, 32);
+  p->hint_hash_partial_per_hint =
+    init_parm("hint_hash_partial_per_hint", 32, 0, 1024);
+  p->hint_hash_max_entries =
+    init_parm("hint_hash_max_entries", 100000000, 1, INT_MAX);
   p->rewrite_refresh_hot_ratio =
     init_parm("rewrite_refresh_hot_ratio", 7, 0, INT_MAX);
   p->rewrite_refresh_raw_budget =
@@ -2358,7 +2373,7 @@ Prover_options init_prover_options(void)
 			"eager_legacy",
 			"eager_interreduced");
 
-  p->hint_index = init_stringparm("hint_index", 12,
+  p->hint_index = init_stringparm("hint_index", 13,
 				  "fpa",
 				  "compact",
 				  "shallow",
@@ -2370,7 +2385,8 @@ Prover_options init_prover_options(void)
 				  "packed_compiled_lazy",
 				  "packed_compiled_paths",
 				  "hybrid",
-				  "packed_legacy");
+				  "packed_legacy",
+				  "generalized_hash");
 
   p->inference_frontier = init_stringparm("inference_frontier", 2,
 					  "clauses",
@@ -11681,10 +11697,17 @@ void index_and_process_initial_clauses(void)
 	     better_packed_hint_mode(),
 	     fast_packed_hint_mode(),
 	     (unsigned) parm(Opt->hint_cache_kb),
-	     (unsigned) parm(Opt->hint_conjunction_kb),
+	     generalized_hint_hash_mode() ? 0 :
+	       (unsigned) parm(Opt->hint_conjunction_kb),
 	     (unsigned) clist_length(Glob.hints),
 	     (unsigned) parm(Opt->hint_rebuild_scan_ratio),
 	     current_demodulate_clause);
+  set_hint_generalization_hash(
+    generalized_hint_hash_mode(),
+    (unsigned) parm(Opt->hint_hash_complete_nodes),
+    (unsigned) parm(Opt->hint_hash_partial_per_hint),
+    (unsigned long long) parm(Opt->hint_hash_max_entries),
+    (unsigned) clist_length(Glob.hints));
   set_hint_match_stats(flag(Opt->hint_match_stats));
   set_hint_compiled_census(flag(Opt->hint_compiled_census));
   set_hint_compiled_term_table(compiled_hint_table_mode());
@@ -16239,10 +16262,17 @@ void load_checkpoint_into_loop(void)
              better_packed_hint_mode(),
              fast_packed_hint_mode(),
              (unsigned) parm(Opt->hint_cache_kb),
-             (unsigned) parm(Opt->hint_conjunction_kb),
+             generalized_hint_hash_mode() ? 0 :
+               (unsigned) parm(Opt->hint_conjunction_kb),
              (unsigned) clist_length(Glob.hints),
              (unsigned) parm(Opt->hint_rebuild_scan_ratio),
              current_demodulate_clause);
+  set_hint_generalization_hash(
+    generalized_hint_hash_mode(),
+    (unsigned) parm(Opt->hint_hash_complete_nodes),
+    (unsigned) parm(Opt->hint_hash_partial_per_hint),
+    (unsigned long long) parm(Opt->hint_hash_max_entries),
+    (unsigned) clist_length(Glob.hints));
   set_hint_match_stats(flag(Opt->hint_match_stats));
   set_hint_compiled_census(flag(Opt->hint_compiled_census));
   set_hint_compiled_term_table(compiled_hint_table_mode());
@@ -16785,6 +16815,14 @@ Prover_results search(Prover_input p)
     Resume_rewrite_hot_cursor_id = 0;
     Resume_rewrite_general_cursor_id = 0;
     Resume_rewrite_interreduce_cursor_id = 0;
+    if (generalized_hint_hash_mode()) {
+      if (flag(Opt->back_demod_hints))
+        fatal_error("hint_index=generalized_hash requires clear(back_demod_hints)");
+      if (flag(Opt->hint_match_once))
+        fatal_error("hint_index=generalized_hash does not support hint_match_once");
+      if (parm(Opt->hint_expiry) > 0)
+        fatal_error("hint_index=generalized_hash does not support hint_expiry");
+    }
     if (flag(Opt->collective_promising_scheduler) &&
         !str_ident(stringparm1(Opt->inference_frontier), "collective"))
       fatal_error("collective_promising_scheduler requires inference_frontier=collective");

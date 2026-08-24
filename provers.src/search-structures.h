@@ -291,6 +291,9 @@ struct prover_options {
     hint_compiled_cache_kb,       // aggregate SAME bitset budget
     hint_conjunction_kb,   // packed-fast subset-conjunction resident cap
     hint_rebuild_scan_ratio, // stale scans/live index before posting rebuild
+    hint_hash_complete_nodes, // exhaustive generalized-hash clause length
+    hint_hash_partial_per_hint, // one-hole keys retained for longer hints
+    hint_hash_max_entries, // hard unique-key cap for hash-only experiment
     rewrite_refresh_hot_ratio, // hinted refresh turns per fair general turn
     rewrite_refresh_raw_budget, // dense records inspected per refresh turn
     rewrite_refresh_inference_ratio, // inference turns per background repair

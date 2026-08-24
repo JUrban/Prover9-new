@@ -26,6 +26,7 @@
 #include "weight.h"
 #include "hints.h"
 #include "hint_term_table.h"
+#include "hint_generalization_hash.h"
 #include "clausify.h"
 #include "ac_redun.h"
 #include "int_code.h"

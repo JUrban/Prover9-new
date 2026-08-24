@@ -21,6 +21,7 @@
 #include "clock.h"
 #include "hint_postings.h"
 #include "hint_term_table.h"
+#include "hint_generalization_hash.h"
 #include <stdint.h>
 
 /* Private definitions and types */
@@ -56,6 +57,10 @@ static unsigned *Packed_candidates = NULL;
 static unsigned Packed_candidates_count = 0, Packed_candidates_capacity = 0;
 static BOOL Packed_candidates_nondecreasing = TRUE;
 static unsigned long long Packed_candidate_checks = 0;
+
+/* Static hash-only experiment.  The ordinary packed bank still owns and
+   deduplicates hint clauses, but it is never consulted by query matching. */
+static Hint_generalization_hash Generalization_hash = NULL;
 
 /* Construction-only precursor of the compiled matcher.  Ordinary unit hints
    receive canonical roots; packed_fast remains authoritative. */
@@ -2073,6 +2078,62 @@ void finalize_hint_conjunction_index(void)
     hint_term_table_finalize(Compiled_term_table);
   if (Compiled_filter_enabled)
     Compiled_same_cache_ready = TRUE;
+  if (Generalization_hash != NULL) {
+    unsigned complete = 0, partial = 0;
+    BOOL partial_room = TRUE;
+    fprintf(stderr,
+            "NOTE: building exhaustive short-hint generalization hash...\n");
+    fflush(stderr);
+    for (i = 1; i < Packed_hint_capacity; i++) {
+      Topform hint = Packed_hint_by_id[i];
+      if (hint != NULL && Packed_hint_active[i] &&
+          hint_generalization_hash_is_complete_hint(
+            Generalization_hash, i)) {
+        if (hint->compressed != NULL && !materialize_clause(hint))
+          fatal_error("generalized hint hash cannot materialize short hint");
+        if (!hint_generalization_hash_add_complete(
+              Generalization_hash, i, hint))
+          fatal_error("hint_hash_max_entries is too small for complete coverage");
+        if (compress_clause(hint) == CLAUSE_COMPRESS_INVALID)
+          fatal_error("generalized hint hash cannot recompress short hint");
+        complete++;
+        if (complete % 100000 == 0) {
+          fprintf(stderr,
+                  "NOTE: generalized hint hash completed %u short hints.\n",
+                  complete);
+          fflush(stderr);
+        }
+      }
+    }
+    fprintf(stderr,
+            "NOTE: adding bounded long-hint one-subterm generalizations...\n");
+    fflush(stderr);
+    for (i = 1; i < Packed_hint_capacity && partial_room; i++) {
+      Topform hint = Packed_hint_by_id[i];
+      if (hint != NULL && Packed_hint_active[i] &&
+          !hint_generalization_hash_is_complete_hint(
+            Generalization_hash, i)) {
+        if (hint->compressed != NULL && !materialize_clause(hint))
+          fatal_error("generalized hint hash cannot materialize long hint");
+        partial_room = hint_generalization_hash_add_partial(
+          Generalization_hash, i, hint);
+        if (compress_clause(hint) == CLAUSE_COMPRESS_INVALID)
+          fatal_error("generalized hint hash cannot recompress long hint");
+        partial++;
+        if (partial % 100000 == 0) {
+          fprintf(stderr,
+                  "NOTE: generalized hint hash processed %u long hints.\n",
+                  partial);
+          fflush(stderr);
+        }
+      }
+    }
+    hint_generalization_hash_finalize(Generalization_hash);
+    fprintf(stderr,
+            "NOTE: generalized hint hash ready (%u complete, %u partial hints).\n",
+            complete, partial);
+    fflush(stderr);
+  }
   if (!Fast_conjunction_planning)
     return;
   fast_conjunction_estimator_init(&estimator);
@@ -3290,6 +3351,22 @@ void set_hint_cache_min_candidates(unsigned minimum)
   Fast_match_cache_min_candidates = minimum;
 }
 
+/* PUBLIC */
+void set_hint_generalization_hash(BOOL on, unsigned complete_nodes,
+                                  unsigned partial_per_hint,
+                                  unsigned long long maximum_entries,
+                                  unsigned expected_hints)
+{
+  if (!on)
+    return;
+  if (!Packed_index)
+    fatal_error("generalized hint hash requires packed hint ownership");
+  if (Generalization_hash != NULL)
+    fatal_error("generalized hint hash is already initialized");
+  Generalization_hash = hint_generalization_hash_init(
+    complete_nodes, partial_per_hint, maximum_entries, expected_hints);
+}
+
 /* DOCUMENTATION
 */
 
@@ -3561,6 +3638,7 @@ void done_with_hints(void)
   if (Compiled_same_cache_buckets) safe_free(Compiled_same_cache_buckets);
   if (Compiled_same_cache_paths) safe_free(Compiled_same_cache_paths);
   hint_term_table_destroy(Compiled_term_table);
+  hint_generalization_hash_destroy(Generalization_hash);
   if (Compiled_subterm_fingerprints != NULL)
     safe_free(Compiled_subterm_fingerprints);
   hint_postings_destroy(Better_postings);
@@ -3594,6 +3672,7 @@ void done_with_hints(void)
   Compiled_query_identity = NULL;
   Compiled_fast_identity_keys = NULL;
   Compiled_query_program_cache = NULL;
+  Generalization_hash = NULL;
   Compiled_same_cache_entries = NULL;
   Compiled_same_cache_buckets = NULL;
   Compiled_same_cache_paths = NULL;
@@ -6473,6 +6552,10 @@ void index_hint(Topform c)
       }
       if (Compiled_term_table_enabled)
         compiled_same_cache_index_hint((unsigned) c->id);
+      if (Generalization_hash != NULL &&
+          !hint_generalization_hash_add_exact(
+            Generalization_hash, (unsigned) c->id, c))
+        fatal_error("index_hint: cannot add generalized-hash exact key");
       if (compress_clause(c) == CLAUSE_COMPRESS_INVALID)
         fatal_error("index_hint: cannot compact active packed hint");
     }
@@ -6510,6 +6593,8 @@ void unindex_hint(Topform c)
     Redundant_hints_count--;
   }
   else if (c->hint_indexed) {
+    if (Generalization_hash != NULL)
+      fatal_error("generalized hint hash does not support dynamic hint removal");
     if (Packed_index) {
       if (c->id == 0 || c->id >= Packed_hint_capacity ||
           Packed_hint_by_id[c->id] != c || !Packed_hint_active[c->id])
@@ -6569,6 +6654,24 @@ void discard_packed_hint_indexes(void)
   done_with_hints();
 }
 
+static Topform selected_matching_hint(Topform clause, BOOL flipped)
+{
+  if (Generalization_hash != NULL) {
+    unsigned id = hint_generalization_hash_lookup(
+      Generalization_hash, clause);
+    Topform hint;
+    (void) flipped;
+    if (id == 0 || id >= Packed_hint_capacity)
+      return NULL;
+    hint = Packed_hint_by_id[id];
+    if (hint == NULL || !Packed_hint_active[id] || !hint->hint_indexed)
+      fatal_error("generalized hint hash returned an inactive hint");
+    return hint;
+  }
+  return Packed_index ? packed_find_matching_hint(clause, flipped) :
+                        find_matching_hint(clause, Hints_idx);
+}
+
 /*************
  *
  *   adjust_weight_with_hints()
@@ -6583,8 +6686,7 @@ void adjust_weight_with_hints(Topform c,
 			      BOOL degrade,
 			      BOOL breadth_first_hints)
 {
-  Topform hint = Packed_index ? packed_find_matching_hint(c, FALSE) :
-                                find_matching_hint(c, Hints_idx);
+  Topform hint = selected_matching_hint(c, FALSE);
 
   if (hint == NULL &&
       unit_clause(c->literals) &&
@@ -6595,8 +6697,7 @@ void adjust_weight_with_hints(Topform c,
 
     Term save_atom = c->literals->atom;
     c->literals->atom = top_flip(save_atom);
-    hint = Packed_index ? packed_find_matching_hint(c, TRUE) :
-                          find_matching_hint(c, Hints_idx);
+    hint = selected_matching_hint(c, TRUE);
     zap_top_flip(c->literals->atom);
     c->literals->atom = save_atom;
     if (hint != NULL)
@@ -6682,7 +6783,7 @@ Topform preview_weight_with_hints(Topform c,
      Lazily reserve preview-owned scratch, then temporarily swap it in so
      authoritative serial marks, capacities, and scratch objects are exactly
      unchanged when this function returns. */
-  if (Packed_index) {
+  if (Packed_index && Generalization_hash == NULL) {
     packed_reserve_preview_workspace();
     saved_candidate_mark = Packed_candidate_mark;
     saved_candidates = Packed_candidates;
@@ -6718,22 +6819,20 @@ Topform preview_weight_with_hints(Topform c,
     }
   }
 
-  hint = Packed_index ? packed_find_matching_hint(c, FALSE) :
-                        find_matching_hint(c, Hints_idx);
+  hint = selected_matching_hint(c, FALSE);
   if (hint == NULL &&
       unit_clause(c->literals) &&
       eq_term(c->literals->atom) &&
       !oriented_eq(c->literals->atom)) {
     Term save_atom = c->literals->atom;
     c->literals->atom = top_flip(save_atom);
-    hint = Packed_index ? packed_find_matching_hint(c, TRUE) :
-                          find_matching_hint(c, Hints_idx);
+    hint = selected_matching_hint(c, TRUE);
     zap_top_flip(c->literals->atom);
     c->literals->atom = save_atom;
     flip_match = hint != NULL;
   }
 
-  if (Packed_index) {
+  if (Packed_index && Generalization_hash == NULL) {
     Preview_candidate_mark = Packed_candidate_mark;
     Preview_candidates = Packed_candidates;
     Preview_candidate_serial = Packed_candidate_serial;
@@ -6855,6 +6954,8 @@ void keep_hint_matcher(Topform c)
 /* PUBLIC */
 void back_demod_hints(Topform demod, int type, BOOL lex_order_vars)
 {
+  if (Back_demod_hints && Generalization_hash != NULL)
+    fatal_error("generalized hint hash does not support back demodulation of hints");
   if (Back_demod_hints && Packed_index) {
     Term atom = demod->literals->atom;
     Term alpha = ARG(atom,0);
@@ -7327,6 +7428,11 @@ void packed_hint_index_stats(unsigned long long *node_bytes,
       (unsigned long long) Compiled_same_cache_path_capacity *
         sizeof(*Compiled_same_cache_paths);
   }
+  if (Generalization_hash != NULL) {
+    struct hint_generalization_hash_stats hash_stats;
+    hint_generalization_hash_get_stats(Generalization_hash, &hash_stats);
+    *table_bytes += hash_stats.bytes;
+  }
 }
 
 static unsigned long long packed_preview_workspace_bytes(void)
@@ -7393,6 +7499,31 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             s->candidate_buckets[2], s->candidate_buckets[3],
             s->candidate_buckets[4], s->candidate_buckets[5],
             s->candidate_buckets[6], s->candidate_buckets[7]);
+  }
+  if (Generalization_hash != NULL) {
+    struct hint_generalization_hash_stats s;
+    hint_generalization_hash_get_stats(Generalization_hash, &s);
+    fprintf(fp,
+            "Generalized_hint_hash: finalized=%d, complete_nodes=%u, "
+            "partial_per_hint=%u, max_entries=%llu, entries=%llu, "
+            "capacity=%llu, bytes=%llu, exact_hints=%llu, "
+            "exact_new_entries=%llu, complete_hints=%llu, "
+            "partial_hints=%llu, generated_attempts=%llu, "
+            "generated_new_entries=%llu, duplicates=%llu, "
+            "partial_cap_skips=%llu, rehashes=%llu, queries=%llu, "
+            "hits=%llu, hit_rate=%.2f, probes=%llu, mean_probes=%.2f, "
+            "max_probe=%llu.\n",
+            s.finalized, s.complete_nodes, s.partial_per_hint,
+            s.maximum_entries, s.entries, s.capacity, s.bytes,
+            s.exact_hints, s.exact_new_entries, s.complete_hints,
+            s.partial_hints, s.generated_attempts,
+            s.generated_new_entries, s.duplicates,
+            s.partial_cap_skips, s.rehashes, s.queries, s.hits,
+            s.queries == 0 ? 0.0 :
+              100.0 * (double) s.hits / (double) s.queries,
+            s.probes, s.queries == 0 ? 0.0 :
+              (double) s.probes / (double) s.queries,
+            s.maximum_probe);
   }
   if (Hint_compiled_census) {
     fprintf(fp,

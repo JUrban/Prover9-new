@@ -1,0 +1,67 @@
+/* Experimental precomputed hash-only hint matcher. */
+
+#ifndef TP_HINT_GENERALIZATION_HASH_H
+#define TP_HINT_GENERALIZATION_HASH_H
+
+#include "topform.h"
+#include <stdint.h>
+
+typedef struct hint_generalization_hash *Hint_generalization_hash;
+
+struct hint_generalization_hash_stats {
+  unsigned long long entries;
+  unsigned long long capacity;
+  unsigned long long bytes;
+  unsigned long long exact_hints;
+  unsigned long long exact_new_entries;
+  unsigned long long complete_hints;
+  unsigned long long partial_hints;
+  unsigned long long generated_attempts;
+  unsigned long long generated_new_entries;
+  unsigned long long duplicates;
+  unsigned long long partial_cap_skips;
+  unsigned long long rehashes;
+  unsigned long long queries;
+  unsigned long long hits;
+  unsigned long long probes;
+  unsigned long long maximum_probe;
+  unsigned complete_nodes;
+  unsigned partial_per_hint;
+  unsigned long long maximum_entries;
+  BOOL finalized;
+};
+
+Hint_generalization_hash hint_generalization_hash_init(
+  unsigned complete_nodes, unsigned partial_per_hint,
+  unsigned long long maximum_entries, unsigned expected_hints);
+
+void hint_generalization_hash_destroy(Hint_generalization_hash table);
+
+/* Add the exact variant key and remember the hint length for the later,
+   population-ordered generalization build. */
+BOOL hint_generalization_hash_add_exact(Hint_generalization_hash table,
+                                        unsigned id, Topform hint);
+
+BOOL hint_generalization_hash_is_complete_hint(
+  Hint_generalization_hash table, unsigned id);
+
+/* Exhaustive first-order clause generalizations for a short hint. */
+BOOL hint_generalization_hash_add_complete(Hint_generalization_hash table,
+                                           unsigned id, Topform hint);
+
+/* Exact plus bounded one-subterm abstractions for a longer hint. */
+/* FALSE means the global entry cap was reached; later large hints can be
+   skipped without further materialization. */
+BOOL hint_generalization_hash_add_partial(Hint_generalization_hash table,
+                                          unsigned id, Topform hint);
+
+void hint_generalization_hash_finalize(Hint_generalization_hash table);
+
+/* Return the selected stable hint ID, or zero on a hash miss. */
+unsigned hint_generalization_hash_lookup(Hint_generalization_hash table,
+                                         Topform clause);
+
+void hint_generalization_hash_get_stats(
+  Hint_generalization_hash table, struct hint_generalization_hash_stats *stats);
+
+#endif

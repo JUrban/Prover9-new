@@ -126,7 +126,8 @@ CLAS_OBJ = formula.o definitions.o literals.o topform.o clist.o clause_store.o\
            random.o subsume.o clause_misc.o clause_eval.o complex.o
 INFE_OBJ = dollar.o flatdemod.o demod.o clash.o resolve.o paramod.o\
 	   backdemod.o\
-	   hint_postings.o hint_term_table.o hints.o ac_redun.o xproofs.o ivy.o
+	   hint_postings.o hint_term_table.o hint_generalization_hash.o hints.o\
+	   ac_redun.o xproofs.o ivy.o
 MODL_OBJ = interp.o
 MISC_OBJ = std_options.o banner.o ioutil.o tptp_trans.o top_input.o tptp_parse.o sine.o tstp_proof.o
 

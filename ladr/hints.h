@@ -23,6 +23,7 @@
 #include "clist.h"
 #include "backdemod.h"
 #include "resolve.h"
+#include "hint_generalization_hash.h"
 
 /* INTRODUCTION
 */
@@ -49,6 +50,14 @@ void init_hints(Uniftype utype,
 
 /* Admit a packed-fast result only after at least this much posting work. */
 void set_hint_cache_min_candidates(unsigned minimum);
+
+/* Enable the static, deliberately incomplete hash-only matcher.  Every
+   active hint receives an exact key; short hints are exhaustively
+   generalized and long hints receive bounded one-subterm abstractions. */
+void set_hint_generalization_hash(BOOL on, unsigned complete_nodes,
+                                  unsigned partial_per_hint,
+                                  unsigned long long maximum_entries,
+                                  unsigned expected_hints);
 
 void done_with_hints(void);
 
