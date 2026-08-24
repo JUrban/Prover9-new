@@ -79,10 +79,13 @@ queries where another pass over the IDs is unlikely to pay.
 
 For an admitted query, the compiler also records at most 32 fixed symbols
 below the depth already covered exactly by `packed_fast`.  It tests at most
-eight evenly spaced candidates per position, chooses one condition predicted
-to reject at least 25%, and performs only that one full direct pass.  Thus the
-policy learns `RIGID(child route,symbol)` conditions from actual search work;
-it does not rebuild the rejected all-path sidecar.
+eight candidates per position and ranks up to four conditions predicted to
+reject at least 25%.  Sampling takes one deterministic, query-hash-jittered
+candidate from each part of the emitted prefix.  This preserves reproducible
+whole-prefix coverage without the periodic aliasing caused by positions such
+as 0, 16, 32, ... in a four-cohort stream.  Thus the policy learns
+`RIGID(child route,symbol)` conditions from actual search work; it does not
+rebuild the rejected all-path sidecar.
 
 Previously learned SAME and RIGID conditions are ordered by measured
 selectivity and compiled into a program of at most eight dense stable-ID
@@ -117,20 +120,26 @@ used.
 
 ### Normalized query-program policy cache
 
-Blocks mode also has a fixed 1,024-entry policy cache.  Each entry is 24
-bytes, for a total payload of 24 KiB.  Two 64-bit shape hashes are accumulated
+Blocks mode also has a fixed 1,024-entry policy cache.  Each entry is 56
+bytes, for a total payload of 56 KiB.  Two 64-bit shape hashes are accumulated
 during the existing feature-mask traversal over symbol/arity tokens and
 first-occurrence-normalized variables; operation and literal sign are
 included.
 
 The cache does not store matching hints or reuse a previous candidate answer.
-After a selected deep fixed-symbol instruction rejects at least 25% in its
-full direct pass, the cache remembers that instruction for the normalized
-query shape.  On reuse, the stored condition is compared exactly with the
-current query's path and symbol before it can run.  Consequently, even a
-shape-hash collision cannot create a false negative: the suggested condition
-must independently be a necessary condition of the current query.  A reused
-choice whose full rejection rate falls below 25% is evicted.
+After direct execution, it retains an ordered program of up to eight
+instructions for which each instruction rejected at least 25% of the
+candidates that reached it.  A program must contain a RIGID instruction,
+because avoiding the bounded RIGID selectivity sample is the cache's purpose;
+profitable SAME instructions can share the program and its short-circuit
+order.  On reuse, every stored SAME route pair and RIGID route/symbol key is
+compared exactly with the current query plan before any instruction can run.
+Consequently, even a shape-hash collision cannot create a false negative: a
+cached vector is only a policy suggestion, and every member must independently
+be a necessary condition of the current query.  Built members join the dense
+stable-ID mask program; unbuilt members run directly.  Unprofitable cached
+RIGID choices are evicted, while a partly useful vector is replaced by its
+profitable subset.
 
 Lifecycle behavior is conservative:
 
@@ -312,8 +321,9 @@ The shutdown statistics contain:
   dense posting words intersected, bits rejected before ID enumeration, and
   sparse/conjunction mask prechecks; and
 - `Compiled_hint_query_program_cache`: bounded shape-policy lookups, hits,
-  condition-validation misses, stores, replacements, evictions, and avoided
-  fixed-position sample tests.
+  condition-validation misses, stores, replacements, evictions, avoided
+  fixed-position sample tests, total cached instructions executed, SAME/RIGID
+  mix, mixed hits, and maximum program width.
 
 ## Measurements so far
 
@@ -534,11 +544,12 @@ invalid SAME route precedes a later valid candidate.  It now also includes
 the `f(x,x)`/`f(x,y)` result-cache alias case, batched construction of two
 co-occurring SAME masks, conservative fallback membership, and pre-ID dense
 block intersection on a 600-hint generated bank.  A second 600-hint fixture
-has no repeated query variables and proves RIGID-only dense filtering.  A
-three-cohort fixture forces the sparse vector collector, and a compact
-retained profile forces the conjunction collector; both require nonzero
-learned-mask rejections and exact `packed_fast` trace agreement.  The
-RIGID-only fixture also requires a profitable normalized-program store, a
+forces an independent SAME failure and a deep RIGID collision, then requires
+two later queries to reuse the exact width-two mixed program.  A three-cohort
+fixture forces the sparse vector collector, and a compact retained profile
+forces the conjunction collector; both require nonzero learned-mask
+rejections and exact `packed_fast` trace agreement.  The mixed fixture also
+requires a profitable normalized-program store, both instruction kinds on a
 later hit, and avoided sample work.
 
 Bounded experiments were run one memory-relevant process at a time with a
@@ -564,13 +575,13 @@ The next Waldmeister-like stage should therefore be:
    masks in dense posting words, and mask prechecks in sparse/conjunction
    collectors.  The next 1,000-given gate must show whether these paths are
    reused often enough to repay training and mask construction.
-3. **Measure and extend normalized query-program reuse.** The first bounded
-   cache now normalizes operation, sign, symbols/arities, and variable
-   occurrence pattern during the existing traversal, then reuses only a
-   fixed-symbol instruction whose full work rejected at least 25%.  The
-   1,000-given gate should decide whether hits justify caching a wider ordered
-   SAME/RIGID instruction vector.  The compressed matcher remains final
-   authority.
+3. **Measure normalized mixed-program reuse.** The bounded cache now
+   normalizes operation, sign, symbols/arities, and variable occurrence
+   pattern during the existing traversal, then reuses an ordered vector of up
+   to eight individually profitable SAME/RIGID instructions.  The 1,000-given
+   gate must show useful hit rates, widths, avoided samples, and direct/mask
+   rejections before this added policy is retained.  The compressed matcher
+   remains final authority.
 4. **Measure and generalize batched construction.** Blocks mode now scans the
    retained bank once for up to eight co-occurring ready SAME or selected
    RIGID instructions.  Keep this only if long runs report useful batch

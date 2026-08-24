@@ -35,10 +35,12 @@ different architecture, not a faster version of the present traversal.
 > IDs are enumerated.  Sparse and conjunction collectors precheck learned
 > masks before profile work and candidate insertion.  Query programs are
 > compiled during the existing full feature-mask traversal rather than by a
-> second term walk.  A fixed 24 KiB normalized-shape policy cache reuses a
-> deep-symbol instruction only after its full direct pass rejects at least
-> 25%, revalidates it against the current exact plan, and evicts it if it
-> stops paying.  Threshold-zero diagnostics use an exact compact
+> second term walk.  A fixed 56 KiB normalized-shape policy cache now reuses
+> an ordered mixture of up to eight repeated-subterm and deep-symbol
+> instructions.  Each retained instruction must reject at least 25% of the
+> candidates that actually reach it; every instruction is revalidated against
+> the current exact plan, and an unprofitable cached choice is removed or
+> replaced.  Threshold-zero diagnostics use an exact compact
 > SAME/RIGID cache identity.  At the normal threshold, narrow
 > unfiltered results retain the small `packed_fast` key and broad filtered
 > results are not cached under an incomplete identity.  The established
@@ -250,9 +252,11 @@ Implemented so far:
   and execute up to eight in one short-circuiting direct pass;
 - compare canonical subterm handles while sharing their common route prefix;
 - skip the pretest below `hint_compiled_min_candidates` (default 128);
-- sample at most 32 deep fixed-symbol conditions per admitted query, perform a
-  full direct pass only when the best sample predicts at least 25% rejection,
-  and avoid duplicating the exact depth-2 filtering already in `packed_fast`;
+- sample at most 32 deep fixed-symbol conditions per admitted query, rank up
+  to four whose sample predicts at least 25% rejection, and avoid duplicating
+  the exact depth-2 filtering already in `packed_fast`; the eight samples are
+  deterministically stratified and hash-jittered so periodic candidate order
+  cannot alias a fixed stride;
 - learn exact repeated-subterm and fixed-symbol conditions during search and,
   after enough direct work, scan the live hint bank once to build a dense
   stable-ID membership set;
@@ -296,6 +300,9 @@ enumerated from a dense posting word:
   and compressed confirmation separately and by interval;
 - normalize a query-shape key containing sign, shallow requirements, child
   routes, and repeated-variable relationships;
+- cache an ordered vector of up to eight profitable SAME/RIGID instructions
+  for a repeated normalized shape, while exactly revalidating every cached
+  condition before it can reject an ID;
 - combine existing shallow packed masks and selected SAME/RIGID masks for one
   visited 64-ID block before emitting IDs, preserving decreasing stable-ID
   order;
@@ -339,12 +346,13 @@ avoids both an incorrect alias and a large query-sized key in the common
 long-run path.
 
 Exact tests cover this cache-alias case; a generated 600-hint bank in which
-two SAME conditions mature together; a separate RIGID-only 600-hint bank; a
+two SAME conditions mature together; a separate mixed 600-hint bank that
+requires both a repeated-subterm and a deep fixed-symbol instruction; a
 three-cohort sparse posting case; and a retained conjunction profile.  Dense,
 sparse, and conjunction candidate paths all remain trace-identical to
-`packed_fast` while reporting pre-insertion rejections.  The repeated
-RIGID-only query must also report a normalized-program cache hit, a profitable
-store, and avoided selectivity-sample tests.
+`packed_fast` while reporting pre-insertion rejections.  Repeated mixed
+queries must also report a width-two normalized-program cache hit, both
+instruction kinds, a profitable store, and avoided selectivity-sample tests.
 
 The sequential post-input construction experiment has now been run and
 rejected.  It streamed the exact retained compressed bank successfully, but
