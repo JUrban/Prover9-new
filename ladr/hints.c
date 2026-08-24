@@ -61,6 +61,8 @@ static unsigned long long Packed_candidate_checks = 0;
    receive canonical roots; packed_fast remains authoritative. */
 static BOOL Compiled_term_table_enabled = FALSE;
 static BOOL Compiled_term_table_authoritative = FALSE;
+static BOOL Compiled_term_table_shadow = FALSE;
+static BOOL Compiled_filter_enabled = FALSE;
 static BOOL Compiled_path_index_enabled = FALSE;
 static Hint_term_table Compiled_term_table = NULL;
 
@@ -113,6 +115,9 @@ static unsigned long long Compiled_same_candidates_after = 0;
 static unsigned long long Compiled_same_candidate_tests = 0;
 static unsigned long long Compiled_same_navigation_rejects = 0;
 static unsigned long long Compiled_same_unequal_rejects = 0;
+static unsigned Compiled_same_min_candidates = 128;
+static unsigned long long Compiled_same_admission_skips = 0;
+static unsigned long long Compiled_same_skipped_candidates = 0;
 
 /* Dedicated read-only-preview query workspace.  It is allocated alongside
    the packed bank, never aliases authoritative matcher scratch, and is not
@@ -2945,6 +2950,8 @@ void init_hints(Uniftype utype,
   Hint_compiled_census = FALSE;
   Compiled_term_table_enabled = FALSE;
   Compiled_term_table_authoritative = FALSE;
+  Compiled_term_table_shadow = FALSE;
+  Compiled_filter_enabled = FALSE;
   Compiled_path_index_enabled = FALSE;
   Compiled_path_serial = 1;
   Compiled_path_key_count = 0;
@@ -2967,6 +2974,8 @@ void init_hints(Uniftype utype,
   Compiled_same_candidate_tests = 0;
   Compiled_same_navigation_rejects = 0;
   Compiled_same_unequal_rejects = 0;
+  Compiled_same_admission_skips = 0;
+  Compiled_same_skipped_candidates = 0;
   Hint_match_once = FALSE;
   memset(Compiled_census, 0, sizeof(Compiled_census));
   memset(Compiled_census_printed, 0, sizeof(Compiled_census_printed));
@@ -3203,6 +3212,8 @@ void done_with_hints(void)
   Hint_compiled_census = FALSE;
   Compiled_term_table_enabled = FALSE;
   Compiled_term_table_authoritative = FALSE;
+  Compiled_term_table_shadow = FALSE;
+  Compiled_filter_enabled = FALSE;
   Compiled_path_index_enabled = FALSE;
   Compiled_term_table = NULL;
   Compiled_path_serial = 1;
@@ -3227,6 +3238,9 @@ void done_with_hints(void)
   Compiled_same_candidate_tests = 0;
   Compiled_same_navigation_rejects = 0;
   Compiled_same_unequal_rejects = 0;
+  Compiled_same_min_candidates = 128;
+  Compiled_same_admission_skips = 0;
+  Compiled_same_skipped_candidates = 0;
   Packed_index = FALSE;
   Better_packed_index = FALSE;
   Fast_packed_index = FALSE;
@@ -3561,6 +3575,13 @@ static void compiled_same_filter_candidates(void)
 
   if (Compiled_same_test_count == 0 || before == 0)
     return;
+  if (before < Compiled_same_min_candidates) {
+    if (!Hint_preview_active) {
+      Compiled_same_admission_skips++;
+      Compiled_same_skipped_candidates += before;
+    }
+    return;
+  }
   compiled_plan_sort_same_tests();
   /* One cheap equality condition captures the dominant rejection without
      recreating the full matcher as a sequence of root-to-path walks.  The
@@ -3625,7 +3646,7 @@ static void compiled_path_filter_candidates(
   BOOL account = !Hint_preview_active;
 
   (void) op;
-  if (!Compiled_term_table_authoritative ||
+  if (!Compiled_filter_enabled ||
       c->literals == NULL ||
       c->literals->next != NULL || Packed_candidates_count == 0 ||
       (MATCH_HINTS_ANYCONST && AnyConstsEnabled &&
@@ -3891,7 +3912,7 @@ static Topform packed_find_equivalent_hint(Topform c)
         !(MATCH_HINTS_ANYCONST && AnyConstsEnabled &&
           hint_contains_anyconst(c))) {
       Packed_operation_stats[op].direct_attempts++;
-      if (Compiled_term_table != NULL) {
+      if (Compiled_term_table_authoritative || Compiled_term_table_shadow) {
         compiled_supported = compiled_hint_target_matches(
           c, h, &compiled_match);
         if (!compiled_supported)
@@ -3916,7 +3937,8 @@ static Topform packed_find_equivalent_hint(Topform c)
         }
         else
           direct = compressed_unit_target_matches(c->literals, h, &c_sub_h);
-        if (compiled_supported && direct && compiled_match != c_sub_h)
+        if (Compiled_term_table_shadow && compiled_supported && direct &&
+            compiled_match != c_sub_h)
           fatal_error("packed equivalent hint: compiled match mismatch");
       }
       if (direct && c_sub_h)
@@ -3989,7 +4011,7 @@ static Topform packed_find_matching_hint(Topform c, BOOL flipped)
           hint_contains_anyconst(c))) {
       BOOL h_sub_c = FALSE;
       Packed_operation_stats[op].direct_attempts++;
-      if (Compiled_term_table != NULL) {
+      if (Compiled_term_table_authoritative || Compiled_term_table_shadow) {
         compiled_supported = compiled_hint_target_matches(
           c, h, &compiled_match);
         if (!compiled_supported)
@@ -4014,7 +4036,8 @@ static Topform packed_find_matching_hint(Topform c, BOOL flipped)
         }
         else
           direct = compressed_unit_target_matches(c->literals, h, &c_sub_h);
-        if (compiled_supported && direct && compiled_match != c_sub_h)
+        if (Compiled_term_table_shadow && compiled_supported && direct &&
+            compiled_match != c_sub_h)
           fatal_error("packed matching hint: compiled match mismatch");
       }
       if (direct && c_sub_h)
@@ -4744,12 +4767,34 @@ void set_hint_compiled_paths(BOOL on)
 }  /* set_hint_compiled_paths */
 
 /* PUBLIC */
+void set_hint_compiled_min_candidates(unsigned minimum)
+{
+  Compiled_same_min_candidates = minimum;
+}
+
+/* PUBLIC */
 void set_hint_compiled_authoritative(BOOL on)
 {
   if (on && Compiled_term_table == NULL)
     fatal_error("authoritative compiled hints require term table");
   Compiled_term_table_authoritative = on;
 }  /* set_hint_compiled_authoritative */
+
+/* PUBLIC */
+void set_hint_compiled_shadow(BOOL on)
+{
+  if (on && Compiled_term_table == NULL)
+    fatal_error("compiled hint shadow requires term table");
+  Compiled_term_table_shadow = on;
+}
+
+/* PUBLIC */
+void set_hint_compiled_filter(BOOL on)
+{
+  if (on && Compiled_term_table == NULL)
+    fatal_error("compiled hint filter requires term table");
+  Compiled_filter_enabled = on;
+}
 
 /*************
  *
@@ -5102,7 +5147,8 @@ void fprint_packed_hint_operation_stats(FILE *fp)
     struct hint_term_table_stats s;
     hint_term_table_get_stats(Compiled_term_table, &s);
     fprintf(fp,
-            "Compiled_hint_term_table: authoritative=%d, finalized=%d, "
+            "Compiled_hint_term_table: authoritative=%d, shadow=%d, "
+            "filter=%d, finalized=%d, "
             "active=%llu, "
             "additions=%llu, removals=%llu, reinsertions=%llu, "
             "base_nodes=%llu, base_children=%llu, "
@@ -5115,7 +5161,8 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             "match_nodes=%llu, match_rigid_tests=%llu, "
             "match_rigid_rejects=%llu, match_first_bindings=%llu, "
             "match_repeated_tests=%llu, match_repeated_rejects=%llu.\n",
-            Compiled_term_table_authoritative, s.finalized,
+            Compiled_term_table_authoritative, Compiled_term_table_shadow,
+            Compiled_filter_enabled, s.finalized,
             s.active_records, s.additions, s.removals,
             s.reinsertions, s.base_nodes, s.base_children,
             s.base_occurrences, s.base_intern_hits, s.delta_nodes,
@@ -5158,6 +5205,8 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             "candidates_before=%llu, candidates_after=%llu, "
             "candidates_rejected=%llu, candidate_tests=%llu, "
             "navigation_rejects=%llu, unequal_rejects=%llu, "
+            "minimum_candidates=%u, admission_skips=%llu, "
+            "skipped_candidates=%llu, "
             "query_path_bytes=%llu, plan_path_bytes=%llu, "
             "test_bytes=%llu.\n",
             Compiled_same_queries, Compiled_same_query_tests,
@@ -5165,6 +5214,8 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             Compiled_same_candidates_before - Compiled_same_candidates_after,
             Compiled_same_candidate_tests,
             Compiled_same_navigation_rejects, Compiled_same_unequal_rejects,
+            Compiled_same_min_candidates, Compiled_same_admission_skips,
+            Compiled_same_skipped_candidates,
             (unsigned long long) Compiled_query_path_capacity *
               sizeof(*Compiled_query_path),
             (unsigned long long) Compiled_plan_path_capacity *

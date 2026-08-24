@@ -308,7 +308,13 @@ static BOOL compiled_hint_table_mode(void)
      str_ident(stringparm1(Opt->hint_index), "packed_compiled_paths"));
 }
 
-static BOOL compiled_hint_authoritative_mode(void)
+static BOOL compiled_hint_shadow_mode(void)
+{
+  return Opt != NULL &&
+    str_ident(stringparm1(Opt->hint_index), "packed_compiled_shadow");
+}
+
+static BOOL compiled_hint_filter_mode(void)
 {
   return Opt != NULL &&
     (str_ident(stringparm1(Opt->hint_index), "packed_compiled") ||
@@ -2229,6 +2235,8 @@ Prover_options init_prover_options(void)
   p->hint_cache_kb =      init_parm("hint_cache_kb",      2048,      0,INT_MAX);
   p->hint_cache_min_candidates =
     init_parm("hint_cache_min_candidates", 0, 0, INT_MAX);
+  p->hint_compiled_min_candidates =
+    init_parm("hint_compiled_min_candidates", 128, 0, INT_MAX);
   p->hint_conjunction_kb =
     init_parm("hint_conjunction_kb", 327680, 0, INT_MAX);
   p->hint_rebuild_scan_ratio =
@@ -11631,6 +11639,8 @@ void index_and_process_initial_clauses(void)
 
   set_hint_cache_min_candidates(
     (unsigned) parm(Opt->hint_cache_min_candidates));
+  set_hint_compiled_min_candidates(
+    (unsigned) parm(Opt->hint_compiled_min_candidates));
   init_hints(ORDINARY_UNIF, Att.bsub_hint_wt,
 	     flag(Opt->collect_hint_labels),
 	     flag(Opt->back_demod_hints),
@@ -11646,8 +11656,10 @@ void index_and_process_initial_clauses(void)
   set_hint_match_stats(flag(Opt->hint_match_stats));
   set_hint_compiled_census(flag(Opt->hint_compiled_census));
   set_hint_compiled_term_table(compiled_hint_table_mode());
+  set_hint_compiled_shadow(compiled_hint_shadow_mode());
+  set_hint_compiled_filter(compiled_hint_filter_mode());
   set_hint_compiled_paths(compiled_hint_path_mode());
-  set_hint_compiled_authoritative(compiled_hint_authoritative_mode());
+  set_hint_compiled_authoritative(FALSE);
   set_hint_match_once(flag(Opt->hint_match_once));
   init_semantics(Glob.interps, Clocks.semantics,
 		 stringparm1(Opt->multiple_interps),
@@ -16179,6 +16191,8 @@ void load_checkpoint_into_loop(void)
                                    FPA, ORDINARY_UNIF, fpa_depth);
   set_hint_cache_min_candidates(
     (unsigned) parm(Opt->hint_cache_min_candidates));
+  set_hint_compiled_min_candidates(
+    (unsigned) parm(Opt->hint_compiled_min_candidates));
   init_hints(ORDINARY_UNIF, Att.bsub_hint_wt,
              flag(Opt->collect_hint_labels),
              flag(Opt->back_demod_hints),
@@ -16194,8 +16208,10 @@ void load_checkpoint_into_loop(void)
   set_hint_match_stats(flag(Opt->hint_match_stats));
   set_hint_compiled_census(flag(Opt->hint_compiled_census));
   set_hint_compiled_term_table(compiled_hint_table_mode());
+  set_hint_compiled_shadow(compiled_hint_shadow_mode());
+  set_hint_compiled_filter(compiled_hint_filter_mode());
   set_hint_compiled_paths(compiled_hint_path_mode());
-  set_hint_compiled_authoritative(compiled_hint_authoritative_mode());
+  set_hint_compiled_authoritative(FALSE);
   set_hint_match_once(flag(Opt->hint_match_once));
   init_semantics(Glob.interps, Clocks.semantics,
                  stringparm1(Opt->multiple_interps),

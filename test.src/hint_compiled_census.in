@@ -9,6 +9,7 @@ clear(back_demod_hints).
 assign(search_loop,discount).
 assign(passive_store,compressed).
 assign(hint_index,packed_compiled_shadow).
+assign(hint_compiled_min_candidates,0).
 assign(ancestor_store,memory).
 assign(stats,all).
 assign(max_given,1).

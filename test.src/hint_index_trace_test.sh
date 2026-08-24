@@ -97,9 +97,9 @@ grep -Eq '^Better_packed_postings: .*fingerprint_bytes=[1-9][0-9]*,' \
 grep -q '^Better_packed_postings:' "$test_tmp/hybrid.out"
 grep -q '^Better_packed_postings:' "$test_tmp/packed.out"
 grep -q '^Packed_fast_cache:' "$test_tmp/packed-fast.out"
-grep -Eq '^Compiled_hint_term_table: authoritative=0, finalized=1, active=[1-9][0-9]*,' \
+grep -Eq '^Compiled_hint_term_table: authoritative=0, shadow=1, filter=0, finalized=1, active=[1-9][0-9]*,' \
   "$test_tmp/packed-compiled-shadow.out"
-grep -Eq '^Compiled_hint_term_table: authoritative=1, finalized=1, active=[1-9][0-9]*,' \
+grep -Eq '^Compiled_hint_term_table: authoritative=0, shadow=0, filter=1, finalized=1, active=[1-9][0-9]*,' \
   "$test_tmp/packed-compiled.out"
 grep -q '^Compiled_hint_same_filter:' "$test_tmp/packed-compiled.out"
 grep -q '^Compiled_hint_path_index:' \

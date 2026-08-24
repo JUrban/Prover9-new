@@ -108,7 +108,13 @@ void set_hint_compiled_term_table(BOOL on);
 
 void set_hint_compiled_paths(BOOL on);
 
+void set_hint_compiled_min_candidates(unsigned minimum);
+
 void set_hint_compiled_authoritative(BOOL on);
+
+void set_hint_compiled_shadow(BOOL on);
+
+void set_hint_compiled_filter(BOOL on);
 
 void set_hint_match_once(BOOL on);
 
