@@ -720,6 +720,97 @@ static void run_compiled_same_cache_lifecycle_case(int bsub)
   delete_clause(equal);
 }
 
+static void run_compiled_rigid_cache_lifecycle_case(int bsub)
+{
+  Topform matching =
+    parse_clause_from_string("rigid_cache(f(g(h(a)))).");
+  Topform mismatch =
+    parse_clause_from_string("rigid_cache(f(g(k(a)))).");
+  Topform late =
+    parse_clause_from_string("rigid_cache(f(g(h(b)))).");
+  Topform first =
+    parse_clause_from_string("rigid_cache(f(g(h(x)))).");
+  Topform second =
+    parse_clause_from_string("rigid_cache(f(g(h(x)))).");
+  Topform cached =
+    parse_clause_from_string("rigid_cache(f(g(h(x)))).");
+  Topform after_remove =
+    parse_clause_from_string("rigid_cache(f(g(h(x)))).");
+  Topform after_add =
+    parse_clause_from_string("rigid_cache(f(g(h(x)))).");
+  unsigned long long rigid_built = 0, rigid_hits = 0;
+  BOOL saw_cache = FALSE;
+  FILE *stats;
+  char line[4096];
+
+  init_hints(ORDINARY_UNIF, bsub, FALSE, FALSE, 2,
+             TRUE, TRUE, TRUE, 0, 0, 0, 8, NULL);
+  set_hint_compiled_term_table(TRUE);
+  set_hint_compiled_filter(TRUE);
+  set_hint_compiled_min_candidates(0);
+  set_hint_compiled_cache_build_factor(0);
+  index_hint(matching);
+  index_hint(mismatch);
+  finalize_hint_conjunction_index();
+
+  adjust_weight_with_hints(first, FALSE, FALSE);
+  adjust_weight_with_hints(second, FALSE, FALSE);
+  adjust_weight_with_hints(cached, FALSE, FALSE);
+  CHECK(first->matching_hint == matching &&
+        second->matching_hint == matching &&
+        cached->matching_hint == matching,
+        "compiled RIGID cache preserves the authoritative deep match");
+
+  /* Retired IDs can remain conservative positives until another structure
+     is rebuilt; active-state and exact matching remain authoritative. */
+  unindex_hint(matching);
+  adjust_weight_with_hints(after_remove, FALSE, FALSE);
+  CHECK(after_remove->matching_hint == NULL,
+        "compiled RIGID cache removal leaves only a stale positive");
+
+  /* Every built condition is evaluated for a late hint, so its stable ID is
+     inserted when the new target satisfies the deep fixed-symbol test. */
+  index_hint(late);
+  adjust_weight_with_hints(after_add, FALSE, FALSE);
+  CHECK(after_add->matching_hint == late,
+        "compiled RIGID cache indexes a matching late hint");
+
+  stats = tmpfile();
+  CHECK(stats != NULL, "open compiled RIGID cache statistics stream");
+  if (stats != NULL) {
+    fprint_packed_hint_operation_stats(stats);
+    rewind(stats);
+    while (fgets(line, sizeof(line), stats) != NULL)
+      if (strstr(line, "Compiled_hint_same_cache:") != NULL) {
+        char *field;
+        saw_cache = TRUE;
+        field = strstr(line, "rigid_built=");
+        if (field != NULL)
+          rigid_built = strtoull(
+            field + strlen("rigid_built="), NULL, 10);
+        field = strstr(line, "rigid_hits=");
+        if (field != NULL)
+          rigid_hits = strtoull(
+            field + strlen("rigid_hits="), NULL, 10);
+      }
+    fclose(stats);
+  }
+  CHECK(saw_cache && rigid_built == 1 && rigid_hits >= 3,
+        "compiled RIGID cache reports one build and reused lookups");
+
+  unindex_hint(mismatch);
+  unindex_hint(late);
+  done_with_hints();
+  delete_clause(after_add);
+  delete_clause(after_remove);
+  delete_clause(cached);
+  delete_clause(second);
+  delete_clause(first);
+  delete_clause(late);
+  delete_clause(mismatch);
+  delete_clause(matching);
+}
+
 int main(void)
 {
   init_standard_ladr();
@@ -745,6 +836,7 @@ int main(void)
   run_terminal_bulk_discard_case(bsub);
   run_cache_ring_wrap_case(bsub);
   run_compiled_same_cache_lifecycle_case(bsub);
+  run_compiled_rigid_cache_lifecycle_case(bsub);
   if (Failures != 0) {
     fprintf(stderr, "hint_preview_test: %d failure(s)\n", Failures);
     return 1;
