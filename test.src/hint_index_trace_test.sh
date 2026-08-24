@@ -377,6 +377,7 @@ emit_rigid_atom()
   rigid_bad=$2
   rigid_query=$3
   rigid_tag=$4
+  rigid_group=${5:-}
   printf '  %s(f(k(' "$rigid_pred"
   rigid_pos=0
   while [ "$rigid_pos" -lt 65 ]; do
@@ -394,7 +395,11 @@ emit_rigid_atom()
     fi
     rigid_pos=$((rigid_pos + 1))
   done
-  if [ "$rigid_query" -eq 1 ]; then
+  if [ -n "$rigid_group" ] && [ "$rigid_query" -eq 1 ]; then
+    printf ')),%s,z).\n' "$rigid_group"
+  elif [ -n "$rigid_group" ]; then
+    printf ')),%s,c%s).\n' "$rigid_group" "$rigid_tag"
+  elif [ "$rigid_query" -eq 1 ]; then
     printf ')),z).\n'
   else
     printf ')),c%s).\n' "$rigid_tag"
@@ -461,6 +466,110 @@ if ! grep -Eq '^Compiled_hint_plan: .*same_conditions=0, rigid_conditions=[1-9][
    ! grep -Eq '^Compiled_hint_blocks: .*block_words=[1-9][0-9]*, block_rejects=[1-9][0-9]*,' \
      "$test_tmp/blocks-rigid-blocks.out"; then
   grep '^Compiled_hint_' "$test_tmp/blocks-rigid-blocks.out" >&2
+  exit 1
+fi
+
+# Repeat with three 200-ID cohorts.  The fixed group symbol is covered by the
+# ordinary shallow index, while the selected deep g position is shared by all
+# three query plans.  A 200-ID seed is below FAST_DENSE_MIN_POSTING, so the
+# third cohort must exercise learned-mask rejection in the sparse vector path.
+blocks_sparse_input="$test_tmp/blocks-sparse.in"
+{
+  printf '%s\n' \
+    'clear(auto_denials).' \
+    'clear(auto_inference).' \
+    'clear(predicate_elim).' \
+    'clear(print_initial_clauses).' \
+    'clear(print_given).' \
+    'clear(print_kept).' \
+    'clear(back_demod).' \
+    'clear(back_demod_hints).' \
+    'assign(search_loop,discount).' \
+    'assign(passive_store,compressed).' \
+    'assign(hint_index,packed_compiled_blocks).' \
+    'assign(hint_compiled_min_candidates,128).' \
+    'assign(hint_compiled_cache_build_factor,0).' \
+    'assign(hint_conjunction_kb,1).' \
+    'assign(ancestor_store,memory).' \
+    'assign(stats,all).' \
+    'assign(max_given,3).' \
+    'set(process_initial_sos).' \
+    'set(hint_trace).' \
+    'formulas(hints).'
+  rigid_tag=1
+  for rigid_group in s1 s2 s3; do
+    rigid_i=1
+    while [ "$rigid_i" -le 200 ]; do
+      emit_rigid_atom p $((rigid_i % 2)) 0 "$rigid_tag" "$rigid_group"
+      rigid_i=$((rigid_i + 1))
+      rigid_tag=$((rigid_tag + 1))
+    done
+  done
+  printf '%s\n' 'end_of_list.' 'formulas(sos).'
+  emit_rigid_atom p 0 1 0 s1
+  emit_rigid_atom p 0 1 0 s2
+  emit_rigid_atom p 0 1 0 s3
+  printf '%s\n' 'end_of_list.'
+} > "$blocks_sparse_input"
+sed 's/packed_compiled_blocks/packed_fast/' "$blocks_sparse_input" |
+  "$prover9" > "$test_tmp/blocks-sparse-control.out" \
+               2> "$test_tmp/blocks-sparse-control.err" || blocks_sparse_control_status=$?
+blocks_sparse_control_status=${blocks_sparse_control_status:-0}
+"$prover9" < "$blocks_sparse_input" \
+  > "$test_tmp/blocks-sparse-blocks.out" \
+  2> "$test_tmp/blocks-sparse-blocks.err" || blocks_sparse_status=$?
+blocks_sparse_status=${blocks_sparse_status:-0}
+if [ "$blocks_sparse_control_status" -ne 2 ] || \
+   [ "$blocks_sparse_status" -ne 2 ]; then
+  echo "hint_index_trace_test: blocks sparse statuses control=$blocks_sparse_control_status blocks=$blocks_sparse_status" >&2
+  exit 1
+fi
+for blocks_sparse_mode in control blocks; do
+  grep '^HINT_TRACE ' "$test_tmp/blocks-sparse-$blocks_sparse_mode.out" \
+    > "$test_tmp/blocks-sparse-$blocks_sparse_mode.trace"
+done
+diff -u "$test_tmp/blocks-sparse-control.trace" \
+  "$test_tmp/blocks-sparse-blocks.trace"
+if ! grep -Eq '^Compiled_hint_blocks: .*sparse_mask_tests=[1-9][0-9]*, sparse_mask_rejects=[1-9][0-9]*,' \
+     "$test_tmp/blocks-sparse-blocks.out"; then
+  grep '^Compiled_hint_' "$test_tmp/blocks-sparse-blocks.out" >&2
+  exit 1
+fi
+
+# Use the compact six-hint RIGID fixture with threshold-zero diagnostics so a
+# 1 MiB conjunction budget can retain every profile.  The learned stable-ID
+# mask cannot be ANDed directly with profile positions, but it must reject
+# mapped IDs before literal-count checks and packed candidate insertion.
+sed -e 's/hint_index,packed_compiled/hint_index,packed_fast/' \
+    -e '/assign(hint_compiled_cache_build_factor,0)./a assign(hint_conjunction_kb,1024).' \
+    "$repo_dir/test.src/hint_compiled_rigid_cache.in" |
+  "$prover9" > "$test_tmp/blocks-conjunction-control.out" \
+               2> "$test_tmp/blocks-conjunction-control.err" || blocks_conjunction_control_status=$?
+blocks_conjunction_control_status=${blocks_conjunction_control_status:-0}
+sed -e 's/hint_index,packed_compiled/hint_index,packed_compiled_blocks/' \
+    -e '/assign(hint_compiled_cache_build_factor,0)./a assign(hint_conjunction_kb,1024).' \
+    "$repo_dir/test.src/hint_compiled_rigid_cache.in" |
+  "$prover9" > "$test_tmp/blocks-conjunction-blocks.out" \
+               2> "$test_tmp/blocks-conjunction-blocks.err" || blocks_conjunction_status=$?
+blocks_conjunction_status=${blocks_conjunction_status:-0}
+if [ "$blocks_conjunction_control_status" -ne 2 ] || \
+   [ "$blocks_conjunction_status" -ne 2 ]; then
+  echo "hint_index_trace_test: blocks conjunction statuses control=$blocks_conjunction_control_status blocks=$blocks_conjunction_status" >&2
+  exit 1
+fi
+for blocks_conjunction_mode in control blocks; do
+  grep '^HINT_TRACE ' \
+    "$test_tmp/blocks-conjunction-$blocks_conjunction_mode.out" \
+    > "$test_tmp/blocks-conjunction-$blocks_conjunction_mode.trace"
+done
+diff -u "$test_tmp/blocks-conjunction-control.trace" \
+  "$test_tmp/blocks-conjunction-blocks.trace"
+if ! grep -Eq '^Packed_fast_conjunction: enabled=yes,' \
+     "$test_tmp/blocks-conjunction-blocks.out" || \
+   ! grep -Eq '^Compiled_hint_blocks: .*conjunction_mask_tests=[1-9][0-9]*, conjunction_mask_rejects=[1-9][0-9]*,' \
+     "$test_tmp/blocks-conjunction-blocks.out"; then
+  grep -E '^(Packed_fast_conjunction|Compiled_hint_)' \
+    "$test_tmp/blocks-conjunction-blocks.out" >&2
   exit 1
 fi
 
