@@ -243,6 +243,9 @@ static unsigned long long Fast_dense_seed_ids_avoided = 0;
 static unsigned long long Fast_dense_summary_words = 0;
 static unsigned long long Fast_dense_data_words = 0;
 static unsigned long long Fast_dense_result_ids = 0;
+static unsigned long long Fast_dense_seed_not_first = 0;
+static unsigned long long Fast_dense_summary_plane_reads = 0;
+static unsigned long long Fast_dense_data_plane_reads = 0;
 
 /* Posting rebuilds and AnyConst additions invalidate every dependency set. */
 static void fast_cache_invalidate_all(void)
@@ -2122,6 +2125,8 @@ static BOOL fast_dense_collect_candidates(
   unsigned long long sparse_rejects = 0;
   unsigned long long dense_data_words = 0;
   unsigned long long dense_result_ids = 0;
+  unsigned long long summary_plane_reads = 0;
+  unsigned long long data_plane_reads = 0;
   BOOL record_stats = !Hint_preview_active;
   BOOL create = record_stats;
   if (record_stats)
@@ -2199,20 +2204,30 @@ static BOOL fast_dense_collect_candidates(
     Packed_operation_stats[op].posting_lists += key_count;
   }
   for (summary_word = 0;
-       summary_word < views[0].summary_words; summary_word++) {
-    unsigned long long common = views[0].summary[summary_word];
+       summary_word < views[seed].summary_words; summary_word++) {
+    unsigned long long common = views[seed].summary[summary_word];
     unsigned j;
-    for (j = 1; j < key_count && common != 0; j++)
+    summary_plane_reads++;
+    for (j = 0; j < key_count && common != 0; j++) {
+      if (j == seed)
+        continue;
       common &= views[j].summary[summary_word];
+      summary_plane_reads++;
+    }
     while (common != 0) {
       unsigned summary_bit = (unsigned) __builtin_ctzll(common);
       unsigned word = summary_word * 64 + summary_bit;
       unsigned long long bits;
-      if (word >= views[0].words)
+      if (word >= views[seed].words)
         break;
-      bits = views[0].bits[word];
-      for (j = 1; j < key_count && bits != 0; j++)
+      bits = views[seed].bits[word];
+      data_plane_reads++;
+      for (j = 0; j < key_count && bits != 0; j++) {
+        if (j == seed)
+          continue;
         bits &= views[j].bits[word];
+        data_plane_reads++;
+      }
       dense_data_words++;
       while (bits != 0) {
         unsigned bit = (unsigned) __builtin_ctzll(bits);
@@ -2235,9 +2250,13 @@ static BOOL fast_dense_collect_candidates(
   }
   if (record_stats) {
     Packed_operation_stats[op].posting_candidates += posting_candidates;
-    Fast_dense_summary_words += views[0].summary_words;
+    if (seed != 0)
+      Fast_dense_seed_not_first++;
+    Fast_dense_summary_words += views[seed].summary_words;
     Fast_dense_data_words += dense_data_words;
     Fast_dense_result_ids += dense_result_ids;
+    Fast_dense_summary_plane_reads += summary_plane_reads;
+    Fast_dense_data_plane_reads += data_plane_reads;
   }
   return TRUE;
 }
@@ -2642,6 +2661,8 @@ void done_with_hints(void)
   Fast_sparse_feature_tests = Fast_sparse_rejects = 0;
   Fast_dense_seed_ids_avoided = Fast_dense_summary_words = 0;
   Fast_dense_data_words = Fast_dense_result_ids = 0;
+  Fast_dense_seed_not_first = 0;
+  Fast_dense_summary_plane_reads = Fast_dense_data_plane_reads = 0;
   Packed_hint_capacity = 0;
   Packed_candidates_count = Packed_candidates_capacity = 0;
   Preview_candidate_serial = 1;
@@ -4031,12 +4052,15 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             "sparse_used=%llu, sparse_seed_ids=%llu, "
             "sparse_feature_tests=%llu, sparse_rejects=%llu, "
             "seed_ids_avoided=%llu, summary_words=%llu, data_words=%llu, "
-            "result_ids=%llu.\n",
+            "result_ids=%llu, seed_not_first=%llu, "
+            "summary_plane_reads=%llu, data_plane_reads=%llu.\n",
             FAST_DENSE_MIN_POSTING, Fast_dense_queries, Fast_dense_used,
             Fast_sparse_used, Fast_sparse_seed_ids,
             Fast_sparse_feature_tests, Fast_sparse_rejects,
             Fast_dense_seed_ids_avoided, Fast_dense_summary_words,
-            Fast_dense_data_words, Fast_dense_result_ids);
+            Fast_dense_data_words, Fast_dense_result_ids,
+            Fast_dense_seed_not_first, Fast_dense_summary_plane_reads,
+            Fast_dense_data_plane_reads);
   }
 }
 
