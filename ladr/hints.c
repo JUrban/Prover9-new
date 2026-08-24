@@ -4276,13 +4276,17 @@ static void compiled_path_index_hint(Topform c)
 static void compiled_same_filter_candidates(void)
 {
   unsigned before = Packed_candidates_count;
-  unsigned i, keep = 0, direct_before;
+  unsigned i, j, keep = 0, direct_before;
   unsigned program_count = 0;
   unsigned same_program_count = 0;
+  unsigned direct_count = 0;
+  unsigned direct_indices[COMPILED_PROGRAM_MAX_CONDITIONS];
+  unsigned long long direct_work[COMPILED_PROGRAM_MAX_CONDITIONS];
   unsigned long long candidate_tests = 0;
   unsigned long long navigation_rejects = 0;
   unsigned long long unequal_rejects = 0;
-  struct compiled_same_cache_entry *cache_entry = NULL;
+  struct compiled_same_cache_entry *direct_entries[
+    COMPILED_PROGRAM_MAX_CONDITIONS];
   struct compiled_same_cache_entry *program[
     COMPILED_PROGRAM_MAX_CONDITIONS];
   BOOL account = !Hint_preview_active;
@@ -4297,23 +4301,29 @@ static void compiled_same_filter_candidates(void)
     return;
   }
   compiled_plan_sort_same_tests();
+  for (i = 0; i < COMPILED_PROGRAM_MAX_CONDITIONS; i++)
+    direct_work[i] = 0;
   if (Compiled_same_cache_ready) {
     /* Execute every previously learned condition exposed by this query in
-       one bounded program.  Only the cheapest uncached SAME test is scanned
-       directly and allowed to create new metadata. */
+       one bounded program.  Train up to the same bounded number of uncached
+       SAME conditions; each later direct instruction sees only the survivors
+       of the earlier necessary conditions. */
     for (i = 0; i < Compiled_same_test_count; i++) {
       struct compiled_same_cache_entry *entry =
         compiled_same_cache_lookup(Compiled_same_tests + i,
-                                   account && i == 0);
-      if (i == 0)
-        cache_entry = entry;
-      if (i == 0 || (entry != NULL && entry->built)) {
-        if (account) {
-          Compiled_same_cache_lookups++;
-          if (entry != NULL)
-            entry->queries++;
-        }
+                                   account &&
+                                     i < COMPILED_PROGRAM_MAX_CONDITIONS);
+      if (account) {
+        Compiled_same_cache_lookups++;
+        if (entry != NULL)
+          entry->queries++;
+      }
+      if (entry != NULL && entry->built)
         compiled_program_consider(program, &program_count, entry);
+      else if (direct_count < COMPILED_PROGRAM_MAX_CONDITIONS) {
+        direct_indices[direct_count] = i;
+        direct_entries[direct_count] = entry;
+        direct_count++;
       }
     }
     /* A query with repeated variables can also expose learned fixed-symbol
@@ -4336,25 +4346,19 @@ static void compiled_same_filter_candidates(void)
       else if (program[i]->kind == COMPILED_CONDITION_RIGID)
         Compiled_rigid_program_applied = TRUE;
     }
-    if (compiled_condition_program_filter(program, program_count) &&
-        cache_entry != NULL && cache_entry->built) {
-      if (account) {
-        Compiled_same_queries++;
-        Compiled_same_query_tests += same_program_count;
-        Compiled_same_candidates_before += before;
-        Compiled_same_candidates_after += Packed_candidates_count;
-        if (Compiled_rigid_program_applied) {
-          Compiled_rigid_queries++;
-          Compiled_rigid_candidates_before += before;
-          Compiled_rigid_candidates_after += Packed_candidates_count;
-        }
-      }
-      return;
-    }
+    compiled_condition_program_filter(program, program_count);
     if (account && Compiled_rigid_program_applied) {
       Compiled_rigid_queries++;
       Compiled_rigid_candidates_before += before;
       Compiled_rigid_candidates_after += Packed_candidates_count;
+    }
+  }
+  else {
+    for (i = 0; i < Compiled_same_test_count &&
+                direct_count < COMPILED_PROGRAM_MAX_CONDITIONS; i++) {
+      direct_indices[direct_count] = i;
+      direct_entries[direct_count] = NULL;
+      direct_count++;
     }
   }
   direct_before = Packed_candidates_count;
@@ -4366,10 +4370,12 @@ static void compiled_same_filter_candidates(void)
       Packed_candidates[keep++] = id;
       continue;
     }
-    {
-      struct compiled_same_test *test = Compiled_same_tests;
+    for (j = 0; j < direct_count && accepted; j++) {
+      struct compiled_same_test *test =
+        Compiled_same_tests + direct_indices[j];
       int comparison;
       candidate_tests++;
+      direct_work[j]++;
       comparison = hint_term_table_compare_paths(
         Compiled_term_table, root,
         test->first_length == 0 ? NULL :
@@ -4391,13 +4397,15 @@ static void compiled_same_filter_candidates(void)
   Packed_candidates_count = keep;
   if (account) {
     Compiled_same_queries++;
-    Compiled_same_query_tests += same_program_count + 1;
+    Compiled_same_query_tests += same_program_count + direct_count;
     Compiled_same_candidates_before += before;
     Compiled_same_candidates_after += keep;
     Compiled_same_candidate_tests += candidate_tests;
     Compiled_same_navigation_rejects += navigation_rejects;
     Compiled_same_unequal_rejects += unequal_rejects;
-    compiled_condition_cache_note_work(cache_entry, candidate_tests);
+    for (j = 0; j < direct_count; j++)
+      compiled_condition_cache_note_work(
+        direct_entries[j], direct_work[j]);
   }
 }
 
