@@ -346,11 +346,16 @@ sparse, and conjunction candidate paths all remain trace-identical to
 RIGID-only query must also report a normalized-program cache hit, a profitable
 store, and avoided selectivity-sample tests.
 
-Also compare eager canonical construction with one sequential post-input
-build directly from the exact retained compressed bank.  This is different
-from the rejected raw-count pre-sizing experiment and from random on-demand
-construction.  It must win startup CPU without assuming a Josef-specific
-sharing ratio.
+The sequential post-input construction experiment has now been run and
+rejected.  It streamed the exact retained compressed bank successfully, but
+initial equivalence filtering had already kept redundant hints out of the
+eager table.  Josef 02 therefore performed the same hash-consing work later
+and produced a byte-for-byte identical final canonical arena.  A first
+adjacent startup-only pair used 11.01 CPU seconds eager and 11.14 deferred,
+with about 183 MiB peak RSS in both.  The implementation was reverted rather
+than preserving neutral complexity.  A future startup experiment must change
+the bulk hash-consing algorithm itself; merely moving the same insertions to
+the finalization boundary is closed.
 
 The first 300-given phase split is now available.  On Josef 01, `packed_fast`
 spent an estimated 0.488 seconds generating candidates and 0.944 seconds

@@ -199,6 +199,37 @@ This is an explicit experiment, not a new default.  It helps when the search
 touches only part of the bank, but it is slower when most hints are eventually
 decoded.  The measurements below demonstrate both cases.
 
+### Rejected post-input sequential build
+
+One further experiment moved eager canonical construction to the existing
+boundary after all initial hints have been checked for equivalence.  It then
+scanned active stable IDs and streamed retained compact units into the shared
+term table before processing the initial SOS.  Compiled filtering remained
+dormant until that build completed, so the ordinary packed matcher alone
+decided initial hint redundancy.
+
+The mechanism was exact and needed no materialization on Josef 02: it scanned
+136,486 active hints, skipped 51 nonunits, and streamed 136,435 units.  It did
+not, however, remove real work.  The eager path already adds a hint only after
+the equivalence check accepts it.  Both versions consequently ended with the
+same canonical node, child, occurrence, hash, and byte counts.
+
+On the first adjacent startup-only pair, eager construction used 11.01 total
+CPU seconds and the post-input version used 11.14; peak RSS was 182,860 and
+182,700 KiB respectively.  A second pair was substantially disturbed by host
+noise and supplied no evidence of a deferred win.  At 300 givens the deferred
+version reached the exact same Given=301, Generated=127,774, Kept=7,823
+boundary, but used 18.05 total CPU seconds versus 16.98 in the preceding
+blocks measurement.  That pair is also too timing-noisy to claim a regression,
+but plainly does not establish a benefit.
+
+The implementation was committed for inspection and then reverted.  This is
+an important negative result: a useful deterministic bulk builder must change
+how hash-consing is performed (for example, a bounded sampled reservation or
+sort-and-merge construction), not just when the same insertions occur.  Such
+a builder needs its own startup CPU and peak-memory gate and must not assume a
+fixed Josef-specific sharing ratio.
+
 ### Rejected deep-path sidecar
 
 `packed_compiled_paths` additionally builds eager postings for fixed symbols
@@ -257,7 +288,7 @@ configuration and replace only that one line:
 assign(hint_index,packed_compiled_blocks).
 ```
 
-Do not combine it with `packed_compiled_lazy`: block masks require the eager
+Do not combine it with `packed_compiled_lazy`: block masks require a complete
 canonical table.  The numeric defaults above remain applicable.  A build
 factor of zero forces construction for tests and should not be used for a
 real long search.
@@ -544,10 +575,12 @@ The next Waldmeister-like stage should therefore be:
    retained bank once for up to eight co-occurring ready SAME or selected
    RIGID instructions.  Keep this only if long runs report useful batch
    widths and amortization.
-5. **Remove avoidable startup work.** Compare eager construction with one
-   sequential post-input build from the exact retained compressed bank.  The
-   rejected raw-input pre-sizing policy must not return, and lazy construction
-   remains diagnostic because Josef 01 eventually touches every unit.
+5. **Change, rather than reschedule, startup construction.** The sequential
+   post-input build was exact but CPU/RSS-neutral and has been reverted.  Any
+   successor must reduce the cost of hash-consing itself under an explicit
+   temporary-memory cap.  The rejected raw-input pre-sizing policy must not
+   return, and lazy construction remains diagnostic because Josef 01
+   eventually touches every unit.
 6. **Gate in shadow before authority.** Require exact ordered candidate and
    hint traces on CHAT, Osborn, Josef 01, and Josef 02; then run adjacent
    300/1,000-given CPU pairs.  Only a version that materially improves total
