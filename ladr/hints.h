@@ -50,6 +50,11 @@ void init_hints(Uniftype utype,
 /* Admit a packed-fast result only after at least this much posting work. */
 void set_hint_cache_min_candidates(unsigned minimum);
 
+/* Configure the packed-fast 64-bit checklist prefilter.  A zero maximum
+   disables both its property bitmaps and its query path. */
+void set_hint_mask_filter(unsigned maximum_bits,
+                          unsigned minimum_candidates);
+
 void done_with_hints(void);
 
 /* Complete the population-wide packed-fast conjunction plan after all input

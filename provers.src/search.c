@@ -2200,6 +2200,10 @@ Prover_options init_prover_options(void)
     init_parm("hint_cache_min_candidates", 0, 0, INT_MAX);
   p->hint_conjunction_kb =
     init_parm("hint_conjunction_kb", 327680, 0, INT_MAX);
+  p->hint_mask_filter_bits =
+    init_parm("hint_mask_filter_bits", 4, 0, 64);
+  p->hint_mask_filter_min_candidates =
+    init_parm("hint_mask_filter_min_candidates", 8, 1, 64);
   p->hint_rebuild_scan_ratio =
     init_parm("hint_rebuild_scan_ratio", 8, 0, INT_MAX);
   p->rewrite_refresh_hot_ratio =
@@ -11597,6 +11601,9 @@ void index_and_process_initial_clauses(void)
 
   set_hint_cache_min_candidates(
     (unsigned) parm(Opt->hint_cache_min_candidates));
+  set_hint_mask_filter(
+    (unsigned) parm(Opt->hint_mask_filter_bits),
+    (unsigned) parm(Opt->hint_mask_filter_min_candidates));
   init_hints(ORDINARY_UNIF, Att.bsub_hint_wt,
 	     flag(Opt->collect_hint_labels),
 	     flag(Opt->back_demod_hints),
@@ -16141,6 +16148,9 @@ void load_checkpoint_into_loop(void)
                                    FPA, ORDINARY_UNIF, fpa_depth);
   set_hint_cache_min_candidates(
     (unsigned) parm(Opt->hint_cache_min_candidates));
+  set_hint_mask_filter(
+    (unsigned) parm(Opt->hint_mask_filter_bits),
+    (unsigned) parm(Opt->hint_mask_filter_min_candidates));
   init_hints(ORDINARY_UNIF, Att.bsub_hint_wt,
              flag(Opt->collect_hint_labels),
              flag(Opt->back_demod_hints),

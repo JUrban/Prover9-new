@@ -272,6 +272,107 @@ static void run_early_profile_filter_case(int bsub)
   delete_clause(short_hint);
 }
 
+static void run_adaptive_mask_filter_case(int bsub)
+{
+  enum { DISTRACTORS = 600, HINTS = DISTRACTORS + 1 };
+  Topform hints[HINTS];
+  Topform candidate;
+  unsigned long long bitmap_bytes = 0, filtered_words = 0;
+  unsigned long long property_reads = 0, input_ids = 0, survivor_ids = 0;
+  FILE *stats;
+  char text[96], line[4096];
+  int i;
+
+  set_hint_mask_filter(4, 8);
+  init_hints(ORDINARY_UNIF, bsub, FALSE, FALSE, 2,
+             TRUE, TRUE, TRUE, 0, 0, 0, 8, NULL);
+  for (i = 0; i < DISTRACTORS; i++) {
+    snprintf(text, sizeof(text), "bulk_probe(f(g(bulk_constant_%d))).", i);
+    hints[i] = parse_clause_from_string(text);
+    index_hint(hints[i]);
+  }
+  hints[DISTRACTORS] =
+    parse_clause_from_string("bulk_probe(f(g(bulk_target))).");
+  hints[DISTRACTORS]->attributes =
+    set_int_attribute(hints[DISTRACTORS]->attributes, bsub, 3);
+  index_hint(hints[DISTRACTORS]);
+  candidate = parse_clause_from_string("bulk_probe(f(g(bulk_target))).");
+  adjust_weight_with_hints(candidate, FALSE, FALSE);
+  CHECK(candidate->matching_hint == hints[DISTRACTORS],
+        "adaptive mask filter preserves the authoritative broad-bank match");
+
+  stats = tmpfile();
+  CHECK(stats != NULL, "open adaptive mask-filter statistics stream");
+  if (stats != NULL) {
+    fprint_packed_hint_operation_stats(stats);
+    rewind(stats);
+    while (fgets(line, sizeof(line), stats) != NULL) {
+      if (strstr(line, "Packed_fast_mask_filter:") != NULL) {
+        char *field = strstr(line, "bitmap_bytes=");
+        if (field != NULL)
+          bitmap_bytes = strtoull(
+            field + strlen("bitmap_bytes="), NULL, 10);
+        field = strstr(line, "filtered_words=");
+        if (field != NULL)
+          filtered_words = strtoull(
+            field + strlen("filtered_words="), NULL, 10);
+        field = strstr(line, "property_reads=");
+        if (field != NULL)
+          property_reads = strtoull(
+            field + strlen("property_reads="), NULL, 10);
+        field = strstr(line, "input_ids=");
+        if (field != NULL)
+          input_ids = strtoull(field + strlen("input_ids="), NULL, 10);
+        field = strstr(line, "survivor_ids=");
+        if (field != NULL)
+          survivor_ids = strtoull(
+            field + strlen("survivor_ids="), NULL, 10);
+      }
+    }
+    fclose(stats);
+  }
+  CHECK(bitmap_bytes == 16384,
+        "adaptive mask tables follow the rounded active-ID capacity");
+  CHECK(filtered_words > 0 && property_reads > 0,
+        "broad rough words activate the bounded bulk checklist path");
+  CHECK(input_ids > survivor_ids,
+        "bulk checklist removes deep-feature near misses before enumeration");
+
+  for (i = HINTS - 1; i >= 0; i--)
+    unindex_hint(hints[i]);
+  done_with_hints();
+  delete_clause(candidate);
+  for (i = 0; i < HINTS; i++)
+    delete_clause(hints[i]);
+
+  set_hint_mask_filter(0, 8);
+  init_hints(ORDINARY_UNIF, bsub, FALSE, FALSE, 2,
+             TRUE, TRUE, TRUE, 0, 0, 0, 8, NULL);
+  hints[0] = parse_clause_from_string("disabled_mask_probe(a).");
+  index_hint(hints[0]);
+  stats = tmpfile();
+  bitmap_bytes = ULLONG_MAX;
+  CHECK(stats != NULL, "open disabled mask-filter statistics stream");
+  if (stats != NULL) {
+    fprint_packed_hint_operation_stats(stats);
+    rewind(stats);
+    while (fgets(line, sizeof(line), stats) != NULL)
+      if (strstr(line, "Packed_fast_mask_filter:") != NULL) {
+        char *field = strstr(line, "bitmap_bytes=");
+        if (field != NULL)
+          bitmap_bytes = strtoull(
+            field + strlen("bitmap_bytes="), NULL, 10);
+      }
+    fclose(stats);
+  }
+  CHECK(bitmap_bytes == 0,
+        "zero mask-filter bits disable the property-table allocation");
+  unindex_hint(hints[0]);
+  done_with_hints();
+  delete_clause(hints[0]);
+  set_hint_mask_filter(4, 8);
+}
+
 static void run_cache_ring_wrap_case(int bsub)
 {
   enum { PROBES = 700, REPLAYS = 64 };
@@ -672,6 +773,7 @@ int main(void)
   run_variable_cache_case(bsub, 0, "canonical sparse-fallback");
   run_cache_admission_case(bsub);
   run_early_profile_filter_case(bsub);
+  run_adaptive_mask_filter_case(bsub);
   run_observed_stale_rebuild_case(bsub);
   run_back_fingerprint_case(bsub);
   run_conjunction_budget_case(bsub);

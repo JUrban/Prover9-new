@@ -262,6 +262,15 @@ static unsigned long long Fast_profile_early_feature_rejects = 0;
 static unsigned long long Fast_mask_query_builds = 0;
 static unsigned long long Fast_mask_equivalence_literal_builds = 0;
 static unsigned long long Fast_mask_avoided_builds = 0;
+static unsigned Fast_mask_filter_max_bits = 4;
+static unsigned Fast_mask_filter_min_candidates = 8;
+static unsigned long long Fast_mask_filter_queries = 0;
+static unsigned long long Fast_mask_filter_no_properties = 0;
+static unsigned long long Fast_mask_filter_eligible_words = 0;
+static unsigned long long Fast_mask_filter_words = 0;
+static unsigned long long Fast_mask_filter_property_reads = 0;
+static unsigned long long Fast_mask_filter_input_ids = 0;
+static unsigned long long Fast_mask_filter_survivor_ids = 0;
 
 /* Posting rebuilds and AnyConst additions invalidate every dependency set. */
 static void fast_cache_invalidate_all(void)
@@ -271,6 +280,12 @@ static void fast_cache_invalidate_all(void)
            (size_t) Fast_match_cache_capacity * sizeof(*Fast_match_cache));
   Fast_match_cache_key_count = 0;
   Fast_match_cache_key_generation = 1;
+}
+
+static BOOL packed_feature_bitmaps_enabled(void)
+{
+  return !Better_packed_index ||
+         (Fast_packed_index && Fast_mask_filter_max_bits != 0);
 }
 
 #define BETTER_FEATURE_BACK 1U
@@ -439,7 +454,7 @@ static void packed_reserve_hints(unsigned id)
     while (cap <= id)
       cap *= 2;
     new_words = (cap + 63) / 64;
-    if (!Better_packed_index) {
+    if (packed_feature_bitmaps_enabled()) {
       unsigned long long *bits = safe_calloc(
         (size_t) 128 * new_words, sizeof(unsigned long long));
       if (Packed_feature_bitsets != NULL) {
@@ -652,7 +667,7 @@ static void packed_index_hint_terms(Topform h, BOOL anyconst)
           packed_rewrite_symbol_bits(ARG(lit->atom,i));
     }
   }
-  if (!Better_packed_index) {
+  if (packed_feature_bitmaps_enabled()) {
     for (bit = 0; bit < 64; bit++) {
       unsigned long long b = 1ULL << bit;
       if (Packed_hint_pos_features[id] & b)
@@ -2170,6 +2185,13 @@ static BOOL fast_dense_collect_candidates(
   unsigned long long profile_checks = 0;
   unsigned long long profile_literal_rejects = 0;
   unsigned long long profile_feature_rejects = 0;
+  unsigned selected_mask_bits[64];
+  unsigned selected_mask_count = 0;
+  unsigned long long mask_eligible_words = 0;
+  unsigned long long mask_filtered_words = 0;
+  unsigned long long mask_property_reads = 0;
+  unsigned long long mask_input_ids = 0;
+  unsigned long long mask_survivor_ids = 0;
   BOOL record_stats = !Hint_preview_active;
   BOOL create = record_stats;
   if (record_stats)
@@ -2248,6 +2270,36 @@ static BOOL fast_dense_collect_candidates(
     }
     return TRUE;
   }
+  if (filter != NULL && filter->first_mask != 0 &&
+      Fast_mask_filter_max_bits != 0 &&
+      Packed_feature_bitsets != NULL) {
+    unsigned long long required = filter->first_mask;
+    while (required != 0) {
+      unsigned bit = (unsigned) __builtin_ctzll(required);
+      unsigned count = Packed_feature_counts[filter->sign][bit];
+      unsigned position = selected_mask_count;
+      if (position > Fast_mask_filter_max_bits)
+        position = Fast_mask_filter_max_bits;
+      while (position != 0 &&
+             Packed_feature_counts[filter->sign]
+               [selected_mask_bits[position - 1]] > count) {
+        if (position < Fast_mask_filter_max_bits)
+          selected_mask_bits[position] = selected_mask_bits[position - 1];
+        position--;
+      }
+      if (position < Fast_mask_filter_max_bits) {
+        if (selected_mask_count < Fast_mask_filter_max_bits)
+          selected_mask_count++;
+        selected_mask_bits[position] = bit;
+      }
+      required &= required - 1;
+    }
+    if (record_stats) {
+      Fast_mask_filter_queries++;
+      if (selected_mask_count == 0)
+        Fast_mask_filter_no_properties++;
+    }
+  }
   for (i = 0; i < key_count; i++)
     if (!hint_postings_dense_view(Better_postings, keys[i],
                                   Packed_hint_capacity, create,
@@ -2284,10 +2336,34 @@ static BOOL fast_dense_collect_candidates(
         data_plane_reads++;
       }
       dense_data_words++;
+      if (bits != 0) {
+        unsigned rough_ids = (unsigned) __builtin_popcountll(bits);
+        posting_candidates += rough_ids;
+        dense_result_ids += rough_ids;
+        if (selected_mask_count != 0 &&
+            rough_ids >= Fast_mask_filter_min_candidates) {
+          unsigned limit = selected_mask_count;
+          unsigned used = 0;
+          unsigned filtered_ids;
+          if (limit >= rough_ids)
+            limit = rough_ids - 1;
+          mask_eligible_words++;
+          mask_input_ids += rough_ids;
+          while (used < limit && bits != 0) {
+            unsigned bit = selected_mask_bits[used++];
+            bits &= Packed_feature_bitsets[
+              ((size_t) filter->sign * 64 + bit) *
+                Packed_feature_words + word];
+            mask_property_reads++;
+          }
+          filtered_ids = (unsigned) __builtin_popcountll(bits);
+          mask_survivor_ids += filtered_ids;
+          mask_filtered_words++;
+        }
+      }
       while (bits != 0) {
         unsigned bit = (unsigned) __builtin_ctzll(bits);
         unsigned id = word * 64 + bit;
-        posting_candidates++;
         if (id == 0 || id >= Packed_hint_capacity ||
             !Packed_hint_active[id] ||
             (exclude_anyconst && Packed_hint_anyconst[id])) {
@@ -2304,7 +2380,6 @@ static BOOL fast_dense_collect_candidates(
             profile_feature_rejects++;
           else
             packed_add_candidate(id);
-          dense_result_ids++;
         }
         bits &= bits - 1;
       }
@@ -2323,6 +2398,11 @@ static BOOL fast_dense_collect_candidates(
     Fast_profile_early_checks += profile_checks;
     Fast_profile_early_literal_rejects += profile_literal_rejects;
     Fast_profile_early_feature_rejects += profile_feature_rejects;
+    Fast_mask_filter_eligible_words += mask_eligible_words;
+    Fast_mask_filter_words += mask_filtered_words;
+    Fast_mask_filter_property_reads += mask_property_reads;
+    Fast_mask_filter_input_ids += mask_input_ids;
+    Fast_mask_filter_survivor_ids += mask_survivor_ids;
   }
   return TRUE;
 }
@@ -2509,6 +2589,13 @@ static void fast_cache_init(unsigned cache_kb)
 void set_hint_cache_min_candidates(unsigned minimum)
 {
   Fast_match_cache_min_candidates = minimum;
+}
+
+void set_hint_mask_filter(unsigned maximum_bits, unsigned minimum_candidates)
+{
+  Fast_mask_filter_max_bits = maximum_bits > 64 ? 64 : maximum_bits;
+  Fast_mask_filter_min_candidates = minimum_candidates == 0 ? 1 :
+                                                            minimum_candidates;
 }
 
 /* DOCUMENTATION
@@ -2735,6 +2822,13 @@ void done_with_hints(void)
   Fast_mask_query_builds = 0;
   Fast_mask_equivalence_literal_builds = 0;
   Fast_mask_avoided_builds = 0;
+  Fast_mask_filter_queries = 0;
+  Fast_mask_filter_no_properties = 0;
+  Fast_mask_filter_eligible_words = 0;
+  Fast_mask_filter_words = 0;
+  Fast_mask_filter_property_reads = 0;
+  Fast_mask_filter_input_ids = 0;
+  Fast_mask_filter_survivor_ids = 0;
   Packed_hint_capacity = 0;
   Packed_candidates_count = Packed_candidates_capacity = 0;
   Preview_candidate_serial = 1;
@@ -4168,6 +4262,21 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             Fast_mask_query_builds,
             Fast_mask_equivalence_literal_builds,
             Fast_mask_avoided_builds);
+    fprintf(fp,
+            "Packed_fast_mask_filter: max_bits=%u, min_candidates=%u, "
+            "bitmap_bytes=%llu, id_capacity=%u, queries=%llu, "
+            "no_properties=%llu, eligible_words=%llu, filtered_words=%llu, "
+            "property_reads=%llu, input_ids=%llu, survivor_ids=%llu, "
+            "rejected_ids=%llu.\n",
+            Fast_mask_filter_max_bits, Fast_mask_filter_min_candidates,
+            Packed_feature_bitsets == NULL ? 0 :
+              (unsigned long long) 128 * Packed_feature_words *
+                sizeof(unsigned long long),
+            Packed_hint_capacity, Fast_mask_filter_queries,
+            Fast_mask_filter_no_properties, Fast_mask_filter_eligible_words,
+            Fast_mask_filter_words, Fast_mask_filter_property_reads,
+            Fast_mask_filter_input_ids, Fast_mask_filter_survivor_ids,
+            Fast_mask_filter_input_ids - Fast_mask_filter_survivor_ids);
   }
 }
 

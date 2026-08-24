@@ -286,6 +286,8 @@ struct prover_options {
     hint_cache_kb,         // packed-fast exact profile cache byte budget
     hint_cache_min_candidates, // minimum posting work admitted to cache
     hint_conjunction_kb,   // packed-fast subset-conjunction resident cap
+    hint_mask_filter_bits, // least-common checklist properties per broad word
+    hint_mask_filter_min_candidates, // rough IDs before bulk checklist filter
     hint_rebuild_scan_ratio, // stale scans/live index before posting rebuild
     rewrite_refresh_hot_ratio, // hinted refresh turns per fair general turn
     rewrite_refresh_raw_budget, // dense records inspected per refresh turn
