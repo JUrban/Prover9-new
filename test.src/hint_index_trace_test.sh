@@ -159,6 +159,8 @@ diff -u "$test_tmp/rigid-control.trace" \
   "$test_tmp/rigid-compiled.trace"
 grep -Eq '^Compiled_hint_same_cache: .*rigid_built=1,.*rigid_hits=[1-9][0-9]*,' \
   "$test_tmp/rigid-compiled.out"
+grep -Eq '^Compiled_hint_program: queries=1, conditions=2, maximum_conditions=2,.*word_operations=[1-9][0-9]*,' \
+  "$test_tmp/rigid-compiled.out"
 
 sed 's/packed_compiled/packed_fast/' \
   "$repo_dir/test.src/hint_compiled_program.in" |

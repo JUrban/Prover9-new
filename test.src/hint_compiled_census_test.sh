@@ -112,13 +112,16 @@ if [ "$rigid_status" -ne 2 ] && [ "$rigid_status" -ne 5 ]; then
   exit 1
 fi
 rigid_line=$(grep '^Compiled_hint_rigid_filter:' "$tmp.rigid.out")
+rigid_program=$(grep '^Compiled_hint_program:' "$tmp.rigid.out")
 rigid_cache=$(grep '^Compiled_hint_same_cache:' "$tmp.rigid.out")
 printf '%s\n' "$rigid_line" | grep -Eq \
   'queries=[1-9][0-9]*, sampled_queries=[1-9][0-9]*,.*candidates_rejected=[1-9][0-9]*, candidate_tests=[1-9][0-9]*,'
 printf '%s\n' "$rigid_cache" | grep -Eq \
-  'entries=1, built=1, same_entries=0, rigid_entries=1, same_built=0, rigid_built=1, build_factor=0,'
+  'entries=2, built=2, same_entries=1, rigid_entries=1, same_built=1, rigid_built=1, build_factor=0,'
 printf '%s\n' "$rigid_cache" | grep -Eq \
-  'cache_hits=[1-9][0-9]*, same_hits=0, rigid_hits=[1-9][0-9]*, builds=1,'
+  'cache_hits=2, same_hits=1, rigid_hits=1, builds=2,'
+printf '%s\n' "$rigid_program" | grep -Eq \
+  'queries=1, conditions=2, maximum_conditions=2,.*word_operations=[1-9][0-9]*,'
 
 "$prover9" < "$script_dir/hint_compiled_program.in" \
   > "$tmp.program.out" 2> "$tmp.program.err" || program_status=$?

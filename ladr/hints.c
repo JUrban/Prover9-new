@@ -178,6 +178,7 @@ static unsigned long long Compiled_program_conditions = 0;
 static unsigned long long Compiled_program_word_ops = 0;
 static unsigned long long Compiled_program_candidate_tests = 0;
 static unsigned Compiled_program_maximum_conditions = 0;
+static BOOL Compiled_rigid_program_applied = FALSE;
 
 #define COMPILED_RIGID_SAMPLE_CANDIDATES 8U
 #define COMPILED_RIGID_SAMPLE_MAX_TESTS 32U
@@ -3678,6 +3679,7 @@ static void compiled_plan_begin(void)
   Compiled_plan_path_count = 0;
   Compiled_same_test_count = 0;
   Compiled_rigid_test_count = 0;
+  Compiled_rigid_program_applied = FALSE;
   for (i = 0; i < MAX_VARS; i++)
     Compiled_variable_path_offset[i] = UINT_MAX;
 }
@@ -4225,6 +4227,7 @@ static void compiled_same_filter_candidates(void)
   unsigned before = Packed_candidates_count;
   unsigned i, keep = 0, direct_before;
   unsigned program_count = 0;
+  unsigned same_program_count = 0;
   unsigned long long candidate_tests = 0;
   unsigned long long navigation_rejects = 0;
   unsigned long long unequal_rejects = 0;
@@ -4262,15 +4265,45 @@ static void compiled_same_filter_candidates(void)
         compiled_program_consider(program, &program_count, entry);
       }
     }
+    /* A query with repeated variables can also expose learned fixed-symbol
+       conditions.  Put both instruction kinds into the same word program
+       instead of scanning the candidate vector once per kind. */
+    for (i = 0; i < Compiled_rigid_test_count; i++) {
+      struct compiled_same_cache_entry *entry =
+        compiled_rigid_cache_lookup(Compiled_rigid_tests + i, FALSE);
+      if (entry != NULL && entry->built) {
+        if (account) {
+          Compiled_same_cache_lookups++;
+          entry->queries++;
+        }
+        compiled_program_consider(program, &program_count, entry);
+      }
+    }
+    for (i = 0; i < program_count; i++) {
+      if (program[i]->kind == COMPILED_CONDITION_SAME)
+        same_program_count++;
+      else if (program[i]->kind == COMPILED_CONDITION_RIGID)
+        Compiled_rigid_program_applied = TRUE;
+    }
     if (compiled_condition_program_filter(program, program_count) &&
         cache_entry != NULL && cache_entry->built) {
       if (account) {
         Compiled_same_queries++;
-        Compiled_same_query_tests += program_count;
+        Compiled_same_query_tests += same_program_count;
         Compiled_same_candidates_before += before;
         Compiled_same_candidates_after += Packed_candidates_count;
+        if (Compiled_rigid_program_applied) {
+          Compiled_rigid_queries++;
+          Compiled_rigid_candidates_before += before;
+          Compiled_rigid_candidates_after += Packed_candidates_count;
+        }
       }
       return;
+    }
+    if (account && Compiled_rigid_program_applied) {
+      Compiled_rigid_queries++;
+      Compiled_rigid_candidates_before += before;
+      Compiled_rigid_candidates_after += Packed_candidates_count;
     }
   }
   direct_before = Packed_candidates_count;
@@ -4308,7 +4341,7 @@ static void compiled_same_filter_candidates(void)
   Packed_candidates_count = keep;
   if (account) {
     Compiled_same_queries++;
-    Compiled_same_query_tests += program_count + 1;
+    Compiled_same_query_tests += same_program_count + 1;
     Compiled_same_candidates_before += before;
     Compiled_same_candidates_after += keep;
     Compiled_same_candidate_tests += candidate_tests;
@@ -4333,6 +4366,8 @@ static void compiled_rigid_filter_candidates(void)
   BOOL account = !Hint_preview_active;
 
   if (Compiled_rigid_test_count == 0 || before == 0)
+    return;
+  if (Compiled_rigid_program_applied)
     return;
   if (before < Compiled_same_min_candidates) {
     if (account)
