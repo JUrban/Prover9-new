@@ -122,6 +122,8 @@ static unsigned long long Compiled_same_skipped_candidates = 0;
 #define COMPILED_SAME_CACHE_BUILD_FACTOR 2U
 #define COMPILED_SAME_CACHE_DEFAULT_BYTES \
   (32ULL * 1024ULL * 1024ULL)
+#define COMPILED_SAME_CACHE_MAX_ENTRIES 4096U
+#define COMPILED_SAME_CACHE_MAX_PATH_WORDS (256U * 1024U)
 struct compiled_same_cache_entry {
   unsigned long long hash;
   unsigned long long queries;
@@ -157,6 +159,7 @@ static unsigned long long Compiled_same_cache_build_matches = 0;
 static unsigned long long Compiled_same_cache_filter_candidates = 0;
 static unsigned long long Compiled_same_cache_filter_rejects = 0;
 static unsigned long long Compiled_same_cache_dense_denials = 0;
+static unsigned long long Compiled_same_cache_metadata_denials = 0;
 static unsigned Compiled_same_cache_build_factor =
   COMPILED_SAME_CACHE_BUILD_FACTOR;
 
@@ -3029,6 +3032,7 @@ void init_hints(Uniftype utype,
   Compiled_same_cache_filter_candidates = 0;
   Compiled_same_cache_filter_rejects = 0;
   Compiled_same_cache_dense_denials = 0;
+  Compiled_same_cache_metadata_denials = 0;
   Hint_match_once = FALSE;
   memset(Compiled_census, 0, sizeof(Compiled_census));
   memset(Compiled_census_printed, 0, sizeof(Compiled_census_printed));
@@ -3317,6 +3321,7 @@ void done_with_hints(void)
   Compiled_same_cache_filter_candidates = 0;
   Compiled_same_cache_filter_rejects = 0;
   Compiled_same_cache_dense_denials = 0;
+  Compiled_same_cache_metadata_denials = 0;
   Compiled_same_cache_build_factor = COMPILED_SAME_CACHE_BUILD_FACTOR;
   Compiled_same_cache_budget_bytes =
     COMPILED_SAME_CACHE_DEFAULT_BYTES;
@@ -3725,6 +3730,14 @@ static struct compiled_same_cache_entry *compiled_same_cache_lookup(
   }
   if (!create)
     return NULL;
+  if (Compiled_same_cache_count >= COMPILED_SAME_CACHE_MAX_ENTRIES ||
+      first_length > COMPILED_SAME_CACHE_MAX_PATH_WORDS -
+                       Compiled_same_cache_path_count ||
+      second_length > COMPILED_SAME_CACHE_MAX_PATH_WORDS -
+                        (Compiled_same_cache_path_count + first_length)) {
+    Compiled_same_cache_metadata_denials++;
+    return NULL;
+  }
   if (Compiled_same_cache_count >=
       Compiled_same_cache_bucket_capacity / 2) {
     if (Compiled_same_cache_bucket_capacity > UINT_MAX / 2)
@@ -3738,6 +3751,8 @@ static struct compiled_same_cache_entry *compiled_same_cache_lookup(
     unsigned capacity = old == 0 ? 64 : old * 2;
     if (capacity <= old)
       fatal_error("compiled SAME cache entry capacity overflow");
+    if (capacity > COMPILED_SAME_CACHE_MAX_ENTRIES)
+      capacity = COMPILED_SAME_CACHE_MAX_ENTRIES;
     Compiled_same_cache_entries = safe_realloc(
       Compiled_same_cache_entries,
       (size_t) capacity * sizeof(*Compiled_same_cache_entries));
@@ -5695,8 +5710,9 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             "filter_candidates=%llu, filter_rejects=%llu, "
             "denied_entries=%u, dense_keys=%u, dense_bit_bytes=%llu, "
             "dense_budget_bytes=%llu, "
-            "dense_denials=%llu, entry_bytes=%llu, bucket_bytes=%llu, "
-            "path_bytes=%llu.\n",
+            "dense_denials=%llu, metadata_denials=%llu, "
+            "maximum_entries=%u, maximum_path_words=%u, "
+            "entry_bytes=%llu, bucket_bytes=%llu, path_bytes=%llu.\n",
             Compiled_same_cache_ready, Compiled_same_cache_count, built,
             Compiled_same_cache_build_factor,
             Compiled_same_cache_lookups, observed_queries, observed_work,
@@ -5709,6 +5725,9 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             denied, built, Compiled_same_cache_dense_bytes,
             Compiled_same_cache_budget_bytes,
             Compiled_same_cache_dense_denials,
+            Compiled_same_cache_metadata_denials,
+            COMPILED_SAME_CACHE_MAX_ENTRIES,
+            COMPILED_SAME_CACHE_MAX_PATH_WORDS,
             (unsigned long long) Compiled_same_cache_capacity *
               sizeof(*Compiled_same_cache_entries),
             (unsigned long long) Compiled_same_cache_bucket_capacity *
