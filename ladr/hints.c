@@ -63,9 +63,22 @@ static BOOL Compiled_term_table_enabled = FALSE;
 static BOOL Compiled_term_table_authoritative = FALSE;
 static BOOL Compiled_term_table_shadow = FALSE;
 static BOOL Compiled_term_table_lazy = FALSE;
+/* packed_compiled_blocks builds its immutable canonical arena only after
+   initial hint redundancy has settled.  This avoids interning hints that do
+   not survive input processing and lets the builder stream compact clauses
+   sequentially.  Later additions still use the ordinary delta arena. */
+static BOOL Compiled_term_table_deferred = FALSE;
+static BOOL Compiled_term_table_initial_build_complete = FALSE;
 static BOOL Compiled_filter_enabled = FALSE;
 static BOOL Compiled_path_index_enabled = FALSE;
 static Hint_term_table Compiled_term_table = NULL;
+static unsigned long long Compiled_deferred_scans = 0;
+static unsigned long long Compiled_deferred_additions = 0;
+static unsigned long long Compiled_deferred_stream_additions = 0;
+static unsigned long long Compiled_deferred_materializations = 0;
+static unsigned long long Compiled_deferred_anyconst_skips = 0;
+static unsigned long long Compiled_deferred_nonunit_skips = 0;
+static double Compiled_deferred_build_seconds = 0.0;
 static unsigned long long Compiled_lazy_root_requests = 0;
 static unsigned long long Compiled_lazy_root_builds = 0;
 static unsigned long long Compiled_lazy_root_deferred = 0;
@@ -2052,6 +2065,64 @@ static void fast_conjunction_index_hint(
   fast_conjunction_index_sign(postings, id, 1);
 }
 
+/* Build the immutable canonical target bank from the exact active set, after
+   initial hint equivalence/redundancy processing.  Compact unit clauses take
+   the allocation-free streaming route.  The materialized fallback preserves
+   correctness for an otherwise supported unit whose compact stream cannot be
+   consumed; unsupported AnyConst and nonunit hints deliberately remain on
+   the established exact packed matcher. */
+static void compiled_term_table_build_retained(void)
+{
+  unsigned id;
+  double started;
+  if (!Compiled_term_table_deferred ||
+      Compiled_term_table_initial_build_complete)
+    return;
+  if (Compiled_term_table == NULL)
+    fatal_error("deferred compiled hint build has no term table");
+  started = user_seconds();
+  for (id = 1; id < Packed_hint_capacity; id++) {
+    Topform h;
+    BOOL was_compressed;
+    BOOL added = FALSE;
+    if (!Packed_hint_active[id])
+      continue;
+    Compiled_deferred_scans++;
+    if (Packed_hint_anyconst[id]) {
+      Compiled_deferred_anyconst_skips++;
+      continue;
+    }
+    if (Better_hint_positive_count[id] + Better_hint_negative_count[id] != 1) {
+      Compiled_deferred_nonunit_skips++;
+      continue;
+    }
+    h = Packed_hint_by_id[id];
+    if (h == NULL)
+      fatal_error("deferred compiled hint has no stable owner");
+    was_compressed = h->compressed != NULL;
+    if (was_compressed &&
+        hint_term_table_add_compressed(Compiled_term_table, id, h)) {
+      added = TRUE;
+      Compiled_deferred_stream_additions++;
+    }
+    if (!added && was_compressed) {
+      if (!materialize_clause(h))
+        fatal_error("deferred compiled hint cannot materialize target");
+      Compiled_deferred_materializations++;
+    }
+    if (!added &&
+        (h->literals == NULL || h->literals->next != NULL ||
+         !hint_term_table_add(
+           Compiled_term_table, id, h->literals->sign, h->literals->atom)))
+      fatal_error("deferred compiled hint cannot add canonical target");
+    if (!added && was_compressed && !recompress_clause(h))
+      fatal_error("deferred compiled hint cannot recompress target");
+    Compiled_deferred_additions++;
+  }
+  Compiled_deferred_build_seconds += user_seconds() - started;
+  Compiled_term_table_initial_build_complete = TRUE;
+}
+
 void finalize_hint_conjunction_index(void)
 {
   struct fast_conjunction_estimator estimator;
@@ -2060,8 +2131,11 @@ void finalize_hint_conjunction_index(void)
   BOOL denied = FALSE;
   BOOL estimator_live = TRUE;
   compiled_census_finalize_bank();
-  if (Compiled_term_table != NULL && !Compiled_term_table_lazy)
+  if (Compiled_term_table != NULL && !Compiled_term_table_lazy) {
+    compiled_term_table_build_retained();
     hint_term_table_finalize(Compiled_term_table);
+    Compiled_term_table_initial_build_complete = TRUE;
+  }
   if (Compiled_filter_enabled)
     Compiled_same_cache_ready = TRUE;
   if (!Fast_conjunction_planning)
@@ -3310,7 +3384,16 @@ void init_hints(Uniftype utype,
   Compiled_term_table_authoritative = FALSE;
   Compiled_term_table_shadow = FALSE;
   Compiled_term_table_lazy = FALSE;
+  Compiled_term_table_deferred = FALSE;
+  Compiled_term_table_initial_build_complete = FALSE;
   Compiled_filter_enabled = FALSE;
+  Compiled_deferred_scans = 0;
+  Compiled_deferred_additions = 0;
+  Compiled_deferred_stream_additions = 0;
+  Compiled_deferred_materializations = 0;
+  Compiled_deferred_anyconst_skips = 0;
+  Compiled_deferred_nonunit_skips = 0;
+  Compiled_deferred_build_seconds = 0.0;
   Compiled_lazy_root_requests = 0;
   Compiled_lazy_root_builds = 0;
   Compiled_lazy_root_deferred = 0;
@@ -3679,7 +3762,16 @@ void done_with_hints(void)
   Compiled_term_table_authoritative = FALSE;
   Compiled_term_table_shadow = FALSE;
   Compiled_term_table_lazy = FALSE;
+  Compiled_term_table_deferred = FALSE;
+  Compiled_term_table_initial_build_complete = FALSE;
   Compiled_filter_enabled = FALSE;
+  Compiled_deferred_scans = 0;
+  Compiled_deferred_additions = 0;
+  Compiled_deferred_stream_additions = 0;
+  Compiled_deferred_materializations = 0;
+  Compiled_deferred_anyconst_skips = 0;
+  Compiled_deferred_nonunit_skips = 0;
+  Compiled_deferred_build_seconds = 0.0;
   Compiled_lazy_root_requests = 0;
   Compiled_lazy_root_builds = 0;
   Compiled_lazy_root_deferred = 0;
@@ -5275,7 +5367,10 @@ static BOOL compiled_fused_query_begin(
   Compiled_fused_program_preapplied = FALSE;
   Compiled_fused_rigid_program_cache_hit = FALSE;
   if (!Compiled_fused_enabled || !Compiled_filter_enabled ||
-      Compiled_term_table_lazy || op == PACKED_HINT_BACK_DEMOD ||
+      Compiled_term_table_lazy ||
+      (Compiled_term_table_deferred &&
+       !Compiled_term_table_initial_build_complete) ||
+      op == PACKED_HINT_BACK_DEMOD ||
       c->literals == NULL || c->literals->next != NULL ||
       query_anyconst)
     return FALSE;
@@ -5590,6 +5685,8 @@ static void compiled_path_filter_candidates(
      root-relative conditions are not necessary there. */
   if (op == PACKED_HINT_BACK_DEMOD || !Compiled_filter_enabled ||
       (Compiled_term_table_lazy && !Compiled_same_cache_ready) ||
+      (Compiled_term_table_deferred &&
+       !Compiled_term_table_initial_build_complete) ||
       c->literals == NULL ||
       c->literals->next != NULL ||
       (MATCH_HINTS_ANYCONST && AnyConstsEnabled &&
@@ -6173,6 +6270,8 @@ void index_hint(Topform c)
       better_index_hint_terms(c, anyconst);
       compiled_census_observe_hint(c, anyconst);
       if (Compiled_term_table_enabled && !Compiled_term_table_lazy &&
+          (!Compiled_term_table_deferred ||
+           Compiled_term_table_initial_build_complete) &&
           !anyconst &&
           c->literals != NULL && c->literals->next == NULL) {
         if (!hint_term_table_add(
@@ -6779,6 +6878,9 @@ void set_hint_compiled_fused(BOOL on)
     Compiled_query_program_cache = safe_calloc(
       COMPILED_QUERY_PROGRAM_CACHE_CAPACITY,
       sizeof(*Compiled_query_program_cache));
+  /* The fused blocks experiment owns the deterministic post-input builder.
+     This setter runs before any hint is indexed. */
+  Compiled_term_table_deferred = on;
   Compiled_fused_enabled = on;
 }
 
@@ -7258,6 +7360,20 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             s.match_rigid_tests, s.match_rigid_rejects,
             s.match_first_bindings, s.match_repeated_tests,
             s.match_repeated_rejects);
+    if (Compiled_term_table_deferred)
+      fprintf(fp,
+              "Compiled_hint_deferred_build: enabled=1, complete=%d, "
+              "active_scans=%llu, additions=%llu, stream_additions=%llu, "
+              "materializations=%llu, anyconst_skips=%llu, "
+              "nonunit_skips=%llu, seconds=%.6f.\n",
+              Compiled_term_table_initial_build_complete,
+              Compiled_deferred_scans,
+              Compiled_deferred_additions,
+              Compiled_deferred_stream_additions,
+              Compiled_deferred_materializations,
+              Compiled_deferred_anyconst_skips,
+              Compiled_deferred_nonunit_skips,
+              Compiled_deferred_build_seconds);
   }
   if (Compiled_path_postings != NULL) {
     struct hint_postings_stats s;
