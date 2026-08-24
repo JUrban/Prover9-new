@@ -270,7 +270,7 @@ grep -Eq '^Compiled_hint_same_filter: queries=1, query_tests=1, candidates_befor
   "$test_tmp/navigation-lazy.out"
 grep -Eq '^Compiled_hint_same_filter: queries=1, query_tests=1, candidates_before=2, candidates_after=1, candidates_rejected=1, candidate_tests=2, navigation_rejects=1,' \
   "$test_tmp/navigation-blocks.out"
-grep -Eq '^Compiled_hint_blocks: enabled=1, queries=1, activations=1, prefix_candidates=0, early_rejects=1,' \
+grep -Eq '^Compiled_hint_blocks: enabled=1, queries=[1-9][0-9]*, activations=[1-9][0-9]*, prefix_candidates=0, early_rejects=1,' \
   "$test_tmp/navigation-blocks.out"
 
 sed 's/packed_compiled_blocks/packed_fast/' \
@@ -364,5 +364,104 @@ grep -Eq '^Compiled_hint_same_cache: .*builds=2, .*build_batches=1, batch_condit
   "$test_tmp/blocks-batch-blocks.out"
 grep -Eq '^Compiled_hint_blocks: .*block_words=[1-9][0-9]*, block_rejects=[1-9][0-9]*,' \
   "$test_tmp/blocks-batch-blocks.out"
+
+# Exercise a RIGID-only query in the before-emission path.  Positions 7 and
+# 28 of k/65 collide in the established shallow 64-bit path mask.  Every bad
+# hint has h at position 7 but retains g at position 28, so packed_fast must
+# emit it; the exact compiled deep-position condition rejects it.  The first
+# two identical queries train/build the shared condition and the third must
+# use its dense mask before scalar ID enumeration.
+emit_rigid_atom()
+{
+  rigid_pred=$1
+  rigid_bad=$2
+  rigid_query=$3
+  rigid_tag=$4
+  printf '  %s(f(k(' "$rigid_pred"
+  rigid_pos=0
+  while [ "$rigid_pos" -lt 65 ]; do
+    if [ "$rigid_pos" -ne 0 ]; then
+      printf ','
+    fi
+    if [ "$rigid_query" -eq 1 ] && [ "$rigid_pos" -eq 0 ]; then
+      printf 'x'
+    elif [ "$rigid_query" -eq 1 ] && [ "$rigid_pos" -eq 1 ]; then
+      printf 'y'
+    elif [ "$rigid_bad" -eq 1 ] && [ "$rigid_pos" -eq 7 ]; then
+      printf 'h'
+    else
+      printf 'g'
+    fi
+    rigid_pos=$((rigid_pos + 1))
+  done
+  if [ "$rigid_query" -eq 1 ]; then
+    printf ')),z).\n'
+  else
+    printf ')),c%s).\n' "$rigid_tag"
+  fi
+}
+
+blocks_rigid_input="$test_tmp/blocks-rigid.in"
+{
+  printf '%s\n' \
+    'clear(auto_denials).' \
+    'clear(auto_inference).' \
+    'clear(predicate_elim).' \
+    'clear(print_initial_clauses).' \
+    'clear(print_given).' \
+    'clear(print_kept).' \
+    'clear(back_demod).' \
+    'clear(back_demod_hints).' \
+    'assign(search_loop,discount).' \
+    'assign(passive_store,compressed).' \
+    'assign(hint_index,packed_compiled_blocks).' \
+    'assign(hint_compiled_min_candidates,128).' \
+    'assign(hint_compiled_cache_build_factor,0).' \
+    'assign(hint_conjunction_kb,1).' \
+    'assign(ancestor_store,memory).' \
+    'assign(stats,all).' \
+    'assign(max_given,3).' \
+    'set(process_initial_sos).' \
+    'set(hint_trace).' \
+    'formulas(hints).'
+  rigid_i=1
+  while [ "$rigid_i" -le 600 ]; do
+    emit_rigid_atom p $((rigid_i % 2)) 0 "$rigid_i"
+    rigid_i=$((rigid_i + 1))
+  done
+  printf '%s\n' 'end_of_list.' 'formulas(sos).'
+  emit_rigid_atom p 0 1 0
+  emit_rigid_atom p 0 1 0
+  emit_rigid_atom p 0 1 0
+  printf '%s\n' 'end_of_list.'
+} > "$blocks_rigid_input"
+sed 's/packed_compiled_blocks/packed_fast/' "$blocks_rigid_input" |
+  "$prover9" > "$test_tmp/blocks-rigid-control.out" \
+               2> "$test_tmp/blocks-rigid-control.err" || blocks_rigid_control_status=$?
+blocks_rigid_control_status=${blocks_rigid_control_status:-0}
+"$prover9" < "$blocks_rigid_input" \
+  > "$test_tmp/blocks-rigid-blocks.out" \
+  2> "$test_tmp/blocks-rigid-blocks.err" || blocks_rigid_status=$?
+blocks_rigid_status=${blocks_rigid_status:-0}
+if [ "$blocks_rigid_control_status" -ne 2 ] || \
+   [ "$blocks_rigid_status" -ne 2 ]; then
+  echo "hint_index_trace_test: blocks rigid statuses control=$blocks_rigid_control_status blocks=$blocks_rigid_status" >&2
+  exit 1
+fi
+for blocks_rigid_mode in control blocks; do
+  grep '^HINT_TRACE ' "$test_tmp/blocks-rigid-$blocks_rigid_mode.out" \
+    > "$test_tmp/blocks-rigid-$blocks_rigid_mode.trace"
+done
+diff -u "$test_tmp/blocks-rigid-control.trace" \
+  "$test_tmp/blocks-rigid-blocks.trace"
+if ! grep -Eq '^Compiled_hint_plan: .*same_conditions=0, rigid_conditions=[1-9][0-9]*,' \
+     "$test_tmp/blocks-rigid-blocks.out" || \
+   ! grep -Eq '^Compiled_hint_same_cache: .*same_entries=0, rigid_entries=1, same_built=0, rigid_built=1,.*rigid_hits=[1-9][0-9]*,' \
+     "$test_tmp/blocks-rigid-blocks.out" || \
+   ! grep -Eq '^Compiled_hint_blocks: .*block_words=[1-9][0-9]*, block_rejects=[1-9][0-9]*,' \
+     "$test_tmp/blocks-rigid-blocks.out"; then
+  grep '^Compiled_hint_' "$test_tmp/blocks-rigid-blocks.out" >&2
+  exit 1
+fi
 
 echo 'hint_index_trace_test: PASS'
