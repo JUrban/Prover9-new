@@ -35,7 +35,10 @@ different architecture, not a faster version of the present traversal.
 > IDs are enumerated.  Sparse and conjunction collectors precheck learned
 > masks before profile work and candidate insertion.  Query programs are
 > compiled during the existing full feature-mask traversal rather than by a
-> second term walk.  Threshold-zero diagnostics use an exact compact
+> second term walk.  A fixed 24 KiB normalized-shape policy cache reuses a
+> deep-symbol instruction only after its full direct pass rejects at least
+> 25%, revalidates it against the current exact plan, and evicts it if it
+> stops paying.  Threshold-zero diagnostics use an exact compact
 > SAME/RIGID cache identity.  At the normal threshold, narrow
 > unfiltered results retain the small `packed_fast` key and broad filtered
 > results are not cached under an incomplete identity.  The established
@@ -339,7 +342,9 @@ Exact tests cover this cache-alias case; a generated 600-hint bank in which
 two SAME conditions mature together; a separate RIGID-only 600-hint bank; a
 three-cohort sparse posting case; and a retained conjunction profile.  Dense,
 sparse, and conjunction candidate paths all remain trace-identical to
-`packed_fast` while reporting pre-insertion rejections.
+`packed_fast` while reporting pre-insertion rejections.  The repeated
+RIGID-only query must also report a normalized-program cache hit, a profitable
+store, and avoided selectivity-sample tests.
 
 Also compare eager canonical construction with one sequential post-input
 build directly from the exact retained compressed bank.  This is different

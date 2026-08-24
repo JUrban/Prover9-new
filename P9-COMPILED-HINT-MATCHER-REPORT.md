@@ -115,6 +115,23 @@ later matching hint cannot fit, or either metadata ceiling is reached, that
 condition falls back to direct exact-handle checking.  A partial set is never
 used.
 
+### Normalized query-program policy cache
+
+Blocks mode also has a fixed 1,024-entry policy cache.  Each entry is 24
+bytes, for a total payload of 24 KiB.  Two 64-bit shape hashes are accumulated
+during the existing feature-mask traversal over symbol/arity tokens and
+first-occurrence-normalized variables; operation and literal sign are
+included.
+
+The cache does not store matching hints or reuse a previous candidate answer.
+After a selected deep fixed-symbol instruction rejects at least 25% in its
+full direct pass, the cache remembers that instruction for the normalized
+query shape.  On reuse, the stored condition is compared exactly with the
+current query's path and symbol before it can run.  Consequently, even a
+shape-hash collision cannot create a false negative: the suggested condition
+must independently be a necessary condition of the current query.  A reused
+choice whose full rejection rate falls below 25% is evicted.
+
 Lifecycle behavior is conservative:
 
 - a removed or rewritten hint may leave a stale positive bit, but the active
@@ -127,8 +144,8 @@ Lifecycle behavior is conservative:
 ### Candidate-emission and dense-block experiment
 
 `packed_compiled_blocks` moves repeated-variable and selected deep
-fixed-symbol checks into candidate
-generation.  In plain language, the separate mode no longer always “builds a
+fixed-symbol checks into candidate generation.  In plain language, the
+separate mode no longer always “builds a
 large list and then throws most of it away”:
 
 1. it prepares repeated-variable child routes and bounded deep-symbol routes
@@ -229,8 +246,8 @@ assign(stats,all).
 
 The three numeric assignments show the defaults and may be omitted.  A build
 factor of 0 is useful only for a tiny forced-construction test.  A cache budget
-of 0 disables collective bitsets but keeps the direct repeated-variable
-pretest.  `set(hint_compiled_census)` is diagnostic and adds work; leave it
+of 0 disables collective bitsets but keeps direct SAME/RIGID pretests.
+`set(hint_compiled_census)` is diagnostic and adds work; leave it
 clear in CPU comparisons.
 
 To exercise the candidate-emission implementation, use the same surrounding
@@ -261,7 +278,11 @@ The shutdown statistics contain:
   scans, batch widths, hits, rejections, denials, and exact
   allocated/budgeted bytes; and
 - `Compiled_hint_blocks`: activations, prefix work, early scalar rejections,
-  dense posting words intersected, and bits rejected before ID enumeration.
+  dense posting words intersected, bits rejected before ID enumeration, and
+  sparse/conjunction mask prechecks; and
+- `Compiled_hint_query_program_cache`: bounded shape-policy lookups, hits,
+  condition-validation misses, stores, replacements, evictions, and avoided
+  fixed-position sample tests.
 
 ## Measurements so far
 
@@ -485,7 +506,9 @@ block intersection on a 600-hint generated bank.  A second 600-hint fixture
 has no repeated query variables and proves RIGID-only dense filtering.  A
 three-cohort fixture forces the sparse vector collector, and a compact
 retained profile forces the conjunction collector; both require nonzero
-learned-mask rejections and exact `packed_fast` trace agreement.
+learned-mask rejections and exact `packed_fast` trace agreement.  The
+RIGID-only fixture also requires a profitable normalized-program store, a
+later hit, and avoided sample work.
 
 Bounded experiments were run one memory-relevant process at a time with a
 2-GiB address-space cap.  The machine had old pages in swap but no active
@@ -510,10 +533,13 @@ The next Waldmeister-like stage should therefore be:
    masks in dense posting words, and mask prechecks in sparse/conjunction
    collectors.  The next 1,000-given gate must show whether these paths are
    reused often enough to repay training and mask construction.
-3. **Compile and reuse query shapes.** Normalize the sign, shallow packed
-   requirements, child routes, and repeated-variable pattern into a compact
-   instruction key.  Cache only shapes whose measured candidate work repays
-   construction; keep the compressed matcher as final authority.
+3. **Measure and extend normalized query-program reuse.** The first bounded
+   cache now normalizes operation, sign, symbols/arities, and variable
+   occurrence pattern during the existing traversal, then reuses only a
+   fixed-symbol instruction whose full work rejected at least 25%.  The
+   1,000-given gate should decide whether hits justify caching a wider ordered
+   SAME/RIGID instruction vector.  The compressed matcher remains final
+   authority.
 4. **Measure and generalize batched construction.** Blocks mode now scans the
    retained bank once for up to eight co-occurring ready SAME or selected
    RIGID instructions.  Keep this only if long runs report useful batch
