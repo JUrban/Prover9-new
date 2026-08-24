@@ -432,6 +432,59 @@ BOOL hint_term_table_node(Hint_term_table table, uint32_t handle,
   return TRUE;
 }
 
+static BOOL hint_term_table_path_child(Hint_term_table table,
+                                       uint32_t handle, unsigned child,
+                                       uint32_t *result)
+{
+  const struct hint_term_arena *arena;
+  const struct hint_term_node *node;
+  uint32_t local;
+  if (table == NULL || handle == 0 || result == NULL)
+    return FALSE;
+  arena = (handle & HINT_TERM_DELTA_HANDLE) != 0 ?
+    &table->delta : &table->base;
+  local = handle & HINT_TERM_HANDLE_MASK;
+  if (local == 0 || local > arena->node_count)
+    return FALSE;
+  node = arena->nodes + local - 1;
+  if ((node->code & HINT_TERM_VARIABLE_CODE) != 0 || child >= node->arity)
+    return FALSE;
+  *result = arena->children[node->child_offset + child];
+  return TRUE;
+}
+
+int hint_term_table_compare_paths(Hint_term_table table, uint32_t root,
+                                  const unsigned *first,
+                                  unsigned first_length,
+                                  const unsigned *second,
+                                  unsigned second_length)
+{
+  uint32_t common = root;
+  uint32_t left, right;
+  unsigned shared = 0;
+  unsigned i;
+  if (table == NULL || root == 0 ||
+      (first_length != 0 && first == NULL) ||
+      (second_length != 0 && second == NULL))
+    return -1;
+  while (shared < first_length && shared < second_length &&
+         first[shared] == second[shared]) {
+    if (!hint_term_table_path_child(
+          table, common, first[shared], &common))
+      return -1;
+    shared++;
+  }
+  left = common;
+  right = common;
+  for (i = shared; i < first_length; i++)
+    if (!hint_term_table_path_child(table, left, first[i], &left))
+      return -1;
+  for (i = shared; i < second_length; i++)
+    if (!hint_term_table_path_child(table, right, second[i], &right))
+      return -1;
+  return left == right ? 1 : 0;
+}
+
 static BOOL hint_term_table_matches_internal(
   Hint_term_table table, unsigned id, BOOL positive, Term pattern,
   BOOL *matched, BOOL account)

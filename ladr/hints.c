@@ -3551,23 +3551,6 @@ static void compiled_path_index_hint(Topform c)
     UINT64_C(0x243f6a8885a308d3), 0, (unsigned) c->id);
 }
 
-static BOOL compiled_term_handle_at_path(uint32_t root, unsigned offset,
-                                         unsigned length, uint32_t *result)
-{
-  unsigned i;
-  uint32_t handle = root;
-  for (i = 0; i < length; i++) {
-    struct hint_term_node_view view;
-    unsigned child = Compiled_plan_paths[offset + i];
-    if (!hint_term_table_node(Compiled_term_table, handle, &view) ||
-        view.variable || child >= view.arity)
-      return FALSE;
-    handle = view.children[child];
-  }
-  *result = handle;
-  return TRUE;
-}
-
 static void compiled_same_filter_candidates(void)
 {
   unsigned before = Packed_candidates_count;
@@ -3595,17 +3578,20 @@ static void compiled_same_filter_candidates(void)
     }
     for (j = 0; j < Compiled_same_test_count; j++) {
       struct compiled_same_test *test = Compiled_same_tests + j;
-      uint32_t first, second;
+      int comparison;
       candidate_tests++;
-      if (!compiled_term_handle_at_path(
-            root, test->first_offset, test->first_length, &first) ||
-          !compiled_term_handle_at_path(
-            root, test->second_offset, test->second_length, &second)) {
+      comparison = hint_term_table_compare_paths(
+        Compiled_term_table, root,
+        test->first_length == 0 ? NULL :
+          Compiled_plan_paths + test->first_offset, test->first_length,
+        test->second_length == 0 ? NULL :
+          Compiled_plan_paths + test->second_offset, test->second_length);
+      if (comparison < 0) {
         navigation_rejects++;
         accepted = FALSE;
         break;
       }
-      if (first != second) {
+      if (comparison == 0) {
         unequal_rejects++;
         accepted = FALSE;
         break;

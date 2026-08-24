@@ -21,6 +21,9 @@ int main(void)
   Hint_term_table table;
   Topform first, renamed, shared, replacement;
   uint32_t first_root, renamed_root, shared_root, replacement_root;
+  unsigned left_path[2] = {0, 0};
+  unsigned right_path[2] = {0, 1};
+  unsigned invalid_path[1] = {1};
   struct hint_term_node_view root_view, f_view;
   struct hint_term_table_stats before, frozen, after;
   Topform query, mismatch, rigid_mismatch;
@@ -55,6 +58,12 @@ int main(void)
   CHECK(hint_term_table_node(table, root_view.children[0], &f_view) &&
         f_view.arity == 2 && f_view.children[0] == f_view.children[1],
         "repeated ground subterm has one canonical handle");
+  CHECK(hint_term_table_compare_paths(
+          table, shared_root, left_path, 2, right_path, 2) == 1,
+        "path comparison shares a prefix and recognizes equal handles");
+  CHECK(hint_term_table_compare_paths(
+          table, shared_root, invalid_path, 1, right_path, 2) == -1,
+        "path comparison rejects an invalid target route");
   hint_term_table_get_stats(table, &before);
   CHECK(before.base_intern_hits != 0 &&
         before.base_occurrences > before.base_nodes,
@@ -70,6 +79,10 @@ int main(void)
         "canonical handles match a repeated generated variable");
   CHECK(hint_term_table_add(table, 20, TRUE, mismatch->literals->atom),
         "add repeated-variable mismatch target");
+  CHECK(hint_term_table_compare_paths(
+          table, hint_term_table_root(table, 20),
+          left_path, 2, right_path, 2) == 0,
+        "path comparison distinguishes unequal canonical handles");
   CHECK(hint_term_table_matches(
           table, 20, TRUE, query->literals->atom, &matched) && !matched,
         "different canonical handles reject repeated generated variable");

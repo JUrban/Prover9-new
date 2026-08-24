@@ -70,6 +70,15 @@ BOOL hint_term_table_positive(Hint_term_table table, unsigned id);
 BOOL hint_term_table_node(Hint_term_table table, uint32_t handle,
                           struct hint_term_node_view *view);
 
+/* Compare two target subterms while sharing their common path prefix.
+   Return 1 for equal canonical handles, 0 for unequal handles, and -1 when
+   either path is invalid for the target root. */
+int hint_term_table_compare_paths(Hint_term_table table, uint32_t root,
+                                  const unsigned *first,
+                                  unsigned first_length,
+                                  const unsigned *second,
+                                  unsigned second_length);
+
 /* Allocation-free one-way match: PATTERN variables may bind canonical
    subterm handles from retained unit hint ID.  TRUE means ID was supported
    and *MATCHED is authoritative; FALSE requests the compressed fallback. */
