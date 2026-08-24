@@ -4944,24 +4944,45 @@ static unsigned compiled_rigid_sample_position(
   return start + (unsigned) (jitter % width);
 }
 
-/* Rank a bounded fixed-symbol instruction vector from one deterministic
-   sample of the real emitted prefix.  Computing the best four costs no more
-   path probes than the old best-one policy because every eligible condition
-   was already sampled. */
+static unsigned compiled_rigid_sample_mask_count(unsigned mask)
+{
+  unsigned count = 0;
+  while (mask != 0) {
+    mask &= mask - 1;
+    count++;
+  }
+  return count;
+}
+
+/* Compile a bounded fixed-symbol instruction vector from one deterministic
+   sample of the real emitted prefix.  Each condition's outcomes are probed
+   exactly once and retained as an eight-bit rejection mask.  Subsequent
+   instructions are ranked only on the sample candidates that survive the
+   earlier choices, preventing several correlated tests from claiming the
+   same rejection work.  Computing the vector therefore costs no more term
+   navigation than the old best-one policy. */
 static unsigned compiled_rank_rigid_tests(
   const unsigned *candidates, unsigned before, BOOL account,
   unsigned *ranked_indices, unsigned ranked_capacity)
 {
   unsigned samples, i, j;
   unsigned ranked_count = 0;
-  struct compiled_rigid_rank ranked[COMPILED_RIGID_DIRECT_MAX];
+  unsigned alive;
+  unsigned reject_masks[COMPILED_RIGID_SAMPLE_MAX_TESTS];
+  unsigned supported_masks[COMPILED_RIGID_SAMPLE_MAX_TESTS];
+  unsigned char selected[COMPILED_RIGID_SAMPLE_MAX_TESTS];
   if (ranked_capacity > COMPILED_RIGID_DIRECT_MAX)
     ranked_capacity = COMPILED_RIGID_DIRECT_MAX;
   if (Compiled_rigid_test_count == 0 || before == 0 ||
       ranked_capacity == 0)
     return 0;
+  if (Compiled_rigid_test_count > COMPILED_RIGID_SAMPLE_MAX_TESTS)
+    fatal_error("compiled rigid sample exceeds condition limit");
   samples = before < COMPILED_RIGID_SAMPLE_CANDIDATES ?
     before : COMPILED_RIGID_SAMPLE_CANDIDATES;
+  memset(reject_masks, 0, sizeof(reject_masks));
+  memset(supported_masks, 0, sizeof(supported_masks));
+  memset(selected, 0, sizeof(selected));
   for (i = 0; i < Compiled_rigid_test_count; i++) {
     struct compiled_rigid_test *test = Compiled_rigid_tests + i;
     unsigned rejects = 0, supported = 0;
@@ -4981,40 +5002,49 @@ static unsigned compiled_rank_rigid_tests(
       if (result < 0)
         fatal_error("compiled rigid sample: invalid canonical target");
       supported++;
-      if (result == 0)
+      supported_masks[i] |= 1U << j;
+      if (result == 0) {
         rejects++;
+        reject_masks[i] |= 1U << j;
+      }
     }
     if (account) {
       Compiled_rigid_sample_tests++;
       Compiled_rigid_sample_candidates += supported;
       Compiled_rigid_sample_rejects += rejects;
     }
-    if (supported != 0 &&
-        (unsigned long long) rejects * 100 >=
-          (unsigned long long) supported *
-            COMPILED_RIGID_MIN_REJECT_PERCENT) {
-      struct compiled_rigid_rank value;
-      unsigned position, move;
-      value.index = i;
-      value.rejects = rejects;
-      value.supported = supported;
-      position = 0;
-      while (position < ranked_count &&
-             !compiled_rigid_rank_better(&value, ranked + position))
-        position++;
-      if (position < ranked_capacity) {
-        if (ranked_count < ranked_capacity)
-          ranked_count++;
-        for (move = ranked_count - 1; move > position; move--)
-          ranked[move] = ranked[move - 1];
-        ranked[position] = value;
-      }
-    }
   }
   if (account)
     Compiled_rigid_sampled_queries++;
-  for (i = 0; i < ranked_count; i++)
-    ranked_indices[i] = ranked[i].index;
+  alive = (1U << samples) - 1;
+  while (ranked_count < ranked_capacity && alive != 0) {
+    struct compiled_rigid_rank best;
+    BOOL have_best = FALSE;
+    for (i = 0; i < Compiled_rigid_test_count; i++) {
+      struct compiled_rigid_rank value;
+      if (selected[i])
+        continue;
+      value.index = i;
+      value.rejects = compiled_rigid_sample_mask_count(
+        reject_masks[i] & alive);
+      value.supported = compiled_rigid_sample_mask_count(
+        supported_masks[i] & alive);
+      if (value.supported == 0 ||
+          (unsigned long long) value.rejects * 100 <
+            (unsigned long long) value.supported *
+              COMPILED_RIGID_MIN_REJECT_PERCENT)
+        continue;
+      if (!have_best || compiled_rigid_rank_better(&value, &best)) {
+        best = value;
+        have_best = TRUE;
+      }
+    }
+    if (!have_best)
+      break;
+    ranked_indices[ranked_count++] = best.index;
+    selected[best.index] = 1;
+    alive &= ~reject_masks[best.index];
+  }
   return ranked_count;
 }
 
