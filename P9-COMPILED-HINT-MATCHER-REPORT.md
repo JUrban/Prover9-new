@@ -308,6 +308,16 @@ valuable: direct attempts fell from 139,308 to 86,377, while sampled ordinary
 match time remained 0.990 versus 0.988 seconds and whole CPU was unchanged.
 The extra handle checks merely replaced already-cheap compressed checks.
 
+The new phase timer explains where the Josef 01/300 matcher win goes.  On one
+adjacent pair, `packed_fast` used an estimated 0.488 seconds to generate
+candidates and 0.944 seconds to confirm them; its nominal 0.100-second filter
+interval contains only timing-boundary overhead.  `packed_compiled` used
+0.373 seconds for candidate generation, 0.377 for its separate structural
+pass, and 0.451 for confirmation.  The program roughly halves confirmation
+but pays for a second traversal of the candidate vector.  Phase 2b is intended
+to fold those structural operations into the existing block loop, not add a
+third index traversal.
+
 On Osborn, lazy constructed 103,171 of 248,809 cumulative canonical
 additions and used 15.2 MiB for the term table versus eager's 20.0 MiB.  Both
 processes were about 301 MiB RSS because other structures dominate.  On

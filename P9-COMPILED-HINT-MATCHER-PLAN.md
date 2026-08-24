@@ -296,6 +296,15 @@ from the rejected raw-count pre-sizing experiment and from random on-demand
 construction.  It must win startup CPU without assuming a Josef-specific
 sharing ratio.
 
+The first 300-given phase split is now available.  On Josef 01, `packed_fast`
+spent an estimated 0.488 seconds generating candidates and 0.944 seconds
+confirming them.  The compiled mode spent 0.373 seconds generating, 0.377
+seconds in the separate structural pass, and 0.451 seconds confirming.  This
+supports fusing the structural conditions into candidate generation: it can
+remove a separate pass and preserve the confirmation saving.  It also limits
+expectations—hint handling is too small a fraction of this short whole run for
+any matcher alone to deliver a radical prover-wide speedup.
+
 Gate: zero ordered-candidate differences in shadow; a material reduction in
 candidate-generation CPU as well as confirmation CPU; at least 2x total hint
 matching improvement on two problems; and a material whole-run CPU win at a
