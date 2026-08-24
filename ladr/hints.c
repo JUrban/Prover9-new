@@ -362,6 +362,218 @@ static struct compiled_hint_census_stats
 static struct compiled_hint_census_stats
   Compiled_census_printed[PACKED_HINT_OPERATIONS];
 
+#define COMPILED_TERM_LENGTH_BUCKETS 8
+
+struct compiled_hint_bank_census {
+  unsigned long long retained_hints;
+  unsigned long long unit_hints;
+  unsigned long long anyconst_units;
+  unsigned long long nonunit_hints;
+  unsigned long long positive_units;
+  unsigned long long negative_units;
+  unsigned long long equations;
+  unsigned long long disequations;
+  unsigned long long term_nodes;
+  unsigned long long term_bytes;
+  unsigned long long maximum_term_nodes;
+  unsigned long long variable_occurrences;
+  unsigned long long distinct_variables;
+  unsigned long long repeated_variable_occurrences;
+  unsigned long long units_with_repeated_variables;
+  unsigned long long subterm_occurrences;
+  unsigned long long subterm_fingerprint_distinct;
+  unsigned long long term_length_buckets[COMPILED_TERM_LENGTH_BUCKETS];
+  unsigned long long fingerprint_peak_bytes;
+  BOOL finalized;
+};
+
+static struct compiled_hint_bank_census Compiled_bank_census;
+static unsigned long long *Compiled_subterm_fingerprints = NULL;
+static size_t Compiled_subterm_fingerprint_capacity = 0;
+static size_t Compiled_subterm_fingerprint_count = 0;
+
+static unsigned long long compiled_hash_mix(unsigned long long x)
+{
+  x ^= x >> 30;
+  x *= UINT64_C(0xbf58476d1ce4e5b9);
+  x ^= x >> 27;
+  x *= UINT64_C(0x94d049bb133111eb);
+  x ^= x >> 31;
+  return x;
+}
+
+static void compiled_subterm_rehash(size_t capacity)
+{
+  unsigned long long *old = Compiled_subterm_fingerprints;
+  size_t old_capacity = Compiled_subterm_fingerprint_capacity;
+  size_t i;
+  Compiled_subterm_fingerprints = safe_calloc(
+    capacity, sizeof(*Compiled_subterm_fingerprints));
+  Compiled_subterm_fingerprint_capacity = capacity;
+  Compiled_subterm_fingerprint_count = 0;
+  for (i = 0; i < old_capacity; i++) {
+    unsigned long long hash = old[i];
+    if (hash != 0) {
+      size_t position = (size_t) hash & (capacity - 1);
+      while (Compiled_subterm_fingerprints[position] != 0)
+        position = (position + 1) & (capacity - 1);
+      Compiled_subterm_fingerprints[position] = hash;
+      Compiled_subterm_fingerprint_count++;
+    }
+  }
+  if (old != NULL)
+    safe_free(old);
+  if ((unsigned long long) capacity * sizeof(*Compiled_subterm_fingerprints) >
+      Compiled_bank_census.fingerprint_peak_bytes)
+    Compiled_bank_census.fingerprint_peak_bytes =
+      (unsigned long long) capacity * sizeof(*Compiled_subterm_fingerprints);
+}
+
+static void compiled_subterm_add(unsigned long long hash)
+{
+  size_t position;
+  if (hash == 0)
+    hash = 1;
+  if (Compiled_subterm_fingerprint_capacity == 0)
+    compiled_subterm_rehash(1024);
+  else if ((Compiled_subterm_fingerprint_count + 1) * 10 >=
+           Compiled_subterm_fingerprint_capacity * 7) {
+    if (Compiled_subterm_fingerprint_capacity > SIZE_MAX / 2)
+      fatal_error("compiled hint census fingerprint capacity overflow");
+    compiled_subterm_rehash(Compiled_subterm_fingerprint_capacity * 2);
+  }
+  position = (size_t) hash & (Compiled_subterm_fingerprint_capacity - 1);
+  while (Compiled_subterm_fingerprints[position] != 0 &&
+         Compiled_subterm_fingerprints[position] != hash)
+    position = (position + 1) &
+               (Compiled_subterm_fingerprint_capacity - 1);
+  if (Compiled_subterm_fingerprints[position] == 0) {
+    Compiled_subterm_fingerprints[position] = hash;
+    Compiled_subterm_fingerprint_count++;
+    Compiled_bank_census.subterm_fingerprint_distinct++;
+  }
+}
+
+struct compiled_term_shape {
+  unsigned long long hash;
+  unsigned nodes;
+};
+
+static struct compiled_term_shape compiled_census_term(
+  Term t, unsigned char *seen_variables, unsigned *distinct_variables,
+  unsigned *repeated_variables)
+{
+  struct compiled_term_shape result;
+  unsigned long long hash;
+  int i;
+  result.nodes = 1;
+  if (VARIABLE(t)) {
+    unsigned variable = (unsigned) VARNUM(t);
+    hash = compiled_hash_mix(
+      UINT64_C(0x7661720000000000) ^ (unsigned long long) variable);
+    Compiled_bank_census.variable_occurrences++;
+    if (variable < MAX_VARS && !seen_variables[variable]) {
+      seen_variables[variable] = 1;
+      (*distinct_variables)++;
+    }
+    else
+      (*repeated_variables)++;
+  }
+  else {
+    hash = compiled_hash_mix(
+      UINT64_C(0x66756e0000000000) ^
+      ((unsigned long long) (unsigned) SYMNUM(t) << 8) ^
+      (unsigned long long) (unsigned) ARITY(t));
+    for (i = 0; i < ARITY(t); i++) {
+      struct compiled_term_shape child = compiled_census_term(
+        ARG(t,i), seen_variables, distinct_variables, repeated_variables);
+      result.nodes += child.nodes;
+      hash = compiled_hash_mix(hash ^ child.hash ^
+        ((unsigned long long) (unsigned) (i + 1) *
+         UINT64_C(0x9e3779b97f4a7c15)));
+    }
+  }
+  result.hash = hash;
+  Compiled_bank_census.subterm_occurrences++;
+  compiled_subterm_add(hash);
+  return result;
+}
+
+static unsigned compiled_term_length_bucket(unsigned nodes)
+{
+  if (nodes <= 4) return 0;
+  else if (nodes <= 8) return 1;
+  else if (nodes <= 16) return 2;
+  else if (nodes <= 32) return 3;
+  else if (nodes <= 64) return 4;
+  else if (nodes <= 128) return 5;
+  else if (nodes <= 256) return 6;
+  else return 7;
+}
+
+static void compiled_census_observe_hint(Topform h, BOOL anyconst)
+{
+  Literals lit;
+  unsigned literals = 0;
+  if (!Hint_compiled_census || Compiled_bank_census.finalized)
+    return;
+  for (lit = h->literals; lit != NULL; lit = lit->next)
+    literals++;
+  Compiled_bank_census.retained_hints++;
+  if (literals != 1) {
+    Compiled_bank_census.nonunit_hints++;
+    return;
+  }
+  else {
+    unsigned char seen_variables[MAX_VARS];
+    unsigned distinct_variables = 0;
+    unsigned repeated_variables = 0;
+    struct compiled_term_shape shape;
+    memset(seen_variables, 0, sizeof(seen_variables));
+    Compiled_bank_census.unit_hints++;
+    if (anyconst)
+      Compiled_bank_census.anyconst_units++;
+    if (h->literals->sign)
+      Compiled_bank_census.positive_units++;
+    else
+      Compiled_bank_census.negative_units++;
+    if (eq_term(h->literals->atom)) {
+      if (h->literals->sign)
+        Compiled_bank_census.equations++;
+      else
+        Compiled_bank_census.disequations++;
+    }
+    shape = compiled_census_term(
+      h->literals->atom, seen_variables, &distinct_variables,
+      &repeated_variables);
+    Compiled_bank_census.term_nodes += shape.nodes;
+    /* A future flat table needs at least one 32-bit token per node. */
+    Compiled_bank_census.term_bytes +=
+      (unsigned long long) shape.nodes * sizeof(uint32_t);
+    if (shape.nodes > Compiled_bank_census.maximum_term_nodes)
+      Compiled_bank_census.maximum_term_nodes = shape.nodes;
+    Compiled_bank_census.term_length_buckets[
+      compiled_term_length_bucket(shape.nodes)]++;
+    Compiled_bank_census.distinct_variables += distinct_variables;
+    Compiled_bank_census.repeated_variable_occurrences +=
+      repeated_variables;
+    if (repeated_variables != 0)
+      Compiled_bank_census.units_with_repeated_variables++;
+  }
+}
+
+static void compiled_census_finalize_bank(void)
+{
+  if (!Hint_compiled_census || Compiled_bank_census.finalized)
+    return;
+  Compiled_bank_census.finalized = TRUE;
+  if (Compiled_subterm_fingerprints != NULL)
+    safe_free(Compiled_subterm_fingerprints);
+  Compiled_subterm_fingerprints = NULL;
+  Compiled_subterm_fingerprint_capacity = 0;
+  Compiled_subterm_fingerprint_count = 0;
+}
+
 /* Per-query getrusage pairs scale to millions of avoidable system calls on
    hint-heavy AIM searches.  Sample a deterministic, input-derived 1/64 of
    authoritative operations at microsecond precision; all logical work
@@ -1536,6 +1748,7 @@ void finalize_hint_conjunction_index(void)
   unsigned i;
   BOOL denied = FALSE;
   BOOL estimator_live = TRUE;
+  compiled_census_finalize_bank();
   if (!Fast_conjunction_planning)
     return;
   fast_conjunction_estimator_init(&estimator);
@@ -2667,6 +2880,12 @@ void init_hints(Uniftype utype,
   Hint_match_once = FALSE;
   memset(Compiled_census, 0, sizeof(Compiled_census));
   memset(Compiled_census_printed, 0, sizeof(Compiled_census_printed));
+  memset(&Compiled_bank_census, 0, sizeof(Compiled_bank_census));
+  if (Compiled_subterm_fingerprints != NULL)
+    safe_free(Compiled_subterm_fingerprints);
+  Compiled_subterm_fingerprints = NULL;
+  Compiled_subterm_fingerprint_capacity = 0;
+  Compiled_subterm_fingerprint_count = 0;
   memset(Delta_bucket, 0, sizeof(Delta_bucket));
   Delta_total = 0;
   Delta_min = Delta_max = 0;
@@ -2763,6 +2982,8 @@ void done_with_hints(void)
   if (Preview_key_scratch) safe_free(Preview_key_scratch);
   if (Fast_match_cache) safe_free(Fast_match_cache);
   if (Fast_match_cache_keys) safe_free(Fast_match_cache_keys);
+  if (Compiled_subterm_fingerprints != NULL)
+    safe_free(Compiled_subterm_fingerprints);
   hint_postings_destroy(Better_postings);
   hint_postings_destroy(Fast_conjunction_postings);
   if (Better_rebuild_clock != NULL)
@@ -2872,6 +3093,10 @@ void done_with_hints(void)
   memset(Packed_operation_stats, 0, sizeof(Packed_operation_stats));
   memset(Compiled_census, 0, sizeof(Compiled_census));
   memset(Compiled_census_printed, 0, sizeof(Compiled_census_printed));
+  memset(&Compiled_bank_census, 0, sizeof(Compiled_bank_census));
+  Compiled_subterm_fingerprints = NULL;
+  Compiled_subterm_fingerprint_capacity = 0;
+  Compiled_subterm_fingerprint_count = 0;
   Hint_compiled_census = FALSE;
   Packed_index = FALSE;
   Better_packed_index = FALSE;
@@ -3387,6 +3612,7 @@ void index_hint(Topform c)
         fatal_error("index_hint: packed hint ID overflow");
       packed_index_hint_terms(c, anyconst);
       better_index_hint_terms(c, anyconst);
+      compiled_census_observe_hint(c, anyconst);
       if (compress_clause(c) == CLAUSE_COMPRESS_INVALID)
         fatal_error("index_hint: cannot compact active packed hint");
     }
@@ -4151,6 +4377,52 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             s->candidate_buckets[6], s->candidate_buckets[7]);
   }
   if (Hint_compiled_census) {
+    fprintf(fp,
+            "Compiled_hint_bank_census: finalized=%d, retained=%llu, "
+            "units=%llu, ordinary_units=%llu, anyconst_units=%llu, "
+            "nonunits=%llu, positive_units=%llu, negative_units=%llu, "
+            "equations=%llu, disequations=%llu, term_nodes=%llu, "
+            "term_bytes_32=%llu, maximum_term_nodes=%llu, "
+            "variable_occurrences=%llu, distinct_variables=%llu, "
+            "repeated_variable_occurrences=%llu, "
+            "units_with_repeated_variables=%llu, "
+            "subterm_occurrences=%llu, "
+            "subterm_fingerprint_distinct=%llu, sharing_ratio=%.3f, "
+            "fingerprint_peak_bytes=%llu, "
+            "term_length_buckets=1-4:%llu/5-8:%llu/9-16:%llu/"
+            "17-32:%llu/33-64:%llu/65-128:%llu/129-256:%llu/257+:%llu.\n",
+            Compiled_bank_census.finalized,
+            Compiled_bank_census.retained_hints,
+            Compiled_bank_census.unit_hints,
+            Compiled_bank_census.unit_hints -
+              Compiled_bank_census.anyconst_units,
+            Compiled_bank_census.anyconst_units,
+            Compiled_bank_census.nonunit_hints,
+            Compiled_bank_census.positive_units,
+            Compiled_bank_census.negative_units,
+            Compiled_bank_census.equations,
+            Compiled_bank_census.disequations,
+            Compiled_bank_census.term_nodes,
+            Compiled_bank_census.term_bytes,
+            Compiled_bank_census.maximum_term_nodes,
+            Compiled_bank_census.variable_occurrences,
+            Compiled_bank_census.distinct_variables,
+            Compiled_bank_census.repeated_variable_occurrences,
+            Compiled_bank_census.units_with_repeated_variables,
+            Compiled_bank_census.subterm_occurrences,
+            Compiled_bank_census.subterm_fingerprint_distinct,
+            Compiled_bank_census.subterm_fingerprint_distinct == 0 ? 0.0 :
+              (double) Compiled_bank_census.subterm_occurrences /
+                (double) Compiled_bank_census.subterm_fingerprint_distinct,
+            Compiled_bank_census.fingerprint_peak_bytes,
+            Compiled_bank_census.term_length_buckets[0],
+            Compiled_bank_census.term_length_buckets[1],
+            Compiled_bank_census.term_length_buckets[2],
+            Compiled_bank_census.term_length_buckets[3],
+            Compiled_bank_census.term_length_buckets[4],
+            Compiled_bank_census.term_length_buckets[5],
+            Compiled_bank_census.term_length_buckets[6],
+            Compiled_bank_census.term_length_buckets[7]);
     for (i = 0; i < PACKED_HINT_OPERATIONS; i++) {
       struct compiled_hint_census_stats *s = Compiled_census + i;
       struct compiled_hint_census_stats *p =

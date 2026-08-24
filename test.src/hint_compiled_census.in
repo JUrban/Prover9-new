@@ -20,6 +20,11 @@ formulas(hints).
   p(f(h(c),h(d),g(a))) # label(repeated_only).
   p(f(h(c),h(c),g(b))) # label(rigid_only).
   p(f(h(c),h(d),g(b))) # label(combined).
+  q(k(x,x)) # label(stored_repeated_variable).
+  -r(y) # label(negative_unit).
+  u(x) = v(x) # label(equation).
+  u(a) != v(b) # label(disequation).
+  -s(x) | t(x) # label(nonunit).
 end_of_list.
 
 formulas(sos).
