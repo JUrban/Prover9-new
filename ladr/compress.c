@@ -189,6 +189,46 @@ static BOOL packed_terms_ident(const unsigned char *data,
   return a == first_end && b == second_end;
 }
 
+static BOOL skip_packed_children_profile(
+  const unsigned char *data, unsigned size, unsigned *offset,
+  unsigned children, unsigned long long *nodes)
+{
+  unsigned pending = children;
+  while (pending != 0) {
+    BOOL variable;
+    unsigned number, arity;
+    if (!read_packed_node(data, size, offset, &variable, &number, &arity))
+      return FALSE;
+    (*nodes)++;
+    pending--;
+    if (arity > UINT_MAX - pending)
+      return FALSE;
+    pending += arity;
+  }
+  return TRUE;
+}
+
+static BOOL packed_terms_ident_profile(
+  const unsigned char *data,
+  unsigned first_start, unsigned first_end,
+  unsigned second_start, unsigned second_end,
+  unsigned long long *nodes)
+{
+  unsigned a = first_start;
+  unsigned b = second_start;
+  while (a < first_end && b < second_end) {
+    BOOL avar, bvar;
+    unsigned anum, bnum, aarity, barity;
+    if (!read_packed_node(data, first_end, &a, &avar, &anum, &aarity) ||
+        !read_packed_node(data, second_end, &b, &bvar, &bnum, &barity))
+      return FALSE;
+    (*nodes)++;
+    if (avar != bvar || anum != bnum || aarity != barity)
+      return FALSE;
+  }
+  return a == first_end && b == second_end;
+}
+
 /* Locate the unit atom inside the right-associated clause encoding. */
 static BOOL packed_unit_atom(Topform c, BOOL positive,
                              const unsigned char **data_out,
@@ -275,6 +315,83 @@ static BOOL resident_matches_packed(Term pattern,
   return TRUE;
 }
 
+/* Diagnostic traversal for the compiled-matcher census.  Unlike the hot
+   matcher above, it continues after a repeated-variable mismatch so a later
+   rigid mismatch is also visible.  That tells us how many candidates a
+   rarity-ordered rigid test could reject before binding work. */
+static BOOL resident_matches_packed_profile(
+  Term pattern, const unsigned char *data, unsigned start, unsigned end,
+  BOOL *matched, struct compressed_unit_match_profile *profile)
+{
+  Term stack[1000];
+  unsigned bind_start[MAX_VARS];
+  unsigned bind_end[MAX_VARS];
+  unsigned char bound[MAX_VARS];
+  int top = 0;
+  unsigned offset = start;
+  memset(bound, 0, sizeof(bound));
+  memset(profile, 0, sizeof(*profile));
+  stack[top++] = pattern;
+  while (top > 0) {
+    Term p = stack[--top];
+    unsigned node_start = offset;
+    BOOL variable;
+    unsigned number, arity;
+    if (!read_packed_node(data, end, &offset, &variable, &number, &arity))
+      return FALSE;
+    profile->stream_nodes++;
+    if (VARIABLE(p)) {
+      unsigned vn = (unsigned) VARNUM(p);
+      unsigned node_end;
+      unsigned long long child_nodes = 0;
+      if (vn >= MAX_VARS ||
+          !skip_packed_children_profile(data, end, &offset, arity,
+                                        &child_nodes))
+        return FALSE;
+      profile->stream_nodes += child_nodes;
+      profile->skipped_subterms++;
+      profile->skipped_nodes += child_nodes + 1;
+      profile->skipped_bytes += offset - node_start;
+      node_end = offset;
+      if (!bound[vn]) {
+        bound[vn] = 1;
+        bind_start[vn] = node_start;
+        bind_end[vn] = node_end;
+        profile->first_bindings++;
+      }
+      else {
+        unsigned long long compared = 0;
+        BOOL identical;
+        profile->repeated_tests++;
+        identical = packed_terms_ident_profile(
+          data, bind_start[vn], bind_end[vn], node_start, node_end,
+          &compared);
+        profile->repeated_compare_nodes += compared;
+        if (!identical)
+          profile->reject_reasons |= COMPRESSED_UNIT_REJECT_REPEATED;
+      }
+    }
+    else {
+      int i;
+      profile->rigid_tests++;
+      if (variable || number != (unsigned) SYMNUM(p) ||
+          arity != (unsigned) ARITY(p)) {
+        profile->reject_reasons |= COMPRESSED_UNIT_REJECT_RIGID;
+        *matched = FALSE;
+        return TRUE;
+      }
+      if (top + ARITY(p) > (int) (sizeof(stack) / sizeof(stack[0])))
+        return FALSE;
+      for (i = ARITY(p) - 1; i >= 0; i--)
+        stack[top++] = ARG(p,i);
+    }
+  }
+  if (offset != end)
+    return FALSE;
+  *matched = profile->reject_reasons == 0;
+  return TRUE;
+}
+
 /* Match a preorder packed pattern against an ordinary Term target. */
 static BOOL packed_matches_resident(const unsigned char *data,
                                     unsigned start, unsigned end,
@@ -337,6 +454,27 @@ BOOL compressed_unit_target_matches(Literals resident,
   if (!packed_unit_atom(compressed, resident->sign, &data, &start, &end))
     return FALSE;
   return resident_matches_packed(resident->atom, data, start, end, matched);
+}
+
+BOOL compressed_unit_target_match_profile(
+  Literals resident, Topform compressed, BOOL *matched,
+  struct compressed_unit_match_profile *profile)
+{
+  const unsigned char *data;
+  unsigned start, end;
+  if (matched == NULL || profile == NULL || compressed == NULL ||
+      resident == NULL || resident->next != NULL)
+    return FALSE;
+  memset(profile, 0, sizeof(*profile));
+  if (resident->sign == compressed->neg_compressed) {
+    profile->reject_reasons = COMPRESSED_UNIT_REJECT_SIGN;
+    *matched = FALSE;
+    return TRUE;
+  }
+  if (!packed_unit_atom(compressed, resident->sign, &data, &start, &end))
+    return FALSE;
+  return resident_matches_packed_profile(
+    resident->atom, data, start, end, matched, profile);
 }
 
 BOOL compressed_unit_pattern_matches(Topform compressed,

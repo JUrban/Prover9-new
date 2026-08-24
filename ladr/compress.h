@@ -41,6 +41,28 @@ struct clause_compression_stats {
   unsigned long long recompressed;
 };
 
+/* Diagnostic decomposition of a successful or failed resident-pattern match
+   against a compressed unit target.  It is deliberately separate from the
+   hot compressed_unit_target_matches() path: callers that do not request a
+   profile pay no extra per-node branches.  Reject reasons are bit flags
+   because a repeated-variable mismatch can be observed before a later rigid
+   symbol mismatch in the same candidate. */
+#define COMPRESSED_UNIT_REJECT_SIGN     1U
+#define COMPRESSED_UNIT_REJECT_RIGID    2U
+#define COMPRESSED_UNIT_REJECT_REPEATED 4U
+
+struct compressed_unit_match_profile {
+  unsigned reject_reasons;
+  unsigned long long stream_nodes;
+  unsigned long long rigid_tests;
+  unsigned long long first_bindings;
+  unsigned long long repeated_tests;
+  unsigned long long skipped_subterms;
+  unsigned long long skipped_nodes;
+  unsigned long long skipped_bytes;
+  unsigned long long repeated_compare_nodes;
+};
+
 /* End of public definitions */
 
 /* Public function prototypes from compress.c */
@@ -81,6 +103,15 @@ BOOL compressed_clause_is_valid(Topform c);
 BOOL compressed_unit_target_matches(Literals resident,
                                     Topform compressed,
                                     BOOL *matched);
+
+/* Diagnostic counterpart of compressed_unit_target_matches().  It returns
+   the same supported/matched answer and additionally classifies exact work
+   without allocating or materializing the compressed target. */
+BOOL compressed_unit_target_match_profile(
+  Literals resident,
+  Topform compressed,
+  BOOL *matched,
+  struct compressed_unit_match_profile *profile);
 
 BOOL compressed_unit_pattern_matches(Topform compressed,
                                      Literals resident,
