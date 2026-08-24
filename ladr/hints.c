@@ -204,7 +204,10 @@ static unsigned Compiled_fused_structural_kept = 0;
 static unsigned Compiled_fused_direct_count = 0;
 static unsigned Compiled_fused_program_count = 0;
 static unsigned Compiled_fused_same_program_count = 0;
+static unsigned Compiled_fused_same_direct_count = 0;
 static unsigned Compiled_fused_direct_indices[
+  COMPILED_PROGRAM_MAX_CONDITIONS];
+static unsigned char Compiled_fused_direct_kinds[
   COMPILED_PROGRAM_MAX_CONDITIONS];
 static unsigned long long Compiled_fused_direct_work[
   COMPILED_PROGRAM_MAX_CONDITIONS];
@@ -215,6 +218,7 @@ static struct compiled_same_cache_entry *Compiled_fused_program[
 static unsigned Compiled_fused_current_word = UINT_MAX;
 static unsigned long long Compiled_fused_current_bits = 0;
 static unsigned long long Compiled_fused_candidate_tests = 0;
+static unsigned long long Compiled_fused_rigid_candidate_tests = 0;
 static unsigned long long Compiled_fused_navigation_rejects = 0;
 static unsigned long long Compiled_fused_unequal_rejects = 0;
 static unsigned long long Compiled_fused_word_ops = 0;
@@ -3301,9 +3305,11 @@ void init_hints(Uniftype utype,
   Compiled_fused_direct_count = 0;
   Compiled_fused_program_count = 0;
   Compiled_fused_same_program_count = 0;
+  Compiled_fused_same_direct_count = 0;
   Compiled_fused_current_word = UINT_MAX;
   Compiled_fused_current_bits = 0;
   Compiled_fused_candidate_tests = 0;
+  Compiled_fused_rigid_candidate_tests = 0;
   Compiled_fused_navigation_rejects = 0;
   Compiled_fused_unequal_rejects = 0;
   Compiled_fused_word_ops = 0;
@@ -3658,9 +3664,11 @@ void done_with_hints(void)
   Compiled_fused_direct_count = 0;
   Compiled_fused_program_count = 0;
   Compiled_fused_same_program_count = 0;
+  Compiled_fused_same_direct_count = 0;
   Compiled_fused_current_word = UINT_MAX;
   Compiled_fused_current_bits = 0;
   Compiled_fused_candidate_tests = 0;
+  Compiled_fused_rigid_candidate_tests = 0;
   Compiled_fused_navigation_rejects = 0;
   Compiled_fused_unequal_rejects = 0;
   Compiled_fused_word_ops = 0;
@@ -3921,9 +3929,9 @@ static void compiled_plan_note_variable(Term t, unsigned depth)
 static void compiled_plan_note_rigid(Term t, unsigned depth)
 {
   struct compiled_rigid_test *test;
-  /* Candidate count is already known before query-plan construction.  Do
-     not copy deep routes for the overwhelmingly common cheap queries that
-     cannot pass the collective-filter admission threshold. */
+  /* The postfilter normally knows candidate count before constructing this
+     plan.  Blocks mode explicitly requests a bounded pre-lookup plan so a
+     profitable fixed-symbol test can run during candidate emission. */
   if (!Compiled_plan_collect_rigid &&
       Packed_candidates_count < Compiled_same_min_candidates)
     return;
@@ -3991,6 +3999,25 @@ static void compiled_query_identity_plan(void)
         (j + 1 < test->second_length ?
           (unsigned long long)
             Compiled_plan_paths[test->second_offset + j + 1] << 32 : 0));
+  }
+  /* The SAME count makes the first segment self-delimiting.  Append the
+     complete RIGID program as a second self-delimiting segment so diagnostic
+     threshold-zero result-cache entries cannot alias two distinct deep
+     fixed-symbol queries that share the same shallow packed profile. */
+  compiled_query_identity_add(
+    (unsigned long long) Compiled_rigid_test_count);
+  for (i = 0; i < Compiled_rigid_test_count; i++) {
+    struct compiled_rigid_test *test = Compiled_rigid_tests + i;
+    compiled_query_identity_add(
+      ((unsigned long long) test->symbol << 32) |
+      (unsigned long long) test->path_length);
+    for (j = 0; j < test->path_length; j += 2)
+      compiled_query_identity_add(
+        (unsigned long long)
+          Compiled_plan_paths[test->path_offset + j] |
+        (j + 1 < test->path_length ?
+          (unsigned long long)
+            Compiled_plan_paths[test->path_offset + j + 1] << 32 : 0));
   }
 }
 
@@ -4526,6 +4553,72 @@ static BOOL compiled_condition_program_filter(
   return TRUE;
 }
 
+/* Choose one deep fixed-symbol instruction from an already emitted prefix.
+   The prefix is a deterministic sample of the real packed candidate stream,
+   not a broad posting-list cardinality proxy.  This helper is shared by the
+   old postfilter and the blocks-mode before-emission executor so both use the
+   same bounded selectivity policy. */
+static unsigned compiled_select_rigid_test(const unsigned *candidates,
+                                           unsigned before, BOOL account)
+{
+  unsigned samples, i, j;
+  unsigned selected = UINT_MAX;
+  unsigned best_rejects = 0, best_supported = 1;
+  if (Compiled_rigid_test_count == 0 || before == 0)
+    return UINT_MAX;
+  samples = before < COMPILED_RIGID_SAMPLE_CANDIDATES ?
+    before : COMPILED_RIGID_SAMPLE_CANDIDATES;
+  for (i = 0; i < Compiled_rigid_test_count; i++) {
+    struct compiled_rigid_test *test = Compiled_rigid_tests + i;
+    unsigned rejects = 0, supported = 0;
+    for (j = 0; j < samples; j++) {
+      unsigned position = (unsigned)
+        (((unsigned long long) j * before) / samples);
+      unsigned id = candidates[position];
+      uint32_t root = compiled_hint_root(id, account);
+      int result;
+      if (root == 0)
+        continue;
+      result = hint_term_table_path_symbol(
+        Compiled_term_table, root,
+        test->path_length == 0 ? NULL :
+          Compiled_plan_paths + test->path_offset,
+        test->path_length, test->symbol);
+      if (result < 0)
+        fatal_error("compiled rigid sample: invalid canonical target");
+      supported++;
+      if (result == 0)
+        rejects++;
+    }
+    if (account) {
+      Compiled_rigid_sample_tests++;
+      Compiled_rigid_sample_candidates += supported;
+      Compiled_rigid_sample_rejects += rejects;
+    }
+    if (supported != 0 &&
+        (unsigned long long) rejects * 100 >=
+          (unsigned long long) supported *
+            COMPILED_RIGID_MIN_REJECT_PERCENT &&
+        (selected == UINT_MAX ||
+         (unsigned long long) rejects * best_supported >
+           (unsigned long long) best_rejects * supported ||
+         ((unsigned long long) rejects * best_supported ==
+            (unsigned long long) best_rejects * supported &&
+          (test->path_length <
+             Compiled_rigid_tests[selected].path_length ||
+           (test->path_length ==
+              Compiled_rigid_tests[selected].path_length &&
+            test->symbol < Compiled_rigid_tests[selected].symbol))))) {
+      selected = i;
+      best_rejects = rejects;
+      best_supported = supported;
+    }
+  }
+  if (account)
+    Compiled_rigid_sampled_queries++;
+  return selected;
+}
+
 static BOOL compiled_fused_candidate_accept(unsigned id)
 {
   BOOL account = !Hint_preview_active;
@@ -4552,29 +4645,48 @@ static BOOL compiled_fused_candidate_accept(unsigned id)
       return FALSE;
   }
   for (j = 0; j < Compiled_fused_direct_count; j++) {
-    struct compiled_same_test *test =
-      Compiled_same_tests + Compiled_fused_direct_indices[j];
-    int comparison;
-    if (account) {
-      Compiled_fused_candidate_tests++;
+    unsigned index = Compiled_fused_direct_indices[j];
+    if (account)
       Compiled_fused_direct_work[j]++;
-    }
-    comparison = hint_term_table_compare_paths(
-      Compiled_term_table, root,
-      test->first_length == 0 ? NULL :
-        Compiled_plan_paths + test->first_offset, test->first_length,
-      test->second_length == 0 ? NULL :
-        Compiled_plan_paths + test->second_offset, test->second_length);
-    if (comparison < 0) {
+    if (Compiled_fused_direct_kinds[j] == COMPILED_CONDITION_SAME) {
+      struct compiled_same_test *test = Compiled_same_tests + index;
+      int comparison;
       if (account)
-        Compiled_fused_navigation_rejects++;
-      return FALSE;
+        Compiled_fused_candidate_tests++;
+      comparison = hint_term_table_compare_paths(
+        Compiled_term_table, root,
+        test->first_length == 0 ? NULL :
+          Compiled_plan_paths + test->first_offset, test->first_length,
+        test->second_length == 0 ? NULL :
+          Compiled_plan_paths + test->second_offset, test->second_length);
+      if (comparison < 0) {
+        if (account)
+          Compiled_fused_navigation_rejects++;
+        return FALSE;
+      }
+      else if (comparison == 0) {
+        if (account)
+          Compiled_fused_unequal_rejects++;
+        return FALSE;
+      }
     }
-    else if (comparison == 0) {
+    else if (Compiled_fused_direct_kinds[j] == COMPILED_CONDITION_RIGID) {
+      struct compiled_rigid_test *test = Compiled_rigid_tests + index;
+      int result;
       if (account)
-        Compiled_fused_unequal_rejects++;
-      return FALSE;
+        Compiled_fused_rigid_candidate_tests++;
+      result = hint_term_table_path_symbol(
+        Compiled_term_table, root,
+        test->path_length == 0 ? NULL :
+          Compiled_plan_paths + test->path_offset,
+        test->path_length, test->symbol);
+      if (result < 0)
+        fatal_error("compiled fused rigid: invalid canonical target");
+      if (result == 0)
+        return FALSE;
     }
+    else
+      fatal_error("unknown compiled fused direct condition kind");
   }
   return TRUE;
 }
@@ -4583,6 +4695,10 @@ static void compiled_fused_activate(void)
 {
   BOOL account = !Hint_preview_active;
   unsigned i, keep = 0;
+  unsigned unbuilt_same_count = 0;
+  unsigned unbuilt_same_indices[COMPILED_PROGRAM_MAX_CONDITIONS];
+  struct compiled_same_cache_entry *unbuilt_same_entries[
+    COMPILED_PROGRAM_MAX_CONDITIONS];
   if (Compiled_fused_active || !Compiled_fused_prepared)
     return;
   Compiled_fused_active = TRUE;
@@ -4602,12 +4718,10 @@ static void compiled_fused_activate(void)
     if (entry != NULL && entry->built)
       compiled_program_consider(
         Compiled_fused_program, &Compiled_fused_program_count, entry);
-    else if (Compiled_fused_direct_count <
-             COMPILED_PROGRAM_MAX_CONDITIONS) {
-      unsigned position = Compiled_fused_direct_count++;
-      Compiled_fused_direct_indices[position] = i;
-      Compiled_fused_direct_entries[position] = entry;
-      Compiled_fused_direct_work[position] = 0;
+    else if (unbuilt_same_count < COMPILED_PROGRAM_MAX_CONDITIONS) {
+      unbuilt_same_indices[unbuilt_same_count] = i;
+      unbuilt_same_entries[unbuilt_same_count] = entry;
+      unbuilt_same_count++;
     }
   }
   if (Compiled_same_cache_ready)
@@ -4628,6 +4742,43 @@ static void compiled_fused_activate(void)
       Compiled_fused_same_program_count++;
     else
       Compiled_rigid_program_applied = TRUE;
+  }
+  /* If no learned fixed-symbol mask applies yet, select one condition from
+     the real emitted prefix and put it first in the direct program.  A hot
+     condition is then trained by the same work counters and can mature in
+     the same batched bank scan as the co-occurring SAME instructions. */
+  if (!Compiled_rigid_program_applied &&
+      Compiled_fused_direct_count < COMPILED_PROGRAM_MAX_CONDITIONS) {
+    unsigned selected = compiled_select_rigid_test(
+      Packed_candidates, Packed_candidates_count, account);
+    if (selected != UINT_MAX) {
+      struct compiled_same_cache_entry *entry =
+        Compiled_same_cache_ready ? compiled_rigid_cache_lookup(
+          Compiled_rigid_tests + selected, account) : NULL;
+      unsigned position = Compiled_fused_direct_count++;
+      if (account && Compiled_same_cache_ready) {
+        Compiled_same_cache_lookups++;
+        if (entry != NULL)
+          entry->queries++;
+      }
+      Compiled_fused_direct_indices[position] = selected;
+      Compiled_fused_direct_kinds[position] = COMPILED_CONDITION_RIGID;
+      Compiled_fused_direct_entries[position] = entry;
+      Compiled_fused_direct_work[position] = 0;
+      Compiled_rigid_program_applied = TRUE;
+    }
+    else if (account && Compiled_rigid_test_count != 0)
+      Compiled_rigid_admission_skips++;
+  }
+  for (i = 0; i < unbuilt_same_count &&
+              Compiled_fused_direct_count <
+                COMPILED_PROGRAM_MAX_CONDITIONS; i++) {
+    unsigned position = Compiled_fused_direct_count++;
+    Compiled_fused_direct_indices[position] = unbuilt_same_indices[i];
+    Compiled_fused_direct_kinds[position] = COMPILED_CONDITION_SAME;
+    Compiled_fused_direct_entries[position] = unbuilt_same_entries[i];
+    Compiled_fused_direct_work[position] = 0;
+    Compiled_fused_same_direct_count++;
   }
   if (account) {
     Compiled_fused_activations++;
@@ -4654,7 +4805,7 @@ static void compiled_fused_finish(void)
   if (!account)
     return;
   if (!Compiled_fused_active) {
-    if (Compiled_fused_seen != 0) {
+    if (Compiled_same_test_count != 0 && Compiled_fused_seen != 0) {
       Compiled_same_admission_skips++;
       Compiled_same_skipped_candidates += Compiled_fused_seen;
     }
@@ -4676,15 +4827,17 @@ static void compiled_fused_finish(void)
       Compiled_plan_maximum_total)
     Compiled_plan_maximum_total =
       Compiled_same_test_count + Compiled_rigid_test_count;
-  Compiled_same_queries++;
-  Compiled_same_query_tests +=
-    Compiled_fused_same_program_count + Compiled_fused_direct_count;
-  Compiled_same_candidates_before += Compiled_fused_seen;
-  Compiled_same_candidates_after += Compiled_fused_structural_kept;
-  Compiled_same_candidate_tests += Compiled_fused_candidate_tests;
-  Compiled_same_navigation_rejects +=
-    Compiled_fused_navigation_rejects;
-  Compiled_same_unequal_rejects += Compiled_fused_unequal_rejects;
+  if (Compiled_same_test_count != 0) {
+    Compiled_same_queries++;
+    Compiled_same_query_tests +=
+      Compiled_fused_same_program_count + Compiled_fused_same_direct_count;
+    Compiled_same_candidates_before += Compiled_fused_seen;
+    Compiled_same_candidates_after += Compiled_fused_structural_kept;
+    Compiled_same_candidate_tests += Compiled_fused_candidate_tests;
+    Compiled_same_navigation_rejects +=
+      Compiled_fused_navigation_rejects;
+    Compiled_same_unequal_rejects += Compiled_fused_unequal_rejects;
+  }
   if (Compiled_fused_program_count != 0) {
     Compiled_program_queries++;
     Compiled_program_conditions += Compiled_fused_program_count;
@@ -4716,6 +4869,8 @@ static void compiled_fused_finish(void)
     Compiled_rigid_queries++;
     Compiled_rigid_candidates_before += Compiled_fused_seen;
     Compiled_rigid_candidates_after += Compiled_fused_structural_kept;
+    Compiled_rigid_candidate_tests +=
+      Compiled_fused_rigid_candidate_tests;
   }
 }
 
@@ -4826,9 +4981,11 @@ static void compiled_fused_query_begin(
   Compiled_fused_direct_count = 0;
   Compiled_fused_program_count = 0;
   Compiled_fused_same_program_count = 0;
+  Compiled_fused_same_direct_count = 0;
   Compiled_fused_current_word = UINT_MAX;
   Compiled_fused_current_bits = 0;
   Compiled_fused_candidate_tests = 0;
+  Compiled_fused_rigid_candidate_tests = 0;
   Compiled_fused_navigation_rejects = 0;
   Compiled_fused_unequal_rejects = 0;
   Compiled_fused_word_ops = 0;
@@ -4840,11 +4997,14 @@ static void compiled_fused_query_begin(
        hint_contains_anyconst(c)))
     return;
   compiled_plan_begin();
+  Compiled_plan_collect_rigid = TRUE;
   compiled_path_collect_query(
     c->literals->atom, c->literals->sign,
     UINT64_C(0x243f6a8885a308d3), 0);
+  Compiled_plan_collect_rigid = FALSE;
   compiled_query_identity_plan();
-  Compiled_fused_prepared = Compiled_same_test_count != 0;
+  Compiled_fused_prepared =
+    Compiled_same_test_count != 0 || Compiled_rigid_test_count != 0;
   if (Compiled_fused_prepared && Compiled_same_min_candidates == 0)
     compiled_fused_activate();
 }
@@ -5028,10 +5188,9 @@ static void compiled_same_filter_candidates(void)
 static void compiled_rigid_filter_candidates(void)
 {
   unsigned before = Packed_candidates_count;
-  unsigned samples, i, j;
+  unsigned i;
   unsigned selected = UINT_MAX;
   unsigned program_count = 0;
-  unsigned best_rejects = 0, best_supported = 1;
   unsigned keep = 0;
   unsigned long long candidate_tests = 0;
   struct compiled_same_cache_entry *cache_entry = NULL;
@@ -5074,59 +5233,8 @@ static void compiled_rigid_filter_candidates(void)
     return;
   }
 
-  /* Estimate positional selectivity on a deterministic, evenly spaced
-     sample.  Only the selected instruction receives a full candidate pass;
-     this bounds query-planning work independently of bank size. */
-  samples = before < COMPILED_RIGID_SAMPLE_CANDIDATES ?
-    before : COMPILED_RIGID_SAMPLE_CANDIDATES;
-  for (i = 0; i < Compiled_rigid_test_count; i++) {
-    struct compiled_rigid_test *test = Compiled_rigid_tests + i;
-    unsigned rejects = 0, supported = 0;
-    for (j = 0; j < samples; j++) {
-      unsigned position = (unsigned)
-        (((unsigned long long) j * before) / samples);
-      unsigned id = Packed_candidates[position];
-      uint32_t root = compiled_hint_root(id, account);
-      int result;
-      if (root == 0)
-        continue;
-      result = hint_term_table_path_symbol(
-        Compiled_term_table, root,
-        test->path_length == 0 ? NULL :
-          Compiled_plan_paths + test->path_offset,
-        test->path_length, test->symbol);
-      if (result < 0)
-        fatal_error("compiled rigid sample: invalid canonical target");
-      supported++;
-      if (result == 0)
-        rejects++;
-    }
-    if (account) {
-      Compiled_rigid_sample_tests++;
-      Compiled_rigid_sample_candidates += supported;
-      Compiled_rigid_sample_rejects += rejects;
-    }
-    if (supported != 0 &&
-        (unsigned long long) rejects * 100 >=
-          (unsigned long long) supported *
-            COMPILED_RIGID_MIN_REJECT_PERCENT &&
-        (selected == UINT_MAX ||
-         (unsigned long long) rejects * best_supported >
-           (unsigned long long) best_rejects * supported ||
-         ((unsigned long long) rejects * best_supported ==
-            (unsigned long long) best_rejects * supported &&
-          (test->path_length <
-             Compiled_rigid_tests[selected].path_length ||
-           (test->path_length ==
-              Compiled_rigid_tests[selected].path_length &&
-            test->symbol < Compiled_rigid_tests[selected].symbol))))) {
-      selected = i;
-      best_rejects = rejects;
-      best_supported = supported;
-    }
-  }
-  if (account)
-    Compiled_rigid_sampled_queries++;
+  selected = compiled_select_rigid_test(
+    Packed_candidates, before, account);
   if (selected == UINT_MAX) {
     if (account)
       Compiled_rigid_admission_skips++;
