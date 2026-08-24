@@ -431,7 +431,7 @@ blocks_rigid_input="$test_tmp/blocks-rigid.in"
     'formulas(hints).'
   rigid_i=1
   while [ "$rigid_i" -le 600 ]; do
-    emit_rigid_atom p $((rigid_i % 2)) 0 "$rigid_i"
+    emit_rigid_atom p $((rigid_i % 3 == 0)) 0 "$rigid_i"
     rigid_i=$((rigid_i + 1))
   done
   printf '%s\n' 'end_of_list.' 'formulas(sos).'
@@ -462,6 +462,8 @@ diff -u "$test_tmp/blocks-rigid-control.trace" \
 if ! grep -Eq '^Compiled_hint_plan: .*same_conditions=0, rigid_conditions=[1-9][0-9]*,' \
      "$test_tmp/blocks-rigid-blocks.out" || \
    ! grep -Eq '^Compiled_hint_same_cache: .*same_entries=0, rigid_entries=1, same_built=0, rigid_built=1,.*rigid_hits=[1-9][0-9]*,' \
+     "$test_tmp/blocks-rigid-blocks.out" || \
+   ! grep -Eq '^Compiled_hint_query_program_cache: .*hits=[1-9][0-9]*,.*stores=[1-9][0-9]*,.*sample_tests_avoided=[1-9][0-9]*\.' \
      "$test_tmp/blocks-rigid-blocks.out" || \
    ! grep -Eq '^Compiled_hint_blocks: .*block_words=[1-9][0-9]*, block_rejects=[1-9][0-9]*,' \
      "$test_tmp/blocks-rigid-blocks.out"; then
