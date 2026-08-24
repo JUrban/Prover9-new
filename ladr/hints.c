@@ -259,6 +259,9 @@ static unsigned long long Fast_dense_data_plane_reads = 0;
 static unsigned long long Fast_profile_early_checks = 0;
 static unsigned long long Fast_profile_early_literal_rejects = 0;
 static unsigned long long Fast_profile_early_feature_rejects = 0;
+static unsigned long long Fast_mask_query_builds = 0;
+static unsigned long long Fast_mask_equivalence_literal_builds = 0;
+static unsigned long long Fast_mask_avoided_builds = 0;
 
 /* Posting rebuilds and AnyConst additions invalidate every dependency set. */
 static void fast_cache_invalidate_all(void)
@@ -2729,6 +2732,9 @@ void done_with_hints(void)
   Fast_profile_early_checks = 0;
   Fast_profile_early_literal_rejects = 0;
   Fast_profile_early_feature_rejects = 0;
+  Fast_mask_query_builds = 0;
+  Fast_mask_equivalence_literal_builds = 0;
+  Fast_mask_avoided_builds = 0;
   Packed_hint_capacity = 0;
   Packed_candidates_count = Packed_candidates_capacity = 0;
   Preview_candidate_serial = 1;
@@ -2874,20 +2880,39 @@ static void better_collect_clause_candidates(
   unsigned long long posting_candidates_before = 0;
   BOOL fast_eligible = FALSE;
   struct fast_candidate_filter fast_filter;
-  unsigned long long first_mask = first == NULL ? 0 :
-    packed_term_feature_mask(first->atom, TRUE);
+  unsigned long long first_mask = 0;
   BOOL equivalence = op == PACKED_HINT_EQUIVALENCE;
   BOOL query_anyconst = MATCH_HINTS_ANYCONST && AnyConstsEnabled &&
                         hint_contains_anyconst(c);
   for (lit = c->literals; lit != NULL; lit = lit->next) {
-    unsigned long long mask = packed_term_feature_mask(lit->atom, FALSE);
     if (lit->sign) {
       positive++;
-      positive_mask |= mask;
+    }
+    else
+      negative++;
+    if (equivalence) {
+      unsigned long long mask = packed_term_feature_mask(lit->atom, FALSE);
+      if (lit->sign)
+        positive_mask |= mask;
+      else
+        negative_mask |= mask;
+    }
+  }
+  if (!equivalence && first != NULL)
+    first_mask = packed_term_feature_mask(first->atom, TRUE);
+  if (Fast_packed_index && !Hint_preview_active) {
+    if (equivalence) {
+      Fast_mask_equivalence_literal_builds += positive + negative;
+      if (first != NULL)
+        Fast_mask_avoided_builds++;
     }
     else {
-      negative++;
-      negative_mask |= mask;
+      if (first != NULL)
+        Fast_mask_query_builds++;
+      /* The old shared loop rebuilt the first mask and built unused masks for
+         every remaining literal.  Counting the literals records those
+         removed complete term traversals without instrumenting recursion. */
+      Fast_mask_avoided_builds += positive + negative;
     }
   }
   packed_begin_candidates();
@@ -4137,6 +4162,12 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             Fast_dense_data_plane_reads, Fast_profile_early_checks,
             Fast_profile_early_literal_rejects,
             Fast_profile_early_feature_rejects);
+    fprintf(fp,
+            "Packed_fast_mask_builds: query=%llu, "
+            "equivalence_literals=%llu, avoided=%llu.\n",
+            Fast_mask_query_builds,
+            Fast_mask_equivalence_literal_builds,
+            Fast_mask_avoided_builds);
   }
 }
 

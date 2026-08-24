@@ -203,6 +203,8 @@ static void run_early_profile_filter_case(int bsub)
     parse_clause_from_string(
       "early_profile(f(g(a))) | early_guard(a).");
   unsigned long long checks = 0, literal_rejects = 0, feature_rejects = 0;
+  unsigned long long query_builds = 0, equivalence_builds = 0;
+  unsigned long long avoided_builds = 0;
   FILE *stats = tmpfile();
   char line[4096];
 
@@ -224,7 +226,7 @@ static void run_early_profile_filter_case(int bsub)
   if (stats != NULL) {
     fprint_packed_hint_operation_stats(stats);
     rewind(stats);
-    while (fgets(line, sizeof(line), stats) != NULL)
+    while (fgets(line, sizeof(line), stats) != NULL) {
       if (strstr(line, "Packed_fast_dense:") != NULL) {
         char *field = strstr(line, "early_profile_checks=");
         if (field != NULL)
@@ -239,10 +241,27 @@ static void run_early_profile_filter_case(int bsub)
           feature_rejects = strtoull(
             field + strlen("early_feature_rejects="), NULL, 10);
       }
+      else if (strstr(line, "Packed_fast_mask_builds:") != NULL) {
+        char *field = strstr(line, "query=");
+        if (field != NULL)
+          query_builds = strtoull(field + strlen("query="), NULL, 10);
+        field = strstr(line, "equivalence_literals=");
+        if (field != NULL)
+          equivalence_builds = strtoull(
+            field + strlen("equivalence_literals="), NULL, 10);
+        field = strstr(line, "avoided=");
+        if (field != NULL)
+          avoided_builds = strtoull(
+            field + strlen("avoided="), NULL, 10);
+      }
+    }
     fclose(stats);
   }
   CHECK(checks >= 3 && literal_rejects > 0 && feature_rejects > 0,
         "dense/sparse fallback rejects impossible profiles before insertion");
+  CHECK(query_builds == 1 && equivalence_builds == 5 &&
+        avoided_builds == 5,
+        "mask construction avoids duplicate ordinary/equivalence traversals");
   unindex_hint(matching_hint);
   unindex_hint(feature_hint);
   unindex_hint(short_hint);
