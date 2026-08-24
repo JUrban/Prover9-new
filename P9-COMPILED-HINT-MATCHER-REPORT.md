@@ -150,10 +150,16 @@ compressed matcher, which remains the final authority.
 
 The established packed result cache also needed a correctness change in this
 mode.  Queries such as `f(x,x)` and `f(x,y)` can have identical shallow packed
-features but different repeated-variable requirements.  Blocks mode adds an
-exact, compact encoding of the SAME child-route pairs to the cache identity.
-It stores full equality data, not only a collision-prone hash, and continues
-to validate dependencies using only actual posting keys.
+features but different repeated-variable requirements.  In threshold-zero
+diagnostic runs, blocks mode adds an exact compact encoding of the SAME
+child-route pairs to the cache identity.  It stores full equality data, not
+only a collision-prone hash, and validates dependencies using only actual
+posting keys.  At the normal nonzero threshold, narrow results that never
+activate structural filtering retain `packed_fast`'s small key.  A broad
+result changed by structural filtering is not stored in this cache, because
+the small key does not identify it exactly and copying a large structural key
+on every broad query would recreate the scaling cost the experiment is meant
+to remove.
 
 ### Demand-built canonical bank experiment
 
@@ -370,6 +376,29 @@ matured in these short runs.  Thus Josef 02's roughly 7.5% total-CPU gain is
 promising evidence for early insertion filtering, while Josef 01 is an honest
 neutral result; neither measures the new long-run dense-block path or passes
 the 1,000-given promotion gate.
+
+The first 600-given Josef 02 run exposed a real scaling bug.  The initial
+dense path used the cardinality of its broad seed posting as a proxy for the
+configured 128-candidate activation threshold.  That posting was much larger
+than the stream remaining after the other packed tests, so the run filled all
+4,096 compiled metadata entries and denied 110,113 later entries.  Activation
+now has one authority: unique candidates actually presented for emission.
+
+After that correction, candidate and control both stopped at Given=601,
+Generated=524,799, and Kept=26,671.  The candidate used 105 metadata entries
+with zero metadata denials.  One learned mask was applied to 2,294 visited
+64-ID words and rejected 15,002 IDs before they became scalar candidate IDs.
+The current-state runs were:
+
+| Mode | Total CPU | Wall | Peak RSS | Prover9 hint clock |
+|---|---:|---:|---:|---:|
+| separate postfilter | 52.89 s | 53.19 s | 216,248 KiB | 4.54 s |
+| candidate emission | 50.34 s | 50.54 s | 216,464 KiB | 4.33 s |
+
+This approximately 5% whole-run and hint-clock improvement is useful bounded
+evidence.  The host was timing-noisy and the pair was candidate-then-control,
+so it is not a promotion result.  More importantly, the 600-given gate caught
+and removed a policy that would have deteriorated as queries accumulated.
 
 Josef 02/300 confirmed that extra necessary conditions are not automatically
 valuable: direct attempts fell from 139,308 to 86,377, while sampled ordinary

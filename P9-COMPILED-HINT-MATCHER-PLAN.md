@@ -32,9 +32,12 @@ different architecture, not a faster version of the present traversal.
 > now applies direct SAME checks before a unique ID is appended, builds up to
 > eight co-occurring hot masks in one retained-bank pass, and intersects
 > learned masks inside `packed_fast`'s dense 64-ID posting loop before scalar
-> IDs are enumerated.  Its result-cache key includes an exact compact encoding
-> of the repeated-variable path pairs.  The established compressed matcher remains
-> the final authority.  The eager all-path experiment was not worthwhile and
+> IDs are enumerated.  Threshold-zero diagnostics use an exact compact
+> repeated-variable cache identity.  At the normal threshold, narrow
+> unfiltered results retain the small `packed_fast` key and broad filtered
+> results are not cached under an incomplete identity.  The established
+> compressed matcher remains the final authority.  The eager all-path
+> experiment was not worthwhile and
 > is isolated in `packed_compiled_paths`.  A demand-built canonical-bank mode,
 > `packed_compiled_lazy`, saves construction on Osborn but loses when a search
 > eventually touches most hints, so it too remains diagnostic.  Structural
@@ -315,11 +318,16 @@ conservative positive bits, so the optimization cannot hide a possible
 match.  Later additions are added to every applicable built mask, while stale
 positives from removal or rewriting remain harmless.
 
-The packed result cache cannot reuse a candidate list merely because two
-queries have the same shallow rigid features: `f(x,x)` and `f(x,y)` are the
-minimal counterexample.  The blocks mode therefore appends an exact compact
-serialization of SAME path pairs to the established cache identity, while
-keeping the real posting-key count separate for lifecycle validation.
+The packed result cache cannot reuse a structurally filtered candidate list
+merely because two queries have the same shallow rigid features: `f(x,x)` and
+`f(x,y)` are the minimal counterexample.  Threshold-zero diagnostic runs
+therefore append an exact compact serialization of SAME path pairs to the
+cache identity, while keeping the real posting-key count separate for
+lifecycle validation.  At the normal nonzero threshold, narrow results that
+never activate the compiled program retain the existing compact key.  Broad
+results changed by the program are not stored in that result cache.  This
+avoids both an incorrect alias and a large query-sized key in the common
+long-run path.
 
 Exact tests cover this cache-alias case and a generated 600-hint bank in
 which two SAME conditions mature together.  The third query intersects both
@@ -355,6 +363,21 @@ Given/Generated/Kept counters.  No learned mask matured in either short
 default-threshold run, so these results measure early candidate insertion,
 not yet the long-run dense-block payoff.  They are enough to continue to a
 frozen 1,000-given gate, not enough to promote the mode.
+
+The first 600-given Josef 02 gate found and corrected a scaling error before
+promotion.  The initial code activated a compiled program from the size of a
+broad seed posting rather than from candidates actually emitted after the
+other packed conditions.  It filled the 4,096-entry metadata ceiling and
+recorded 110,113 denials.  The corrected code uses the real emitted-candidate
+threshold: the same boundary (Given=601, Generated=524,799, Kept=26,671) used
+105 metadata entries with zero denials.  One learned mask was applied to
+2,294 visited 64-ID words and rejected 15,002 IDs before enumeration.
+
+On a noisy, current-state candidate/control pair, blocks used 50.34 seconds
+of total CPU and 216,464 KiB peak RSS, versus 52.89 seconds and 216,248 KiB
+for the separate postfilter.  The corresponding Prover9 hint clocks were
+4.33 and 4.54 seconds.  This roughly 5% whole-run improvement is encouraging,
+but it is one machine-order-sensitive pair, not the frozen 1,000-given gate.
 
 ### Phase 3: lifecycle and authoritative mode
 
