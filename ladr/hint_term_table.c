@@ -432,8 +432,9 @@ BOOL hint_term_table_node(Hint_term_table table, uint32_t handle,
   return TRUE;
 }
 
-BOOL hint_term_table_matches(Hint_term_table table, unsigned id,
-                             BOOL positive, Term pattern, BOOL *matched)
+static BOOL hint_term_table_matches_internal(
+  Hint_term_table table, unsigned id, BOOL positive, Term pattern,
+  BOOL *matched, BOOL account)
 {
   struct match_frame {
     Term pattern;
@@ -447,7 +448,8 @@ BOOL hint_term_table_matches(Hint_term_table table, unsigned id,
       id >= table->record_capacity ||
       (table->record_flags[id] & HINT_TERM_RECORD_ACTIVE) == 0)
     return FALSE;
-  table->match_attempts++;
+  if (account)
+    table->match_attempts++;
   if (((table->record_flags[id] & HINT_TERM_RECORD_SIGN) != 0) != positive) {
     *matched = FALSE;
     return TRUE;
@@ -460,7 +462,8 @@ BOOL hint_term_table_matches(Hint_term_table table, unsigned id,
   stack[top++].target = root;
   while (top > 0) {
     struct match_frame frame = stack[--top];
-    table->match_nodes++;
+    if (account)
+      table->match_nodes++;
     if (VARIABLE(frame.pattern)) {
       unsigned variable = (unsigned) VARNUM(frame.pattern);
       if (variable >= MAX_VARS)
@@ -468,12 +471,15 @@ BOOL hint_term_table_matches(Hint_term_table table, unsigned id,
       if (!bound[variable]) {
         bound[variable] = 1;
         bindings[variable] = frame.target;
-        table->match_first_bindings++;
+        if (account)
+          table->match_first_bindings++;
       }
       else {
-        table->match_repeated_tests++;
+        if (account)
+          table->match_repeated_tests++;
         if (bindings[variable] != frame.target) {
-          table->match_repeated_rejects++;
+          if (account)
+            table->match_repeated_rejects++;
           *matched = FALSE;
           return TRUE;
         }
@@ -482,13 +488,15 @@ BOOL hint_term_table_matches(Hint_term_table table, unsigned id,
     else {
       struct hint_term_node_view view;
       int i;
-      table->match_rigid_tests++;
+      if (account)
+        table->match_rigid_tests++;
       if (!hint_term_table_node(table, frame.target, &view))
         return FALSE;
       if (view.variable || view.symbol_or_variable !=
             (unsigned) SYMNUM(frame.pattern) ||
           view.arity != (unsigned) ARITY(frame.pattern)) {
-        table->match_rigid_rejects++;
+        if (account)
+          table->match_rigid_rejects++;
         *matched = FALSE;
         return TRUE;
       }
@@ -501,9 +509,25 @@ BOOL hint_term_table_matches(Hint_term_table table, unsigned id,
       }
     }
   }
-  table->match_successes++;
+  if (account)
+    table->match_successes++;
   *matched = TRUE;
   return TRUE;
+}
+
+BOOL hint_term_table_matches(Hint_term_table table, unsigned id,
+                             BOOL positive, Term pattern, BOOL *matched)
+{
+  return hint_term_table_matches_internal(
+    table, id, positive, pattern, matched, TRUE);
+}
+
+BOOL hint_term_table_matches_readonly(Hint_term_table table, unsigned id,
+                                      BOOL positive, Term pattern,
+                                      BOOL *matched)
+{
+  return hint_term_table_matches_internal(
+    table, id, positive, pattern, matched, FALSE);
 }
 
 void hint_term_table_get_stats(Hint_term_table table,

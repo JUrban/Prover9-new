@@ -60,6 +60,7 @@ static unsigned long long Packed_candidate_checks = 0;
 /* Construction-only precursor of the compiled matcher.  Ordinary unit hints
    receive canonical roots; packed_fast remains authoritative. */
 static BOOL Compiled_term_table_enabled = FALSE;
+static BOOL Compiled_term_table_authoritative = FALSE;
 static Hint_term_table Compiled_term_table = NULL;
 
 /* Dedicated read-only-preview query workspace.  It is allocated alongside
@@ -2886,6 +2887,7 @@ void init_hints(Uniftype utype,
   Hint_match_stats = FALSE;
   Hint_compiled_census = FALSE;
   Compiled_term_table_enabled = FALSE;
+  Compiled_term_table_authoritative = FALSE;
   Hint_match_once = FALSE;
   memset(Compiled_census, 0, sizeof(Compiled_census));
   memset(Compiled_census_printed, 0, sizeof(Compiled_census_printed));
@@ -3109,6 +3111,7 @@ void done_with_hints(void)
   Compiled_subterm_fingerprint_count = 0;
   Hint_compiled_census = FALSE;
   Compiled_term_table_enabled = FALSE;
+  Compiled_term_table_authoritative = FALSE;
   Compiled_term_table = NULL;
   Packed_index = FALSE;
   Better_packed_index = FALSE;
@@ -3384,6 +3387,18 @@ static void packed_collect_clause_candidates(Topform c,
   packed_operation_candidates(op);
 }
 
+static BOOL compiled_hint_target_matches(Topform c, Topform h,
+                                         BOOL *matched)
+{
+  if (Compiled_term_table == NULL)
+    return FALSE;
+  return Hint_preview_active ? hint_term_table_matches_readonly(
+    Compiled_term_table, (unsigned) h->id, c->literals->sign,
+    c->literals->atom, matched) : hint_term_table_matches(
+      Compiled_term_table, (unsigned) h->id, c->literals->sign,
+      c->literals->atom, matched);
+}
+
 static Topform packed_find_equivalent_hint(Topform c)
 {
   unsigned i;
@@ -3410,22 +3425,34 @@ static Topform packed_find_equivalent_hint(Topform c)
         !(MATCH_HINTS_ANYCONST && AnyConstsEnabled &&
           hint_contains_anyconst(c))) {
       Packed_operation_stats[op].direct_attempts++;
-      if (Compiled_term_table != NULL && !Hint_preview_active) {
-        compiled_supported = hint_term_table_matches(
-          Compiled_term_table, (unsigned) h->id, c->literals->sign,
-          c->literals->atom, &compiled_match);
+      if (Compiled_term_table != NULL) {
+        compiled_supported = compiled_hint_target_matches(
+          c, h, &compiled_match);
         if (!compiled_supported)
           fatal_error("packed equivalent hint: compiled unit missing");
       }
-      if (Hint_compiled_census && !Hint_preview_active) {
-        direct = compressed_unit_target_match_profile(
-          c->literals, h, &c_sub_h, &profile);
-        profiled = direct;
+      if (Compiled_term_table_authoritative) {
+        direct = compiled_supported;
+        c_sub_h = compiled_match;
+        if (Hint_compiled_census && !Hint_preview_active) {
+          BOOL profile_match = FALSE;
+          profiled = compressed_unit_target_match_profile(
+            c->literals, h, &profile_match, &profile);
+          if (!profiled || profile_match != c_sub_h)
+            fatal_error("packed equivalent hint: census mismatch");
+        }
       }
-      else
-        direct = compressed_unit_target_matches(c->literals, h, &c_sub_h);
-      if (compiled_supported && direct && compiled_match != c_sub_h)
-        fatal_error("packed equivalent hint: compiled match mismatch");
+      else {
+        if (Hint_compiled_census && !Hint_preview_active) {
+          direct = compressed_unit_target_match_profile(
+            c->literals, h, &c_sub_h, &profile);
+          profiled = direct;
+        }
+        else
+          direct = compressed_unit_target_matches(c->literals, h, &c_sub_h);
+        if (compiled_supported && direct && compiled_match != c_sub_h)
+          fatal_error("packed equivalent hint: compiled match mismatch");
+      }
       if (direct && c_sub_h)
         direct = compressed_unit_pattern_matches(h, c->literals, &h_sub_c);
       if (direct) {
@@ -3496,22 +3523,34 @@ static Topform packed_find_matching_hint(Topform c, BOOL flipped)
           hint_contains_anyconst(c))) {
       BOOL h_sub_c = FALSE;
       Packed_operation_stats[op].direct_attempts++;
-      if (Compiled_term_table != NULL && !Hint_preview_active) {
-        compiled_supported = hint_term_table_matches(
-          Compiled_term_table, (unsigned) h->id, c->literals->sign,
-          c->literals->atom, &compiled_match);
+      if (Compiled_term_table != NULL) {
+        compiled_supported = compiled_hint_target_matches(
+          c, h, &compiled_match);
         if (!compiled_supported)
           fatal_error("packed matching hint: compiled unit missing");
       }
-      if (Hint_compiled_census && !Hint_preview_active) {
-        direct = compressed_unit_target_match_profile(
-          c->literals, h, &c_sub_h, &profile);
-        profiled = direct;
+      if (Compiled_term_table_authoritative) {
+        direct = compiled_supported;
+        c_sub_h = compiled_match;
+        if (Hint_compiled_census && !Hint_preview_active) {
+          BOOL profile_match = FALSE;
+          profiled = compressed_unit_target_match_profile(
+            c->literals, h, &profile_match, &profile);
+          if (!profiled || profile_match != c_sub_h)
+            fatal_error("packed matching hint: census mismatch");
+        }
       }
-      else
-        direct = compressed_unit_target_matches(c->literals, h, &c_sub_h);
-      if (compiled_supported && direct && compiled_match != c_sub_h)
-        fatal_error("packed matching hint: compiled match mismatch");
+      else {
+        if (Hint_compiled_census && !Hint_preview_active) {
+          direct = compressed_unit_target_match_profile(
+            c->literals, h, &c_sub_h, &profile);
+          profiled = direct;
+        }
+        else
+          direct = compressed_unit_target_matches(c->literals, h, &c_sub_h);
+        if (compiled_supported && direct && compiled_match != c_sub_h)
+          fatal_error("packed matching hint: compiled match mismatch");
+      }
       if (direct && c_sub_h)
         direct = compressed_unit_pattern_matches(h, c->literals, &h_sub_c);
       if (direct) {
@@ -4223,6 +4262,14 @@ void set_hint_compiled_term_table(BOOL on)
   Compiled_term_table_enabled = on;
 }  /* set_hint_compiled_term_table */
 
+/* PUBLIC */
+void set_hint_compiled_authoritative(BOOL on)
+{
+  if (on && Compiled_term_table == NULL)
+    fatal_error("authoritative compiled hints require term table");
+  Compiled_term_table_authoritative = on;
+}  /* set_hint_compiled_authoritative */
+
 /*************
  *
  *   set_hint_match_once()
@@ -4553,7 +4600,8 @@ void fprint_packed_hint_operation_stats(FILE *fp)
     struct hint_term_table_stats s;
     hint_term_table_get_stats(Compiled_term_table, &s);
     fprintf(fp,
-            "Compiled_hint_term_table: finalized=%d, active=%llu, "
+            "Compiled_hint_term_table: authoritative=%d, finalized=%d, "
+            "active=%llu, "
             "additions=%llu, removals=%llu, reinsertions=%llu, "
             "base_nodes=%llu, base_children=%llu, "
             "base_occurrences=%llu, base_intern_hits=%llu, "
@@ -4565,7 +4613,8 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             "match_nodes=%llu, match_rigid_tests=%llu, "
             "match_rigid_rejects=%llu, match_first_bindings=%llu, "
             "match_repeated_tests=%llu, match_repeated_rejects=%llu.\n",
-            s.finalized, s.active_records, s.additions, s.removals,
+            Compiled_term_table_authoritative, s.finalized,
+            s.active_records, s.additions, s.removals,
             s.reinsertions, s.base_nodes, s.base_children,
             s.base_occurrences, s.base_intern_hits, s.delta_nodes,
             s.delta_children, s.delta_occurrences, s.delta_intern_hits,

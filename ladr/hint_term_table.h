@@ -76,6 +76,11 @@ BOOL hint_term_table_node(Hint_term_table table, uint32_t handle,
 BOOL hint_term_table_matches(Hint_term_table table, unsigned id,
                              BOOL positive, Term pattern, BOOL *matched);
 
+/* Same exact operation without charging authoritative lookup counters. */
+BOOL hint_term_table_matches_readonly(Hint_term_table table, unsigned id,
+                                      BOOL positive, Term pattern,
+                                      BOOL *matched);
+
 void hint_term_table_get_stats(Hint_term_table table,
                                struct hint_term_table_stats *stats);
 
