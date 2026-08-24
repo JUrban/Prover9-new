@@ -256,7 +256,9 @@ Implemented so far:
   to four whose sample predicts at least 25% rejection, and avoid duplicating
   the exact depth-2 filtering already in `packed_fast`; the eight samples are
   deterministically stratified and hash-jittered so periodic candidate order
-  cannot alias a fixed stride;
+  cannot alias a fixed stride, and later conditions are ranked only on the
+  sample survivors of earlier choices so correlated tests cannot claim the
+  same rejection work;
 - learn exact repeated-subterm and fixed-symbol conditions during search and,
   after enough direct work, scan the live hint bank once to build a dense
   stable-ID membership set;
@@ -289,7 +291,8 @@ whole-run CPU regression on any training case.
 
 ### Phase 2b: generate candidates with the compiled program
 
-Status: **first implementation complete; bounded/long-run gate pending.**
+Status: **direct/mask implementation complete; the wider scalar-program
+screen failed; condition-seeded generation is still pending.**
 
 Do not further tune the post-filter.  Integrate the useful conditions into
 candidate generation so rejected stable IDs are not appended to the packed
@@ -412,6 +415,58 @@ separate postfilter.  It rejected 19,570 candidates with deep fixed-symbol
 checks across 127 broad queries.  No learned mask matured, so this is evidence
 for the direct RIGID path and removed query walks, not yet the long-run mask
 payoff.
+
+The wider normalized-program checkpoint did not pass its bounded promotion
+screen.  On the same Josef 02/300 input, the residual-sample implementation
+used 17.94 seconds total CPU and 189,636 KiB peak RSS, versus the earlier
+16.98 seconds and 189,444 KiB.  It had 117 cache hits, all mixed, and reached
+width six, so this is not a case where the feature simply failed to activate.
+Greedy residual ranking reduced RIGID candidate tests from 86,442 in the
+initial independent-ranking build to 54,261, but did not make the whole run a
+win.  A historical Josef 01/300 comparison moved in the other direction
+(30.87 versus 32.28 seconds, with effectively unchanged RSS), while recording
+six stores and no cache hits.  The mixed result fails the cross-problem gate;
+do not schedule the 1,000-given promotion run on this evidence alone.
+
+### Phase 2c: condition-seeded compiled code blocks
+
+Status: **planned; this is the next architectural experiment.**
+
+The failed screen says that executing a wider scalar instruction vector while
+`packed_fast` still creates the candidate stream is not enough.  The next mode
+must let a selective compiled condition create that stream:
+
+1. Give every profitable SAME or RIGID condition one exact stable-ID member
+   set.  Choose its representation by measured bytes: a dense 64-ID word
+   array for broad sets, a decreasing 32-bit ID vector or sparse word vector
+   for narrow sets.  Charge both forms to the existing 32 MiB aggregate cap;
+   never retain both merely for convenience.
+2. Compile a query to shared condition records and choose the smallest exact
+   available member set as the seed instruction.  Enumerate that set directly
+   in decreasing stable-ID order instead of first walking millions of broad
+   shallow posting references.
+3. While enumerating the seed, apply the existing shallow packed requirements
+   and the remaining SAME/RIGID instructions.  Only survivors enter the
+   authoritative compressed matcher.  No query-sized bitmap and no full-bank
+   intersection sweep are allowed.
+4. Keep nonunit, `_AnyConst`, unknown-root, and other unsupported hints in an
+   explicit conservative fallback stream and merge it with the seeded unit
+   stream by stable ID.  Tombstones may leave stale positives; additions and
+   reinsertions must enter every built set they satisfy.
+5. Share immutable instruction blocks by normalized query shape, but keep the
+   exact condition keys as authority.  Hashes choose a cache slot only; a hash
+   collision can cause a miss, never a candidate rejection.
+6. Report seed queries, seed representation and bytes, seed IDs enumerated,
+   shallow posting references avoided, fallback IDs merged, residual
+   instructions executed, and compressed confirmations.
+
+Before building the authoritative path, add a shadow census that computes the
+best available seed cardinality and compares it with the actual
+`packed_fast` posting-reference count.  Proceed only if two different
+300-given inputs predict at least a 4x reduction in IDs/references for the
+queries that dominate hint CPU.  Then require exact ordered candidate/hint
+traces and a whole-CPU win at 300 givens before requesting the 1,000-given
+external gate.
 
 ### Phase 3: lifecycle and authoritative mode
 

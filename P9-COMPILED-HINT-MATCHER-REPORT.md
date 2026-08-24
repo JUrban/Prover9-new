@@ -83,7 +83,11 @@ eight candidates per position and ranks up to four conditions predicted to
 reject at least 25%.  Sampling takes one deterministic, query-hash-jittered
 candidate from each part of the emitted prefix.  This preserves reproducible
 whole-prefix coverage without the periodic aliasing caused by positions such
-as 0, 16, 32, ... in a four-cohort stream.  Thus the policy learns
+as 0, 16, 32, ... in a four-cohort stream.  Each condition's eight outcomes
+are retained as bits; after choosing one condition, later conditions are
+ranked only on surviving sample candidates.  Correlated tests therefore
+cannot all claim the same rejection work, and the vector uses no more term
+probes than the old best-one sampler.  Thus the policy learns
 `RIGID(child route,symbol)` conditions from actual search work; it does not
 rebuild the rejected all-path sidecar.
 
@@ -521,6 +525,31 @@ not replace a Josef 04 retained-bank measurement.  The adaptive cache's dense
 payload is hard-bounded at 32 MiB by default, with small fixed ceilings on
 entries, buckets, and copied child routes.
 
+### Bounded mixed-program screen
+
+The widened normalized-program cache activated substantially on Josef 02/300:
+it recorded 117 hits, every hit contained both SAME and RIGID instructions,
+and the maximum program width was six.  Greedy residual-sample ranking reduced
+RIGID candidate tests from 86,442 in the first independent-top-four build to
+54,261 and reduced cached RIGID instructions from 292 to 176, without adding
+sample path probes.
+
+That structural improvement did not become a reliable CPU win:
+
+| Input | Earlier blocks CPU | Residual mixed CPU | Earlier RSS | Mixed RSS |
+|---|---:|---:|---:|---:|
+| Josef 01/300 | 32.28 s | 30.87 s | 473,188 KiB | 472,936 KiB |
+| Josef 02/300 | 16.98 s | 17.94 s | 189,444 KiB | 189,636 KiB |
+
+The Josef 01 comparison is historical rather than an adjacent pair; it stored
+six normalized programs but had no hits at this boundary.  The Josef 02 warm
+repeat is also a bounded screen, not a precision benchmark, but its cache was
+active enough to answer the architectural question.  Memory is effectively
+unchanged, while whole CPU moves in opposite directions across the two
+problems.  This fails the cross-problem promotion gate.  `packed_fast` remains
+the production choice, and the present evidence does not justify a local or
+external 1,000-given run merely to tune this wider policy.
+
 The honest conclusion is: **semantic and structural gates pass; the CPU gate
 does not yet pass.**
 
@@ -570,18 +599,16 @@ The next Waldmeister-like stage should therefore be:
    interval timers around packed feature lookup, candidate marking/emission,
    compiled structural tests, and compressed confirmation.  This establishes
    the remaining ceiling without relying on aggregate `hints` time.
-2. **Measure the implemented conditions-before-emission paths at scale.**
-   Blocks mode now handles direct SAME and selected RIGID checks, learned
-   masks in dense posting words, and mask prechecks in sparse/conjunction
-   collectors.  The next 1,000-given gate must show whether these paths are
-   reused often enough to repay training and mask construction.
-3. **Measure normalized mixed-program reuse.** The bounded cache now
-   normalizes operation, sign, symbols/arities, and variable occurrence
-   pattern during the existing traversal, then reuses an ordered vector of up
-   to eight individually profitable SAME/RIGID instructions.  The 1,000-given
-   gate must show useful hit rates, widths, avoided samples, and direct/mask
-   rejections before this added policy is retained.  The compressed matcher
-   remains final authority.
+2. **Seed enumeration from a compiled condition.** Give each profitable SAME
+   or RIGID condition one budgeted exact member set, stored as dense words or
+   a compact decreasing-ID/sparse-word vector according to measured bytes.
+   Choose the smallest available condition as the query's primary stream,
+   instead of first scanning broad `packed_fast` posting references.
+3. **Use mixed programs after the seed, not as a wider scalar front end.** The
+   normalized cache and residual-sample ordering are useful machinery, but
+   the bounded screen shows that they are not a promotion by themselves.
+   Execute remaining exact conditions while enumerating the seed and keep the
+   compressed matcher as final authority.
 4. **Measure and generalize batched construction.** Blocks mode now scans the
    retained bank once for up to eight co-occurring ready SAME or selected
    RIGID instructions.  Keep this only if long runs report useful batch
@@ -592,15 +619,17 @@ The next Waldmeister-like stage should therefore be:
    temporary-memory cap.  The rejected raw-input pre-sizing policy must not
    return, and lazy construction remains diagnostic because Josef 01
    eventually touches every unit.
-6. **Gate in shadow before authority.** Require exact ordered candidate and
-   hint traces on CHAT, Osborn, Josef 01, and Josef 02; then run adjacent
-   300/1,000-given CPU pairs.  Only a version that materially improves total
-   CPU proceeds to Josef 04 on ar-2.
+6. **Gate in shadow before authority.** First measure best seed cardinality
+   against actual shallow posting references and require a predicted 4x
+   reduction on two 300-given inputs.  Then require exact ordered candidate
+   and hint traces plus a whole-CPU win at 300 givens.  Only after those gates
+   pass should an external 1,000-given run be requested; Josef 04 remains
+   later.
 
-In plain language, the blocks mode now applies the compiled code while making
-the list and, for learned dense conditions, before turning packed words into
-individual IDs.  The next question is whether long runs reuse those learned
-blocks enough to repay their construction.
+In plain language, the next experiment should start from the short list
+defined by the best compiled condition.  Merely applying more tests while a
+broad old index continues to make the list has now been measured and is not a
+consistent win.
 
 Promotion still requires at least a 2× hint-matching CPU improvement on two
 different problems, no training regression above 5%, no held-out regression
