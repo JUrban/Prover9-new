@@ -61,10 +61,10 @@ the same subterm in the two corresponding child positions.  The compiled mode
 now:
 
 1. finds repeated generated variables in reusable scratch storage;
-2. chooses the cheapest repeated pair, measured by the two child-route
-   lengths;
-3. walks the common route prefix only once;
-4. compares the resulting canonical subterm handles; and
+2. orders their equality requirements by child-route cost;
+3. executes up to eight requirements in one short-circuiting candidate pass;
+4. walks each common route prefix only once and compares the resulting
+   canonical subterm handles; and
 5. sends every survivor to the compressed exact matcher.
 
 Here a “child route” is simply a sequence such as “second argument, then first
@@ -85,11 +85,10 @@ it does not rebuild the rejected all-path sidecar.
 
 Previously learned SAME and RIGID conditions are ordered by measured
 selectivity and compiled into a program of at most eight dense stable-ID
-sets.  A multi-condition program intersects 64 IDs at a time in reusable
-scratch, then preserves the original candidate-vector order for the exact
-compressed matcher.  If the scratch cannot fit, it falls back to bounded
-per-candidate bit membership tests.  Scratch and persistent dense sets share
-one hard cache budget.
+sets.  A multi-condition program combines the sets once for each 64-ID block
+actually visited by the ordered candidate stream.  It never sweeps a bitmap
+proportional to the whole retained bank and needs no query-sized intersection
+scratch.  Candidate order is preserved for the exact compressed matcher.
 
 ### Adaptive collective cache
 
@@ -107,10 +106,9 @@ until the measured direct work is large enough to repay two bank scans.
 Later queries filter candidate IDs by bit lookup instead of repeatedly walking
 the retained terms.
 
-The dense-bit payload and word-intersection scratch have a hard aggregate
-budget, controlled by `hint_compiled_cache_kb` and defaulting to 32768 KiB.
-It stores no duplicate sparse ID lists.  Metadata is separately capped at
-4,096 learned conditions
+The dense-bit payload has a hard aggregate budget, controlled by
+`hint_compiled_cache_kb` and defaulting to 32768 KiB.  It stores no duplicate
+sparse ID lists.  Metadata is separately capped at 4,096 learned conditions
 and 262,144 stored route words (1 MiB of route storage).  If a bitset or a
 later matching hint cannot fit, or either metadata ceiling is reached, that
 condition falls back to direct exact-handle checking.  A partial set is never
@@ -194,8 +192,10 @@ The shutdown statistics contain:
   direct handle comparisons, and admission skips; and
 - `Compiled_hint_rigid_filter`: sampled fixed positions, admitted scans, and
   exact fixed-symbol rejections;
-- `Compiled_hint_program`: dense instructions combined, word operations,
-  fallback membership tests, and jointly budgeted scratch; and
+- `Compiled_hint_plan`: structural conditions available before learning,
+  including multi-condition and mixed-condition query counts;
+- `Compiled_hint_program`: learned dense instructions combined and candidate
+  blocks visited (the scratch counters remain zero); and
 - `Compiled_hint_same_cache`: learned route pairs, hottest pair, builds,
   scans, hits, rejections, denials, and exact allocated/budgeted bytes.
 
@@ -236,14 +236,12 @@ On the latest corrected bounded runs:
 | CHAT/100 | RIGID | 0 | 0 | 0 | 0 |
 | Osborn/100 | SAME | 397 | 344,018 | 94,077 | 249,941 |
 | Osborn/100 | RIGID | 63 | 9,632 | 6,192 | 3,440 |
-| Josef 01/300 | SAME | 970 | 966,789 | 95,899 | 870,890 |
-| Josef 01/300 | RIGID | 56 | 24,701 | 5,152 | 19,549 |
-| Josef 01/1,000 | SAME | 3,093 | 3,215,969 | 213,670 | 3,002,299 |
-| Josef 01/1,000 | RIGID | 119 | 56,188 | 6,348 | 49,840 |
-| Josef 02/300 | SAME | 626 | 299,127 | 85,279 | 213,848 |
-| Josef 02/300 | RIGID | 18 | 2,955 | 943 | 2,012 |
-| Josef 02/1,000 | SAME | 2,872 | 1,110,410 | 321,525 | 788,885 |
-| Josef 02/1,000 | RIGID | 40 | 9,592 | 3,133 | 6,459 |
+| Josef 01/300 | SAME | 970 | 966,789 | 22,018 | 944,771 |
+| Josef 01/300 | RIGID | 7 | 1,842 | 84 | 1,758 |
+| Josef 01/1,000 | SAME | 3,093 | 3,215,969 | 81,664 | 3,134,305 |
+| Josef 01/1,000 | RIGID | 44 | 18,260 | 804 | 17,456 |
+| Josef 02/300 | SAME | 626 | 299,127 | 7,116 | 292,011 |
+| Josef 02/300 | RIGID | 1 | 196 | 111 | 85 |
 
 Earlier SAME-only measurements reduced compressed exact attempts from 77,227
 to 14,468 on the CHAT prefix and from 253,561 to 93,973 on Osborn.  These
@@ -255,17 +253,19 @@ expected: repayment is decided per exact condition, not from the misleading
 sum over unrelated conditions.  Longer runs report `maximum_queries` and
 `maximum_candidate_work`, showing whether one condition approaches construction.
 
-At Josef 02/1,000, two SAME conditions finally earned dense sets.  They were
-used by 300 queries and rejected 119,333 candidates.  No RIGID condition
-earned a set, and every executed program still had width one.  The collective
-executor therefore remained functionally a one-condition lookup on this
-prefix; it did not yet exercise a word-wise intersection.
+The new plan census showed that the old width-one behavior was a learning
+policy failure, not a property of the clauses.  On Josef 01/300, 937 of 970
+admitted queries exposed at least two structural conditions, 665 exposed both
+SAME and RIGID conditions, and the maximum latent width was nine.  Josef
+02/300 reported 623 of 626 multi-condition queries, 275 mixed queries, and the
+same maximum width.
 
-Josef 01/1,000 showed the same qualitative limitation at greater scale.  Three
-SAME conditions earned dense sets and served 730 queries, rejecting 1,493,035
-candidates through the cache.  No RIGID condition matured and every program
-again had width one.  The direct structural pass nevertheless rejected more
-than three million candidates before exact matching.
+The bounded direct SAME program now executes those co-occurring requirements
+without waiting for dense construction.  Dense reuse remains narrow: at
+Josef 01/1,000 three SAME conditions earned sets and served 730 queries, while
+no RIGID condition matured and every dense program still had width one.  The
+direct program nevertheless applied 6,744 SAME instructions across 3,093
+queries and rejected 3,134,305 candidates.
 
 ### CPU and RAM
 
@@ -287,14 +287,26 @@ Kept=65,416.  `packed_compiled` reduced ordinary-match direct attempts from
 `packed_fast`.  Peak RSS was 248,612 KiB versus 235,128 KiB.  This passes the
 semantic and bounded-resource gates but supplies no CPU promotion case.
 
-The adjacent Josef 01/1,000 pair also had identical search counters:
-Given=1,001, Generated=1,628,048, and Kept=320,239.  Here the compiled mode
-reduced ordinary-match direct attempts from 3,632,023 to 656,968 (81.9%) and
-the sampled ordinary-match time from 9.881 to 6.732 seconds (1.47x).  Whole
-user CPU improved only from 50.95 to 50.13 seconds, while combined user and
-system CPU was effectively unchanged (70.79 versus 70.82 seconds).  Peak RSS
-rose from 600,912 to 620,216 KiB.  This is a real matcher-level improvement,
-but it misses both the 2x matcher target and the material whole-run target.
+On the latest adjacent Josef 01/300 pair, the direct multi-SAME program cut
+ordinary-match attempts from 1,085,836 to 157,712 (85.5%) and sampled
+ordinary-match time from 3.046 seconds to 0.731--0.892 seconds across two
+candidate runs.  The complete compiled runs took 17.55--17.78 seconds wall
+time versus 16.36 for `packed_fast`: canonical-table startup still cost more
+than the short search saved.
+
+The exact-build Josef 01/1,000 pair had identical search counters:
+Given=1,001, Generated=1,628,048, and Kept=320,239.  The compiled mode reduced
+ordinary-match direct attempts from 3,632,023 to 562,319 (84.5%) and sampled
+ordinary-match time from 9.175 to 6.507 seconds.  Combined user and system CPU
+improved only from 67.99 to 67.16 seconds (1.2%); wall time changed from 68.16
+to 67.37 seconds.  Peak RSS rose from 600,796 to 620,524 KiB.  This proves that
+startup is repaid by 1,000 givens, but it is still far below the intended
+whole-run improvement.
+
+Josef 02/300 confirmed that extra necessary conditions are not automatically
+valuable: direct attempts fell from 139,308 to 86,377, while sampled ordinary
+match time remained 0.990 versus 0.988 seconds and whole CPU was unchanged.
+The extra handle checks merely replaced already-cheap compressed checks.
 
 On Osborn, lazy constructed 103,171 of 248,809 cumulative canonical
 additions and used 15.2 MiB for the term table versus eager's 20.0 MiB.  Both
@@ -344,23 +356,43 @@ swap-in/swap-out during the checks.
 
 ## Next implementation work
 
-The set-at-a-time foundation is now implemented.  The next work is gated
-rather than open-ended threshold tuning:
+The new bottleneck is architectural and visible in the Josef 01/1,000
+counters.  `packed_fast` first examined 147.5 million posting references and
+constructed its ordered candidate stream.  Only then did the compiled program
+discard 84.5% of exact attempts.  Making the post-filter still stricter cannot
+avoid the work that has already happened.
 
-1. **Measure program maturity.** Run eager `packed_compiled` at 1,000 givens
-   on Josef 01/02 and a larger CHAT/Osborn boundary.  Record how often two or
-   more conditions actually coexist; a correct multi-program that is never
-   reused is not a speedup.
-2. **Instrument interval cost.** Report root construction, direct tests,
-   dense builds, program widths, and exact-match CPU per interval so a long
-   run cannot hide a rising per-query slope.
-3. **Keep lazy experimental.** Do not promote it unless retained-bank
-   coverage can be predicted cheaply; current evidence is positive on
-   Osborn and negative on Josef 01.
-4. **Freeze before long gates.** After the 1,000-given gates pass,
-   freeze thresholds and use ar-2 for Josef 04 at 1,000 and 3,000 givens,
-   without hint dumping.  Record startup CPU, search CPU, RSS, cache builds,
-   and interval cost slopes.
+The next Waldmeister-like stage should therefore be:
+
+1. **Split candidate-generation time from confirmation time.** Add sampled
+   interval timers around packed feature lookup, candidate marking/emission,
+   compiled structural tests, and compressed confirmation.  This establishes
+   the remaining ceiling without relying on aggregate `hints` time.
+2. **Execute conditions before IDs are emitted.** Introduce a shadow-only
+   block executor that combines the existing shallow packed masks with hot
+   SAME/RIGID masks for one 64-ID block, then emits surviving stable IDs in
+   the established order.  A rejected ID must never enter the candidate
+   vector.
+3. **Compile and reuse query shapes.** Normalize the sign, shallow packed
+   requirements, child routes, and repeated-variable pattern into a compact
+   instruction key.  Cache only shapes whose measured candidate work repays
+   construction; keep the compressed matcher as final authority.
+4. **Build related conditions together.** When a hot shape earns an index,
+   scan the retained bank once for up to eight co-occurring instructions,
+   rather than performing one bank scan per condition.  Retain the 32-MiB
+   aggregate mask budget and update additions/removals conservatively.
+5. **Remove avoidable startup work.** Compare eager construction with one
+   sequential post-input build from the exact retained compressed bank.  The
+   rejected raw-input pre-sizing policy must not return, and lazy construction
+   remains diagnostic because Josef 01 eventually touches every unit.
+6. **Gate in shadow before authority.** Require exact ordered candidate and
+   hint traces on CHAT, Osborn, Josef 01, and Josef 02; then run adjacent
+   300/1,000-given CPU pairs.  Only a version that materially improves total
+   CPU proceeds to Josef 04 on ar-2.
+
+In plain language, the current route is “make a large list, then throw most of
+it away.”  The next route must be “apply the compiled code while making the
+list, so the rejected entries never exist.”
 
 Promotion still requires at least a 2× hint-matching CPU improvement on two
 different problems, no training regression above 5%, no held-out regression

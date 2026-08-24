@@ -25,8 +25,9 @@ different architecture, not a faster version of the present traversal.
 > Implementation update (2026-08-24): Phases 0 and 1 and the structural part
 > of Phase 2 are complete.  `packed_compiled` learns exact repeated-subterm
 > and selective deep fixed-symbol conditions, promotes only conditions whose
-> measured work can repay a dense stable-ID set, and intersects up to eight
-> learned sets 64 IDs at a time.  The established compressed matcher remains
+> measured work can repay a dense stable-ID set, executes up to eight direct
+> repeated-subterm instructions, and combines learned sets only for candidate
+> blocks actually visited.  The established compressed matcher remains
 > the final authority.  The eager all-path experiment was not worthwhile and
 > is isolated in `packed_compiled_paths`.  A demand-built canonical-bank mode,
 > `packed_compiled_lazy`, saves construction on Osborn but loses when a search
@@ -230,8 +231,8 @@ Implemented so far:
 
 - discover all repeated generated variables without allocating in the hot
   loop;
-- retain all valid repeated-variable conditions and order them by measured
-  selectivity;
+- retain all valid repeated-variable conditions, order them by route cost,
+  and execute up to eight in one short-circuiting direct pass;
 - compare canonical subterm handles while sharing their common route prefix;
 - skip the pretest below `hint_compiled_min_candidates` (default 128);
 - sample at most 32 deep fixed-symbol conditions per admitted query, perform a
@@ -240,24 +241,65 @@ Implemented so far:
 - learn exact repeated-subterm and fixed-symbol conditions during search and,
   after enough direct work, scan the live hint bank once to build a dense
   stable-ID membership set;
-- compile up to eight learned conditions into one query program and intersect
-  the dense sets word at a time in reusable scratch, with a bounded
-  per-candidate fallback when scratch cannot fit;
-- hard-bound dense sets and intersection scratch jointly to 32 MiB by default,
-  while separately capping learned metadata at 4,096 conditions and 262,144
-  route words;
+- compile up to eight learned conditions into one query program and combine
+  their dense sets only for 64-ID blocks actually visited by the ordered
+  candidate stream;
+- use no query-sized bitmap scratch and hard-bound persistent dense sets to
+  32 MiB by default, while separately capping learned metadata at 4,096
+  conditions and 262,144 route words;
 - keep additions complete and removals conservative across rewriting; and
 - retain the compressed matcher as final authority for every survivor.
 
-The next step is measurement rather than another speculative index: determine
-at 1,000-given boundaries how often several learned conditions coexist, how
-often the word-wise executor is reused, and whether total matcher CPU—not
-only candidate count—improves.  Exact-query-shape program caching is deferred
-until those counters show that reconstructing the small plan is material.
+The opportunity census answered the main uncertainty.  At Josef 01/300, 937
+of 970 admitted queries exposed several structural conditions and 665 mixed
+SAME with RIGID conditions; Josef 02/300 reported 623 of 626 and 275,
+respectively.  Both had a maximum latent width of nine.  The old width-one
+behavior was therefore caused by training only the first condition, not by a
+shortage of useful query structure.
+
+The direct multi-SAME program converts that structure into 84.5% fewer exact
+attempts on Josef 01/1,000.  However, sampled ordinary-match time improves
+only from 9.175 to 6.507 seconds and whole CPU improves about 1.2%.  Candidate
+generation still processes the same 147.5 million packed posting references
+before the compiled filter runs.  Phase 2 passes semantics and demonstrates
+the mechanism, but it does not pass the promotion gate.
 
 Gate: identical traces and proof objects; at least 2x hint-matching CPU
 improvement on two structurally different training problems; no more than 5%
 whole-run CPU regression on any training case.
+
+### Phase 2b: generate candidates with the compiled program
+
+Status: **planned; this is the next architectural step.**
+
+Do not further tune the post-filter.  Integrate the useful conditions into
+candidate generation so rejected stable IDs are never appended to the packed
+candidate vector:
+
+- time packed feature lookup, candidate marking/emission, structural checks,
+  and compressed confirmation separately and by interval;
+- normalize a query-shape key containing sign, shallow requirements, child
+  routes, and repeated-variable relationships;
+- combine existing shallow packed masks and selected SAME/RIGID masks for one
+  visited 64-ID block before emitting IDs, preserving decreasing stable-ID
+  order;
+- build up to eight co-occurring hot conditions in one retained-bank scan,
+  rather than scanning the bank independently for each condition;
+- keep the aggregate persistent-mask budget at 32 MiB and preserve the
+  base/delta/tombstone lifecycle; and
+- run the new generator in shadow against the complete packed candidate and
+  matching-hint traces before it may become authoritative.
+
+Also compare eager canonical construction with one sequential post-input
+build directly from the exact retained compressed bank.  This is different
+from the rejected raw-count pre-sizing experiment and from random on-demand
+construction.  It must win startup CPU without assuming a Josef-specific
+sharing ratio.
+
+Gate: zero ordered-candidate differences in shadow; a material reduction in
+candidate-generation CPU as well as confirmation CPU; at least 2x total hint
+matching improvement on two problems; and a material whole-run CPU win at a
+1,000-given boundary before any Josef 04 run.
 
 ### Phase 3: lifecycle and authoritative mode
 
