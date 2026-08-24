@@ -5,7 +5,8 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 prover9=${PROVER9:-"$script_dir/../provers.src/prover9"}
 tmp=${TMPDIR:-/tmp}/hint-compiled-census.$$
 trap 'rm -f "$tmp.out" "$tmp.err" "$tmp.path.out" "$tmp.path.err" \
-  "$tmp.same.out" "$tmp.same.err" "$tmp.cache.out" "$tmp.cache.err"' \
+  "$tmp.same.out" "$tmp.same.err" "$tmp.cache.out" "$tmp.cache.err" \
+  "$tmp.deny.out" "$tmp.deny.err"' \
   EXIT HUP INT TERM
 
 "$prover9" < "$script_dir/hint_compiled_census.in" \
@@ -85,5 +86,20 @@ printf '%s\n' "$cache_line" | grep -Eq \
   'cache_hits=[1-9][0-9]*, builds=1, build_scans=[1-9][0-9]*, build_matches=[1-9][0-9]*,'
 printf '%s\n' "$cache_line" | grep -Eq \
   'dense_keys=1, dense_bit_bytes=[1-9][0-9]*,.*dense_denials=0,'
+
+sed '/assign(hint_compiled_cache_build_factor,0)./a assign(hint_compiled_cache_kb,0).' \
+  "$script_dir/hint_compiled_cache.in" |
+  "$prover9" > "$tmp.deny.out" 2> "$tmp.deny.err" || deny_status=$?
+deny_status=${deny_status:-0}
+if [ "$deny_status" -ne 2 ] && [ "$deny_status" -ne 5 ]; then
+  cat "$tmp.deny.err" >&2
+  echo "hint_compiled_census_test: cache-denial run returned $deny_status" >&2
+  exit 1
+fi
+deny_line=$(grep '^Compiled_hint_same_cache:' "$tmp.deny.out")
+printf '%s\n' "$deny_line" | grep -Eq \
+  'entries=1, built=0, build_factor=0,.*cache_hits=0, builds=0,'
+printf '%s\n' "$deny_line" | grep -Eq \
+  'denied_entries=1, dense_keys=0, dense_bit_bytes=0, dense_budget_bytes=0, dense_denials=1,'
 
 echo "hint_compiled_census_test: PASS"

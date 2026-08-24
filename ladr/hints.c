@@ -120,19 +120,22 @@ static unsigned long long Compiled_same_admission_skips = 0;
 static unsigned long long Compiled_same_skipped_candidates = 0;
 
 #define COMPILED_SAME_CACHE_BUILD_FACTOR 2U
-#define COMPILED_SAME_CACHE_DENSE_BYTES \
+#define COMPILED_SAME_CACHE_DEFAULT_BYTES \
   (32ULL * 1024ULL * 1024ULL)
 struct compiled_same_cache_entry {
   unsigned long long hash;
   unsigned long long queries;
   unsigned long long candidate_work;
+  unsigned long long *dense_bits;
   unsigned first_offset;
   unsigned first_length;
   unsigned second_offset;
   unsigned second_length;
+  unsigned dense_words;
   unsigned match_count;
   unsigned next;
   unsigned char built;
+  unsigned char build_denied;
 };
 static struct compiled_same_cache_entry *Compiled_same_cache_entries = NULL;
 static unsigned Compiled_same_cache_count = 0;
@@ -142,7 +145,9 @@ static unsigned Compiled_same_cache_bucket_capacity = 0;
 static unsigned *Compiled_same_cache_paths = NULL;
 static unsigned Compiled_same_cache_path_count = 0;
 static unsigned Compiled_same_cache_path_capacity = 0;
-static Hint_postings Compiled_same_cache_postings = NULL;
+static unsigned long long Compiled_same_cache_dense_bytes = 0;
+static unsigned long long Compiled_same_cache_budget_bytes =
+  COMPILED_SAME_CACHE_DEFAULT_BYTES;
 static BOOL Compiled_same_cache_ready = FALSE;
 static unsigned long long Compiled_same_cache_lookups = 0;
 static unsigned long long Compiled_same_cache_hits = 0;
@@ -3014,6 +3019,7 @@ void init_hints(Uniftype utype,
   Compiled_same_unequal_rejects = 0;
   Compiled_same_admission_skips = 0;
   Compiled_same_skipped_candidates = 0;
+  Compiled_same_cache_dense_bytes = 0;
   Compiled_same_cache_ready = FALSE;
   Compiled_same_cache_lookups = 0;
   Compiled_same_cache_hits = 0;
@@ -3091,6 +3097,7 @@ void init_hints(Uniftype utype,
 /* PUBLIC */
 void done_with_hints(void)
 {
+  unsigned i;
   if (!lindex_empty(Hints_idx) ||
       !clist_empty(Redundant_hints))
     printf("ERROR: Hints index not empty!\n");
@@ -3133,6 +3140,9 @@ void done_with_hints(void)
   if (Compiled_query_path) safe_free(Compiled_query_path);
   if (Compiled_plan_paths) safe_free(Compiled_plan_paths);
   if (Compiled_same_tests) safe_free(Compiled_same_tests);
+  for (i = 0; i < Compiled_same_cache_count; i++)
+    if (Compiled_same_cache_entries[i].dense_bits != NULL)
+      safe_free(Compiled_same_cache_entries[i].dense_bits);
   if (Compiled_same_cache_entries) safe_free(Compiled_same_cache_entries);
   if (Compiled_same_cache_buckets) safe_free(Compiled_same_cache_buckets);
   if (Compiled_same_cache_paths) safe_free(Compiled_same_cache_paths);
@@ -3142,7 +3152,6 @@ void done_with_hints(void)
   hint_postings_destroy(Better_postings);
   hint_postings_destroy(Fast_conjunction_postings);
   hint_postings_destroy(Compiled_path_postings);
-  hint_postings_destroy(Compiled_same_cache_postings);
   if (Better_rebuild_clock != NULL)
     free_clock(Better_rebuild_clock);
   if (Better_equivalence_buckets) safe_free(Better_equivalence_buckets);
@@ -3170,7 +3179,6 @@ void done_with_hints(void)
   Compiled_same_cache_entries = NULL;
   Compiled_same_cache_buckets = NULL;
   Compiled_same_cache_paths = NULL;
-  Compiled_same_cache_postings = NULL;
   Better_equivalence_buckets = NULL;
   Better_equivalence_references = NULL;
   Better_anyconst_references = NULL;
@@ -3299,6 +3307,7 @@ void done_with_hints(void)
   Compiled_same_cache_count = Compiled_same_cache_capacity = 0;
   Compiled_same_cache_bucket_capacity = 0;
   Compiled_same_cache_path_count = Compiled_same_cache_path_capacity = 0;
+  Compiled_same_cache_dense_bytes = 0;
   Compiled_same_cache_ready = FALSE;
   Compiled_same_cache_lookups = 0;
   Compiled_same_cache_hits = 0;
@@ -3309,6 +3318,8 @@ void done_with_hints(void)
   Compiled_same_cache_filter_rejects = 0;
   Compiled_same_cache_dense_denials = 0;
   Compiled_same_cache_build_factor = COMPILED_SAME_CACHE_BUILD_FACTOR;
+  Compiled_same_cache_budget_bytes =
+    COMPILED_SAME_CACHE_DEFAULT_BYTES;
   Packed_index = FALSE;
   Better_packed_index = FALSE;
   Fast_packed_index = FALSE;
@@ -3616,11 +3627,6 @@ static void compiled_same_cache_init(void)
       Compiled_same_cache_bucket_capacity,
       sizeof(*Compiled_same_cache_buckets));
   }
-  if (Compiled_same_cache_postings == NULL) {
-    Compiled_same_cache_postings = hint_postings_init();
-    hint_postings_set_dense_budget(
-      Compiled_same_cache_postings, COMPILED_SAME_CACHE_DENSE_BYTES);
-  }
 }
 
 static void compiled_same_cache_rehash(unsigned capacity)
@@ -3770,16 +3776,28 @@ static int compiled_same_cache_compare(
 static void compiled_same_cache_build(
   struct compiled_same_cache_entry *entry)
 {
-  unsigned entry_id =
-    (unsigned) (entry - Compiled_same_cache_entries) + 1;
+  unsigned words = Packed_hint_capacity / 64 +
+    (Packed_hint_capacity % 64 != 0);
+  unsigned long long bytes =
+    (unsigned long long) words * sizeof(*entry->dense_bits);
   unsigned id;
-  struct hint_dense_view view;
+  if (entry->build_denied || entry->built)
+    return;
+  if (bytes > Compiled_same_cache_budget_bytes -
+              Compiled_same_cache_dense_bytes) {
+    entry->build_denied = 1;
+    Compiled_same_cache_dense_denials++;
+    return;
+  }
+  entry->dense_bits = safe_calloc(words, sizeof(*entry->dense_bits));
+  entry->dense_words = words;
+  Compiled_same_cache_dense_bytes += bytes;
   for (id = 1; id < Packed_hint_capacity; id++) {
     uint32_t root = hint_term_table_root(Compiled_term_table, id);
     if (root != 0) {
       Compiled_same_cache_build_scans++;
       if (compiled_same_cache_compare(entry, root) == 1) {
-        hint_postings_add(Compiled_same_cache_postings, entry_id, id);
+        entry->dense_bits[id / 64] |= 1ULL << (id % 64);
         if (entry->match_count != UINT_MAX)
           entry->match_count++;
         Compiled_same_cache_build_matches++;
@@ -3788,35 +3806,21 @@ static void compiled_same_cache_build(
   }
   entry->built = 1;
   Compiled_same_cache_builds++;
-  if (entry->match_count != 0 &&
-      !hint_postings_dense_view(
-        Compiled_same_cache_postings, entry_id, Packed_hint_capacity,
-        TRUE, &view))
-    Compiled_same_cache_dense_denials++;
 }
 
 static BOOL compiled_same_cache_filter(
   struct compiled_same_cache_entry *entry)
 {
-  unsigned entry_id =
-    (unsigned) (entry - Compiled_same_cache_entries) + 1;
-  struct hint_dense_view view;
   unsigned before = Packed_candidates_count;
   unsigned i, keep = 0;
-  if (entry->match_count != 0 &&
-      !hint_postings_dense_view(
-        Compiled_same_cache_postings, entry_id, Packed_hint_capacity,
-        !Hint_preview_active, &view)) {
-    if (!Hint_preview_active)
-      Compiled_same_cache_dense_denials++;
+  if (!entry->built || entry->dense_bits == NULL)
     return FALSE;
-  }
   for (i = 0; i < before; i++) {
     unsigned id = Packed_candidates[i];
     uint32_t root = hint_term_table_root(Compiled_term_table, id);
     if (root == 0 ||
-        (entry->match_count != 0 && id / 64 < view.words &&
-         (view.bits[id / 64] & (1ULL << (id % 64))) != 0))
+        (id / 64 < entry->dense_words &&
+         (entry->dense_bits[id / 64] & (1ULL << (id % 64))) != 0))
       Packed_candidates[keep++] = id;
   }
   Packed_candidates_count = keep;
@@ -3832,7 +3836,7 @@ static void compiled_same_cache_index_hint(unsigned id)
 {
   uint32_t root;
   unsigned i;
-  if (!Compiled_same_cache_ready || Compiled_same_cache_postings == NULL)
+  if (!Compiled_same_cache_ready || Compiled_same_cache_entries == NULL)
     return;
   root = hint_term_table_root(Compiled_term_table, id);
   if (root == 0)
@@ -3841,9 +3845,39 @@ static void compiled_same_cache_index_hint(unsigned id)
     struct compiled_same_cache_entry *entry =
       Compiled_same_cache_entries + i;
     if (entry->built && compiled_same_cache_compare(entry, root) == 1) {
-      hint_postings_add(Compiled_same_cache_postings, i + 1, id);
-      if (entry->match_count != UINT_MAX)
-        entry->match_count++;
+      unsigned word = id / 64;
+      if (word >= entry->dense_words) {
+        unsigned words = word + 1;
+        unsigned long long old_bytes =
+          (unsigned long long) entry->dense_words *
+            sizeof(*entry->dense_bits);
+        unsigned long long bytes =
+          (unsigned long long) words * sizeof(*entry->dense_bits);
+        if (bytes - old_bytes > Compiled_same_cache_budget_bytes -
+                                  Compiled_same_cache_dense_bytes) {
+          safe_free(entry->dense_bits);
+          Compiled_same_cache_dense_bytes -= old_bytes;
+          entry->dense_bits = NULL;
+          entry->dense_words = 0;
+          entry->match_count = 0;
+          entry->built = 0;
+          entry->build_denied = 1;
+          Compiled_same_cache_dense_denials++;
+          continue;
+        }
+        entry->dense_bits = safe_realloc(
+          entry->dense_bits, (size_t) words * sizeof(*entry->dense_bits));
+        memset(entry->dense_bits + entry->dense_words, 0,
+               (size_t) (words - entry->dense_words) *
+                 sizeof(*entry->dense_bits));
+        entry->dense_words = words;
+        Compiled_same_cache_dense_bytes += bytes - old_bytes;
+      }
+      if ((entry->dense_bits[word] & (1ULL << (id % 64))) == 0) {
+        entry->dense_bits[word] |= 1ULL << (id % 64);
+        if (entry->match_count != UINT_MAX)
+          entry->match_count++;
+      }
     }
   }
 }
@@ -4002,7 +4036,8 @@ static void compiled_same_filter_candidates(void)
         cache_entry->candidate_work = ULLONG_MAX;
       else
         cache_entry->candidate_work += candidate_tests;
-      if (!cache_entry->built && Active_hints_count > 0 &&
+      if (!cache_entry->built && !cache_entry->build_denied &&
+          Active_hints_count > 0 &&
           cache_entry->queries >= 2 &&
           cache_entry->candidate_work >=
             (unsigned long long) Active_hints_count *
@@ -5159,6 +5194,12 @@ void set_hint_compiled_cache_build_factor(unsigned factor)
 }
 
 /* PUBLIC */
+void set_hint_compiled_cache_kb(unsigned kb)
+{
+  Compiled_same_cache_budget_bytes = (unsigned long long) kb * 1024;
+}
+
+/* PUBLIC */
 void set_hint_compiled_authoritative(BOOL on)
 {
   if (on && Compiled_term_table == NULL)
@@ -5357,12 +5398,8 @@ void packed_hint_index_stats(unsigned long long *node_bytes,
       (unsigned long long) Compiled_path_key_capacity *
         sizeof(*Compiled_path_key_scratch);
   }
-  if (Compiled_same_cache_postings != NULL) {
-    struct hint_postings_stats cache_stats;
-    hint_postings_get_stats(Compiled_same_cache_postings, &cache_stats);
-    *node_bytes += cache_stats.table_bytes;
-    *reference_bytes += cache_stats.reference_bytes +
-      cache_stats.dense_bit_bytes + cache_stats.dense_summary_bytes;
+  if (Compiled_same_cache_entries != NULL) {
+    *reference_bytes += Compiled_same_cache_dense_bytes;
     *table_bytes +=
       (unsigned long long) Compiled_same_cache_capacity *
         sizeof(*Compiled_same_cache_entries) +
@@ -5624,18 +5661,18 @@ void fprint_packed_hint_operation_stats(FILE *fp)
               sizeof(*Compiled_same_tests));
   }
   if (Compiled_filter_enabled) {
-    struct hint_postings_stats s;
-    unsigned i, built = 0;
+    unsigned i, built = 0, denied = 0;
     unsigned long long observed_queries = 0;
     unsigned long long observed_work = 0;
     unsigned long long maximum_queries = 0;
     unsigned long long maximum_work = 0;
-    hint_postings_get_stats(Compiled_same_cache_postings, &s);
     for (i = 0; i < Compiled_same_cache_count; i++) {
       struct compiled_same_cache_entry *entry =
         Compiled_same_cache_entries + i;
       if (entry->built)
         built++;
+      if (entry->build_denied)
+        denied++;
       if (ULLONG_MAX - observed_queries < entry->queries)
         observed_queries = ULLONG_MAX;
       else
@@ -5656,10 +5693,8 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             "maximum_candidate_work=%llu, cache_hits=%llu, builds=%llu, "
             "build_scans=%llu, build_matches=%llu, "
             "filter_candidates=%llu, filter_rejects=%llu, "
-            "posting_keys=%llu, posting_references=%llu, "
-            "posting_table_bytes=%llu, posting_reference_bytes=%llu, "
-            "dense_keys=%llu, dense_bit_bytes=%llu, "
-            "dense_summary_bytes=%llu, dense_budget_bytes=%llu, "
+            "denied_entries=%u, dense_keys=%u, dense_bit_bytes=%llu, "
+            "dense_budget_bytes=%llu, "
             "dense_denials=%llu, entry_bytes=%llu, bucket_bytes=%llu, "
             "path_bytes=%llu.\n",
             Compiled_same_cache_ready, Compiled_same_cache_count, built,
@@ -5671,9 +5706,9 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             Compiled_same_cache_build_matches,
             Compiled_same_cache_filter_candidates,
             Compiled_same_cache_filter_rejects,
-            s.keys, s.references, s.table_bytes, s.reference_bytes,
-            s.dense_keys, s.dense_bit_bytes, s.dense_summary_bytes,
-            s.dense_budget_bytes, Compiled_same_cache_dense_denials,
+            denied, built, Compiled_same_cache_dense_bytes,
+            Compiled_same_cache_budget_bytes,
+            Compiled_same_cache_dense_denials,
             (unsigned long long) Compiled_same_cache_capacity *
               sizeof(*Compiled_same_cache_entries),
             (unsigned long long) Compiled_same_cache_bucket_capacity *

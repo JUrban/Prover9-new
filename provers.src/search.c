@@ -2239,6 +2239,8 @@ Prover_options init_prover_options(void)
     init_parm("hint_compiled_min_candidates", 128, 0, INT_MAX);
   p->hint_compiled_cache_build_factor =
     init_parm("hint_compiled_cache_build_factor", 2, 0, INT_MAX);
+  p->hint_compiled_cache_kb =
+    init_parm("hint_compiled_cache_kb", 32768, 0, INT_MAX);
   p->hint_conjunction_kb =
     init_parm("hint_conjunction_kb", 327680, 0, INT_MAX);
   p->hint_rebuild_scan_ratio =
@@ -11645,6 +11647,8 @@ void index_and_process_initial_clauses(void)
     (unsigned) parm(Opt->hint_compiled_min_candidates));
   set_hint_compiled_cache_build_factor(
     (unsigned) parm(Opt->hint_compiled_cache_build_factor));
+  set_hint_compiled_cache_kb(
+    (unsigned) parm(Opt->hint_compiled_cache_kb));
   init_hints(ORDINARY_UNIF, Att.bsub_hint_wt,
 	     flag(Opt->collect_hint_labels),
 	     flag(Opt->back_demod_hints),
@@ -16199,6 +16203,8 @@ void load_checkpoint_into_loop(void)
     (unsigned) parm(Opt->hint_compiled_min_candidates));
   set_hint_compiled_cache_build_factor(
     (unsigned) parm(Opt->hint_compiled_cache_build_factor));
+  set_hint_compiled_cache_kb(
+    (unsigned) parm(Opt->hint_compiled_cache_kb));
   init_hints(ORDINARY_UNIF, Att.bsub_hint_wt,
              flag(Opt->collect_hint_labels),
              flag(Opt->back_demod_hints),
