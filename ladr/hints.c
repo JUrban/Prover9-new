@@ -228,6 +228,10 @@ static unsigned long long Compiled_fused_prefix_candidates = 0;
 static unsigned long long Compiled_fused_early_rejects = 0;
 static unsigned long long Compiled_fused_block_words = 0;
 static unsigned long long Compiled_fused_block_rejects = 0;
+static unsigned long long Compiled_fused_sparse_mask_tests = 0;
+static unsigned long long Compiled_fused_sparse_mask_rejects = 0;
+static unsigned long long Compiled_fused_conjunction_mask_tests = 0;
+static unsigned long long Compiled_fused_conjunction_mask_rejects = 0;
 static BOOL Compiled_fused_program_preapplied = FALSE;
 static unsigned long long *Compiled_query_identity = NULL;
 static unsigned Compiled_query_identity_count = 0;
@@ -1270,6 +1274,7 @@ static void packed_index_hint_terms(Topform h, BOOL anyconst)
 
 static void compiled_fused_activate(void);
 static BOOL compiled_fused_candidate_accept(unsigned id);
+static BOOL compiled_fused_program_accept(unsigned id, BOOL account);
 
 static void packed_add_candidate(unsigned id)
 {
@@ -2898,6 +2903,19 @@ static BOOL fast_dense_collect_candidates(
         keep = word < views[i].words &&
                (views[i].bits[word] & (1ULL << (id % 64))) != 0;
       }
+      if (keep && Compiled_fused_active &&
+          Compiled_fused_program_count != 0) {
+        BOOL structural = compiled_fused_program_accept(id, record_stats);
+        if (record_stats)
+          Compiled_fused_sparse_mask_tests++;
+        if (!structural) {
+          if (record_stats) {
+            Compiled_fused_sparse_mask_rejects++;
+            Compiled_fused_early_rejects++;
+          }
+          continue;
+        }
+      }
       if (keep) {
         unsigned rejection = fast_candidate_profile_rejection(filter, id);
         if (filter != NULL)
@@ -3092,18 +3110,34 @@ static BOOL fast_conjunction_collect_candidates(
         unsigned position = base + bit;
         unsigned id = view.ids[position];
         unsigned counts = view.literal_counts[position];
-        if ((counts >> 16) < positive ||
-            (counts & 0xffffU) < negative) {
-          if (!Hint_preview_active)
-            Fast_conjunction_profile_rejects++;
-        }
-        else if (id == 0 || id >= Packed_hint_capacity ||
-                 !Packed_hint_active[id] || Packed_hint_anyconst[id]) {
+        if (id == 0 || id >= Packed_hint_capacity ||
+            !Packed_hint_active[id] || Packed_hint_anyconst[id]) {
           if (!Hint_preview_active)
             packed_note_stale_skip(op);
         }
-        else
-          packed_add_candidate(id);
+        else {
+          BOOL structural = TRUE;
+          if (Compiled_fused_active &&
+              Compiled_fused_program_count != 0) {
+            structural = compiled_fused_program_accept(
+              id, !Hint_preview_active);
+            if (!Hint_preview_active)
+              Compiled_fused_conjunction_mask_tests++;
+          }
+          if (!structural) {
+            if (!Hint_preview_active) {
+              Compiled_fused_conjunction_mask_rejects++;
+              Compiled_fused_early_rejects++;
+            }
+          }
+          else if ((counts >> 16) < positive ||
+                   (counts & 0xffffU) < negative) {
+            if (!Hint_preview_active)
+              Fast_conjunction_profile_rejects++;
+          }
+          else
+            packed_add_candidate(id);
+        }
         common &= common - 1;
       }
     }
@@ -3121,12 +3155,27 @@ static BOOL fast_conjunction_collect_candidates(
       if (!Hint_preview_active)
         packed_note_stale_skip(op);
     }
-    else if (Better_hint_positive_count[id] >= positive &&
-             Better_hint_negative_count[id] >= negative &&
-             (((sign ? Packed_hint_pos_features[id] :
-                       Packed_hint_neg_features[id]) & first_mask) ==
-               first_mask))
-      packed_add_candidate(id);
+    else {
+      BOOL structural = TRUE;
+      if (Compiled_fused_active && Compiled_fused_program_count != 0) {
+        structural = compiled_fused_program_accept(
+          id, !Hint_preview_active);
+        if (!Hint_preview_active)
+          Compiled_fused_conjunction_mask_tests++;
+      }
+      if (!structural) {
+        if (!Hint_preview_active) {
+          Compiled_fused_conjunction_mask_rejects++;
+          Compiled_fused_early_rejects++;
+        }
+      }
+      else if (Better_hint_positive_count[id] >= positive &&
+               Better_hint_negative_count[id] >= negative &&
+               (((sign ? Packed_hint_pos_features[id] :
+                         Packed_hint_neg_features[id]) & first_mask) ==
+                 first_mask))
+        packed_add_candidate(id);
+    }
   }
   return TRUE;
 }
@@ -3319,6 +3368,10 @@ void init_hints(Uniftype utype,
   Compiled_fused_early_rejects = 0;
   Compiled_fused_block_words = 0;
   Compiled_fused_block_rejects = 0;
+  Compiled_fused_sparse_mask_tests = 0;
+  Compiled_fused_sparse_mask_rejects = 0;
+  Compiled_fused_conjunction_mask_tests = 0;
+  Compiled_fused_conjunction_mask_rejects = 0;
   Compiled_fused_program_preapplied = FALSE;
   Compiled_query_identity_count = 0;
   Compiled_rigid_test_count = 0;
@@ -3678,6 +3731,10 @@ void done_with_hints(void)
   Compiled_fused_early_rejects = 0;
   Compiled_fused_block_words = 0;
   Compiled_fused_block_rejects = 0;
+  Compiled_fused_sparse_mask_tests = 0;
+  Compiled_fused_sparse_mask_rejects = 0;
+  Compiled_fused_conjunction_mask_tests = 0;
+  Compiled_fused_conjunction_mask_rejects = 0;
   Compiled_fused_program_preapplied = FALSE;
   Compiled_rigid_queries = 0;
   Compiled_rigid_sampled_queries = 0;
@@ -4619,31 +4676,41 @@ static unsigned compiled_select_rigid_test(const unsigned *candidates,
   return selected;
 }
 
+/* Test only the learned dense part of the current query program.  Every
+   learned mask contains conservative positive bits for targets without a
+   canonical unit root, so this can safely run before root resolution and
+   before the scalar candidate has entered the packed candidate vector. */
+static BOOL compiled_fused_program_accept(unsigned id, BOOL account)
+{
+  unsigned word = id / 64;
+  unsigned j;
+  if (word != Compiled_fused_current_word) {
+    unsigned long long bits = ULLONG_MAX;
+    for (j = 0; j < Compiled_fused_program_count; j++) {
+      struct compiled_same_cache_entry *entry =
+        Compiled_fused_program[j];
+      bits &= word < entry->dense_words ? entry->dense_bits[word] : 0;
+    }
+    Compiled_fused_current_word = word;
+    Compiled_fused_current_bits = bits;
+    if (account)
+      Compiled_fused_word_ops += Compiled_fused_program_count;
+  }
+  return (Compiled_fused_current_bits & (1ULL << (id % 64))) != 0;
+}
+
 static BOOL compiled_fused_candidate_accept(unsigned id)
 {
   BOOL account = !Hint_preview_active;
-  uint32_t root = compiled_hint_root(id, account);
+  uint32_t root;
   unsigned j;
+  if (Compiled_fused_program_count != 0 &&
+      !Compiled_fused_program_preapplied &&
+      !compiled_fused_program_accept(id, account))
+    return FALSE;
+  root = compiled_hint_root(id, account);
   if (root == 0)
     return TRUE;
-  if (Compiled_fused_program_count != 0 &&
-      !Compiled_fused_program_preapplied) {
-    unsigned word = id / 64;
-    if (word != Compiled_fused_current_word) {
-      unsigned long long bits = ULLONG_MAX;
-      for (j = 0; j < Compiled_fused_program_count; j++) {
-        struct compiled_same_cache_entry *entry =
-          Compiled_fused_program[j];
-        bits &= word < entry->dense_words ? entry->dense_bits[word] : 0;
-      }
-      Compiled_fused_current_word = word;
-      Compiled_fused_current_bits = bits;
-      if (account)
-        Compiled_fused_word_ops += Compiled_fused_program_count;
-    }
-    if ((Compiled_fused_current_bits & (1ULL << (id % 64))) == 0)
-      return FALSE;
-  }
   for (j = 0; j < Compiled_fused_direct_count; j++) {
     unsigned index = Compiled_fused_direct_indices[j];
     if (account)
@@ -7056,11 +7123,17 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             "Compiled_hint_blocks: enabled=1, queries=%llu, "
             "activations=%llu, prefix_candidates=%llu, "
             "early_rejects=%llu, block_words=%llu, "
-            "block_rejects=%llu, query_identity_bytes=%llu, "
+            "block_rejects=%llu, sparse_mask_tests=%llu, "
+            "sparse_mask_rejects=%llu, conjunction_mask_tests=%llu, "
+            "conjunction_mask_rejects=%llu, query_identity_bytes=%llu, "
             "cache_identity_bytes=%llu.\n",
             Compiled_fused_queries, Compiled_fused_activations,
             Compiled_fused_prefix_candidates, Compiled_fused_early_rejects,
             Compiled_fused_block_words, Compiled_fused_block_rejects,
+            Compiled_fused_sparse_mask_tests,
+            Compiled_fused_sparse_mask_rejects,
+            Compiled_fused_conjunction_mask_tests,
+            Compiled_fused_conjunction_mask_rejects,
             (unsigned long long) Compiled_query_identity_capacity *
               sizeof(*Compiled_query_identity),
             (unsigned long long) Compiled_fast_identity_capacity *
