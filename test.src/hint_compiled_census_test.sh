@@ -4,7 +4,8 @@ set -eu
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 prover9=${PROVER9:-"$script_dir/../provers.src/prover9"}
 tmp=${TMPDIR:-/tmp}/hint-compiled-census.$$
-trap 'rm -f "$tmp.out" "$tmp.err" "$tmp.path.out" "$tmp.path.err"' \
+trap 'rm -f "$tmp.out" "$tmp.err" "$tmp.path.out" "$tmp.path.err" \
+  "$tmp.same.out" "$tmp.same.err"' \
   EXIT HUP INT TERM
 
 "$prover9" < "$script_dir/hint_compiled_census.in" \
@@ -52,6 +53,21 @@ printf '%s\n' "$path_line" | grep -Eq \
 printf '%s\n' "$path_line" | grep -Eq \
   'queries=[1-9][0-9]*, query_keys=[1-9][0-9]*,'
 printf '%s\n' "$path_line" | grep -Eq \
+  'candidates_before=[1-9][0-9]*, candidates_after=[0-9]+, candidates_rejected=[1-9][0-9]*'
+
+sed 's/packed_compiled_shadow/packed_compiled/' \
+  "$script_dir/hint_compiled_census.in" |
+  "$prover9" > "$tmp.same.out" 2> "$tmp.same.err" || same_status=$?
+same_status=${same_status:-0}
+if [ "$same_status" -ne 2 ] && [ "$same_status" -ne 5 ]; then
+  cat "$tmp.same.err" >&2
+  echo "hint_compiled_census_test: SAME run returned $same_status" >&2
+  exit 1
+fi
+same_line=$(grep '^Compiled_hint_same_filter:' "$tmp.same.out")
+printf '%s\n' "$same_line" | grep -Eq \
+  'queries=[1-9][0-9]*, query_tests=[1-9][0-9]*,'
+printf '%s\n' "$same_line" | grep -Eq \
   'candidates_before=[1-9][0-9]*, candidates_after=[0-9]+, candidates_rejected=[1-9][0-9]*'
 
 echo "hint_compiled_census_test: PASS"

@@ -8,7 +8,7 @@ clear(back_demod).
 clear(back_demod_hints).
 assign(search_loop,discount).
 assign(passive_store,compressed).
-assign(hint_index,packed_compiled).
+assign(hint_index,packed_compiled_paths).
 assign(ancestor_store,memory).
 assign(stats,all).
 assign(max_given,1).

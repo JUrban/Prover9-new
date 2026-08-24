@@ -34,6 +34,11 @@ set(hint_trace).' "$repo_dir/test.src/discount_loop.in" |
   "$prover9" > "$test_tmp/packed-compiled.out" \
                2> "$test_tmp/packed-compiled.err"
 
+sed '/assign(hint_index,compact)./a assign(hint_index,packed_compiled_paths).\
+set(hint_trace).' "$repo_dir/test.src/discount_loop.in" |
+  "$prover9" > "$test_tmp/packed-compiled-paths.out" \
+               2> "$test_tmp/packed-compiled-paths.err"
+
 sed '/assign(hint_index,compact)./a assign(hint_index,hybrid).\
 set(hint_trace).' "$repo_dir/test.src/discount_loop.in" |
   "$prover9" > "$test_tmp/hybrid.out" 2> "$test_tmp/hybrid.err"
@@ -52,6 +57,8 @@ grep '^HINT_TRACE ' "$test_tmp/packed-compiled-shadow.out" \
   > "$test_tmp/packed-compiled-shadow.trace"
 grep '^HINT_TRACE ' "$test_tmp/packed-compiled.out" \
   > "$test_tmp/packed-compiled.trace"
+grep '^HINT_TRACE ' "$test_tmp/packed-compiled-paths.out" \
+  > "$test_tmp/packed-compiled-paths.trace"
 grep '^HINT_TRACE ' "$test_tmp/hybrid.out" > "$test_tmp/hybrid.trace"
 grep '^HINT_TRACE ' "$test_tmp/packed-legacy.out" \
   > "$test_tmp/packed-legacy.trace"
@@ -61,6 +68,7 @@ diff -u "$test_tmp/fpa.trace" "$test_tmp/packed.trace"
 diff -u "$test_tmp/fpa.trace" "$test_tmp/packed-fast.trace"
 diff -u "$test_tmp/fpa.trace" "$test_tmp/packed-compiled-shadow.trace"
 diff -u "$test_tmp/fpa.trace" "$test_tmp/packed-compiled.trace"
+diff -u "$test_tmp/fpa.trace" "$test_tmp/packed-compiled-paths.trace"
 diff -u "$test_tmp/fpa.trace" "$test_tmp/hybrid.trace"
 diff -u "$test_tmp/fpa.trace" "$test_tmp/packed-legacy.trace"
 grep -q 'THEOREM PROVED' "$test_tmp/compact.out"
@@ -69,6 +77,7 @@ grep -q 'THEOREM PROVED' "$test_tmp/packed.out"
 grep -q 'THEOREM PROVED' "$test_tmp/packed-fast.out"
 grep -q 'THEOREM PROVED' "$test_tmp/packed-compiled-shadow.out"
 grep -q 'THEOREM PROVED' "$test_tmp/packed-compiled.out"
+grep -q 'THEOREM PROVED' "$test_tmp/packed-compiled-paths.out"
 grep -q 'THEOREM PROVED' "$test_tmp/hybrid.out"
 grep -q 'THEOREM PROVED' "$test_tmp/packed-legacy.out"
 for hint_op in equivalence match flipped_match back_demod; do
@@ -92,10 +101,13 @@ grep -Eq '^Compiled_hint_term_table: authoritative=0, finalized=1, active=[1-9][
   "$test_tmp/packed-compiled-shadow.out"
 grep -Eq '^Compiled_hint_term_table: authoritative=1, finalized=1, active=[1-9][0-9]*,' \
   "$test_tmp/packed-compiled.out"
+grep -q '^Compiled_hint_same_filter:' "$test_tmp/packed-compiled.out"
+grep -q '^Compiled_hint_path_index:' \
+  "$test_tmp/packed-compiled-paths.out"
 
 "$prover9" -f "$repo_dir/test.src/hint_anyconst.in" \
   > "$test_tmp/anyconst-compact.out" 2> "$test_tmp/anyconst-compact.err"
-for hint_mode in packed packed_fast packed_compiled_shadow packed_compiled hybrid packed_legacy; do
+for hint_mode in packed packed_fast packed_compiled_shadow packed_compiled packed_compiled_paths hybrid packed_legacy; do
   sed "/assign(hint_index,compact)./a assign(hint_index,$hint_mode)." \
     "$repo_dir/test.src/hint_anyconst.in" |
     "$prover9" > "$test_tmp/anyconst-$hint_mode.out" \
@@ -114,6 +126,8 @@ diff -u "$test_tmp/anyconst-compact.trace" \
   "$test_tmp/anyconst-packed_compiled_shadow.trace"
 diff -u "$test_tmp/anyconst-compact.trace" \
   "$test_tmp/anyconst-packed_compiled.trace"
+diff -u "$test_tmp/anyconst-compact.trace" \
+  "$test_tmp/anyconst-packed_compiled_paths.trace"
 diff -u "$test_tmp/anyconst-compact.trace" "$test_tmp/anyconst-hybrid.trace"
 diff -u "$test_tmp/anyconst-compact.trace" \
   "$test_tmp/anyconst-packed_legacy.trace"

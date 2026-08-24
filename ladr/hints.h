@@ -106,6 +106,8 @@ void set_hint_compiled_census(BOOL on);
    remains authoritative. */
 void set_hint_compiled_term_table(BOOL on);
 
+void set_hint_compiled_paths(BOOL on);
+
 void set_hint_compiled_authoritative(BOOL on);
 
 void set_hint_match_once(BOOL on);

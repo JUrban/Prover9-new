@@ -275,6 +275,7 @@ static BOOL packed_hint_bank_mode(void)
      str_ident(stringparm1(Opt->hint_index), "packed_fast") ||
      str_ident(stringparm1(Opt->hint_index), "packed_compiled_shadow") ||
      str_ident(stringparm1(Opt->hint_index), "packed_compiled") ||
+     str_ident(stringparm1(Opt->hint_index), "packed_compiled_paths") ||
      str_ident(stringparm1(Opt->hint_index), "hybrid") ||
      str_ident(stringparm1(Opt->hint_index), "packed_legacy"));
 }
@@ -286,6 +287,7 @@ static BOOL better_packed_hint_mode(void)
      str_ident(stringparm1(Opt->hint_index), "packed_fast") ||
      str_ident(stringparm1(Opt->hint_index), "packed_compiled_shadow") ||
      str_ident(stringparm1(Opt->hint_index), "packed_compiled") ||
+     str_ident(stringparm1(Opt->hint_index), "packed_compiled_paths") ||
      str_ident(stringparm1(Opt->hint_index), "hybrid"));
 }
 
@@ -294,20 +296,29 @@ static BOOL fast_packed_hint_mode(void)
   return Opt != NULL &&
     (str_ident(stringparm1(Opt->hint_index), "packed_fast") ||
      str_ident(stringparm1(Opt->hint_index), "packed_compiled_shadow") ||
-     str_ident(stringparm1(Opt->hint_index), "packed_compiled"));
+     str_ident(stringparm1(Opt->hint_index), "packed_compiled") ||
+     str_ident(stringparm1(Opt->hint_index), "packed_compiled_paths"));
 }
 
 static BOOL compiled_hint_table_mode(void)
 {
   return Opt != NULL &&
     (str_ident(stringparm1(Opt->hint_index), "packed_compiled_shadow") ||
-     str_ident(stringparm1(Opt->hint_index), "packed_compiled"));
+     str_ident(stringparm1(Opt->hint_index), "packed_compiled") ||
+     str_ident(stringparm1(Opt->hint_index), "packed_compiled_paths"));
 }
 
 static BOOL compiled_hint_authoritative_mode(void)
 {
   return Opt != NULL &&
-    str_ident(stringparm1(Opt->hint_index), "packed_compiled");
+    (str_ident(stringparm1(Opt->hint_index), "packed_compiled") ||
+     str_ident(stringparm1(Opt->hint_index), "packed_compiled_paths"));
+}
+
+static BOOL compiled_hint_path_mode(void)
+{
+  return Opt != NULL &&
+    str_ident(stringparm1(Opt->hint_index), "packed_compiled_paths");
 }
 
 static BOOL live_clash_index_needed(void)
@@ -2313,7 +2324,7 @@ Prover_options init_prover_options(void)
 			"eager_legacy",
 			"eager_interreduced");
 
-  p->hint_index = init_stringparm("hint_index", 9,
+  p->hint_index = init_stringparm("hint_index", 10,
 				  "fpa",
 				  "compact",
 				  "shallow",
@@ -2321,6 +2332,7 @@ Prover_options init_prover_options(void)
 				  "packed_fast",
 				  "packed_compiled_shadow",
 				  "packed_compiled",
+				  "packed_compiled_paths",
 				  "hybrid",
 				  "packed_legacy");
 
@@ -11634,6 +11646,7 @@ void index_and_process_initial_clauses(void)
   set_hint_match_stats(flag(Opt->hint_match_stats));
   set_hint_compiled_census(flag(Opt->hint_compiled_census));
   set_hint_compiled_term_table(compiled_hint_table_mode());
+  set_hint_compiled_paths(compiled_hint_path_mode());
   set_hint_compiled_authoritative(compiled_hint_authoritative_mode());
   set_hint_match_once(flag(Opt->hint_match_once));
   init_semantics(Glob.interps, Clocks.semantics,
@@ -16181,6 +16194,7 @@ void load_checkpoint_into_loop(void)
   set_hint_match_stats(flag(Opt->hint_match_stats));
   set_hint_compiled_census(flag(Opt->hint_compiled_census));
   set_hint_compiled_term_table(compiled_hint_table_mode());
+  set_hint_compiled_paths(compiled_hint_path_mode());
   set_hint_compiled_authoritative(compiled_hint_authoritative_mode());
   set_hint_match_once(flag(Opt->hint_match_once));
   init_semantics(Glob.interps, Clocks.semantics,
