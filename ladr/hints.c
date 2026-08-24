@@ -184,6 +184,14 @@ static unsigned long long Compiled_program_conditions = 0;
 static unsigned long long Compiled_program_word_ops = 0;
 static unsigned long long Compiled_program_candidate_tests = 0;
 static unsigned Compiled_program_maximum_conditions = 0;
+static unsigned long long Compiled_plan_queries = 0;
+static unsigned long long Compiled_plan_same_conditions = 0;
+static unsigned long long Compiled_plan_rigid_conditions = 0;
+static unsigned long long Compiled_plan_multi_condition_queries = 0;
+static unsigned long long Compiled_plan_mixed_queries = 0;
+static unsigned Compiled_plan_maximum_same = 0;
+static unsigned Compiled_plan_maximum_rigid = 0;
+static unsigned Compiled_plan_maximum_total = 0;
 static BOOL Compiled_rigid_program_applied = FALSE;
 
 #define COMPILED_RIGID_SAMPLE_CANDIDATES 8U
@@ -3091,6 +3099,14 @@ void init_hints(Uniftype utype,
   Compiled_program_word_ops = 0;
   Compiled_program_candidate_tests = 0;
   Compiled_program_maximum_conditions = 0;
+  Compiled_plan_queries = 0;
+  Compiled_plan_same_conditions = 0;
+  Compiled_plan_rigid_conditions = 0;
+  Compiled_plan_multi_condition_queries = 0;
+  Compiled_plan_mixed_queries = 0;
+  Compiled_plan_maximum_same = 0;
+  Compiled_plan_maximum_rigid = 0;
+  Compiled_plan_maximum_total = 0;
   Compiled_rigid_test_count = 0;
   Compiled_rigid_queries = 0;
   Compiled_rigid_sampled_queries = 0;
@@ -4595,6 +4611,22 @@ static void compiled_path_filter_candidates(
   compiled_path_collect_query(
     c->literals->atom, c->literals->sign,
     UINT64_C(0x243f6a8885a308d3), 0);
+  if (account && Packed_candidates_count >= Compiled_same_min_candidates) {
+    unsigned total = Compiled_same_test_count + Compiled_rigid_test_count;
+    Compiled_plan_queries++;
+    Compiled_plan_same_conditions += Compiled_same_test_count;
+    Compiled_plan_rigid_conditions += Compiled_rigid_test_count;
+    if (total >= 2)
+      Compiled_plan_multi_condition_queries++;
+    if (Compiled_same_test_count != 0 && Compiled_rigid_test_count != 0)
+      Compiled_plan_mixed_queries++;
+    if (Compiled_same_test_count > Compiled_plan_maximum_same)
+      Compiled_plan_maximum_same = Compiled_same_test_count;
+    if (Compiled_rigid_test_count > Compiled_plan_maximum_rigid)
+      Compiled_plan_maximum_rigid = Compiled_rigid_test_count;
+    if (total > Compiled_plan_maximum_total)
+      Compiled_plan_maximum_total = total;
+  }
   compiled_same_filter_candidates();
   compiled_rigid_filter_candidates();
   before = Packed_candidates_count;
@@ -6243,6 +6275,21 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             Compiled_rigid_truncated_tests,
             (unsigned long long) Compiled_rigid_test_capacity *
               sizeof(*Compiled_rigid_tests));
+  }
+  if (Compiled_filter_enabled) {
+    fprintf(fp,
+            "Compiled_hint_plan: admitted_queries=%llu, "
+            "same_conditions=%llu, rigid_conditions=%llu, "
+            "multi_condition_queries=%llu, mixed_queries=%llu, "
+            "maximum_same=%u, maximum_rigid=%u, maximum_total=%u.\n",
+            Compiled_plan_queries,
+            Compiled_plan_same_conditions,
+            Compiled_plan_rigid_conditions,
+            Compiled_plan_multi_condition_queries,
+            Compiled_plan_mixed_queries,
+            Compiled_plan_maximum_same,
+            Compiled_plan_maximum_rigid,
+            Compiled_plan_maximum_total);
   }
   if (Compiled_filter_enabled) {
     fprintf(fp,

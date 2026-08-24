@@ -132,7 +132,10 @@ if [ "$program_status" -ne 2 ] && [ "$program_status" -ne 5 ]; then
   exit 1
 fi
 program_line=$(grep '^Compiled_hint_program:' "$tmp.program.out")
+program_plan=$(grep '^Compiled_hint_plan:' "$tmp.program.out")
 program_cache=$(grep '^Compiled_hint_same_cache:' "$tmp.program.out")
+printf '%s\n' "$program_plan" | grep -Eq \
+  'admitted_queries=[1-9][0-9]*, same_conditions=[1-9][0-9]*, rigid_conditions=0, multi_condition_queries=[1-9][0-9]*, mixed_queries=0, maximum_same=2, maximum_rigid=0, maximum_total=2\.'
 printf '%s\n' "$program_line" | grep -Eq \
   'queries=2, conditions=3, maximum_conditions=2, maximum_allowed=8, word_operations=[1-9][0-9]*, candidate_membership_tests=0, scratch_words=[1-9][0-9]*, scratch_bytes=[1-9][0-9]*\.'
 printf '%s\n' "$program_cache" | grep -Eq \
