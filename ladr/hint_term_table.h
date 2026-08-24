@@ -81,6 +81,13 @@ int hint_term_table_compare_paths(Hint_term_table table, uint32_t root,
                                   const unsigned *second,
                                   unsigned second_length);
 
+/* Return 1 when the target subterm at PATH has SYMBOL, 0 when the exact
+   necessary condition fails, and -1 for invalid table/input state. */
+int hint_term_table_path_symbol(Hint_term_table table, uint32_t root,
+                                const unsigned *path,
+                                unsigned path_length,
+                                unsigned symbol);
+
 /* Allocation-free one-way match: PATTERN variables may bind canonical
    subterm handles from retained unit hint ID.  TRUE means ID was supported
    and *MATCHED is authoritative; FALSE requests the compressed fallback. */

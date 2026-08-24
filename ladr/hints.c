@@ -124,11 +124,17 @@ static unsigned long long Compiled_same_skipped_candidates = 0;
   (32ULL * 1024ULL * 1024ULL)
 #define COMPILED_SAME_CACHE_MAX_ENTRIES 4096U
 #define COMPILED_SAME_CACHE_MAX_PATH_WORDS (256U * 1024U)
+enum compiled_condition_kind {
+  COMPILED_CONDITION_SAME = 1,
+  COMPILED_CONDITION_RIGID = 2
+};
 struct compiled_same_cache_entry {
   unsigned long long hash;
   unsigned long long queries;
   unsigned long long candidate_work;
   unsigned long long *dense_bits;
+  unsigned kind;
+  unsigned symbol;
   unsigned first_offset;
   unsigned first_length;
   unsigned second_offset;
@@ -160,8 +166,32 @@ static unsigned long long Compiled_same_cache_filter_candidates = 0;
 static unsigned long long Compiled_same_cache_filter_rejects = 0;
 static unsigned long long Compiled_same_cache_dense_denials = 0;
 static unsigned long long Compiled_same_cache_metadata_denials = 0;
+static unsigned long long Compiled_same_cache_same_hits = 0;
+static unsigned long long Compiled_same_cache_rigid_hits = 0;
 static unsigned Compiled_same_cache_build_factor =
   COMPILED_SAME_CACHE_BUILD_FACTOR;
+
+#define COMPILED_RIGID_SAMPLE_CANDIDATES 8U
+#define COMPILED_RIGID_SAMPLE_MAX_TESTS 32U
+#define COMPILED_RIGID_MIN_REJECT_PERCENT 25U
+struct compiled_rigid_test {
+  unsigned path_offset;
+  unsigned path_length;
+  unsigned symbol;
+};
+static struct compiled_rigid_test *Compiled_rigid_tests = NULL;
+static unsigned Compiled_rigid_test_count = 0;
+static unsigned Compiled_rigid_test_capacity = 0;
+static unsigned long long Compiled_rigid_queries = 0;
+static unsigned long long Compiled_rigid_sampled_queries = 0;
+static unsigned long long Compiled_rigid_sample_tests = 0;
+static unsigned long long Compiled_rigid_sample_candidates = 0;
+static unsigned long long Compiled_rigid_sample_rejects = 0;
+static unsigned long long Compiled_rigid_admission_skips = 0;
+static unsigned long long Compiled_rigid_candidates_before = 0;
+static unsigned long long Compiled_rigid_candidates_after = 0;
+static unsigned long long Compiled_rigid_candidate_tests = 0;
+static unsigned long long Compiled_rigid_truncated_tests = 0;
 
 /* Dedicated read-only-preview query workspace.  It is allocated alongside
    the packed bank, never aliases authoritative matcher scratch, and is not
@@ -3033,6 +3063,19 @@ void init_hints(Uniftype utype,
   Compiled_same_cache_filter_rejects = 0;
   Compiled_same_cache_dense_denials = 0;
   Compiled_same_cache_metadata_denials = 0;
+  Compiled_same_cache_same_hits = 0;
+  Compiled_same_cache_rigid_hits = 0;
+  Compiled_rigid_test_count = 0;
+  Compiled_rigid_queries = 0;
+  Compiled_rigid_sampled_queries = 0;
+  Compiled_rigid_sample_tests = 0;
+  Compiled_rigid_sample_candidates = 0;
+  Compiled_rigid_sample_rejects = 0;
+  Compiled_rigid_admission_skips = 0;
+  Compiled_rigid_candidates_before = 0;
+  Compiled_rigid_candidates_after = 0;
+  Compiled_rigid_candidate_tests = 0;
+  Compiled_rigid_truncated_tests = 0;
   Hint_match_once = FALSE;
   memset(Compiled_census, 0, sizeof(Compiled_census));
   memset(Compiled_census_printed, 0, sizeof(Compiled_census_printed));
@@ -3144,6 +3187,7 @@ void done_with_hints(void)
   if (Compiled_query_path) safe_free(Compiled_query_path);
   if (Compiled_plan_paths) safe_free(Compiled_plan_paths);
   if (Compiled_same_tests) safe_free(Compiled_same_tests);
+  if (Compiled_rigid_tests) safe_free(Compiled_rigid_tests);
   for (i = 0; i < Compiled_same_cache_count; i++)
     if (Compiled_same_cache_entries[i].dense_bits != NULL)
       safe_free(Compiled_same_cache_entries[i].dense_bits);
@@ -3180,6 +3224,7 @@ void done_with_hints(void)
   Compiled_query_path = NULL;
   Compiled_plan_paths = NULL;
   Compiled_same_tests = NULL;
+  Compiled_rigid_tests = NULL;
   Compiled_same_cache_entries = NULL;
   Compiled_same_cache_buckets = NULL;
   Compiled_same_cache_paths = NULL;
@@ -3298,6 +3343,7 @@ void done_with_hints(void)
   Compiled_query_path_capacity = 0;
   Compiled_plan_path_count = Compiled_plan_path_capacity = 0;
   Compiled_same_test_count = Compiled_same_test_capacity = 0;
+  Compiled_rigid_test_count = Compiled_rigid_test_capacity = 0;
   Compiled_same_queries = 0;
   Compiled_same_query_tests = 0;
   Compiled_same_candidates_before = 0;
@@ -3322,6 +3368,18 @@ void done_with_hints(void)
   Compiled_same_cache_filter_rejects = 0;
   Compiled_same_cache_dense_denials = 0;
   Compiled_same_cache_metadata_denials = 0;
+  Compiled_same_cache_same_hits = 0;
+  Compiled_same_cache_rigid_hits = 0;
+  Compiled_rigid_queries = 0;
+  Compiled_rigid_sampled_queries = 0;
+  Compiled_rigid_sample_tests = 0;
+  Compiled_rigid_sample_candidates = 0;
+  Compiled_rigid_sample_rejects = 0;
+  Compiled_rigid_admission_skips = 0;
+  Compiled_rigid_candidates_before = 0;
+  Compiled_rigid_candidates_after = 0;
+  Compiled_rigid_candidate_tests = 0;
+  Compiled_rigid_truncated_tests = 0;
   Compiled_same_cache_build_factor = COMPILED_SAME_CACHE_BUILD_FACTOR;
   Compiled_same_cache_budget_bytes =
     COMPILED_SAME_CACHE_DEFAULT_BYTES;
@@ -3559,12 +3617,41 @@ static void compiled_plan_note_variable(Term t, unsigned depth)
   }
 }
 
+static void compiled_plan_note_rigid(Term t, unsigned depth)
+{
+  struct compiled_rigid_test *test;
+  if (depth <= FAST_MATCH_FEATURE_DEPTH)
+    return;  /* Existing exact postings already enforce these positions. */
+  if (Compiled_rigid_test_count >= COMPILED_RIGID_SAMPLE_MAX_TESTS) {
+    if (!Hint_preview_active)
+      Compiled_rigid_truncated_tests++;
+    return;
+  }
+  if (Compiled_rigid_test_count == Compiled_rigid_test_capacity) {
+    unsigned old = Compiled_rigid_test_capacity;
+    unsigned capacity = old == 0 ? 16 : old * 2;
+    if (capacity <= old)
+      fatal_error("compiled rigid-test capacity overflow");
+    if (capacity > COMPILED_RIGID_SAMPLE_MAX_TESTS)
+      capacity = COMPILED_RIGID_SAMPLE_MAX_TESTS;
+    Compiled_rigid_tests = safe_realloc(
+      Compiled_rigid_tests,
+      (size_t) capacity * sizeof(*Compiled_rigid_tests));
+    Compiled_rigid_test_capacity = capacity;
+  }
+  test = Compiled_rigid_tests + Compiled_rigid_test_count++;
+  test->path_offset = compiled_plan_copy_path(depth);
+  test->path_length = depth;
+  test->symbol = (unsigned) SYMNUM(t);
+}
+
 static void compiled_plan_begin(void)
 {
   unsigned i;
   Compiled_path_key_count = 0;
   Compiled_plan_path_count = 0;
   Compiled_same_test_count = 0;
+  Compiled_rigid_test_count = 0;
   for (i = 0; i < MAX_VARS; i++)
     Compiled_variable_path_offset[i] = UINT_MAX;
 }
@@ -3604,12 +3691,14 @@ static int compiled_same_path_order(const unsigned *first,
          first_length > second_length ? 1 : 0;
 }
 
-static unsigned long long compiled_same_cache_hash(
+static unsigned long long compiled_condition_cache_hash(
+  unsigned kind, unsigned symbol,
   const unsigned *first, unsigned first_length,
   const unsigned *second, unsigned second_length)
 {
   unsigned long long hash = compiled_path_mix(
-    UINT64_C(0x53414d4550415448) ^ first_length);
+    UINT64_C(0x434f4e444954494f) ^ kind ^
+      ((unsigned long long) symbol << 17) ^ first_length);
   unsigned i;
   for (i = 0; i < first_length; i++)
     hash = compiled_path_mix(hash ^
@@ -3676,12 +3765,14 @@ static unsigned compiled_same_cache_copy_path(const unsigned *path,
   return offset;
 }
 
-static BOOL compiled_same_cache_key_equal(
+static BOOL compiled_condition_cache_key_equal(
   const struct compiled_same_cache_entry *entry,
+  unsigned kind, unsigned symbol,
   const unsigned *first, unsigned first_length,
   const unsigned *second, unsigned second_length)
 {
-  return entry->first_length == first_length &&
+  return entry->kind == kind && entry->symbol == symbol &&
+    entry->first_length == first_length &&
     entry->second_length == second_length &&
     (first_length == 0 ||
      memcmp(Compiled_same_cache_paths + entry->first_offset, first,
@@ -3691,40 +3782,29 @@ static BOOL compiled_same_cache_key_equal(
             (size_t) second_length * sizeof(*second)) == 0);
 }
 
-static struct compiled_same_cache_entry *compiled_same_cache_lookup(
-  const struct compiled_same_test *test, BOOL create)
+static struct compiled_same_cache_entry *compiled_condition_cache_lookup(
+  unsigned kind, unsigned symbol,
+  const unsigned *first, unsigned first_length,
+  const unsigned *second, unsigned second_length,
+  BOOL create)
 {
-  const unsigned *first = test->first_length == 0 ? NULL :
-    Compiled_plan_paths + test->first_offset;
-  const unsigned *second = test->second_length == 0 ? NULL :
-    Compiled_plan_paths + test->second_offset;
-  unsigned first_length = test->first_length;
-  unsigned second_length = test->second_length;
   unsigned long long hash;
   unsigned bucket, position;
-  if (compiled_same_path_order(
-        first, first_length, second, second_length) > 0) {
-    const unsigned *path = first;
-    unsigned length = first_length;
-    first = second;
-    first_length = second_length;
-    second = path;
-    second_length = length;
-  }
   if (Compiled_same_cache_buckets == NULL) {
     if (!create)
       return NULL;
     compiled_same_cache_init();
   }
-  hash = compiled_same_cache_hash(
-    first, first_length, second, second_length);
+  hash = compiled_condition_cache_hash(
+    kind, symbol, first, first_length, second, second_length);
   bucket = (unsigned) hash & (Compiled_same_cache_bucket_capacity - 1);
   position = Compiled_same_cache_buckets[bucket];
   while (position != 0) {
     struct compiled_same_cache_entry *entry =
       Compiled_same_cache_entries + position - 1;
-    if (entry->hash == hash && compiled_same_cache_key_equal(
-          entry, first, first_length, second, second_length))
+    if (entry->hash == hash && compiled_condition_cache_key_equal(
+          entry, kind, symbol,
+          first, first_length, second, second_length))
       return entry;
     position = entry->next;
   }
@@ -3763,6 +3843,8 @@ static struct compiled_same_cache_entry *compiled_same_cache_lookup(
       Compiled_same_cache_entries + Compiled_same_cache_count;
     memset(entry, 0, sizeof(*entry));
     entry->hash = hash;
+    entry->kind = kind;
+    entry->symbol = symbol;
     entry->first_offset = compiled_same_cache_copy_path(
       first, first_length);
     entry->first_length = first_length;
@@ -3775,17 +3857,60 @@ static struct compiled_same_cache_entry *compiled_same_cache_lookup(
   }
 }
 
+static struct compiled_same_cache_entry *compiled_same_cache_lookup(
+  const struct compiled_same_test *test, BOOL create)
+{
+  const unsigned *first = test->first_length == 0 ? NULL :
+    Compiled_plan_paths + test->first_offset;
+  const unsigned *second = test->second_length == 0 ? NULL :
+    Compiled_plan_paths + test->second_offset;
+  unsigned first_length = test->first_length;
+  unsigned second_length = test->second_length;
+  if (compiled_same_path_order(
+        first, first_length, second, second_length) > 0) {
+    const unsigned *path = first;
+    unsigned length = first_length;
+    first = second;
+    first_length = second_length;
+    second = path;
+    second_length = length;
+  }
+  return compiled_condition_cache_lookup(
+    COMPILED_CONDITION_SAME, 0,
+    first, first_length, second, second_length, create);
+}
+
+static struct compiled_same_cache_entry *compiled_rigid_cache_lookup(
+  const struct compiled_rigid_test *test, BOOL create)
+{
+  return compiled_condition_cache_lookup(
+    COMPILED_CONDITION_RIGID, test->symbol,
+    test->path_length == 0 ? NULL :
+      Compiled_plan_paths + test->path_offset,
+    test->path_length, NULL, 0, create);
+}
+
 static int compiled_same_cache_compare(
   const struct compiled_same_cache_entry *entry, uint32_t root)
 {
-  return hint_term_table_compare_paths(
-    Compiled_term_table, root,
-    entry->first_length == 0 ? NULL :
-      Compiled_same_cache_paths + entry->first_offset,
-    entry->first_length,
-    entry->second_length == 0 ? NULL :
-      Compiled_same_cache_paths + entry->second_offset,
-    entry->second_length);
+  if (entry->kind == COMPILED_CONDITION_SAME)
+    return hint_term_table_compare_paths(
+      Compiled_term_table, root,
+      entry->first_length == 0 ? NULL :
+        Compiled_same_cache_paths + entry->first_offset,
+      entry->first_length,
+      entry->second_length == 0 ? NULL :
+        Compiled_same_cache_paths + entry->second_offset,
+      entry->second_length);
+  else if (entry->kind == COMPILED_CONDITION_RIGID)
+    return hint_term_table_path_symbol(
+      Compiled_term_table, root,
+      entry->first_length == 0 ? NULL :
+        Compiled_same_cache_paths + entry->first_offset,
+      entry->first_length, entry->symbol);
+  else
+    fatal_error("unknown compiled hint condition kind");
+  return -1;
 }
 
 static void compiled_same_cache_build(
@@ -3841,6 +3966,10 @@ static BOOL compiled_same_cache_filter(
   Packed_candidates_count = keep;
   if (!Hint_preview_active) {
     Compiled_same_cache_hits++;
+    if (entry->kind == COMPILED_CONDITION_SAME)
+      Compiled_same_cache_same_hits++;
+    else if (entry->kind == COMPILED_CONDITION_RIGID)
+      Compiled_same_cache_rigid_hits++;
     Compiled_same_cache_filter_candidates += before;
     Compiled_same_cache_filter_rejects += before - keep;
   }
@@ -3897,6 +4026,24 @@ static void compiled_same_cache_index_hint(unsigned id)
   }
 }
 
+static void compiled_condition_cache_note_work(
+  struct compiled_same_cache_entry *entry,
+  unsigned long long candidate_tests)
+{
+  if (entry == NULL)
+    return;
+  if (ULLONG_MAX - entry->candidate_work < candidate_tests)
+    entry->candidate_work = ULLONG_MAX;
+  else
+    entry->candidate_work += candidate_tests;
+  if (!entry->built && !entry->build_denied &&
+      Active_hints_count > 0 && entry->queries >= 2 &&
+      entry->candidate_work >=
+        (unsigned long long) Active_hints_count *
+          Compiled_same_cache_build_factor)
+    compiled_same_cache_build(entry);
+}
+
 static void compiled_path_collect_query(Term t, BOOL sign,
                                         unsigned long long path,
                                         unsigned depth)
@@ -3906,6 +4053,7 @@ static void compiled_path_collect_query(Term t, BOOL sign,
     compiled_plan_note_variable(t, depth);
     return;
   }
+  compiled_plan_note_rigid(t, depth);
   if (Compiled_path_postings != NULL &&
       depth >= COMPILED_PATH_MIN_DEPTH &&
       depth <= COMPILED_PATH_MAX_DEPTH)
@@ -4046,19 +4194,149 @@ static void compiled_same_filter_candidates(void)
     Compiled_same_candidate_tests += candidate_tests;
     Compiled_same_navigation_rejects += navigation_rejects;
     Compiled_same_unequal_rejects += unequal_rejects;
-    if (cache_entry != NULL) {
-      if (ULLONG_MAX - cache_entry->candidate_work < candidate_tests)
-        cache_entry->candidate_work = ULLONG_MAX;
-      else
-        cache_entry->candidate_work += candidate_tests;
-      if (!cache_entry->built && !cache_entry->build_denied &&
-          Active_hints_count > 0 &&
-          cache_entry->queries >= 2 &&
-          cache_entry->candidate_work >=
-            (unsigned long long) Active_hints_count *
-              Compiled_same_cache_build_factor)
-        compiled_same_cache_build(cache_entry);
+    compiled_condition_cache_note_work(cache_entry, candidate_tests);
+  }
+}
+
+static void compiled_rigid_filter_candidates(void)
+{
+  unsigned before = Packed_candidates_count;
+  unsigned samples, i, j;
+  unsigned selected = UINT_MAX;
+  unsigned best_rejects = 0, best_supported = 1;
+  unsigned keep = 0;
+  unsigned long long candidate_tests = 0;
+  struct compiled_same_cache_entry *cache_entry = NULL;
+  BOOL account = !Hint_preview_active;
+
+  if (Compiled_rigid_test_count == 0 || before == 0)
+    return;
+  if (before < Compiled_same_min_candidates) {
+    if (account)
+      Compiled_rigid_admission_skips++;
+    return;
+  }
+
+  /* Reuse an already-built instruction without re-sampling.  The globally
+     smallest membership population is a conservative selectivity estimate;
+     the packed sign/root candidate stream remains the actual population. */
+  if (Compiled_same_cache_ready) {
+    for (i = 0; i < Compiled_rigid_test_count; i++) {
+      struct compiled_same_cache_entry *entry =
+        compiled_rigid_cache_lookup(Compiled_rigid_tests + i, FALSE);
+      if (entry != NULL && entry->built &&
+          (cache_entry == NULL || entry->match_count <
+                                  cache_entry->match_count)) {
+        cache_entry = entry;
+        selected = i;
+      }
     }
+  }
+  if (cache_entry != NULL && compiled_same_cache_filter(cache_entry)) {
+    if (account) {
+      Compiled_same_cache_lookups++;
+      cache_entry->queries++;
+      Compiled_rigid_queries++;
+      Compiled_rigid_candidates_before += before;
+      Compiled_rigid_candidates_after += Packed_candidates_count;
+    }
+    return;
+  }
+
+  /* Estimate positional selectivity on a deterministic, evenly spaced
+     sample.  Only the selected instruction receives a full candidate pass;
+     this bounds query-planning work independently of bank size. */
+  samples = before < COMPILED_RIGID_SAMPLE_CANDIDATES ?
+    before : COMPILED_RIGID_SAMPLE_CANDIDATES;
+  for (i = 0; i < Compiled_rigid_test_count; i++) {
+    struct compiled_rigid_test *test = Compiled_rigid_tests + i;
+    unsigned rejects = 0, supported = 0;
+    for (j = 0; j < samples; j++) {
+      unsigned position = (unsigned)
+        (((unsigned long long) j * before) / samples);
+      unsigned id = Packed_candidates[position];
+      uint32_t root = hint_term_table_root(Compiled_term_table, id);
+      int result;
+      if (root == 0)
+        continue;
+      result = hint_term_table_path_symbol(
+        Compiled_term_table, root,
+        test->path_length == 0 ? NULL :
+          Compiled_plan_paths + test->path_offset,
+        test->path_length, test->symbol);
+      if (result < 0)
+        fatal_error("compiled rigid sample: invalid canonical target");
+      supported++;
+      if (result == 0)
+        rejects++;
+    }
+    if (account) {
+      Compiled_rigid_sample_tests++;
+      Compiled_rigid_sample_candidates += supported;
+      Compiled_rigid_sample_rejects += rejects;
+    }
+    if (supported != 0 &&
+        (unsigned long long) rejects * 100 >=
+          (unsigned long long) supported *
+            COMPILED_RIGID_MIN_REJECT_PERCENT &&
+        (selected == UINT_MAX ||
+         (unsigned long long) rejects * best_supported >
+           (unsigned long long) best_rejects * supported ||
+         ((unsigned long long) rejects * best_supported ==
+            (unsigned long long) best_rejects * supported &&
+          (test->path_length <
+             Compiled_rigid_tests[selected].path_length ||
+           (test->path_length ==
+              Compiled_rigid_tests[selected].path_length &&
+            test->symbol < Compiled_rigid_tests[selected].symbol))))) {
+      selected = i;
+      best_rejects = rejects;
+      best_supported = supported;
+    }
+  }
+  if (account)
+    Compiled_rigid_sampled_queries++;
+  if (selected == UINT_MAX) {
+    if (account)
+      Compiled_rigid_admission_skips++;
+    return;
+  }
+
+  cache_entry = Compiled_same_cache_ready ? compiled_rigid_cache_lookup(
+    Compiled_rigid_tests + selected, account) : NULL;
+  if (account && Compiled_same_cache_ready) {
+    Compiled_same_cache_lookups++;
+    if (cache_entry != NULL)
+      cache_entry->queries++;
+  }
+  for (i = 0; i < before; i++) {
+    unsigned id = Packed_candidates[i];
+    uint32_t root = hint_term_table_root(Compiled_term_table, id);
+    int result;
+    if (root == 0) {
+      Packed_candidates[keep++] = id;
+      continue;
+    }
+    result = hint_term_table_path_symbol(
+      Compiled_term_table, root,
+      Compiled_rigid_tests[selected].path_length == 0 ? NULL :
+        Compiled_plan_paths +
+          Compiled_rigid_tests[selected].path_offset,
+      Compiled_rigid_tests[selected].path_length,
+      Compiled_rigid_tests[selected].symbol);
+    if (result < 0)
+      fatal_error("compiled rigid filter: invalid canonical target");
+    candidate_tests++;
+    if (result == 1)
+      Packed_candidates[keep++] = id;
+  }
+  Packed_candidates_count = keep;
+  if (account) {
+    Compiled_rigid_queries++;
+    Compiled_rigid_candidates_before += before;
+    Compiled_rigid_candidates_after += keep;
+    Compiled_rigid_candidate_tests += candidate_tests;
+    compiled_condition_cache_note_work(cache_entry, candidate_tests);
   }
 }
 
@@ -4074,8 +4352,11 @@ static void compiled_path_filter_candidates(
   unsigned i, keep, before = Packed_candidates_count;
   BOOL account = !Hint_preview_active;
 
-  (void) op;
-  if (!Compiled_filter_enabled ||
+  /* SAME(path,path) and RIGID(path,symbol) describe a match of the complete
+     query atom against the complete stored atom.  Back demodulation instead
+     asks whether the query can rewrite an arbitrary stored subterm, so these
+     root-relative conditions are not necessary there. */
+  if (op == PACKED_HINT_BACK_DEMOD || !Compiled_filter_enabled ||
       c->literals == NULL ||
       c->literals->next != NULL || Packed_candidates_count == 0 ||
       (MATCH_HINTS_ANYCONST && AnyConstsEnabled &&
@@ -4087,6 +4368,7 @@ static void compiled_path_filter_candidates(
     c->literals->atom, c->literals->sign,
     UINT64_C(0x243f6a8885a308d3), 0);
   compiled_same_filter_candidates();
+  compiled_rigid_filter_candidates();
   before = Packed_candidates_count;
   if (Compiled_path_postings == NULL ||
       Compiled_path_key_count == 0 || before == 0)
@@ -5401,7 +5683,9 @@ void packed_hint_index_stats(unsigned long long *node_bytes,
       (unsigned long long) Compiled_plan_path_capacity *
         sizeof(*Compiled_plan_paths) +
       (unsigned long long) Compiled_same_test_capacity *
-        sizeof(*Compiled_same_tests);
+        sizeof(*Compiled_same_tests) +
+      (unsigned long long) Compiled_rigid_test_capacity *
+        sizeof(*Compiled_rigid_tests);
   }
   if (Compiled_path_postings != NULL) {
     struct hint_postings_stats path_stats;
@@ -5678,7 +5962,36 @@ void fprint_packed_hint_operation_stats(FILE *fp)
               sizeof(*Compiled_same_tests));
   }
   if (Compiled_filter_enabled) {
+    fprintf(fp,
+            "Compiled_hint_rigid_filter: queries=%llu, "
+            "sampled_queries=%llu, sample_tests=%llu, "
+            "sample_candidates=%llu, sample_rejects=%llu, "
+            "minimum_reject_percent=%u, admission_skips=%llu, "
+            "candidates_before=%llu, candidates_after=%llu, "
+            "candidates_rejected=%llu, candidate_tests=%llu, "
+            "maximum_query_tests=%u, sample_size=%u, "
+            "truncated_tests=%llu, test_bytes=%llu.\n",
+            Compiled_rigid_queries, Compiled_rigid_sampled_queries,
+            Compiled_rigid_sample_tests,
+            Compiled_rigid_sample_candidates,
+            Compiled_rigid_sample_rejects,
+            COMPILED_RIGID_MIN_REJECT_PERCENT,
+            Compiled_rigid_admission_skips,
+            Compiled_rigid_candidates_before,
+            Compiled_rigid_candidates_after,
+            Compiled_rigid_candidates_before -
+              Compiled_rigid_candidates_after,
+            Compiled_rigid_candidate_tests,
+            COMPILED_RIGID_SAMPLE_MAX_TESTS,
+            COMPILED_RIGID_SAMPLE_CANDIDATES,
+            Compiled_rigid_truncated_tests,
+            (unsigned long long) Compiled_rigid_test_capacity *
+              sizeof(*Compiled_rigid_tests));
+  }
+  if (Compiled_filter_enabled) {
     unsigned i, built = 0, denied = 0;
+    unsigned same_entries = 0, rigid_entries = 0;
+    unsigned same_built = 0, rigid_built = 0;
     unsigned long long observed_queries = 0;
     unsigned long long observed_work = 0;
     unsigned long long maximum_queries = 0;
@@ -5688,6 +6001,16 @@ void fprint_packed_hint_operation_stats(FILE *fp)
         Compiled_same_cache_entries + i;
       if (entry->built)
         built++;
+      if (entry->kind == COMPILED_CONDITION_SAME) {
+        same_entries++;
+        if (entry->built)
+          same_built++;
+      }
+      else if (entry->kind == COMPILED_CONDITION_RIGID) {
+        rigid_entries++;
+        if (entry->built)
+          rigid_built++;
+      }
       if (entry->build_denied)
         denied++;
       if (ULLONG_MAX - observed_queries < entry->queries)
@@ -5705,9 +6028,12 @@ void fprint_packed_hint_operation_stats(FILE *fp)
     }
     fprintf(fp,
             "Compiled_hint_same_cache: ready=%d, entries=%u, built=%u, "
+            "same_entries=%u, rigid_entries=%u, "
+            "same_built=%u, rigid_built=%u, "
             "build_factor=%u, lookups=%llu, observed_queries=%llu, "
             "observed_candidate_work=%llu, maximum_queries=%llu, "
-            "maximum_candidate_work=%llu, cache_hits=%llu, builds=%llu, "
+            "maximum_candidate_work=%llu, cache_hits=%llu, "
+            "same_hits=%llu, rigid_hits=%llu, builds=%llu, "
             "build_scans=%llu, build_matches=%llu, "
             "filter_candidates=%llu, filter_rejects=%llu, "
             "denied_entries=%u, dense_keys=%u, dense_bit_bytes=%llu, "
@@ -5716,10 +6042,14 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             "maximum_entries=%u, maximum_path_words=%u, "
             "entry_bytes=%llu, bucket_bytes=%llu, path_bytes=%llu.\n",
             Compiled_same_cache_ready, Compiled_same_cache_count, built,
+            same_entries, rigid_entries, same_built, rigid_built,
             Compiled_same_cache_build_factor,
             Compiled_same_cache_lookups, observed_queries, observed_work,
             maximum_queries, maximum_work,
-            Compiled_same_cache_hits, Compiled_same_cache_builds,
+            Compiled_same_cache_hits,
+            Compiled_same_cache_same_hits,
+            Compiled_same_cache_rigid_hits,
+            Compiled_same_cache_builds,
             Compiled_same_cache_build_scans,
             Compiled_same_cache_build_matches,
             Compiled_same_cache_filter_candidates,

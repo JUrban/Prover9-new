@@ -1,0 +1,37 @@
+clear(auto_denials).
+clear(auto_inference).
+clear(predicate_elim).
+clear(print_initial_clauses).
+clear(print_given).
+clear(print_kept).
+clear(back_demod).
+clear(back_demod_hints).
+assign(search_loop,discount).
+assign(passive_store,compressed).
+assign(hint_index,packed_compiled).
+assign(hint_compiled_min_candidates,0).
+assign(hint_compiled_cache_build_factor,0).
+assign(ancestor_store,memory).
+assign(stats,all).
+assign(max_given,3).
+set(process_initial_sos).
+set(hint_trace).
+
+% Positions 7 and 28 of k/65 collide in the established conservative
+% 64-bit path mask for every symbol number.  Replacing position 7 therefore
+% leaves both hints in the packed candidate stream; the exact depth-3 rigid
+% instruction is what distinguishes them.
+formulas(hints).
+  p(f(k(g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g))).
+  p(f(k(g,g,g,g,g,g,g,h,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g))).
+  q(f(k(g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g))).
+  q(f(k(g,g,g,g,g,g,g,h,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g))).
+  r(f(k(g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g))).
+  r(f(k(g,g,g,g,g,g,g,h,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g))).
+end_of_list.
+
+formulas(sos).
+  p(f(k(g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g))).
+  q(f(k(g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g))).
+  r(f(k(g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g))).
+end_of_list.

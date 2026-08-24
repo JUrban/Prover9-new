@@ -6,7 +6,7 @@ prover9=${PROVER9:-"$script_dir/../provers.src/prover9"}
 tmp=${TMPDIR:-/tmp}/hint-compiled-census.$$
 trap 'rm -f "$tmp.out" "$tmp.err" "$tmp.path.out" "$tmp.path.err" \
   "$tmp.same.out" "$tmp.same.err" "$tmp.cache.out" "$tmp.cache.err" \
-  "$tmp.deny.out" "$tmp.deny.err"' \
+  "$tmp.deny.out" "$tmp.deny.err" "$tmp.rigid.out" "$tmp.rigid.err"' \
   EXIT HUP INT TERM
 
 "$prover9" < "$script_dir/hint_compiled_census.in" \
@@ -81,9 +81,9 @@ if [ "$cache_status" -ne 2 ] && [ "$cache_status" -ne 5 ]; then
 fi
 cache_line=$(grep '^Compiled_hint_same_cache:' "$tmp.cache.out")
 printf '%s\n' "$cache_line" | grep -Eq \
-  'entries=1, built=1, build_factor=0, lookups=[1-9][0-9]*,'
+  'entries=1, built=1, same_entries=1, rigid_entries=0, same_built=1, rigid_built=0, build_factor=0, lookups=[1-9][0-9]*,'
 printf '%s\n' "$cache_line" | grep -Eq \
-  'cache_hits=[1-9][0-9]*, builds=1, build_scans=[1-9][0-9]*, build_matches=[1-9][0-9]*,'
+  'cache_hits=[1-9][0-9]*, same_hits=[1-9][0-9]*, rigid_hits=0, builds=1, build_scans=[1-9][0-9]*, build_matches=[1-9][0-9]*,'
 printf '%s\n' "$cache_line" | grep -Eq \
   'dense_keys=1, dense_bit_bytes=[1-9][0-9]*,.*dense_denials=0,'
 
@@ -98,8 +98,25 @@ if [ "$deny_status" -ne 2 ] && [ "$deny_status" -ne 5 ]; then
 fi
 deny_line=$(grep '^Compiled_hint_same_cache:' "$tmp.deny.out")
 printf '%s\n' "$deny_line" | grep -Eq \
-  'entries=1, built=0, build_factor=0,.*cache_hits=0, builds=0,'
+  'entries=1, built=0, same_entries=1, rigid_entries=0, same_built=0, rigid_built=0, build_factor=0,.*cache_hits=0,.*builds=0,'
 printf '%s\n' "$deny_line" | grep -Eq \
   'denied_entries=1, dense_keys=0, dense_bit_bytes=0, dense_budget_bytes=0, dense_denials=1,'
+
+"$prover9" < "$script_dir/hint_compiled_rigid_cache.in" \
+  > "$tmp.rigid.out" 2> "$tmp.rigid.err" || rigid_status=$?
+rigid_status=${rigid_status:-0}
+if [ "$rigid_status" -ne 2 ] && [ "$rigid_status" -ne 5 ]; then
+  cat "$tmp.rigid.err" >&2
+  echo "hint_compiled_census_test: rigid-cache run returned $rigid_status" >&2
+  exit 1
+fi
+rigid_line=$(grep '^Compiled_hint_rigid_filter:' "$tmp.rigid.out")
+rigid_cache=$(grep '^Compiled_hint_same_cache:' "$tmp.rigid.out")
+printf '%s\n' "$rigid_line" | grep -Eq \
+  'queries=[1-9][0-9]*, sampled_queries=[1-9][0-9]*,.*candidates_rejected=[1-9][0-9]*, candidate_tests=[1-9][0-9]*,'
+printf '%s\n' "$rigid_cache" | grep -Eq \
+  'entries=1, built=1, same_entries=0, rigid_entries=1, same_built=0, rigid_built=1, build_factor=0,'
+printf '%s\n' "$rigid_cache" | grep -Eq \
+  'cache_hits=[1-9][0-9]*, same_hits=0, rigid_hits=[1-9][0-9]*, builds=1,'
 
 echo "hint_compiled_census_test: PASS"

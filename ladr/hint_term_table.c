@@ -487,6 +487,25 @@ int hint_term_table_compare_paths(Hint_term_table table, uint32_t root,
   return left == right ? 1 : 0;
 }
 
+int hint_term_table_path_symbol(Hint_term_table table, uint32_t root,
+                                const unsigned *path,
+                                unsigned path_length,
+                                unsigned symbol)
+{
+  uint32_t target = root;
+  struct hint_term_node_view view;
+  unsigned i;
+  if (table == NULL || root == 0 || symbol == 0 ||
+      (path_length != 0 && path == NULL))
+    return -1;
+  for (i = 0; i < path_length; i++)
+    if (!hint_term_table_path_child(table, target, path[i], &target))
+      return 0;
+  if (!hint_term_table_node(table, target, &view))
+    return -1;
+  return !view.variable && view.symbol_or_variable == symbol ? 1 : 0;
+}
+
 static BOOL hint_term_table_matches_internal(
   Hint_term_table table, unsigned id, BOOL positive, Term pattern,
   BOOL *matched, BOOL account)

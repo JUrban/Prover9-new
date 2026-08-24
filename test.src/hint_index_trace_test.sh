@@ -102,6 +102,7 @@ grep -Eq '^Compiled_hint_term_table: authoritative=0, shadow=1, filter=0, finali
 grep -Eq '^Compiled_hint_term_table: authoritative=0, shadow=0, filter=1, finalized=1, active=[1-9][0-9]*,' \
   "$test_tmp/packed-compiled.out"
 grep -q '^Compiled_hint_same_filter:' "$test_tmp/packed-compiled.out"
+grep -q '^Compiled_hint_rigid_filter:' "$test_tmp/packed-compiled.out"
 grep -q '^Compiled_hint_same_cache:' "$test_tmp/packed-compiled.out"
 grep -q '^Compiled_hint_path_index:' \
   "$test_tmp/packed-compiled-paths.out"
@@ -134,5 +135,29 @@ diff -u "$test_tmp/anyconst-compact.trace" \
   "$test_tmp/anyconst-packed_legacy.trace"
 grep -Eq '^Better_packed_postings: .*anyconst_references=[1-9][0-9]*,' \
   "$test_tmp/anyconst-packed_fast.out"
+
+sed 's/packed_compiled/packed_fast/' \
+  "$repo_dir/test.src/hint_compiled_rigid_cache.in" |
+  "$prover9" > "$test_tmp/rigid-control.out" \
+               2> "$test_tmp/rigid-control.err" || rigid_control_status=$?
+rigid_control_status=${rigid_control_status:-0}
+"$prover9" < "$repo_dir/test.src/hint_compiled_rigid_cache.in" \
+  > "$test_tmp/rigid-compiled.out" \
+  2> "$test_tmp/rigid-compiled.err" || rigid_compiled_status=$?
+rigid_compiled_status=${rigid_compiled_status:-0}
+if [ "$rigid_control_status" -ne 2 ] || \
+   [ "$rigid_compiled_status" -ne 2 ]; then
+  echo "hint_index_trace_test: rigid statuses control=$rigid_control_status compiled=$rigid_compiled_status" >&2
+  exit 1
+fi
+grep '^HINT_TRACE ' "$test_tmp/rigid-control.out" \
+  > "$test_tmp/rigid-control.trace"
+grep '^HINT_TRACE ' "$test_tmp/rigid-compiled.out" \
+  > "$test_tmp/rigid-compiled.trace"
+test -s "$test_tmp/rigid-control.trace"
+diff -u "$test_tmp/rigid-control.trace" \
+  "$test_tmp/rigid-compiled.trace"
+grep -Eq '^Compiled_hint_same_cache: .*rigid_built=1,.*rigid_hits=[1-9][0-9]*,' \
+  "$test_tmp/rigid-compiled.out"
 
 echo 'hint_index_trace_test: PASS'

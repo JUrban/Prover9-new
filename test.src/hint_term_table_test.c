@@ -24,7 +24,7 @@ int main(void)
   unsigned left_path[2] = {0, 0};
   unsigned right_path[2] = {0, 1};
   unsigned invalid_path[1] = {1};
-  struct hint_term_node_view root_view, f_view;
+  struct hint_term_node_view root_view, f_view, g_view;
   struct hint_term_table_stats before, frozen, after;
   Topform query, mismatch, rigid_mismatch;
   BOOL matched;
@@ -58,6 +58,15 @@ int main(void)
   CHECK(hint_term_table_node(table, root_view.children[0], &f_view) &&
         f_view.arity == 2 && f_view.children[0] == f_view.children[1],
         "repeated ground subterm has one canonical handle");
+  CHECK(hint_term_table_node(table, f_view.children[0], &g_view) &&
+        hint_term_table_path_symbol(
+          table, shared_root, left_path, 2,
+          g_view.symbol_or_variable) == 1,
+        "rigid path instruction recognizes its exact target symbol");
+  CHECK(hint_term_table_path_symbol(
+          table, shared_root, invalid_path, 1,
+          g_view.symbol_or_variable) == 0,
+        "rigid path instruction rejects an invalid target route");
   CHECK(hint_term_table_compare_paths(
           table, shared_root, left_path, 2, right_path, 2) == 1,
         "path comparison shares a prefix and recognizes equal handles");
