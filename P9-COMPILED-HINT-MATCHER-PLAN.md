@@ -22,6 +22,14 @@ The next project should build a compiled, set-at-a-time instance matcher that
 can skip entire subterms and choose its tests by selectivity.  This is a
 different architecture, not a faster version of the present traversal.
 
+> Implementation update (2026-08-24): Phase 0 is implemented and passes its
+> stop/go gate on bounded CHAT, Osborn, Josef 01, and Josef 02 measurements.
+> Fixed-symbol and repeated-variable conditions reject 89.95--99.57% of
+> profiled unit candidates.  They account for about 2.90 seconds of a
+> 5.76-second Osborn search phase and 1.00 second of a 4.07-second Josef 01
+> search phase.  Retained subterm sharing is 8.27--9.51×.  See
+> [P9-COMPILED-HINT-MATCHER-REPORT.md](P9-COMPILED-HINT-MATCHER-REPORT.md).
+
 ## A terminology correction
 
 The local Waldmeister paper describes a **perfect discrimination tree**: term
