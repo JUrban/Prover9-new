@@ -473,6 +473,11 @@ struct packed_hint_operation_stats {
   unsigned long long timing_samples;
   double timing_sample_seconds;
   double timing_sample_started;
+  double timing_phase_started;
+  double timing_candidate_seconds;
+  double timing_filter_seconds;
+  double timing_confirmation_seconds;
+  unsigned timing_phase;
   BOOL timing_sample_active;
 };
 
@@ -756,6 +761,14 @@ static double packed_estimated_seconds(
       (double) s->timing_samples;
 }
 
+static double packed_estimated_component_seconds(
+  const struct packed_hint_operation_stats *s, double seconds)
+{
+  return s->timing_samples == 0 ? 0.0 :
+    seconds * (double) s->timing_queries /
+      (double) s->timing_samples;
+}
+
 static double compiled_census_estimated_seconds(
   const struct compiled_hint_census_stats *s)
 {
@@ -895,7 +908,41 @@ static void packed_operation_begin(enum packed_hint_operation op)
         s->timing_samples++;
         s->timing_sample_active = TRUE;
         s->timing_sample_started = user_seconds();
+        s->timing_phase_started = s->timing_sample_started;
+        s->timing_phase = 0;
       }
+    }
+  }
+}
+
+static void packed_operation_candidate_generation_end(
+  enum packed_hint_operation op)
+{
+  if (!Hint_preview_active) {
+    struct packed_hint_operation_stats *s = Packed_operation_stats + op;
+    if (s->timing_sample_active && s->timing_phase == 0) {
+      double now = user_seconds();
+      double elapsed = now - s->timing_phase_started;
+      if (elapsed > 0.0)
+        s->timing_candidate_seconds += elapsed;
+      s->timing_phase_started = now;
+      s->timing_phase = 1;
+    }
+  }
+}
+
+static void packed_operation_compiled_filter_end(
+  enum packed_hint_operation op)
+{
+  if (!Hint_preview_active) {
+    struct packed_hint_operation_stats *s = Packed_operation_stats + op;
+    if (s->timing_sample_active && s->timing_phase == 1) {
+      double now = user_seconds();
+      double elapsed = now - s->timing_phase_started;
+      if (elapsed > 0.0)
+        s->timing_filter_seconds += elapsed;
+      s->timing_phase_started = now;
+      s->timing_phase = 2;
     }
   }
 }
@@ -915,9 +962,19 @@ static void packed_operation_end(enum packed_hint_operation op)
   if (!Hint_preview_active) {
     struct packed_hint_operation_stats *s = Packed_operation_stats + op;
     if (s->timing_sample_active) {
-      double elapsed = user_seconds() - s->timing_sample_started;
+      double now = user_seconds();
+      double elapsed = now - s->timing_sample_started;
+      double phase_elapsed = now - s->timing_phase_started;
       if (elapsed > 0.0)
         s->timing_sample_seconds += elapsed;
+      if (phase_elapsed > 0.0) {
+        if (s->timing_phase == 0)
+          s->timing_candidate_seconds += phase_elapsed;
+        else if (s->timing_phase == 1)
+          s->timing_filter_seconds += phase_elapsed;
+        else
+          s->timing_confirmation_seconds += phase_elapsed;
+      }
       s->timing_sample_active = FALSE;
     }
     if (Better_packed_index &&
@@ -4737,7 +4794,9 @@ static void better_collect_clause_candidates(
             fast_keys, fast_key_count, first_mask, positive, negative)) {
         compiled_census_candidate_stages(
           op, Packed_candidates_count, Packed_candidates_count);
+        packed_operation_candidate_generation_end(op);
         compiled_path_filter_candidates(c, op);
+        packed_operation_compiled_filter_end(op);
         packed_operation_candidates(op);
         return;
       }
@@ -4796,7 +4855,9 @@ static void better_collect_clause_candidates(
       Packed_operation_stats[op].posting_candidates -
         posting_candidates_before);
   }
+  packed_operation_candidate_generation_end(op);
   compiled_path_filter_candidates(c, op);
+  packed_operation_compiled_filter_end(op);
   packed_operation_candidates(op);
 }
 
@@ -4814,6 +4875,8 @@ static void packed_collect_clause_candidates(Topform c,
   packed_finish_candidates(MATCH_HINTS_ANYCONST, op);
   compiled_census_candidate_stages(
     op, Packed_candidates_count, Packed_candidates_count);
+  packed_operation_candidate_generation_end(op);
+  packed_operation_compiled_filter_end(op);
   packed_operation_candidates(op);
 }
 
@@ -5555,6 +5618,8 @@ void back_demod_hints(Topform demod, int type, BOOL lex_order_vars)
       }
     }
     packed_finish_candidates(FALSE, op);
+    packed_operation_candidate_generation_end(op);
+    packed_operation_compiled_filter_end(op);
     packed_operation_candidates(op);
     candidate_count = Packed_candidates_count;
     candidate_ids = candidate_count == 0 ? NULL :
@@ -5988,7 +6053,9 @@ void fprint_packed_hint_operation_stats(FILE *fp)
   for (i = 0; i < PACKED_HINT_OPERATIONS; i++) {
     struct packed_hint_operation_stats *s = Packed_operation_stats + i;
     fprintf(fp,
-            "Packed_hint_operation: op=%s, seconds=%.3f, queries=%llu, "
+            "Packed_hint_operation: op=%s, seconds=%.3f, "
+            "candidate_seconds=%.3f, compiled_filter_seconds=%.3f, "
+            "confirmation_seconds=%.3f, queries=%llu, "
             "posting_lists=%llu, posting_candidates=%llu, "
             "unique_candidates=%llu, mean=%.2f, "
             "max=%llu, materialized=%llu, exact_positive=%llu, rewrites=%llu, "
@@ -5999,7 +6066,14 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             "timing_rate=1/%llu, "
             "buckets=0:%llu/1:%llu/2-7:%llu/8-31:%llu/32-127:%llu/"
             "128-1023:%llu/1024-16383:%llu/16384+:%llu.\n",
-            Packed_operation_names[i], packed_estimated_seconds(s), s->queries,
+            Packed_operation_names[i], packed_estimated_seconds(s),
+            packed_estimated_component_seconds(
+              s, s->timing_candidate_seconds),
+            packed_estimated_component_seconds(
+              s, s->timing_filter_seconds),
+            packed_estimated_component_seconds(
+              s, s->timing_confirmation_seconds),
+            s->queries,
             s->posting_lists, s->posting_candidates, s->unique_candidates,
             s->queries == 0 ? 0.0 :
               (double) s->unique_candidates / (double) s->queries,

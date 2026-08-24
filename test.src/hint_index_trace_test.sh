@@ -96,6 +96,8 @@ done
 # conservative per-hint fingerprint filters the remaining query features,
 # and exact subsumption remains the final decision.
 match_line=$(grep '^Packed_hint_operation: op=match,' "$test_tmp/packed.out")
+printf '%s\n' "$match_line" | grep -Eq \
+  'seconds=[0-9]+\.[0-9]+, candidate_seconds=[0-9]+\.[0-9]+, compiled_filter_seconds=[0-9]+\.[0-9]+, confirmation_seconds=[0-9]+\.[0-9]+,'
 match_queries=$(printf '%s\n' "$match_line" | \
   sed 's/.*queries=\([0-9][0-9]*\),.*/\1/')
 match_postings=$(printf '%s\n' "$match_line" | \
