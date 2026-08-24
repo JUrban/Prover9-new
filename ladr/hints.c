@@ -4239,6 +4239,31 @@ static void compiled_same_cache_rehash(unsigned capacity)
   Compiled_same_cache_bucket_capacity = capacity;
 }
 
+/* Query execution keeps condition-entry pointers in its short instruction
+   arrays.  Reserve the complete bounded set of records that this query can
+   create before taking any such pointer; otherwise a later safe_realloc in
+   the same query can invalidate instructions collected earlier. */
+static void compiled_same_cache_reserve_entries(unsigned needed)
+{
+  unsigned capacity;
+  if (needed > COMPILED_SAME_CACHE_MAX_ENTRIES)
+    needed = COMPILED_SAME_CACHE_MAX_ENTRIES;
+  if (needed <= Compiled_same_cache_capacity)
+    return;
+  capacity = Compiled_same_cache_capacity == 0 ? 64 :
+    Compiled_same_cache_capacity;
+  while (capacity < needed) {
+    unsigned next = capacity * 2;
+    if (next <= capacity || next > COMPILED_SAME_CACHE_MAX_ENTRIES)
+      next = COMPILED_SAME_CACHE_MAX_ENTRIES;
+    capacity = next;
+  }
+  Compiled_same_cache_entries = safe_realloc(
+    Compiled_same_cache_entries,
+    (size_t) capacity * sizeof(*Compiled_same_cache_entries));
+  Compiled_same_cache_capacity = capacity;
+}
+
 static unsigned compiled_same_cache_copy_path(const unsigned *path,
                                               unsigned length)
 {
@@ -4328,16 +4353,7 @@ static struct compiled_same_cache_entry *compiled_condition_cache_lookup(
     bucket = (unsigned) hash & (Compiled_same_cache_bucket_capacity - 1);
   }
   if (Compiled_same_cache_count == Compiled_same_cache_capacity) {
-    unsigned old = Compiled_same_cache_capacity;
-    unsigned capacity = old == 0 ? 64 : old * 2;
-    if (capacity <= old)
-      fatal_error("compiled SAME cache entry capacity overflow");
-    if (capacity > COMPILED_SAME_CACHE_MAX_ENTRIES)
-      capacity = COMPILED_SAME_CACHE_MAX_ENTRIES;
-    Compiled_same_cache_entries = safe_realloc(
-      Compiled_same_cache_entries,
-      (size_t) capacity * sizeof(*Compiled_same_cache_entries));
-    Compiled_same_cache_capacity = capacity;
+    compiled_same_cache_reserve_entries(Compiled_same_cache_count + 1);
   }
   {
     struct compiled_same_cache_entry *entry =
@@ -4947,6 +4963,15 @@ static void compiled_fused_activate(void)
     COMPILED_PROGRAM_MAX_CONDITIONS];
   if (Compiled_fused_active || !Compiled_fused_prepared)
     return;
+  if (Compiled_same_cache_ready) {
+    unsigned available = COMPILED_SAME_CACHE_MAX_ENTRIES -
+      Compiled_same_cache_count;
+    unsigned requested = Compiled_same_test_count +
+      Compiled_rigid_test_count;
+    compiled_same_cache_reserve_entries(
+      Compiled_same_cache_count +
+        (requested < available ? requested : available));
+  }
   Compiled_fused_active = TRUE;
   Compiled_fused_current_word = UINT_MAX;
   Compiled_fused_current_bits = 0;
@@ -5373,6 +5398,12 @@ static void compiled_same_filter_candidates(void)
   for (i = 0; i < COMPILED_PROGRAM_MAX_CONDITIONS; i++)
     direct_work[i] = 0;
   if (Compiled_same_cache_ready) {
+    unsigned available = COMPILED_SAME_CACHE_MAX_ENTRIES -
+      Compiled_same_cache_count;
+    unsigned requested = Compiled_same_test_count;
+    compiled_same_cache_reserve_entries(
+      Compiled_same_cache_count +
+        (requested < available ? requested : available));
     /* Execute every previously learned condition exposed by this query in
        one bounded program.  Train up to the same bounded number of uncached
        SAME conditions; each later direct instruction sees only the survivors
