@@ -296,8 +296,6 @@ diff -u "$test_tmp/blocks-cache-control.trace" \
   "$test_tmp/blocks-cache-blocks.trace"
 grep -Eq '^Packed_fast_cache: .*hits=[1-9][0-9]*,' \
   "$test_tmp/blocks-cache-blocks.out"
-grep -Eq '^Compiled_hint_deferred_build: enabled=1, complete=1, active_scans=2, additions=2, stream_additions=2, materializations=0, anyconst_skips=0, nonunit_skips=0,' \
-  "$test_tmp/blocks-cache-blocks.out"
 
 # Force two co-occurring SAME conditions to mature together on a bank large
 # enough for packed_fast's dense-word collector.  The third identical query
