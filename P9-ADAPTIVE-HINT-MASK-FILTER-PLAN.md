@@ -4,7 +4,8 @@ Date: 2026-08-24 (Europe/Berlin)
 
 Branch: `adaptive-hint-mask-filter`
 
-Status: implementation in progress
+Status: implementation and local 1,000-given validation complete; ar-2
+promotion measurement pending
 
 ## Objective
 
@@ -15,10 +16,11 @@ bank, must adapt to broad and narrow queries, and must not assume the Josef 04
 term distribution is universal.
 
 The validated parent branch already makes the existing fallback matcher 7.58%
-faster at 1,000 givens on ar-2.  It does so by removing two key sorts, starting
-posting intersections with the least common indexed property, and rejecting
-obviously unsuitable hint IDs before copying them to the final candidate
-vector.  The exact 1,000-given trace is unchanged.
+faster at 1,000 givens and 8.64% faster at 3,000 givens on ar-2.  It does so by
+removing two key sorts, starting posting intersections with the least common
+indexed property, and rejecting obviously unsuitable hint IDs before copying
+them to the final candidate vector.  Both exact given-clause traces are
+unchanged.
 
 This branch addresses the work that still occurs before that rejection.
 
@@ -134,7 +136,9 @@ be lost and reported memory agrees with the allocated capacity.
 
 For each ordinary dense fallback query:
 
-1. Rank the required checklist properties by their active posting counts.
+1. Rank the required checklist properties by their stored population counts.
+   Counts may conservatively include stale rewritten/deactivated properties;
+   that can only affect ranking, not matching correctness.
 2. Retain only a small configured maximum of the least-common properties.
 3. After the current shallow lookup produces one 64-ID rough word, count its
    surviving IDs.
@@ -181,10 +185,12 @@ the input's existing memory/time limits merely to obtain a result.
 
 Required ar-2 checks left to the user:
 
-1. The pending parent-branch 3,000-given control/candidate pair establishes the
-   scaling of the already validated early-rejection change.
-2. After this branch passes the local gates, run a pinned parent control and
-   new candidate at 1,000 and 3,000 givens without input echo.
+1. The completed parent-branch 3,000-given pair establishes an 8.64% whole-run
+   and 8.84% incremental 1,000-to-3,000 saving for the already validated
+   early-rejection change.
+2. Run the pinned parent and new candidate at 3,000 givens without input echo;
+   a same-binary `hint_mask_filter_bits=0` run may be added to isolate the bulk
+   filter from the checklist-walk cleanup.
 3. Compare both whole-run CPU and the incremental 1,000-to-3,000 CPU segment.
 4. Longer proof-confirmation runs are allowed only after exact 3,000-given
    trajectory equality and a favorable incremental result.
@@ -197,8 +203,9 @@ The branch is acceptable only if all of the following hold:
 2. The Josef 04 prefix has an identical given trace and logical endpoint.
 3. Property storage is bounded by active-ID capacity and reported explicitly.
 4. The adaptive path records no candidate-order or exact-answer divergence.
-5. Local peak RSS increases by approximately the documented 16 MiB, not by a
-   hidden conjunction-sized allocation.
+5. Explicit allocation accounting shows exactly the documented 16 MiB and no
+   hidden conjunction-sized allocation; OS peak RSS may hide that increment
+   inside the existing startup high-water plateau.
 6. CPU does not regress on narrow-query generalization cases.
 7. The ar-2 3,000-given incremental CPU result improves sufficiently to justify
    the added resident memory.
@@ -206,6 +213,22 @@ The branch is acceptable only if all of the following hold:
 The local 1,000-given measurement is a development gate, not evidence for
 day/week/month behavior.  The user-run ar-2 prefixes and subsequent long runs
 remain the promotion authority.
+
+## Implementation outcome
+
+Phases A through D are complete locally.  The focused and generalization test
+suites pass, including broad-bank activation, disabled allocation,
+deactivation, and rewritten-hint reindexing.  Sequential enabled/disabled
+Josef 04 runs have an identical 1,000-given trace and endpoint.  Enabling the
+filter improves matched local user CPU by 10.56% while reporting exactly 16
+MiB of property tables and no swap activity.
+
+The filter used 167,593,174 property-table reads to reject 1,391,378,351 rough
+IDs before individual inspection, a ratio of about 8.30 avoided inspections
+per table read.  Detailed commands, counters, hashes, and measurements are in
+`P9-ADAPTIVE-HINT-MASK-FILTER-RESULTS.md`.  The remaining project gate is the
+user-run 3,000-given ar-2 comparison; longer proof runs remain intentionally
+deferred until that result is known.
 
 ## Follow-on work intentionally out of scope
 
