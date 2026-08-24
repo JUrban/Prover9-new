@@ -2583,7 +2583,11 @@ static BOOL fast_cache_profile(const unsigned long long **keys,
   if (Fast_match_cache == NULL)
     return FALSE;
   *posting_key_count = Better_key_scratch_count;
-  if (Compiled_fused_prepared) {
+  /* A zero threshold is a diagnostic mode that filters every result and
+     therefore needs the full SAME identity in the cache key.  At the normal
+     threshold, broad structurally filtered results are not stored at all;
+     narrow unfiltered results retain packed_fast's compact profile key. */
+  if (Compiled_fused_prepared && Compiled_same_min_candidates == 0) {
     required = Better_key_scratch_count + 1 +
       Compiled_query_identity_count;
     if (required < Better_key_scratch_count)
@@ -2924,11 +2928,6 @@ static BOOL fast_dense_collect_candidates(
     Fast_dense_seed_ids_avoided += minimum;
     Packed_operation_stats[op].posting_lists += key_count;
   }
-  if (Compiled_fused_prepared && !Compiled_fused_active &&
-      minimum >= Compiled_same_min_candidates)
-    compiled_fused_activate();
-  if (Compiled_fused_active && Compiled_fused_program_count != 0)
-    Compiled_fused_program_preapplied = TRUE;
   for (summary_word = 0;
        summary_word < views[seed].summary_words; summary_word++) {
     unsigned long long common = views[seed].summary[summary_word];
@@ -2954,6 +2953,9 @@ static BOOL fast_dense_collect_candidates(
         bits &= views[j].bits[word];
         data_plane_reads++;
       }
+      if (!Compiled_fused_program_preapplied && Compiled_fused_active &&
+          Compiled_fused_program_count != 0)
+        Compiled_fused_program_preapplied = TRUE;
       if (Compiled_fused_program_preapplied && bits != 0) {
         unsigned long long before_bits = bits;
         for (j = 0; j < Compiled_fused_program_count && bits != 0; j++) {
@@ -5422,7 +5424,12 @@ static void better_collect_clause_candidates(
   Packed_candidates_count = keep;
   compiled_census_candidate_stages(
     op, pre_profile, Packed_candidates_count);
-  if (fast_eligible) {
+  /* With a nonzero threshold an active fused query has changed the candidate
+     set in a way the ordinary packed key does not identify.  Broad results
+     normally overflow the small result cache anyway, so skip this store
+     instead of copying a large structural key on every lookup. */
+  if (fast_eligible &&
+      (!Compiled_fused_active || Compiled_same_min_candidates == 0)) {
     fast_cache_store(
       fast_keys, fast_key_count, fast_posting_key_count,
       first_mask, positive, negative,
