@@ -167,6 +167,9 @@ static BOOL Compiled_same_cache_ready = FALSE;
 static unsigned long long Compiled_same_cache_lookups = 0;
 static unsigned long long Compiled_same_cache_hits = 0;
 static unsigned long long Compiled_same_cache_builds = 0;
+static unsigned long long Compiled_same_cache_build_batches = 0;
+static unsigned long long Compiled_same_cache_build_batch_conditions = 0;
+static unsigned Compiled_same_cache_maximum_batch = 0;
 static unsigned long long Compiled_same_cache_build_scans = 0;
 static unsigned long long Compiled_same_cache_build_matches = 0;
 static unsigned long long Compiled_same_cache_filter_candidates = 0;
@@ -219,6 +222,9 @@ static unsigned long long Compiled_fused_queries = 0;
 static unsigned long long Compiled_fused_activations = 0;
 static unsigned long long Compiled_fused_prefix_candidates = 0;
 static unsigned long long Compiled_fused_early_rejects = 0;
+static unsigned long long Compiled_fused_block_words = 0;
+static unsigned long long Compiled_fused_block_rejects = 0;
+static BOOL Compiled_fused_program_preapplied = FALSE;
 static unsigned long long *Compiled_query_identity = NULL;
 static unsigned Compiled_query_identity_count = 0;
 static unsigned Compiled_query_identity_capacity = 0;
@@ -2918,6 +2924,11 @@ static BOOL fast_dense_collect_candidates(
     Fast_dense_seed_ids_avoided += minimum;
     Packed_operation_stats[op].posting_lists += key_count;
   }
+  if (Compiled_fused_prepared && !Compiled_fused_active &&
+      minimum >= Compiled_same_min_candidates)
+    compiled_fused_activate();
+  if (Compiled_fused_active && Compiled_fused_program_count != 0)
+    Compiled_fused_program_preapplied = TRUE;
   for (summary_word = 0;
        summary_word < views[seed].summary_words; summary_word++) {
     unsigned long long common = views[seed].summary[summary_word];
@@ -2942,6 +2953,25 @@ static BOOL fast_dense_collect_candidates(
           continue;
         bits &= views[j].bits[word];
         data_plane_reads++;
+      }
+      if (Compiled_fused_program_preapplied && bits != 0) {
+        unsigned long long before_bits = bits;
+        for (j = 0; j < Compiled_fused_program_count && bits != 0; j++) {
+          struct compiled_same_cache_entry *entry =
+            Compiled_fused_program[j];
+          bits &= word < entry->dense_words ?
+            entry->dense_bits[word] : 0;
+        }
+        if (record_stats) {
+          Compiled_fused_word_ops += Compiled_fused_program_count;
+          Compiled_fused_block_words++;
+          Compiled_fused_block_rejects +=
+            (unsigned) __builtin_popcountll(before_bits) -
+            (unsigned) __builtin_popcountll(bits);
+          Compiled_fused_early_rejects +=
+            (unsigned) __builtin_popcountll(before_bits) -
+            (unsigned) __builtin_popcountll(bits);
+        }
       }
       dense_data_words++;
       while (bits != 0) {
@@ -3235,6 +3265,9 @@ void init_hints(Uniftype utype,
   Compiled_same_cache_lookups = 0;
   Compiled_same_cache_hits = 0;
   Compiled_same_cache_builds = 0;
+  Compiled_same_cache_build_batches = 0;
+  Compiled_same_cache_build_batch_conditions = 0;
+  Compiled_same_cache_maximum_batch = 0;
   Compiled_same_cache_build_scans = 0;
   Compiled_same_cache_build_matches = 0;
   Compiled_same_cache_filter_candidates = 0;
@@ -3276,6 +3309,9 @@ void init_hints(Uniftype utype,
   Compiled_fused_activations = 0;
   Compiled_fused_prefix_candidates = 0;
   Compiled_fused_early_rejects = 0;
+  Compiled_fused_block_words = 0;
+  Compiled_fused_block_rejects = 0;
+  Compiled_fused_program_preapplied = FALSE;
   Compiled_query_identity_count = 0;
   Compiled_rigid_test_count = 0;
   Compiled_rigid_queries = 0;
@@ -3586,6 +3622,9 @@ void done_with_hints(void)
   Compiled_same_cache_lookups = 0;
   Compiled_same_cache_hits = 0;
   Compiled_same_cache_builds = 0;
+  Compiled_same_cache_build_batches = 0;
+  Compiled_same_cache_build_batch_conditions = 0;
+  Compiled_same_cache_maximum_batch = 0;
   Compiled_same_cache_build_scans = 0;
   Compiled_same_cache_build_matches = 0;
   Compiled_same_cache_filter_candidates = 0;
@@ -3627,6 +3666,9 @@ void done_with_hints(void)
   Compiled_fused_activations = 0;
   Compiled_fused_prefix_candidates = 0;
   Compiled_fused_early_rejects = 0;
+  Compiled_fused_block_words = 0;
+  Compiled_fused_block_rejects = 0;
+  Compiled_fused_program_preapplied = FALSE;
   Compiled_rigid_queries = 0;
   Compiled_rigid_sampled_queries = 0;
   Compiled_rigid_sample_tests = 0;
@@ -4229,6 +4271,8 @@ static BOOL compiled_cache_budget_allows(unsigned long long additional)
 }
 
 static void compiled_same_cache_index_hint(unsigned id);
+static void compiled_same_cache_build_batch(
+  struct compiled_same_cache_entry **entries, unsigned count);
 static void compiled_condition_cache_note_work(
   struct compiled_same_cache_entry *entry,
   unsigned long long candidate_tests);
@@ -4299,7 +4343,14 @@ static void compiled_same_cache_build(
   for (id = 1; id < Packed_hint_capacity; id++) {
     uint32_t root = Packed_hint_active[id] ?
       compiled_hint_root(id, TRUE) : 0;
-    if (root != 0) {
+    if (!Packed_hint_active[id])
+      continue;
+    if (root == 0) {
+      entry->dense_bits[id / 64] |= 1ULL << (id % 64);
+      if (entry->match_count != UINT_MAX)
+        entry->match_count++;
+    }
+    else {
       Compiled_same_cache_build_scans++;
       if (compiled_same_cache_compare(entry, root) == 1) {
         entry->dense_bits[id / 64] |= 1ULL << (id % 64);
@@ -4316,6 +4367,84 @@ static void compiled_same_cache_build(
     hint_term_table_finalize(Compiled_term_table);
   entry->built = 1;
   Compiled_same_cache_builds++;
+}
+
+static BOOL compiled_condition_cache_ready_to_build(
+  const struct compiled_same_cache_entry *entry)
+{
+  return entry != NULL && !entry->built && !entry->build_denied &&
+    Active_hints_count > 0 && entry->queries >= 2 &&
+    entry->candidate_work >=
+      (unsigned long long) Active_hints_count *
+        Compiled_same_cache_build_factor;
+}
+
+/* Several conditions in one generated query often become profitable at the
+   same time.  Allocate their independent masks first, then resolve every
+   retained hint root once and test all ready conditions against it.  This is
+   the set-at-a-time construction counterpart to the visited-word executor. */
+static void compiled_same_cache_build_batch(
+  struct compiled_same_cache_entry **entries, unsigned count)
+{
+  struct compiled_same_cache_entry *ready[COMPILED_PROGRAM_MAX_CONDITIONS];
+  unsigned ready_count = 0;
+  unsigned words = Packed_hint_capacity / 64 +
+    (Packed_hint_capacity % 64 != 0);
+  unsigned long long bytes =
+    (unsigned long long) words * sizeof(unsigned long long);
+  unsigned i, j, id;
+  for (i = 0; i < count && i < COMPILED_PROGRAM_MAX_CONDITIONS; i++) {
+    struct compiled_same_cache_entry *entry = entries[i];
+    BOOL duplicate = FALSE;
+    for (j = 0; j < ready_count; j++)
+      if (ready[j] == entry)
+        duplicate = TRUE;
+    if (duplicate || !compiled_condition_cache_ready_to_build(entry))
+      continue;
+    if (!compiled_cache_budget_allows(bytes)) {
+      entry->build_denied = 1;
+      Compiled_same_cache_dense_denials++;
+      continue;
+    }
+    entry->dense_bits = safe_calloc(words, sizeof(*entry->dense_bits));
+    entry->dense_words = words;
+    Compiled_same_cache_dense_bytes += bytes;
+    ready[ready_count++] = entry;
+  }
+  if (ready_count == 0)
+    return;
+  Compiled_same_cache_build_batches++;
+  Compiled_same_cache_build_batch_conditions += ready_count;
+  if (ready_count > Compiled_same_cache_maximum_batch)
+    Compiled_same_cache_maximum_batch = ready_count;
+  for (id = 1; id < Packed_hint_capacity; id++) {
+    uint32_t root = Packed_hint_active[id] ?
+      compiled_hint_root(id, TRUE) : 0;
+    if (!Packed_hint_active[id])
+      continue;
+    for (j = 0; j < ready_count; j++) {
+      struct compiled_same_cache_entry *entry = ready[j];
+      BOOL member;
+      if (root == 0)
+        member = TRUE;
+      else {
+        Compiled_same_cache_build_scans++;
+        member = compiled_same_cache_compare(entry, root) == 1;
+        if (member)
+          Compiled_same_cache_build_matches++;
+      }
+      if (member) {
+        entry->dense_bits[id / 64] |= 1ULL << (id % 64);
+        if (entry->match_count != UINT_MAX)
+          entry->match_count++;
+      }
+    }
+  }
+  if (Compiled_term_table_lazy)
+    hint_term_table_finalize(Compiled_term_table);
+  for (j = 0; j < ready_count; j++)
+    ready[j]->built = 1;
+  Compiled_same_cache_builds += ready_count;
 }
 
 static void compiled_program_consider(
@@ -4402,7 +4531,8 @@ static BOOL compiled_fused_candidate_accept(unsigned id)
   unsigned j;
   if (root == 0)
     return TRUE;
-  if (Compiled_fused_program_count != 0) {
+  if (Compiled_fused_program_count != 0 &&
+      !Compiled_fused_program_preapplied) {
     unsigned word = id / 64;
     if (word != Compiled_fused_current_word) {
       unsigned long long bits = ULLONG_MAX;
@@ -4567,9 +4697,19 @@ static void compiled_fused_finish(void)
         Compiled_same_cache_rigid_hits++;
     }
   }
-  for (i = 0; i < Compiled_fused_direct_count; i++)
-    compiled_condition_cache_note_work(
-      Compiled_fused_direct_entries[i], Compiled_fused_direct_work[i]);
+  for (i = 0; i < Compiled_fused_direct_count; i++) {
+    struct compiled_same_cache_entry *entry =
+      Compiled_fused_direct_entries[i];
+    unsigned long long work = Compiled_fused_direct_work[i];
+    if (entry == NULL)
+      continue;
+    if (ULLONG_MAX - entry->candidate_work < work)
+      entry->candidate_work = ULLONG_MAX;
+    else
+      entry->candidate_work += work;
+  }
+  compiled_same_cache_build_batch(
+    Compiled_fused_direct_entries, Compiled_fused_direct_count);
   if (Compiled_rigid_program_applied) {
     Compiled_rigid_queries++;
     Compiled_rigid_candidates_before += Compiled_fused_seen;
@@ -4584,12 +4724,11 @@ static void compiled_same_cache_index_hint(unsigned id)
   if (!Compiled_same_cache_ready || Compiled_same_cache_entries == NULL)
     return;
   root = hint_term_table_root(Compiled_term_table, id);
-  if (root == 0)
-    return;
   for (i = 0; i < Compiled_same_cache_count; i++) {
     struct compiled_same_cache_entry *entry =
       Compiled_same_cache_entries + i;
-    if (entry->built && compiled_same_cache_compare(entry, root) == 1) {
+    if (entry->built &&
+        (root == 0 || compiled_same_cache_compare(entry, root) == 1)) {
       unsigned word = id / 64;
       if (word >= entry->dense_words) {
         unsigned words = word + 1;
@@ -4636,11 +4775,7 @@ static void compiled_condition_cache_note_work(
     entry->candidate_work = ULLONG_MAX;
   else
     entry->candidate_work += candidate_tests;
-  if (!entry->built && !entry->build_denied &&
-      Active_hints_count > 0 && entry->queries >= 2 &&
-      entry->candidate_work >=
-        (unsigned long long) Active_hints_count *
-          Compiled_same_cache_build_factor)
+  if (compiled_condition_cache_ready_to_build(entry))
     compiled_same_cache_build(entry);
 }
 
@@ -4695,6 +4830,7 @@ static void compiled_fused_query_begin(
   Compiled_fused_navigation_rejects = 0;
   Compiled_fused_unequal_rejects = 0;
   Compiled_fused_word_ops = 0;
+  Compiled_fused_program_preapplied = FALSE;
   if (!Compiled_fused_enabled || !Compiled_filter_enabled ||
       Compiled_term_table_lazy || op == PACKED_HINT_BACK_DEMOD ||
       c->literals == NULL || c->literals->next != NULL ||
@@ -4717,6 +4853,7 @@ static void compiled_fused_query_clear(void)
   Compiled_fused_active = FALSE;
   Compiled_fused_finished = FALSE;
   Compiled_plan_collect_rigid = FALSE;
+  Compiled_fused_program_preapplied = FALSE;
   Compiled_query_identity_count = 0;
 }
 
@@ -5624,8 +5761,9 @@ void index_hint(Topform c)
               c->literals->atom))
           fatal_error("index_hint: cannot add compiled unit-hint term");
         compiled_path_index_hint(c);
-        compiled_same_cache_index_hint((unsigned) c->id);
       }
+      if (Compiled_term_table_enabled)
+        compiled_same_cache_index_hint((unsigned) c->id);
       if (compress_clause(c) == CLAUSE_COMPRESS_INVALID)
         fatal_error("index_hint: cannot compact active packed hint");
     }
@@ -6802,10 +6940,12 @@ void fprint_packed_hint_operation_stats(FILE *fp)
     fprintf(fp,
             "Compiled_hint_blocks: enabled=1, queries=%llu, "
             "activations=%llu, prefix_candidates=%llu, "
-            "early_rejects=%llu, query_identity_bytes=%llu, "
+            "early_rejects=%llu, block_words=%llu, "
+            "block_rejects=%llu, query_identity_bytes=%llu, "
             "cache_identity_bytes=%llu.\n",
             Compiled_fused_queries, Compiled_fused_activations,
             Compiled_fused_prefix_candidates, Compiled_fused_early_rejects,
+            Compiled_fused_block_words, Compiled_fused_block_rejects,
             (unsigned long long) Compiled_query_identity_capacity *
               sizeof(*Compiled_query_identity),
             (unsigned long long) Compiled_fast_identity_capacity *
@@ -6858,6 +6998,8 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             "maximum_candidate_work=%llu, cache_hits=%llu, "
             "same_hits=%llu, rigid_hits=%llu, builds=%llu, "
             "build_scans=%llu, build_matches=%llu, "
+            "build_batches=%llu, batch_conditions=%llu, "
+            "maximum_batch=%u, "
             "filter_candidates=%llu, filter_rejects=%llu, "
             "denied_entries=%u, dense_keys=%u, dense_bit_bytes=%llu, "
             "dense_budget_bytes=%llu, "
@@ -6875,6 +7017,9 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             Compiled_same_cache_builds,
             Compiled_same_cache_build_scans,
             Compiled_same_cache_build_matches,
+            Compiled_same_cache_build_batches,
+            Compiled_same_cache_build_batch_conditions,
+            Compiled_same_cache_maximum_batch,
             Compiled_same_cache_filter_candidates,
             Compiled_same_cache_filter_rejects,
             denied, built, Compiled_same_cache_dense_bytes,

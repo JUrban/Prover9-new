@@ -297,4 +297,72 @@ diff -u "$test_tmp/blocks-cache-control.trace" \
 grep -Eq '^Packed_fast_cache: .*hits=[1-9][0-9]*,' \
   "$test_tmp/blocks-cache-blocks.out"
 
+# Force two co-occurring SAME conditions to mature together on a bank large
+# enough for packed_fast's dense-word collector.  The third identical query
+# must use the two learned masks before enumerating stable IDs.
+blocks_batch_input="$test_tmp/blocks-batch.in"
+{
+  printf '%s\n' \
+    'clear(auto_denials).' \
+    'clear(auto_inference).' \
+    'clear(predicate_elim).' \
+    'clear(print_initial_clauses).' \
+    'clear(print_given).' \
+    'clear(print_kept).' \
+    'clear(back_demod).' \
+    'clear(back_demod_hints).' \
+    'assign(search_loop,discount).' \
+    'assign(passive_store,compressed).' \
+    'assign(hint_index,packed_compiled_blocks).' \
+    'assign(hint_compiled_min_candidates,0).' \
+    'assign(hint_compiled_cache_build_factor,0).' \
+    'assign(hint_conjunction_kb,1).' \
+    'assign(ancestor_store,memory).' \
+    'assign(stats,all).' \
+    'assign(max_given,3).' \
+    'set(process_initial_sos).' \
+    'set(hint_trace).' \
+    'formulas(hints).'
+  batch_i=1
+  while [ "$batch_i" -le 600 ]; do
+    case $((batch_i % 4)) in
+      0) printf '  p(k%u,f(a,a),g(c,c)).\n' "$batch_i" ;;
+      1) printf '  p(k%u,f(a,b),g(c,c)).\n' "$batch_i" ;;
+      2) printf '  p(k%u,f(a,a),g(c,d)).\n' "$batch_i" ;;
+      3) printf '  p(k%u,f(a,b),g(c,d)).\n' "$batch_i" ;;
+    esac
+    batch_i=$((batch_i + 1))
+  done
+  printf '%s\n' \
+    'end_of_list.' \
+    'formulas(sos).' \
+    '  p(z,f(x,x),g(y,y)).' \
+    '  p(z,f(x,x),g(y,y)).' \
+    '  p(z,f(x,x),g(y,y)).' \
+    'end_of_list.'
+} > "$blocks_batch_input"
+sed 's/packed_compiled_blocks/packed_fast/' "$blocks_batch_input" |
+  "$prover9" > "$test_tmp/blocks-batch-control.out" \
+               2> "$test_tmp/blocks-batch-control.err" || blocks_batch_control_status=$?
+blocks_batch_control_status=${blocks_batch_control_status:-0}
+"$prover9" < "$blocks_batch_input" \
+  > "$test_tmp/blocks-batch-blocks.out" \
+  2> "$test_tmp/blocks-batch-blocks.err" || blocks_batch_status=$?
+blocks_batch_status=${blocks_batch_status:-0}
+if [ "$blocks_batch_control_status" -ne 2 ] || \
+   [ "$blocks_batch_status" -ne 2 ]; then
+  echo "hint_index_trace_test: blocks batch statuses control=$blocks_batch_control_status blocks=$blocks_batch_status" >&2
+  exit 1
+fi
+for blocks_batch_mode in control blocks; do
+  grep '^HINT_TRACE ' "$test_tmp/blocks-batch-$blocks_batch_mode.out" \
+    > "$test_tmp/blocks-batch-$blocks_batch_mode.trace"
+done
+diff -u "$test_tmp/blocks-batch-control.trace" \
+  "$test_tmp/blocks-batch-blocks.trace"
+grep -Eq '^Compiled_hint_same_cache: .*builds=2, .*build_batches=1, batch_conditions=2, maximum_batch=2,' \
+  "$test_tmp/blocks-batch-blocks.out"
+grep -Eq '^Compiled_hint_blocks: .*block_words=[1-9][0-9]*, block_rejects=[1-9][0-9]*,' \
+  "$test_tmp/blocks-batch-blocks.out"
+
 echo 'hint_index_trace_test: PASS'
