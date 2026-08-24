@@ -23,6 +23,8 @@ int main(void)
   uint32_t first_root, renamed_root, shared_root, replacement_root;
   struct hint_term_node_view root_view, f_view;
   struct hint_term_table_stats before, frozen, after;
+  Topform query, mismatch, rigid_mismatch;
+  BOOL matched;
 
   init_standard_ladr();
   table = hint_term_table_init();
@@ -60,13 +62,36 @@ int main(void)
   CHECK(before.hash_bytes != 0 && before.scratch_bytes != 0,
         "construction workspace is visible before finalization");
 
+  query = normalized_clause("p(f(x,x)).");
+  mismatch = normalized_clause("p(f(g(a),g(b))).");
+  rigid_mismatch = normalized_clause("p(k(x)).");
+  CHECK(hint_term_table_matches(
+          table, 12, TRUE, query->literals->atom, &matched) && matched,
+        "canonical handles match a repeated generated variable");
+  CHECK(hint_term_table_add(table, 20, TRUE, mismatch->literals->atom),
+        "add repeated-variable mismatch target");
+  CHECK(hint_term_table_matches(
+          table, 20, TRUE, query->literals->atom, &matched) && !matched,
+        "different canonical handles reject repeated generated variable");
+  CHECK(hint_term_table_matches(
+          table, 12, TRUE, rigid_mismatch->literals->atom, &matched) &&
+        !matched,
+        "compact node rejects a rigid generated symbol");
+  CHECK(hint_term_table_matches(
+          table, 12, FALSE, query->literals->atom, &matched) && !matched,
+        "separate sign rejects before term traversal");
+
   hint_term_table_finalize(table);
   hint_term_table_get_stats(table, &frozen);
   CHECK(frozen.finalized && frozen.hash_bytes == 0 &&
         frozen.scratch_bytes == 0,
         "finalization releases immutable construction workspace");
-  CHECK(frozen.active_records == 3 && frozen.total_bytes != 0,
+  CHECK(frozen.active_records == 4 && frozen.total_bytes != 0,
         "finalized table retains compact roots and nodes");
+  CHECK(frozen.match_attempts == 4 && frozen.match_successes == 1 &&
+        frozen.match_rigid_rejects == 1 &&
+        frozen.match_repeated_rejects == 1,
+        "handle matcher reports successes and exact rejection causes");
 
   CHECK(hint_term_table_remove(table, 1),
         "remove stable ID after finalization");
@@ -91,6 +116,9 @@ int main(void)
   delete_clause(renamed);
   delete_clause(shared);
   delete_clause(replacement);
+  delete_clause(query);
+  delete_clause(mismatch);
+  delete_clause(rigid_mismatch);
 
   if (Failures != 0) {
     fprintf(stderr, "hint_term_table_test: %d failure(s)\n", Failures);

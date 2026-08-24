@@ -49,6 +49,14 @@ struct hint_term_table {
   unsigned long long additions;
   unsigned long long removals;
   unsigned long long reinsertions;
+  unsigned long long match_attempts;
+  unsigned long long match_successes;
+  unsigned long long match_nodes;
+  unsigned long long match_rigid_tests;
+  unsigned long long match_rigid_rejects;
+  unsigned long long match_first_bindings;
+  unsigned long long match_repeated_tests;
+  unsigned long long match_repeated_rejects;
   BOOL finalized;
 };
 
@@ -424,6 +432,80 @@ BOOL hint_term_table_node(Hint_term_table table, uint32_t handle,
   return TRUE;
 }
 
+BOOL hint_term_table_matches(Hint_term_table table, unsigned id,
+                             BOOL positive, Term pattern, BOOL *matched)
+{
+  struct match_frame {
+    Term pattern;
+    uint32_t target;
+  } stack[1000];
+  uint32_t bindings[MAX_VARS];
+  unsigned char bound[MAX_VARS];
+  int top = 0;
+  uint32_t root;
+  if (matched == NULL || table == NULL || pattern == NULL || id == 0 ||
+      id >= table->record_capacity ||
+      (table->record_flags[id] & HINT_TERM_RECORD_ACTIVE) == 0)
+    return FALSE;
+  table->match_attempts++;
+  if (((table->record_flags[id] & HINT_TERM_RECORD_SIGN) != 0) != positive) {
+    *matched = FALSE;
+    return TRUE;
+  }
+  root = table->roots[id];
+  if (root == 0)
+    return FALSE;
+  memset(bound, 0, sizeof(bound));
+  stack[top].pattern = pattern;
+  stack[top++].target = root;
+  while (top > 0) {
+    struct match_frame frame = stack[--top];
+    table->match_nodes++;
+    if (VARIABLE(frame.pattern)) {
+      unsigned variable = (unsigned) VARNUM(frame.pattern);
+      if (variable >= MAX_VARS)
+        return FALSE;
+      if (!bound[variable]) {
+        bound[variable] = 1;
+        bindings[variable] = frame.target;
+        table->match_first_bindings++;
+      }
+      else {
+        table->match_repeated_tests++;
+        if (bindings[variable] != frame.target) {
+          table->match_repeated_rejects++;
+          *matched = FALSE;
+          return TRUE;
+        }
+      }
+    }
+    else {
+      struct hint_term_node_view view;
+      int i;
+      table->match_rigid_tests++;
+      if (!hint_term_table_node(table, frame.target, &view))
+        return FALSE;
+      if (view.variable || view.symbol_or_variable !=
+            (unsigned) SYMNUM(frame.pattern) ||
+          view.arity != (unsigned) ARITY(frame.pattern)) {
+        table->match_rigid_rejects++;
+        *matched = FALSE;
+        return TRUE;
+      }
+      if (top + ARITY(frame.pattern) >
+          (int) (sizeof(stack) / sizeof(stack[0])))
+        return FALSE;
+      for (i = ARITY(frame.pattern) - 1; i >= 0; i--) {
+        stack[top].pattern = ARG(frame.pattern,i);
+        stack[top++].target = view.children[i];
+      }
+    }
+  }
+  table->match_successes++;
+  *matched = TRUE;
+  return TRUE;
+}
+
 void hint_term_table_get_stats(Hint_term_table table,
                                struct hint_term_table_stats *stats)
 {
@@ -465,5 +547,13 @@ void hint_term_table_get_stats(Hint_term_table table,
                           table->delta.scratch_capacity) * sizeof(uint32_t);
   stats->total_bytes = stats->node_bytes + stats->child_bytes +
     stats->record_bytes + stats->hash_bytes + stats->scratch_bytes;
+  stats->match_attempts = table->match_attempts;
+  stats->match_successes = table->match_successes;
+  stats->match_nodes = table->match_nodes;
+  stats->match_rigid_tests = table->match_rigid_tests;
+  stats->match_rigid_rejects = table->match_rigid_rejects;
+  stats->match_first_bindings = table->match_first_bindings;
+  stats->match_repeated_tests = table->match_repeated_tests;
+  stats->match_repeated_rejects = table->match_repeated_rejects;
   stats->finalized = table->finalized;
 }

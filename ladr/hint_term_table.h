@@ -35,6 +35,14 @@ struct hint_term_table_stats {
   unsigned long long hash_peak_bytes;
   unsigned long long scratch_bytes;
   unsigned long long total_bytes;
+  unsigned long long match_attempts;
+  unsigned long long match_successes;
+  unsigned long long match_nodes;
+  unsigned long long match_rigid_tests;
+  unsigned long long match_rigid_rejects;
+  unsigned long long match_first_bindings;
+  unsigned long long match_repeated_tests;
+  unsigned long long match_repeated_rejects;
   BOOL finalized;
 };
 
@@ -61,6 +69,12 @@ BOOL hint_term_table_positive(Hint_term_table table, unsigned id);
 
 BOOL hint_term_table_node(Hint_term_table table, uint32_t handle,
                           struct hint_term_node_view *view);
+
+/* Allocation-free one-way match: PATTERN variables may bind canonical
+   subterm handles from retained unit hint ID.  TRUE means ID was supported
+   and *MATCHED is authoritative; FALSE requests the compressed fallback. */
+BOOL hint_term_table_matches(Hint_term_table table, unsigned id,
+                             BOOL positive, Term pattern, BOOL *matched);
 
 void hint_term_table_get_stats(Hint_term_table table,
                                struct hint_term_table_stats *stats);
