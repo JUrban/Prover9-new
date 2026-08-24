@@ -5003,15 +5003,17 @@ static void compiled_condition_cache_note_work(
     compiled_same_cache_build(entry);
 }
 
-static void compiled_path_collect_query(Term t, BOOL sign,
-                                        unsigned long long path,
-                                        unsigned depth)
+static unsigned long long compiled_path_collect_query(
+  Term t, BOOL sign, unsigned long long path, unsigned depth,
+  unsigned feature_path)
 {
   unsigned i;
+  unsigned long long mask;
   if (VARIABLE(t)) {
     compiled_plan_note_variable(t, depth);
-    return;
+    return 0;
   }
+  mask = 1ULL << packed_feature_bit(SYMNUM(t), feature_path);
   compiled_plan_note_rigid(t, depth);
   if (Compiled_path_postings != NULL &&
       depth >= COMPILED_PATH_MIN_DEPTH &&
@@ -5032,13 +5034,15 @@ static void compiled_path_collect_query(Term t, BOOL sign,
   }
   for (i = 0; i < (unsigned) ARITY(t); i++) {
     Compiled_query_path[depth] = i;
-    compiled_path_collect_query(
-      ARG(t,i), sign, compiled_path_child(path, i), depth + 1);
+    mask |= compiled_path_collect_query(
+      ARG(t,i), sign, compiled_path_child(path, i), depth + 1,
+      feature_path * 33U + i + 1);
   }
+  return mask;
 }
 
-static void compiled_fused_query_begin(
-  Topform c, enum packed_hint_operation op)
+static BOOL compiled_fused_query_begin(
+  Topform c, enum packed_hint_operation op, BOOL query_anyconst)
 {
   Compiled_fused_prepared = FALSE;
   Compiled_fused_active = FALSE;
@@ -5060,14 +5064,15 @@ static void compiled_fused_query_begin(
   if (!Compiled_fused_enabled || !Compiled_filter_enabled ||
       Compiled_term_table_lazy || op == PACKED_HINT_BACK_DEMOD ||
       c->literals == NULL || c->literals->next != NULL ||
-      (MATCH_HINTS_ANYCONST && AnyConstsEnabled &&
-       hint_contains_anyconst(c)))
-    return;
+      query_anyconst)
+    return FALSE;
   compiled_plan_begin();
   Compiled_plan_collect_rigid = TRUE;
-  compiled_path_collect_query(
-    c->literals->atom, c->literals->sign,
-    UINT64_C(0x243f6a8885a308d3), 0);
+  return TRUE;
+}
+
+static void compiled_fused_query_end_plan(void)
+{
   Compiled_plan_collect_rigid = FALSE;
   compiled_query_identity_plan();
   Compiled_fused_prepared =
@@ -5378,9 +5383,9 @@ static void compiled_path_filter_candidates(
     compiled_plan_begin();
     Compiled_plan_collect_rigid =
       Packed_candidates_count >= Compiled_same_min_candidates;
-    compiled_path_collect_query(
+    (void) compiled_path_collect_query(
       c->literals->atom, c->literals->sign,
-      UINT64_C(0x243f6a8885a308d3), 0);
+      UINT64_C(0x243f6a8885a308d3), 0, 1);
     Compiled_plan_collect_rigid = FALSE;
     if (account && Packed_candidates_count >= Compiled_same_min_candidates) {
       unsigned total = Compiled_same_test_count + Compiled_rigid_test_count;
@@ -5482,14 +5487,25 @@ static void better_collect_clause_candidates(
   unsigned fast_posting_key_count = 0;
   unsigned long long posting_candidates_before = 0;
   BOOL fast_eligible = FALSE;
+  BOOL compile_query_plan;
   struct fast_candidate_filter fast_filter;
-  unsigned long long first_mask = first == NULL ? 0 :
-    packed_term_feature_mask(first->atom, TRUE);
+  unsigned long long first_mask = 0;
   BOOL equivalence = op == PACKED_HINT_EQUIVALENCE;
   BOOL query_anyconst = MATCH_HINTS_ANYCONST && AnyConstsEnabled &&
                         hint_contains_anyconst(c);
+  packed_begin_candidates();
+  compile_query_plan = compiled_fused_query_begin(
+    c, op, query_anyconst);
   for (lit = c->literals; lit != NULL; lit = lit->next) {
-    unsigned long long mask = packed_term_feature_mask(lit->atom, FALSE);
+    unsigned long long mask;
+    if (compile_query_plan && lit == first)
+      mask = compiled_path_collect_query(
+        lit->atom, lit->sign,
+        UINT64_C(0x243f6a8885a308d3), 0, 1);
+    else
+      mask = packed_term_feature_mask(lit->atom, FALSE);
+    if (lit == first)
+      first_mask = mask;
     if (lit->sign) {
       positive++;
       positive_mask |= mask;
@@ -5499,8 +5515,8 @@ static void better_collect_clause_candidates(
       negative_mask |= mask;
     }
   }
-  packed_begin_candidates();
-  compiled_fused_query_begin(c, op);
+  if (compile_query_plan)
+    compiled_fused_query_end_plan();
   if (equivalence) {
     unsigned long long key = better_equivalence_key(
       positive_mask, negative_mask, positive, negative,
