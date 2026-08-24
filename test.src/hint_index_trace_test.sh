@@ -365,12 +365,14 @@ grep -Eq '^Compiled_hint_same_cache: .*builds=2, .*build_batches=1, batch_condit
 grep -Eq '^Compiled_hint_blocks: .*block_words=[1-9][0-9]*, block_rejects=[1-9][0-9]*,' \
   "$test_tmp/blocks-batch-blocks.out"
 
-# Exercise a RIGID-only query in the before-emission path.  Positions 7 and
-# 28 of k/65 collide in the established shallow 64-bit path mask.  Every bad
-# hint has h at position 7 but retains g at position 28, so packed_fast must
-# emit it; the exact compiled deep-position condition rejects it.  The first
-# two identical queries train/build the shared condition and the third must
-# use its dense mask before scalar ID enumeration.
+# Exercise a mixed two-instruction program in the before-emission path.
+# Positions 7 and 28 of k/65 collide in the established shallow 64-bit path
+# mask.  One independent cohort violates the query's repeated x at positions
+# 0/1 and another has h instead of g at position 7.  The first broad query
+# must therefore retain both a SAME and a RIGID instruction; later identical
+# queries reuse the normalized two-instruction program.  Mask construction is
+# deliberately kept out of this fixture so it tests policy reuse itself; the
+# preceding and following fixtures cover learned dense/sparse masks.
 emit_rigid_atom()
 {
   rigid_pred=$1
@@ -384,11 +386,12 @@ emit_rigid_atom()
     if [ "$rigid_pos" -ne 0 ]; then
       printf ','
     fi
-    if [ "$rigid_query" -eq 1 ] && [ "$rigid_pos" -eq 0 ]; then
+    if [ "$rigid_query" -eq 1 ] && \
+       { [ "$rigid_pos" -eq 0 ] || [ "$rigid_pos" -eq 1 ]; }; then
       printf 'x'
-    elif [ "$rigid_query" -eq 1 ] && [ "$rigid_pos" -eq 1 ]; then
-      printf 'y'
-    elif [ "$rigid_bad" -eq 1 ] && [ "$rigid_pos" -eq 7 ]; then
+    elif [ $((rigid_bad & 1)) -ne 0 ] && [ "$rigid_pos" -eq 1 ]; then
+      printf 'h'
+    elif [ $((rigid_bad & 2)) -ne 0 ] && [ "$rigid_pos" -eq 7 ]; then
       printf 'h'
     else
       printf 'g'
@@ -400,9 +403,9 @@ emit_rigid_atom()
   elif [ -n "$rigid_group" ]; then
     printf ')),%s,c%s).\n' "$rigid_group" "$rigid_tag"
   elif [ "$rigid_query" -eq 1 ]; then
-    printf ')),z).\n'
+    printf ')),y,y).\n'
   else
-    printf ')),c%s).\n' "$rigid_tag"
+    printf ')),c%s,c%s).\n' "$rigid_tag" "$rigid_tag"
   fi
 }
 
@@ -421,7 +424,7 @@ blocks_rigid_input="$test_tmp/blocks-rigid.in"
     'assign(passive_store,compressed).' \
     'assign(hint_index,packed_compiled_blocks).' \
     'assign(hint_compiled_min_candidates,128).' \
-    'assign(hint_compiled_cache_build_factor,0).' \
+    'assign(hint_compiled_cache_build_factor,100).' \
     'assign(hint_conjunction_kb,1).' \
     'assign(ancestor_store,memory).' \
     'assign(stats,all).' \
@@ -431,7 +434,7 @@ blocks_rigid_input="$test_tmp/blocks-rigid.in"
     'formulas(hints).'
   rigid_i=1
   while [ "$rigid_i" -le 600 ]; do
-    emit_rigid_atom p $((rigid_i % 3 == 0)) 0 "$rigid_i"
+    emit_rigid_atom p $((rigid_i % 4)) 0 "$rigid_i"
     rigid_i=$((rigid_i + 1))
   done
   printf '%s\n' 'end_of_list.' 'formulas(sos).'
@@ -459,13 +462,11 @@ for blocks_rigid_mode in control blocks; do
 done
 diff -u "$test_tmp/blocks-rigid-control.trace" \
   "$test_tmp/blocks-rigid-blocks.trace"
-if ! grep -Eq '^Compiled_hint_plan: .*same_conditions=0, rigid_conditions=[1-9][0-9]*,' \
+if ! grep -Eq '^Compiled_hint_plan: .*same_conditions=[1-9][0-9]*, rigid_conditions=[1-9][0-9]*,.*mixed_queries=[1-9][0-9]*,' \
      "$test_tmp/blocks-rigid-blocks.out" || \
-   ! grep -Eq '^Compiled_hint_same_cache: .*same_entries=0, rigid_entries=1, same_built=0, rigid_built=1,.*rigid_hits=[1-9][0-9]*,' \
+   ! grep -Eq '^Compiled_hint_same_cache: .*same_entries=2, rigid_entries=1, same_built=0, rigid_built=0,.*builds=0,' \
      "$test_tmp/blocks-rigid-blocks.out" || \
-   ! grep -Eq '^Compiled_hint_query_program_cache: .*hits=[1-9][0-9]*,.*stores=[1-9][0-9]*,.*sample_tests_avoided=[1-9][0-9]*\.' \
-     "$test_tmp/blocks-rigid-blocks.out" || \
-   ! grep -Eq '^Compiled_hint_blocks: .*block_words=[1-9][0-9]*, block_rejects=[1-9][0-9]*,' \
+   ! grep -Eq '^Compiled_hint_query_program_cache: .*hits=[1-9][0-9]*,.*stores=[1-9][0-9]*,.*sample_tests_avoided=[1-9][0-9]*, instructions=[1-9][0-9]*, same_instructions=[1-9][0-9]*, rigid_instructions=[1-9][0-9]*, mixed_hits=[1-9][0-9]*, maximum_width=2,' \
      "$test_tmp/blocks-rigid-blocks.out"; then
   grep '^Compiled_hint_' "$test_tmp/blocks-rigid-blocks.out" >&2
   exit 1
