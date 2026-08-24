@@ -164,11 +164,12 @@ cold-passive-store-test: cold_passive_store_test
 bookkeeping-tests: bookkeeping_lifecycle_test
 	./bookkeeping_lifecycle_test
 
-hint-postings-test: hint_postings_test hint_preview_test compressed_unit_match_test hint_term_table_test
+hint-postings-test: hint_postings_test hint_preview_test compressed_unit_match_test hint_term_table_test hint_generalization_hash_test
 	./hint_postings_test
 	./hint_preview_test
 	./compressed_unit_match_test
 	./hint_term_table_test
+	./hint_generalization_hash_test
 	./hint_compiled_census_test.sh
 
 weight-test: default_weight_test
