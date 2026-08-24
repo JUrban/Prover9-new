@@ -3923,24 +3923,30 @@ static void compiled_query_identity_add(unsigned long long token)
   Compiled_query_identity[Compiled_query_identity_count++] = token;
 }
 
-static void compiled_query_identity_term(Term t)
+static void compiled_query_identity_plan(void)
 {
-  int i;
-  if (VARIABLE(t)) {
+  unsigned i, j;
+  compiled_query_identity_add(
+    (unsigned long long) Compiled_same_test_count);
+  for (i = 0; i < Compiled_same_test_count; i++) {
+    struct compiled_same_test *test = Compiled_same_tests + i;
     compiled_query_identity_add(
-      UINT64_C(0x1000000000000000));
-    compiled_query_identity_add(
-      (unsigned long long) (uint32_t) VARNUM(t));
-  }
-  else {
-    compiled_query_identity_add(
-      UINT64_C(0x2000000000000000));
-    compiled_query_identity_add(
-      (unsigned long long) (uint32_t) SYMNUM(t));
-    compiled_query_identity_add(
-      (unsigned long long) (uint32_t) ARITY(t));
-    for (i = 0; i < ARITY(t); i++)
-      compiled_query_identity_term(ARG(t,i));
+      ((unsigned long long) test->first_length << 32) |
+      (unsigned long long) test->second_length);
+    for (j = 0; j < test->first_length; j += 2)
+      compiled_query_identity_add(
+        (unsigned long long)
+          Compiled_plan_paths[test->first_offset + j] |
+        (j + 1 < test->first_length ?
+          (unsigned long long)
+            Compiled_plan_paths[test->first_offset + j + 1] << 32 : 0));
+    for (j = 0; j < test->second_length; j += 2)
+      compiled_query_identity_add(
+        (unsigned long long)
+          Compiled_plan_paths[test->second_offset + j] |
+        (j + 1 < test->second_length ?
+          (unsigned long long)
+            Compiled_plan_paths[test->second_offset + j + 1] << 32 : 0));
   }
 }
 
@@ -4516,8 +4522,10 @@ static void compiled_fused_finish(void)
   if (!account)
     return;
   if (!Compiled_fused_active) {
-    Compiled_same_admission_skips++;
-    Compiled_same_skipped_candidates += Compiled_fused_seen;
+    if (Compiled_fused_seen != 0) {
+      Compiled_same_admission_skips++;
+      Compiled_same_skipped_candidates += Compiled_fused_seen;
+    }
     return;
   }
   Compiled_fused_queries++;
@@ -4697,7 +4705,7 @@ static void compiled_fused_query_begin(
   compiled_path_collect_query(
     c->literals->atom, c->literals->sign,
     UINT64_C(0x243f6a8885a308d3), 0);
-  compiled_query_identity_term(c->literals->atom);
+  compiled_query_identity_plan();
   Compiled_fused_prepared = Compiled_same_test_count != 0;
   if (Compiled_fused_prepared && Compiled_same_min_candidates == 0)
     compiled_fused_activate();
