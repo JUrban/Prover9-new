@@ -12,7 +12,8 @@ Keep using this for production and long comparison runs:
 assign(hint_index,packed_fast).
 ```
 
-Use `packed_compiled` only for bounded experiments.  It now removes a large
+Use `packed_compiled` or `packed_compiled_blocks` only for bounded experiments.
+They now remove a large
 amount of repeated-variable and deep fixed-symbol candidate work, but it has
 not yet passed the whole-CPU promotion gate.  The current mode is safe: its new structures can
 only reject candidates that fail a necessary condition, and the established
@@ -123,6 +124,37 @@ Lifecycle behavior is conservative:
 - preview queries read existing cache state but neither train it nor change
   accounting.
 
+### Candidate-emission and dense-block experiment
+
+`packed_compiled_blocks` moves repeated-variable checks into candidate
+generation.  In plain language, the separate mode no longer always “builds a
+large list and then throws most of it away”:
+
+1. it prepares the repeated-variable child routes before looking up postings;
+2. after the configured threshold, it filters the small prefix already seen;
+3. it checks subsequent unique IDs before appending them to the candidate
+   vector; and
+4. once a condition has earned a dense mask, it ANDs up to eight such masks
+   with each visited 64-ID packed posting word before extracting scalar IDs.
+
+Co-occurring conditions that become profitable together are built together.
+Their masks remain independent, but one retained-bank traversal resolves each
+canonical hint root and fills all ready masks.  The existing 32 MiB aggregate
+budget is unchanged.
+
+Dense masks conservatively include hints that the canonical unit table cannot
+represent, including nonunits and `_AnyConst`.  Later additions are installed
+in every built mask; removals and rewrites may leave positive stale bits but
+can never create a false negative.  Every surviving ID still reaches the
+compressed matcher, which remains the final authority.
+
+The established packed result cache also needed a correctness change in this
+mode.  Queries such as `f(x,x)` and `f(x,y)` can have identical shallow packed
+features but different repeated-variable requirements.  Blocks mode adds an
+exact, compact encoding of the SAME child-route pairs to the cache identity.
+It stores full equality data, not only a collision-prone hash, and continues
+to validate dependencies using only actual posting keys.
+
 ### Demand-built canonical bank experiment
 
 `packed_compiled_lazy` leaves the canonical table empty while input hints are
@@ -158,6 +190,9 @@ assign(hint_index,packed_compiled_shadow).
 % Experimental repeated-variable prefilter, compressed final authority:
 assign(hint_index,packed_compiled).
 
+% Experimental SAME checks during ID emission and learned 64-ID block masks:
+assign(hint_index,packed_compiled_blocks).
+
 % Experimental demand-built form of the same prefilter:
 assign(hint_index,packed_compiled_lazy).
 
@@ -184,6 +219,18 @@ of 0 disables collective bitsets but keeps the direct repeated-variable
 pretest.  `set(hint_compiled_census)` is diagnostic and adds work; leave it
 clear in CPU comparisons.
 
+To exercise the candidate-emission implementation, use the same surrounding
+configuration and replace only that one line:
+
+```text
+assign(hint_index,packed_compiled_blocks).
+```
+
+Do not combine it with `packed_compiled_lazy`: block masks require the eager
+canonical table.  The numeric defaults above remain applicable.  A build
+factor of zero forces construction for tests and should not be used for a
+real long search.
+
 The shutdown statistics contain:
 
 - `Compiled_hint_term_table`: canonical nodes, children, roots, real bytes,
@@ -197,7 +244,10 @@ The shutdown statistics contain:
 - `Compiled_hint_program`: learned dense instructions combined and candidate
   blocks visited (the scratch counters remain zero); and
 - `Compiled_hint_same_cache`: learned route pairs, hottest pair, builds,
-  scans, hits, rejections, denials, and exact allocated/budgeted bytes.
+  scans, batch widths, hits, rejections, denials, and exact
+  allocated/budgeted bytes; and
+- `Compiled_hint_blocks`: activations, prefix work, early scalar rejections,
+  dense posting words intersected, and bits rejected before ID enumeration.
 
 ## Measurements so far
 
@@ -303,6 +353,24 @@ to 67.37 seconds.  Peak RSS rose from 600,796 to 620,524 KiB.  This proves that
 startup is repaid by 1,000 givens, but it is still far below the intended
 whole-run improvement.
 
+The first candidate-emission pairs compared `packed_compiled_blocks` with the
+separate `packed_compiled` postfilter at 300 givens:
+
+| Problem | Mode | Total CPU | Wall | Peak RSS | Sampled ordinary match |
+|---|---|---:|---:|---:|---:|
+| Josef 01 | separate postfilter | 32.25 s | 32.63 s | 472,460 KiB | 0.308 s |
+| Josef 01 | candidate emission | 32.15 s | 32.30 s | 473,188 KiB | 0.332 s |
+| Josef 02 | separate postfilter | 17.94 s | 18.01 s | 189,572 KiB | 1.587 s |
+| Josef 02 | candidate emission | 16.60 s | 16.68 s | 189,764 KiB | 0.967 s |
+
+All four runs stopped at the same final search boundary as their pair.
+Josef 01 ended at Given=301, Generated=120,793, Kept=5,737; Josef 02 ended at
+Given=301, Generated=127,774, Kept=7,823.  No default-threshold condition mask
+matured in these short runs.  Thus Josef 02's roughly 7.5% total-CPU gain is
+promising evidence for early insertion filtering, while Josef 01 is an honest
+neutral result; neither measures the new long-run dense-block path or passes
+the 1,000-given promotion gate.
+
 Josef 02/300 confirmed that extra necessary conditions are not automatically
 valuable: direct attempts fell from 139,308 to 86,377, while sampled ordinary
 match time remained 0.990 versus 0.988 seconds and whole CPU was unchanged.
@@ -358,7 +426,10 @@ positive/negative units, equations/disequations, `_AnyConst`, equality
 flipping, preview isolation, match-once and expiry lifecycle, late additions,
 stale removals, forced cache construction, mixed SAME/RIGID word programs,
 zero-budget fallback, lazy byte-stream construction, and the case where an
-invalid SAME route precedes a later valid candidate.
+invalid SAME route precedes a later valid candidate.  It now also includes
+the `f(x,x)`/`f(x,y)` result-cache alias case, batched construction of two
+co-occurring SAME masks, conservative fallback membership, and pre-ID dense
+block intersection on a 600-hint generated bank.
 
 Bounded experiments were run one memory-relevant process at a time with a
 2-GiB address-space cap.  The machine had old pages in swap but no active
@@ -378,19 +449,19 @@ The next Waldmeister-like stage should therefore be:
    interval timers around packed feature lookup, candidate marking/emission,
    compiled structural tests, and compressed confirmation.  This establishes
    the remaining ceiling without relying on aggregate `hints` time.
-2. **Execute conditions before IDs are emitted.** Introduce a shadow-only
-   block executor that combines the existing shallow packed masks with hot
-   SAME/RIGID masks for one 64-ID block, then emits surviving stable IDs in
-   the established order.  A rejected ID must never enter the candidate
-   vector.
+2. **Extend conditions-before-emission beyond the implemented SAME path.**
+   The explicit blocks mode now handles direct SAME checks and learned SAME
+   masks in dense posting words.  Next, measure learned-mask use at 1,000
+   givens, add only profitable RIGID masks, and cover sparse/conjunction
+   collectors where their counters show enough avoidable scalar work.
 3. **Compile and reuse query shapes.** Normalize the sign, shallow packed
    requirements, child routes, and repeated-variable pattern into a compact
    instruction key.  Cache only shapes whose measured candidate work repays
    construction; keep the compressed matcher as final authority.
-4. **Build related conditions together.** When a hot shape earns an index,
-   scan the retained bank once for up to eight co-occurring instructions,
-   rather than performing one bank scan per condition.  Retain the 32-MiB
-   aggregate mask budget and update additions/removals conservatively.
+4. **Measure and generalize batched construction.** Blocks mode now scans the
+   retained bank once for up to eight co-occurring ready SAME instructions.
+   Keep this only if long runs report useful batch widths and amortization;
+   extend it to RIGID instructions only after that evidence.
 5. **Remove avoidable startup work.** Compare eager construction with one
    sequential post-input build from the exact retained compressed bank.  The
    rejected raw-input pre-sizing policy must not return, and lazy construction
@@ -400,9 +471,10 @@ The next Waldmeister-like stage should therefore be:
    300/1,000-given CPU pairs.  Only a version that materially improves total
    CPU proceeds to Josef 04 on ar-2.
 
-In plain language, the current route is “make a large list, then throw most of
-it away.”  The next route must be “apply the compiled code while making the
-list, so the rejected entries never exist.”
+In plain language, the blocks mode now applies the compiled code while making
+the list and, for learned dense conditions, before turning packed words into
+individual IDs.  The next question is whether long runs reuse those learned
+blocks enough to repay their construction.
 
 Promotion still requires at least a 2× hint-matching CPU improvement on two
 different problems, no training regression above 5%, no held-out regression

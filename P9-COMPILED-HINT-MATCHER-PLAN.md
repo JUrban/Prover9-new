@@ -22,12 +22,18 @@ The next project should build a compiled, set-at-a-time instance matcher that
 can skip entire subterms and choose its tests by selectivity.  This is a
 different architecture, not a faster version of the present traversal.
 
-> Implementation update (2026-08-24): Phases 0 and 1 and the structural part
-> of Phase 2 are complete.  `packed_compiled` learns exact repeated-subterm
+> Implementation update (2026-08-24): Phases 0 and 1, Phase 2, and the first
+> candidate-generation part of Phase 2b are complete.  `packed_compiled`
+> learns exact repeated-subterm
 > and selective deep fixed-symbol conditions, promotes only conditions whose
 > measured work can repay a dense stable-ID set, executes up to eight direct
 > repeated-subterm instructions, and combines learned sets only for candidate
-> blocks actually visited.  The established compressed matcher remains
+> blocks actually visited.  The explicit `packed_compiled_blocks` experiment
+> now applies direct SAME checks before a unique ID is appended, builds up to
+> eight co-occurring hot masks in one retained-bank pass, and intersects
+> learned masks inside `packed_fast`'s dense 64-ID posting loop before scalar
+> IDs are enumerated.  Its result-cache key includes an exact compact encoding
+> of the repeated-variable path pairs.  The established compressed matcher remains
 > the final authority.  The eager all-path experiment was not worthwhile and
 > is isolated in `packed_compiled_paths`.  A demand-built canonical-bank mode,
 > `packed_compiled_lazy`, saves construction on Osborn but loses when a search
@@ -270,11 +276,12 @@ whole-run CPU regression on any training case.
 
 ### Phase 2b: generate candidates with the compiled program
 
-Status: **planned; this is the next architectural step.**
+Status: **first implementation complete; bounded/long-run gate pending.**
 
 Do not further tune the post-filter.  Integrate the useful conditions into
-candidate generation so rejected stable IDs are never appended to the packed
-candidate vector:
+candidate generation so rejected stable IDs are not appended to the packed
+candidate vector and, after a condition becomes hot, need not even be
+enumerated from a dense posting word:
 
 - time packed feature lookup, candidate marking/emission, structural checks,
   and compressed confirmation separately and by interval;
@@ -289,6 +296,35 @@ candidate vector:
   base/delta/tombstone lifecycle; and
 - run the new generator in shadow against the complete packed candidate and
   matching-hint traces before it may become authoritative.
+
+The new explicit mode is:
+
+```text
+assign(hint_index,packed_compiled_blocks).
+```
+
+It currently implements the SAME portion of that design.  A query plan is
+prepared before packed collection.  Once the configured candidate threshold
+is reached, the already-seen prefix is filtered once and later unique IDs are
+tested before vector insertion.  If exact condition masks have matured, the
+dense posting collector intersects them one 64-ID word at a time; rejected
+bits are never converted to IDs.  Several conditions that mature on the same
+query are allocated within the existing 32 MiB budget and filled in one bank
+pass.  Unknown canonical roots, nonunit hints, and `_AnyConst` hints receive
+conservative positive bits, so the optimization cannot hide a possible
+match.  Later additions are added to every applicable built mask, while stale
+positives from removal or rewriting remain harmless.
+
+The packed result cache cannot reuse a candidate list merely because two
+queries have the same shallow rigid features: `f(x,x)` and `f(x,y)` are the
+minimal counterexample.  The blocks mode therefore appends an exact compact
+serialization of SAME path pairs to the established cache identity, while
+keeping the real posting-key count separate for lifecycle validation.
+
+Exact tests cover this cache-alias case and a generated 600-hint bank in
+which two SAME conditions mature together.  The third query intersects both
+masks inside the dense posting loop and remains trace-identical to
+`packed_fast`.
 
 Also compare eager canonical construction with one sequential post-input
 build directly from the exact retained compressed bank.  This is different
@@ -309,6 +345,16 @@ Gate: zero ordered-candidate differences in shadow; a material reduction in
 candidate-generation CPU as well as confirmation CPU; at least 2x total hint
 matching improvement on two problems; and a material whole-run CPU win at a
 1,000-given boundary before any Josef 04 run.
+
+The first 300-given adjacent comparisons against the old separate
+`packed_compiled` postfilter are mixed but safe.  Josef 01 was effectively
+flat (32.25 versus 32.15 total CPU seconds, about 472--473 MiB RSS).  Josef 02
+improved from 17.94 to 16.60 total CPU seconds, and sampled ordinary hint
+matching fell from 1.587 to 0.967 seconds.  Both pairs had identical final
+Given/Generated/Kept counters.  No learned mask matured in either short
+default-threshold run, so these results measure early candidate insertion,
+not yet the long-run dense-block payoff.  They are enough to continue to a
+frozen 1,000-given gate, not enough to promote the mode.
 
 ### Phase 3: lifecycle and authoritative mode
 
