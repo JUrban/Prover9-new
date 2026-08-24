@@ -189,6 +189,70 @@ static void run_cache_admission_case(int bsub)
   delete_clause(hint);
 }
 
+static void run_early_profile_filter_case(int bsub)
+{
+  Topform short_hint =
+    parse_clause_from_string("early_profile(f(g(a))).");
+  Topform feature_hint =
+    parse_clause_from_string(
+      "early_profile(f(g(b))) | early_guard(a).");
+  Topform matching_hint =
+    parse_clause_from_string(
+      "early_profile(f(g(a))) | early_guard(a).");
+  Topform candidate =
+    parse_clause_from_string(
+      "early_profile(f(g(a))) | early_guard(a).");
+  unsigned long long checks = 0, literal_rejects = 0, feature_rejects = 0;
+  FILE *stats = tmpfile();
+  char line[4096];
+
+  short_hint->attributes =
+    set_int_attribute(short_hint->attributes, bsub, 9);
+  feature_hint->attributes =
+    set_int_attribute(feature_hint->attributes, bsub, 8);
+  matching_hint->attributes =
+    set_int_attribute(matching_hint->attributes, bsub, 7);
+  init_hints(ORDINARY_UNIF, bsub, FALSE, FALSE, 2,
+             TRUE, TRUE, TRUE, 64, 0, 0, 8, NULL);
+  index_hint(short_hint);
+  index_hint(feature_hint);
+  index_hint(matching_hint);
+  adjust_weight_with_hints(candidate, FALSE, FALSE);
+  CHECK(candidate->matching_hint == matching_hint,
+        "early profile rejection preserves authoritative hint identity");
+  CHECK(stats != NULL, "open early-profile statistics stream");
+  if (stats != NULL) {
+    fprint_packed_hint_operation_stats(stats);
+    rewind(stats);
+    while (fgets(line, sizeof(line), stats) != NULL)
+      if (strstr(line, "Packed_fast_dense:") != NULL) {
+        char *field = strstr(line, "early_profile_checks=");
+        if (field != NULL)
+          checks = strtoull(
+            field + strlen("early_profile_checks="), NULL, 10);
+        field = strstr(line, "early_literal_rejects=");
+        if (field != NULL)
+          literal_rejects = strtoull(
+            field + strlen("early_literal_rejects="), NULL, 10);
+        field = strstr(line, "early_feature_rejects=");
+        if (field != NULL)
+          feature_rejects = strtoull(
+            field + strlen("early_feature_rejects="), NULL, 10);
+      }
+    fclose(stats);
+  }
+  CHECK(checks >= 3 && literal_rejects > 0 && feature_rejects > 0,
+        "dense/sparse fallback rejects impossible profiles before insertion");
+  unindex_hint(matching_hint);
+  unindex_hint(feature_hint);
+  unindex_hint(short_hint);
+  done_with_hints();
+  delete_clause(candidate);
+  delete_clause(matching_hint);
+  delete_clause(feature_hint);
+  delete_clause(short_hint);
+}
+
 static void run_cache_ring_wrap_case(int bsub)
 {
   enum { PROBES = 700, REPLAYS = 64 };
@@ -588,6 +652,7 @@ int main(void)
   run_variable_cache_case(bsub, 327680, "stable conjunction-order");
   run_variable_cache_case(bsub, 0, "canonical sparse-fallback");
   run_cache_admission_case(bsub);
+  run_early_profile_filter_case(bsub);
   run_observed_stale_rebuild_case(bsub);
   run_back_fingerprint_case(bsub);
   run_conjunction_budget_case(bsub);

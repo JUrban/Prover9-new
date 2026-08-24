@@ -140,6 +140,16 @@ static unsigned Preview_key_scratch_capacity = 0;
 #define FAST_DENSE_BUDGET_BYTES (16ULL * 1024ULL * 1024ULL)
 #define FAST_CONJUNCTION_MAX_KEYS 9U
 
+/* Necessary conditions already enforced before authoritative hint
+   subsumption.  The ordinary dense/sparse collector can apply them before
+   inserting broad structural results into the shared candidate vector. */
+struct fast_candidate_filter {
+  unsigned long long first_mask;
+  unsigned positive;
+  unsigned negative;
+  unsigned sign;
+};
+
 /* A match hint whose complete same-polarity shallow profile has at most nine
    keys is entered under every nonempty subset of that profile.  Generated
    clauses can consequently ask for their complete conjunction with one hash
@@ -246,6 +256,9 @@ static unsigned long long Fast_dense_result_ids = 0;
 static unsigned long long Fast_dense_seed_not_first = 0;
 static unsigned long long Fast_dense_summary_plane_reads = 0;
 static unsigned long long Fast_dense_data_plane_reads = 0;
+static unsigned long long Fast_profile_early_checks = 0;
+static unsigned long long Fast_profile_early_literal_rejects = 0;
+static unsigned long long Fast_profile_early_feature_rejects = 0;
 
 /* Posting rebuilds and AnyConst additions invalidate every dependency set. */
 static void fast_cache_invalidate_all(void)
@@ -791,7 +804,8 @@ static unsigned long long better_feature_key(unsigned kind, unsigned path,
 
 static BOOL fast_dense_collect_candidates(
   const unsigned long long *keys, unsigned key_count,
-  enum packed_hint_operation op, BOOL exclude_anyconst);
+  enum packed_hint_operation op, BOOL exclude_anyconst,
+  const struct fast_candidate_filter *filter);
 
 /* A second, independent conservative signature complements the original
    packed path mask.  Every exact shallow match feature contributes one bit;
@@ -1886,7 +1900,7 @@ static void better_collect_back_pattern_candidates(
       BETTER_FEATURE_BACK, 0, SYMNUM(pattern)));
   if (!Fast_packed_index ||
       !fast_dense_collect_candidates(
-        Better_key_scratch, Better_key_scratch_count, op, TRUE))
+        Better_key_scratch, Better_key_scratch_count, op, TRUE, NULL))
     better_intersect_scratch_candidates(op, TRUE, TRUE);
 }
 
@@ -2112,9 +2126,32 @@ static void fast_cache_store(
    are skipped before any full bitset row is touched.  Posting bits may retain
    stale IDs after rewrites, but they never lose a newly indexed feature;
    activity and the authoritative matcher therefore preserve correctness. */
+/* Return zero for an admissible ID, one for a literal-count rejection, and
+   two for a first-literal feature rejection.  Query AnyConst clauses bypass
+   this collector, and concrete AnyConst hints are added by the established
+   finish path, so the ordinary filter has no exceptional match semantics to
+   reproduce here. */
+static unsigned fast_candidate_profile_rejection(
+  const struct fast_candidate_filter *filter, unsigned id)
+{
+  unsigned long long stored;
+  if (filter == NULL)
+    return 0;
+  if (Better_hint_positive_count[id] < filter->positive ||
+      Better_hint_negative_count[id] < filter->negative)
+    return 1;
+  stored = filter->sign ? Packed_hint_pos_features[id] :
+                          Packed_hint_neg_features[id];
+  if (filter->first_mask != 0 &&
+      (stored & filter->first_mask) != filter->first_mask)
+    return 2;
+  return 0;
+}
+
 static BOOL fast_dense_collect_candidates(
   const unsigned long long *keys, unsigned key_count,
-  enum packed_hint_operation op, BOOL exclude_anyconst)
+  enum packed_hint_operation op, BOOL exclude_anyconst,
+  const struct fast_candidate_filter *filter)
 {
   struct hint_dense_view views[FAST_DENSE_MAX_KEYS];
   unsigned minimum = UINT_MAX;
@@ -2127,6 +2164,9 @@ static BOOL fast_dense_collect_candidates(
   unsigned long long dense_result_ids = 0;
   unsigned long long summary_plane_reads = 0;
   unsigned long long data_plane_reads = 0;
+  unsigned long long profile_checks = 0;
+  unsigned long long profile_literal_rejects = 0;
+  unsigned long long profile_feature_rejects = 0;
   BOOL record_stats = !Hint_preview_active;
   BOOL create = record_stats;
   if (record_stats)
@@ -2181,8 +2221,17 @@ static BOOL fast_dense_collect_candidates(
         keep = word < views[i].words &&
                (views[i].bits[word] & (1ULL << (id % 64))) != 0;
       }
-      if (keep)
-        packed_add_candidate(id);
+      if (keep) {
+        unsigned rejection = fast_candidate_profile_rejection(filter, id);
+        if (filter != NULL)
+          profile_checks++;
+        if (rejection == 1)
+          profile_literal_rejects++;
+        else if (rejection == 2)
+          profile_feature_rejects++;
+        else
+          packed_add_candidate(id);
+      }
       else
         sparse_rejects++;
     }
@@ -2190,6 +2239,9 @@ static BOOL fast_dense_collect_candidates(
       Packed_operation_stats[op].posting_candidates += posting_candidates;
       Fast_sparse_feature_tests += sparse_feature_tests;
       Fast_sparse_rejects += sparse_rejects;
+      Fast_profile_early_checks += profile_checks;
+      Fast_profile_early_literal_rejects += profile_literal_rejects;
+      Fast_profile_early_feature_rejects += profile_feature_rejects;
     }
     return TRUE;
   }
@@ -2240,7 +2292,15 @@ static BOOL fast_dense_collect_candidates(
             packed_note_stale_skip(op);
         }
         else {
-          packed_add_candidate(id);
+          unsigned rejection = fast_candidate_profile_rejection(filter, id);
+          if (filter != NULL)
+            profile_checks++;
+          if (rejection == 1)
+            profile_literal_rejects++;
+          else if (rejection == 2)
+            profile_feature_rejects++;
+          else
+            packed_add_candidate(id);
           dense_result_ids++;
         }
         bits &= bits - 1;
@@ -2257,6 +2317,9 @@ static BOOL fast_dense_collect_candidates(
     Fast_dense_result_ids += dense_result_ids;
     Fast_dense_summary_plane_reads += summary_plane_reads;
     Fast_dense_data_plane_reads += data_plane_reads;
+    Fast_profile_early_checks += profile_checks;
+    Fast_profile_early_literal_rejects += profile_literal_rejects;
+    Fast_profile_early_feature_rejects += profile_feature_rejects;
   }
   return TRUE;
 }
@@ -2663,6 +2726,9 @@ void done_with_hints(void)
   Fast_dense_data_words = Fast_dense_result_ids = 0;
   Fast_dense_seed_not_first = 0;
   Fast_dense_summary_plane_reads = Fast_dense_data_plane_reads = 0;
+  Fast_profile_early_checks = 0;
+  Fast_profile_early_literal_rejects = 0;
+  Fast_profile_early_feature_rejects = 0;
   Packed_hint_capacity = 0;
   Packed_candidates_count = Packed_candidates_capacity = 0;
   Preview_candidate_serial = 1;
@@ -2807,6 +2873,7 @@ static void better_collect_clause_candidates(
   unsigned fast_key_count = 0;
   unsigned long long posting_candidates_before = 0;
   BOOL fast_eligible = FALSE;
+  struct fast_candidate_filter fast_filter;
   unsigned long long first_mask = first == NULL ? 0 :
     packed_term_feature_mask(first->atom, TRUE);
   BOOL equivalence = op == PACKED_HINT_EQUIVALENCE;
@@ -2850,6 +2917,10 @@ static void better_collect_clause_candidates(
                                      Fast_packed_index ?
                                        FAST_MATCH_FEATURE_DEPTH :
                                        BETTER_MATCH_FEATURE_DEPTH);
+    fast_filter.first_mask = first_mask;
+    fast_filter.positive = positive;
+    fast_filter.negative = negative;
+    fast_filter.sign = first->sign ? 1 : 0;
     if (Fast_packed_index) {
       fast_eligible = positive <= USHRT_MAX && negative <= USHRT_MAX &&
                       fast_cache_profile(&fast_keys, &fast_key_count);
@@ -2870,7 +2941,8 @@ static void better_collect_clause_candidates(
            Better_key_scratch, Better_key_scratch_count,
            first_mask, positive, negative, op) &&
          !fast_dense_collect_candidates(
-           Better_key_scratch, Better_key_scratch_count, op, TRUE)))
+           Better_key_scratch, Better_key_scratch_count, op, TRUE,
+           &fast_filter)))
       better_intersect_scratch_candidates(op, TRUE, FALSE);
   }
 
@@ -4053,14 +4125,18 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             "sparse_feature_tests=%llu, sparse_rejects=%llu, "
             "seed_ids_avoided=%llu, summary_words=%llu, data_words=%llu, "
             "result_ids=%llu, seed_not_first=%llu, "
-            "summary_plane_reads=%llu, data_plane_reads=%llu.\n",
+            "summary_plane_reads=%llu, data_plane_reads=%llu, "
+            "early_profile_checks=%llu, early_literal_rejects=%llu, "
+            "early_feature_rejects=%llu.\n",
             FAST_DENSE_MIN_POSTING, Fast_dense_queries, Fast_dense_used,
             Fast_sparse_used, Fast_sparse_seed_ids,
             Fast_sparse_feature_tests, Fast_sparse_rejects,
             Fast_dense_seed_ids_avoided, Fast_dense_summary_words,
             Fast_dense_data_words, Fast_dense_result_ids,
             Fast_dense_seed_not_first, Fast_dense_summary_plane_reads,
-            Fast_dense_data_plane_reads);
+            Fast_dense_data_plane_reads, Fast_profile_early_checks,
+            Fast_profile_early_literal_rejects,
+            Fast_profile_early_feature_rejects);
   }
 }
 
