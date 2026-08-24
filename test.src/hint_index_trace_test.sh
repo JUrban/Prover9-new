@@ -102,6 +102,7 @@ grep -Eq '^Compiled_hint_term_table: authoritative=0, shadow=1, filter=0, finali
 grep -Eq '^Compiled_hint_term_table: authoritative=0, shadow=0, filter=1, finalized=1, active=[1-9][0-9]*,' \
   "$test_tmp/packed-compiled.out"
 grep -q '^Compiled_hint_same_filter:' "$test_tmp/packed-compiled.out"
+grep -q '^Compiled_hint_same_cache:' "$test_tmp/packed-compiled.out"
 grep -q '^Compiled_hint_path_index:' \
   "$test_tmp/packed-compiled-paths.out"
 
