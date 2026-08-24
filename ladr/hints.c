@@ -211,6 +211,8 @@ static unsigned char Compiled_fused_direct_kinds[
   COMPILED_PROGRAM_MAX_CONDITIONS];
 static unsigned long long Compiled_fused_direct_work[
   COMPILED_PROGRAM_MAX_CONDITIONS];
+static unsigned long long Compiled_fused_direct_rejects[
+  COMPILED_PROGRAM_MAX_CONDITIONS];
 static struct compiled_same_cache_entry *Compiled_fused_direct_entries[
   COMPILED_PROGRAM_MAX_CONDITIONS];
 static struct compiled_same_cache_entry *Compiled_fused_program[
@@ -233,6 +235,29 @@ static unsigned long long Compiled_fused_sparse_mask_rejects = 0;
 static unsigned long long Compiled_fused_conjunction_mask_tests = 0;
 static unsigned long long Compiled_fused_conjunction_mask_rejects = 0;
 static BOOL Compiled_fused_program_preapplied = FALSE;
+static unsigned long long Compiled_query_shape_hash1 = 0;
+static unsigned long long Compiled_query_shape_hash2 = 0;
+static unsigned Compiled_variable_shape_id[MAX_VARS];
+static unsigned Compiled_variable_shape_next = 0;
+
+#define COMPILED_QUERY_PROGRAM_CACHE_CAPACITY 1024U
+struct compiled_query_program_cache_entry {
+  unsigned long long hash1;
+  unsigned long long hash2;
+  unsigned condition_index;
+  unsigned char valid;
+};
+static struct compiled_query_program_cache_entry
+  *Compiled_query_program_cache = NULL;
+static unsigned long long Compiled_query_program_cache_lookups = 0;
+static unsigned long long Compiled_query_program_cache_hits = 0;
+static unsigned long long Compiled_query_program_cache_misses = 0;
+static unsigned long long Compiled_query_program_cache_condition_misses = 0;
+static unsigned long long Compiled_query_program_cache_stores = 0;
+static unsigned long long Compiled_query_program_cache_replacements = 0;
+static unsigned long long Compiled_query_program_cache_evictions = 0;
+static unsigned long long Compiled_query_program_cache_sample_tests_avoided = 0;
+static BOOL Compiled_fused_rigid_program_cache_hit = FALSE;
 static unsigned long long *Compiled_query_identity = NULL;
 static unsigned Compiled_query_identity_count = 0;
 static unsigned Compiled_query_identity_capacity = 0;
@@ -3373,6 +3398,18 @@ void init_hints(Uniftype utype,
   Compiled_fused_conjunction_mask_tests = 0;
   Compiled_fused_conjunction_mask_rejects = 0;
   Compiled_fused_program_preapplied = FALSE;
+  Compiled_query_shape_hash1 = 0;
+  Compiled_query_shape_hash2 = 0;
+  Compiled_variable_shape_next = 0;
+  Compiled_query_program_cache_lookups = 0;
+  Compiled_query_program_cache_hits = 0;
+  Compiled_query_program_cache_misses = 0;
+  Compiled_query_program_cache_condition_misses = 0;
+  Compiled_query_program_cache_stores = 0;
+  Compiled_query_program_cache_replacements = 0;
+  Compiled_query_program_cache_evictions = 0;
+  Compiled_query_program_cache_sample_tests_avoided = 0;
+  Compiled_fused_rigid_program_cache_hit = FALSE;
   Compiled_query_identity_count = 0;
   Compiled_rigid_test_count = 0;
   Compiled_rigid_queries = 0;
@@ -3499,6 +3536,8 @@ void done_with_hints(void)
   if (Compiled_rigid_tests) safe_free(Compiled_rigid_tests);
   if (Compiled_query_identity) safe_free(Compiled_query_identity);
   if (Compiled_fast_identity_keys) safe_free(Compiled_fast_identity_keys);
+  if (Compiled_query_program_cache)
+    safe_free(Compiled_query_program_cache);
   for (i = 0; i < Compiled_same_cache_count; i++)
     if (Compiled_same_cache_entries[i].dense_bits != NULL)
       safe_free(Compiled_same_cache_entries[i].dense_bits);
@@ -3538,6 +3577,7 @@ void done_with_hints(void)
   Compiled_rigid_tests = NULL;
   Compiled_query_identity = NULL;
   Compiled_fast_identity_keys = NULL;
+  Compiled_query_program_cache = NULL;
   Compiled_same_cache_entries = NULL;
   Compiled_same_cache_buckets = NULL;
   Compiled_same_cache_paths = NULL;
@@ -3736,6 +3776,18 @@ void done_with_hints(void)
   Compiled_fused_conjunction_mask_tests = 0;
   Compiled_fused_conjunction_mask_rejects = 0;
   Compiled_fused_program_preapplied = FALSE;
+  Compiled_query_shape_hash1 = 0;
+  Compiled_query_shape_hash2 = 0;
+  Compiled_variable_shape_next = 0;
+  Compiled_query_program_cache_lookups = 0;
+  Compiled_query_program_cache_hits = 0;
+  Compiled_query_program_cache_misses = 0;
+  Compiled_query_program_cache_condition_misses = 0;
+  Compiled_query_program_cache_stores = 0;
+  Compiled_query_program_cache_replacements = 0;
+  Compiled_query_program_cache_evictions = 0;
+  Compiled_query_program_cache_sample_tests_avoided = 0;
+  Compiled_fused_rigid_program_cache_hit = FALSE;
   Compiled_rigid_queries = 0;
   Compiled_rigid_sampled_queries = 0;
   Compiled_rigid_sample_tests = 0;
@@ -3882,6 +3934,17 @@ static unsigned long long compiled_path_mix(unsigned long long x)
   x *= UINT64_C(0x94d049bb133111eb);
   x ^= x >> 31;
   return x;
+}
+
+static void compiled_query_shape_note(unsigned long long token)
+{
+  Compiled_query_shape_hash1 = compiled_path_mix(
+    Compiled_query_shape_hash1 ^ token ^
+      UINT64_C(0x9e3779b97f4a7c15));
+  Compiled_query_shape_hash2 = compiled_path_mix(
+    Compiled_query_shape_hash2 + token +
+      (Compiled_query_shape_hash1 << 17) +
+      (Compiled_query_shape_hash1 >> 47));
 }
 
 static unsigned long long compiled_path_child(unsigned long long path,
@@ -4087,8 +4150,11 @@ static void compiled_plan_begin(void)
   Compiled_rigid_test_count = 0;
   Compiled_rigid_program_applied = FALSE;
   Compiled_query_identity_count = 0;
-  for (i = 0; i < MAX_VARS; i++)
+  Compiled_variable_shape_next = 0;
+  for (i = 0; i < MAX_VARS; i++) {
     Compiled_variable_path_offset[i] = UINT_MAX;
+    Compiled_variable_shape_id[i] = UINT_MAX;
+  }
 }
 
 static void compiled_plan_sort_same_tests(void)
@@ -4323,6 +4389,112 @@ static struct compiled_same_cache_entry *compiled_rigid_cache_lookup(
     test->path_length == 0 ? NULL :
       Compiled_plan_paths + test->path_offset,
     test->path_length, NULL, 0, create);
+}
+
+static struct compiled_query_program_cache_entry *
+compiled_query_program_cache_slot(void)
+{
+  unsigned position = (unsigned) compiled_path_mix(
+    Compiled_query_shape_hash1 ^
+    (Compiled_query_shape_hash2 << 1)) &
+    (COMPILED_QUERY_PROGRAM_CACHE_CAPACITY - 1);
+  return Compiled_query_program_cache == NULL ? NULL :
+    Compiled_query_program_cache + position;
+}
+
+/* A cached result is only a selection policy.  Revalidate the persistent
+   condition against the current exact plan before returning its local test
+   index.  Thus even a 128-bit shape-hash collision can at worst choose a
+   suboptimal necessary condition; it cannot reject a possible hint. */
+static unsigned compiled_query_program_cache_lookup_rigid(
+  unsigned prefix_candidates, BOOL account)
+{
+  struct compiled_query_program_cache_entry *cached =
+    compiled_query_program_cache_slot();
+  struct compiled_same_cache_entry *condition;
+  unsigned i;
+  if (cached == NULL)
+    return UINT_MAX;
+  if (account)
+    Compiled_query_program_cache_lookups++;
+  if (!cached->valid ||
+      cached->hash1 != Compiled_query_shape_hash1 ||
+      cached->hash2 != Compiled_query_shape_hash2) {
+    if (account)
+      Compiled_query_program_cache_misses++;
+    return UINT_MAX;
+  }
+  if (cached->condition_index >= Compiled_same_cache_count) {
+    if (account)
+      Compiled_query_program_cache_condition_misses++;
+    return UINT_MAX;
+  }
+  condition = Compiled_same_cache_entries + cached->condition_index;
+  if (condition->kind != COMPILED_CONDITION_RIGID) {
+    if (account)
+      Compiled_query_program_cache_condition_misses++;
+    return UINT_MAX;
+  }
+  for (i = 0; i < Compiled_rigid_test_count; i++) {
+    struct compiled_rigid_test *test = Compiled_rigid_tests + i;
+    if (compiled_condition_cache_key_equal(
+          condition, COMPILED_CONDITION_RIGID, test->symbol,
+          test->path_length == 0 ? NULL :
+            Compiled_plan_paths + test->path_offset,
+          test->path_length, NULL, 0)) {
+      if (account) {
+        unsigned samples = prefix_candidates <
+          COMPILED_RIGID_SAMPLE_CANDIDATES ? prefix_candidates :
+          COMPILED_RIGID_SAMPLE_CANDIDATES;
+        Compiled_query_program_cache_hits++;
+        Compiled_query_program_cache_sample_tests_avoided +=
+          (unsigned long long) samples * Compiled_rigid_test_count;
+      }
+      return i;
+    }
+  }
+  if (account)
+    Compiled_query_program_cache_condition_misses++;
+  return UINT_MAX;
+}
+
+static void compiled_query_program_cache_store_rigid(
+  const struct compiled_same_cache_entry *condition)
+{
+  struct compiled_query_program_cache_entry *cached;
+  unsigned index;
+  if (Compiled_query_program_cache == NULL || condition == NULL ||
+      condition->kind != COMPILED_CONDITION_RIGID)
+    return;
+  index = (unsigned) (condition - Compiled_same_cache_entries);
+  if (index >= Compiled_same_cache_count)
+    fatal_error("compiled query program cache condition outside table");
+  cached = compiled_query_program_cache_slot();
+  if (cached->valid &&
+      (cached->hash1 != Compiled_query_shape_hash1 ||
+       cached->hash2 != Compiled_query_shape_hash2 ||
+       cached->condition_index != index))
+    Compiled_query_program_cache_replacements++;
+  if (!cached->valid || cached->hash1 != Compiled_query_shape_hash1 ||
+      cached->hash2 != Compiled_query_shape_hash2 ||
+      cached->condition_index != index)
+    Compiled_query_program_cache_stores++;
+  cached->hash1 = Compiled_query_shape_hash1;
+  cached->hash2 = Compiled_query_shape_hash2;
+  cached->condition_index = index;
+  cached->valid = 1;
+}
+
+static void compiled_query_program_cache_evict_current(void)
+{
+  struct compiled_query_program_cache_entry *cached =
+    compiled_query_program_cache_slot();
+  if (cached != NULL && cached->valid &&
+      cached->hash1 == Compiled_query_shape_hash1 &&
+      cached->hash2 == Compiled_query_shape_hash2) {
+    cached->valid = 0;
+    Compiled_query_program_cache_evictions++;
+  }
 }
 
 static int compiled_same_cache_compare(
@@ -4727,13 +4899,17 @@ static BOOL compiled_fused_candidate_accept(unsigned id)
         test->second_length == 0 ? NULL :
           Compiled_plan_paths + test->second_offset, test->second_length);
       if (comparison < 0) {
-        if (account)
+        if (account) {
           Compiled_fused_navigation_rejects++;
+          Compiled_fused_direct_rejects[j]++;
+        }
         return FALSE;
       }
       else if (comparison == 0) {
-        if (account)
+        if (account) {
           Compiled_fused_unequal_rejects++;
+          Compiled_fused_direct_rejects[j]++;
+        }
         return FALSE;
       }
     }
@@ -4749,8 +4925,11 @@ static BOOL compiled_fused_candidate_accept(unsigned id)
         test->path_length, test->symbol);
       if (result < 0)
         fatal_error("compiled fused rigid: invalid canonical target");
-      if (result == 0)
+      if (result == 0) {
+        if (account)
+          Compiled_fused_direct_rejects[j]++;
         return FALSE;
+      }
     }
     else
       fatal_error("unknown compiled fused direct condition kind");
@@ -4816,8 +4995,13 @@ static void compiled_fused_activate(void)
      the same batched bank scan as the co-occurring SAME instructions. */
   if (!Compiled_rigid_program_applied &&
       Compiled_fused_direct_count < COMPILED_PROGRAM_MAX_CONDITIONS) {
-    unsigned selected = compiled_select_rigid_test(
-      Packed_candidates, Packed_candidates_count, account);
+    unsigned selected = compiled_query_program_cache_lookup_rigid(
+      Packed_candidates_count, account);
+    if (selected != UINT_MAX)
+      Compiled_fused_rigid_program_cache_hit = TRUE;
+    else
+      selected = compiled_select_rigid_test(
+        Packed_candidates, Packed_candidates_count, account);
     if (selected != UINT_MAX) {
       struct compiled_same_cache_entry *entry =
         Compiled_same_cache_ready ? compiled_rigid_cache_lookup(
@@ -4832,6 +5016,7 @@ static void compiled_fused_activate(void)
       Compiled_fused_direct_kinds[position] = COMPILED_CONDITION_RIGID;
       Compiled_fused_direct_entries[position] = entry;
       Compiled_fused_direct_work[position] = 0;
+      Compiled_fused_direct_rejects[position] = 0;
       Compiled_rigid_program_applied = TRUE;
     }
     else if (account && Compiled_rigid_test_count != 0)
@@ -4845,6 +5030,7 @@ static void compiled_fused_activate(void)
     Compiled_fused_direct_kinds[position] = COMPILED_CONDITION_SAME;
     Compiled_fused_direct_entries[position] = unbuilt_same_entries[i];
     Compiled_fused_direct_work[position] = 0;
+    Compiled_fused_direct_rejects[position] = 0;
     Compiled_fused_same_direct_count++;
   }
   if (account) {
@@ -4923,12 +5109,22 @@ static void compiled_fused_finish(void)
     struct compiled_same_cache_entry *entry =
       Compiled_fused_direct_entries[i];
     unsigned long long work = Compiled_fused_direct_work[i];
+    unsigned long long rejects = Compiled_fused_direct_rejects[i];
     if (entry == NULL)
       continue;
     if (ULLONG_MAX - entry->candidate_work < work)
       entry->candidate_work = ULLONG_MAX;
     else
       entry->candidate_work += work;
+    if (Compiled_fused_direct_kinds[i] == COMPILED_CONDITION_RIGID) {
+      /* COMPILED_RIGID_MIN_REJECT_PERCENT is 25; quotient/remainder form
+         avoids overflowing a long-run 64-bit work counter. */
+      if (work != 0 &&
+          rejects >= work / 4 + (work % 4 != 0))
+        compiled_query_program_cache_store_rigid(entry);
+      else if (Compiled_fused_rigid_program_cache_hit)
+        compiled_query_program_cache_evict_current();
+    }
   }
   compiled_same_cache_build_batch(
     Compiled_fused_direct_entries, Compiled_fused_direct_count);
@@ -5010,9 +5206,25 @@ static unsigned long long compiled_path_collect_query(
   unsigned i;
   unsigned long long mask;
   if (VARIABLE(t)) {
+    int variable = VARNUM(t);
+    if (Compiled_fused_enabled) {
+      if (variable < 0 || variable >= MAX_VARS)
+        fatal_error("compiled query shape variable out of range");
+      if (Compiled_variable_shape_id[variable] == UINT_MAX)
+        Compiled_variable_shape_id[variable] =
+          Compiled_variable_shape_next++;
+      compiled_query_shape_note(
+        UINT64_C(0xf000000000000000) |
+        Compiled_variable_shape_id[variable]);
+    }
     compiled_plan_note_variable(t, depth);
     return 0;
   }
+  if (Compiled_fused_enabled)
+    compiled_query_shape_note(
+      UINT64_C(0x1000000000000000) ^
+      ((unsigned long long) (uint32_t) SYMNUM(t) << 16) ^
+      (unsigned) ARITY(t));
   mask = 1ULL << packed_feature_bit(SYMNUM(t), feature_path);
   compiled_plan_note_rigid(t, depth);
   if (Compiled_path_postings != NULL &&
@@ -5061,12 +5273,21 @@ static BOOL compiled_fused_query_begin(
   Compiled_fused_unequal_rejects = 0;
   Compiled_fused_word_ops = 0;
   Compiled_fused_program_preapplied = FALSE;
+  Compiled_fused_rigid_program_cache_hit = FALSE;
   if (!Compiled_fused_enabled || !Compiled_filter_enabled ||
       Compiled_term_table_lazy || op == PACKED_HINT_BACK_DEMOD ||
       c->literals == NULL || c->literals->next != NULL ||
       query_anyconst)
     return FALSE;
   compiled_plan_begin();
+  Compiled_query_shape_hash1 = compiled_path_mix(
+    UINT64_C(0x515545525950524f) ^ (unsigned) op ^
+    (c->literals->sign ? UINT64_C(0xd6e8feb86659fd93) :
+                         UINT64_C(0xa5a3564e27f8862b)));
+  Compiled_query_shape_hash2 = compiled_path_mix(
+    UINT64_C(0x4752414d43414348) ^ ((unsigned long long) op << 32) ^
+    (c->literals->sign ? UINT64_C(0x94d049bb133111eb) :
+                         UINT64_C(0xbf58476d1ce4e5b9)));
   Compiled_plan_collect_rigid = TRUE;
   return TRUE;
 }
@@ -6554,6 +6775,10 @@ void set_hint_compiled_fused(BOOL on)
     fatal_error("fused compiled hints require term table");
   if (on && Compiled_term_table_lazy)
     fatal_error("fused compiled hints require eager term table");
+  if (on && Compiled_query_program_cache == NULL)
+    Compiled_query_program_cache = safe_calloc(
+      COMPILED_QUERY_PROGRAM_CACHE_CAPACITY,
+      sizeof(*Compiled_query_program_cache));
   Compiled_fused_enabled = on;
 }
 
@@ -6787,7 +7012,10 @@ void packed_hint_index_stats(unsigned long long *node_bytes,
       (unsigned long long) Compiled_query_identity_capacity *
         sizeof(*Compiled_query_identity) +
       (unsigned long long) Compiled_fast_identity_capacity *
-        sizeof(*Compiled_fast_identity_keys);
+        sizeof(*Compiled_fast_identity_keys) +
+      (Compiled_query_program_cache == NULL ? 0 :
+        (unsigned long long) COMPILED_QUERY_PROGRAM_CACHE_CAPACITY *
+          sizeof(*Compiled_query_program_cache));
   }
   if (Compiled_path_postings != NULL) {
     struct hint_postings_stats path_stats;
@@ -7154,6 +7382,21 @@ void fprint_packed_hint_operation_stats(FILE *fp)
               sizeof(*Compiled_query_identity),
             (unsigned long long) Compiled_fast_identity_capacity *
               sizeof(*Compiled_fast_identity_keys));
+    fprintf(fp,
+            "Compiled_hint_query_program_cache: capacity=%u, "
+            "entry_bytes=%llu, lookups=%llu, hits=%llu, misses=%llu, "
+            "condition_misses=%llu, stores=%llu, replacements=%llu, "
+            "evictions=%llu, sample_tests_avoided=%llu.\n",
+            COMPILED_QUERY_PROGRAM_CACHE_CAPACITY,
+            (unsigned long long) sizeof(*Compiled_query_program_cache),
+            Compiled_query_program_cache_lookups,
+            Compiled_query_program_cache_hits,
+            Compiled_query_program_cache_misses,
+            Compiled_query_program_cache_condition_misses,
+            Compiled_query_program_cache_stores,
+            Compiled_query_program_cache_replacements,
+            Compiled_query_program_cache_evictions,
+            Compiled_query_program_cache_sample_tests_avoided);
   }
   if (Compiled_filter_enabled) {
     unsigned i, built = 0, denied = 0;
