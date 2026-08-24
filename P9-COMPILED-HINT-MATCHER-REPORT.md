@@ -218,6 +218,14 @@ Short-prefix wall/CPU measurements remain noisy and are not a promotion case:
 - on that Osborn prefix, roughly 2.6--3.3 seconds of the regression was table
   construction/startup, and search CPU was also slightly worse.
 
+A follow-up pre-sizing experiment reduced the immutable-base hash from ten
+geometric builds to one, but the raw hint count selected 2,097,152 slots for
+594,455 final base nodes.  It used 29.18 user seconds versus 23.91 for an
+adjacent ordinary-growth run; both ended at Given=101, Generated=10,412, and
+Kept=1,401.  Their detailed hint-query counts differed, so this is not a clean
+paired CPU proof, but it supplies no reason to retain the larger allocation.
+The pre-sizing code was removed; only the rebuild counter remains.
+
 RSS did not show a concerning increase on the pinned Osborn pair (about
 300.8--300.9 MiB in both runs); a CHAT pair showed roughly 7 MiB more.  Those
 small-prefix RSS observations are compatible with the compact table but do
@@ -254,9 +262,9 @@ The next step should not be another threshold sweep.  It should complete the
 collective program promised by the plan:
 
 1. **Remove avoidable construction cost.** Equivalent input hints are already
-   rejected before canonical insertion.  Pre-size from the retained-bank
-   estimate or bulk-build/finalize the retained roots so repeated hash growth
-   and incremental interning do not dominate startup.
+   rejected before canonical insertion, and raw-count pre-sizing failed.
+   Either bulk-build from an exact retained population or construct canonical
+   roots on demand, so short runs do not pay for the full bank.
 2. **Learn selective fixed-symbol tests.** Within one sign/root population,
    observe useful fixed child routes and build only those whose measured
    candidate work repays a bounded bitset.  Do not restore the eager all-path

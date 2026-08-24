@@ -108,8 +108,10 @@ Handles are exact, not hashes, so equality has no collision case.  Stable-ID
 tombstones preserve safe deletion.  Equivalent input hints are rejected
 before they enter this table.  The current construction issue is instead the
 cost of incrementally hashing every subterm of the large retained bank.  Phase
-2 must bulk-build or pre-size that state more cheaply, or enable it only when
-the expected search is long enough to repay startup.
+2 must bulk-build or construct that state lazily, or enable it only when the
+expected search is long enough to repay startup.  Pre-sizing from the raw
+input-hint count has been measured and rejected: it overestimated Osborn's
+hash by one power of two and was slower despite eliminating nine rebuilds.
 
 ### 3. Compile each generated unit into a short matching program
 
