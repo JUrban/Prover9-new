@@ -240,6 +240,8 @@ On the latest corrected bounded runs:
 | Josef 01/300 | RIGID | 56 | 24,701 | 5,152 | 19,549 |
 | Josef 02/300 | SAME | 626 | 299,127 | 85,279 | 213,848 |
 | Josef 02/300 | RIGID | 18 | 2,955 | 943 | 2,012 |
+| Josef 02/1,000 | SAME | 2,872 | 1,110,410 | 321,525 | 788,885 |
+| Josef 02/1,000 | RIGID | 40 | 9,592 | 3,133 | 6,459 |
 
 Earlier SAME-only measurements reduced compressed exact attempts from 77,227
 to 14,468 on the CHAT prefix and from 253,561 to 93,973 on Osborn.  These
@@ -248,8 +250,14 @@ counters are the strong result: the prefilter is removing the intended work.
 The 100-given Osborn adaptive-cache run observed 37 condition keys and
 349,898 direct candidate comparisons in total, but built none.  That is
 expected: repayment is decided per exact condition, not from the misleading
-sum over unrelated conditions.  Longer runs will report `maximum_queries` and
-`maximum_candidate_work`, showing whether one pair approaches construction.
+sum over unrelated conditions.  Longer runs report `maximum_queries` and
+`maximum_candidate_work`, showing whether one condition approaches construction.
+
+At Josef 02/1,000, two SAME conditions finally earned dense sets.  They were
+used by 300 queries and rejected 119,333 candidates.  No RIGID condition
+earned a set, and every executed program still had width one.  The collective
+executor therefore remained functionally a one-condition lookup on this
+prefix; it did not yet exercise a word-wise intersection.
 
 ### CPU and RAM
 
@@ -263,6 +271,13 @@ The latest adjacent or same-build observations are:
 - eager Josef 02/300 used 13.87 user seconds; and
 - CHAT/100 used 17.76 user seconds, but hint matching itself remained too
   small a CPU fraction to establish a promotion.
+
+The first frozen 1,000-given pair was Josef 02 on the same binary, filesystem,
+and limits.  Both modes reached Given=1,001, Generated=1,310,234, and
+Kept=65,416.  `packed_compiled` reduced ordinary-match direct attempts from
+1,515,546 to 860,556 (43.2%) but used 71.54 user seconds versus 71.51 for
+`packed_fast`.  Peak RSS was 248,612 KiB versus 235,128 KiB.  This passes the
+semantic and bounded-resource gates but supplies no CPU promotion case.
 
 On Osborn, lazy constructed 103,171 of 248,809 cumulative canonical
 additions and used 15.2 MiB for the term table versus eager's 20.0 MiB.  Both
