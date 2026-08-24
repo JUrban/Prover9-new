@@ -3620,6 +3620,11 @@ static void compiled_plan_note_variable(Term t, unsigned depth)
 static void compiled_plan_note_rigid(Term t, unsigned depth)
 {
   struct compiled_rigid_test *test;
+  /* Candidate count is already known before query-plan construction.  Do
+     not copy deep routes for the overwhelmingly common cheap queries that
+     cannot pass the collective-filter admission threshold. */
+  if (Packed_candidates_count < Compiled_same_min_candidates)
+    return;
   if (depth <= FAST_MATCH_FEATURE_DEPTH)
     return;  /* Existing exact postings already enforce these positions. */
   if (Compiled_rigid_test_count >= COMPILED_RIGID_SAMPLE_MAX_TESTS) {
