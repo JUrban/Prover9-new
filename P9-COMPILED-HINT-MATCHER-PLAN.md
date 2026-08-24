@@ -26,14 +26,17 @@ different architecture, not a faster version of the present traversal.
 > candidate-generation part of Phase 2b are complete.  `packed_compiled`
 > learns exact repeated-subterm
 > and selective deep fixed-symbol conditions, promotes only conditions whose
-> measured work can repay a dense stable-ID set, executes up to eight direct
-> repeated-subterm instructions, and combines learned sets only for candidate
+> measured work can repay a dense stable-ID set, executes a bounded mixture
+> of repeated-subterm and selective fixed-symbol instructions, and combines learned sets only for candidate
 > blocks actually visited.  The explicit `packed_compiled_blocks` experiment
-> now applies direct SAME checks before a unique ID is appended, builds up to
+> now applies direct SAME/RIGID checks before a unique ID is appended, builds up to
 > eight co-occurring hot masks in one retained-bank pass, and intersects
 > learned masks inside `packed_fast`'s dense 64-ID posting loop before scalar
-> IDs are enumerated.  Threshold-zero diagnostics use an exact compact
-> repeated-variable cache identity.  At the normal threshold, narrow
+> IDs are enumerated.  Sparse and conjunction collectors precheck learned
+> masks before profile work and candidate insertion.  Query programs are
+> compiled during the existing full feature-mask traversal rather than by a
+> second term walk.  Threshold-zero diagnostics use an exact compact
+> SAME/RIGID cache identity.  At the normal threshold, narrow
 > unfiltered results retain the small `packed_fast` key and broad filtered
 > results are not cached under an incomplete identity.  The established
 > compressed matcher remains the final authority.  The eager all-path
@@ -306,17 +309,20 @@ The new explicit mode is:
 assign(hint_index,packed_compiled_blocks).
 ```
 
-It currently implements the SAME portion of that design.  A query plan is
-prepared before packed collection.  Once the configured candidate threshold
-is reached, the already-seen prefix is filtered once and later unique IDs are
-tested before vector insertion.  If exact condition masks have matured, the
-dense posting collector intersects them one 64-ID word at a time; rejected
-bits are never converted to IDs.  Several conditions that mature on the same
-query are allocated within the existing 32 MiB budget and filled in one bank
-pass.  Unknown canonical roots, nonunit hints, and `_AnyConst` hints receive
-conservative positive bits, so the optimization cannot hide a possible
-match.  Later additions are added to every applicable built mask, while stale
-positives from removal or rewriting remain harmless.
+It now implements both SAME and selective deep RIGID conditions.  A query
+plan is prepared during the established full packed-mask traversal.  Once the
+configured candidate threshold is reached, the already-seen prefix is
+filtered once and later unique IDs are tested before vector insertion.  If
+exact condition masks have matured, the dense posting collector intersects
+them one 64-ID word at a time; rejected bits are never converted to IDs.
+Sparse posting vectors and conjunction profiles still map their stored
+positions to stable IDs, but reject learned-mask misses before profile checks,
+canonical-root resolution, or packed insertion.  Several conditions that
+mature on the same query are allocated within the existing 32 MiB budget and
+filled in one bank pass.  Unknown canonical roots, nonunit hints, and
+`_AnyConst` hints receive conservative positive bits, so the optimization
+cannot hide a possible match.  Later additions are added to every applicable
+built mask, while stale positives from removal or rewriting remain harmless.
 
 The packed result cache cannot reuse a structurally filtered candidate list
 merely because two queries have the same shallow rigid features: `f(x,x)` and
@@ -329,10 +335,11 @@ results changed by the program are not stored in that result cache.  This
 avoids both an incorrect alias and a large query-sized key in the common
 long-run path.
 
-Exact tests cover this cache-alias case and a generated 600-hint bank in
-which two SAME conditions mature together.  The third query intersects both
-masks inside the dense posting loop and remains trace-identical to
-`packed_fast`.
+Exact tests cover this cache-alias case; a generated 600-hint bank in which
+two SAME conditions mature together; a separate RIGID-only 600-hint bank; a
+three-cohort sparse posting case; and a retained conjunction profile.  Dense,
+sparse, and conjunction candidate paths all remain trace-identical to
+`packed_fast` while reporting pre-insertion rejections.
 
 Also compare eager canonical construction with one sequential post-input
 build directly from the exact retained compressed bank.  This is different
@@ -378,6 +385,15 @@ of total CPU and 216,464 KiB peak RSS, versus 52.89 seconds and 216,248 KiB
 for the separate postfilter.  The corresponding Prover9 hint clocks were
 4.33 and 4.54 seconds.  This roughly 5% whole-run improvement is encouraging,
 but it is one machine-order-sensitive pair, not the frozen 1,000-given gate.
+
+The next Josef 02/300 pair includes direct selective RIGID instructions and
+single-pass plan compilation.  Candidate and control again stopped at
+Given=301, Generated=127,774, Kept=7,823.  Blocks used 16.98 seconds total
+CPU and 189,444 KiB peak RSS, versus 18.42 seconds and 189,892 KiB for the
+separate postfilter.  It rejected 19,570 candidates with deep fixed-symbol
+checks across 127 broad queries.  No learned mask matured, so this is evidence
+for the direct RIGID path and removed query walks, not yet the long-run mask
+payoff.
 
 ### Phase 3: lifecycle and authoritative mode
 

@@ -126,16 +126,24 @@ Lifecycle behavior is conservative:
 
 ### Candidate-emission and dense-block experiment
 
-`packed_compiled_blocks` moves repeated-variable checks into candidate
+`packed_compiled_blocks` moves repeated-variable and selected deep
+fixed-symbol checks into candidate
 generation.  In plain language, the separate mode no longer always “builds a
 large list and then throws most of it away”:
 
-1. it prepares the repeated-variable child routes before looking up postings;
+1. it prepares repeated-variable child routes and bounded deep-symbol routes
+   during the existing full packed-mask traversal;
 2. after the configured threshold, it filters the small prefix already seen;
 3. it checks subsequent unique IDs before appending them to the candidate
    vector; and
 4. once a condition has earned a dense mask, it ANDs up to eight such masks
    with each visited 64-ID packed posting word before extracting scalar IDs.
+
+Sparse posting vectors cannot skip ID enumeration because IDs are their
+storage format.  They now apply a learned mask after ordinary feature
+membership but before profile checks, canonical-root resolution, and packed
+insertion.  Conjunction profiles similarly map a surviving profile position
+to its stable ID and precheck the learned mask before literal-count work.
 
 Co-occurring conditions that become profitable together are built together.
 Their masks remain independent, but one retained-bank traversal resolves each
@@ -400,6 +408,21 @@ evidence.  The host was timing-noisy and the pair was candidate-then-control,
 so it is not a promotion result.  More importantly, the 600-given gate caught
 and removed a policy that would have deteriorated as queries accumulated.
 
+The follow-up Josef 02/300 pair adds selective RIGID instructions to the
+before-emission executor and compiles the query plan during the existing
+feature-mask traversal.  Both modes ended at Given=301, Generated=127,774,
+Kept=7,823:
+
+| Mode | Total CPU | Wall | Peak RSS |
+|---|---:|---:|---:|
+| separate postfilter | 18.42 s | 18.42 s | 189,892 KiB |
+| SAME/RIGID candidate emission | 16.98 s | 17.12 s | 189,444 KiB |
+
+The candidate rejected 19,570 clauses with selected fixed-symbol checks
+across 127 broad queries.  No default-threshold mask matured, so the roughly
+8% pairwise CPU difference measures direct early RIGID checks plus removal of
+redundant term traversals.  It remains a short, timing-noisy sanity pair.
+
 Josef 02/300 confirmed that extra necessary conditions are not automatically
 valuable: direct attempts fell from 139,308 to 86,377, while sampled ordinary
 match time remained 0.990 versus 0.988 seconds and whole CPU was unchanged.
@@ -458,7 +481,11 @@ zero-budget fallback, lazy byte-stream construction, and the case where an
 invalid SAME route precedes a later valid candidate.  It now also includes
 the `f(x,x)`/`f(x,y)` result-cache alias case, batched construction of two
 co-occurring SAME masks, conservative fallback membership, and pre-ID dense
-block intersection on a 600-hint generated bank.
+block intersection on a 600-hint generated bank.  A second 600-hint fixture
+has no repeated query variables and proves RIGID-only dense filtering.  A
+three-cohort fixture forces the sparse vector collector, and a compact
+retained profile forces the conjunction collector; both require nonzero
+learned-mask rejections and exact `packed_fast` trace agreement.
 
 Bounded experiments were run one memory-relevant process at a time with a
 2-GiB address-space cap.  The machine had old pages in swap but no active
@@ -478,19 +505,19 @@ The next Waldmeister-like stage should therefore be:
    interval timers around packed feature lookup, candidate marking/emission,
    compiled structural tests, and compressed confirmation.  This establishes
    the remaining ceiling without relying on aggregate `hints` time.
-2. **Extend conditions-before-emission beyond the implemented SAME path.**
-   The explicit blocks mode now handles direct SAME checks and learned SAME
-   masks in dense posting words.  Next, measure learned-mask use at 1,000
-   givens, add only profitable RIGID masks, and cover sparse/conjunction
-   collectors where their counters show enough avoidable scalar work.
+2. **Measure the implemented conditions-before-emission paths at scale.**
+   Blocks mode now handles direct SAME and selected RIGID checks, learned
+   masks in dense posting words, and mask prechecks in sparse/conjunction
+   collectors.  The next 1,000-given gate must show whether these paths are
+   reused often enough to repay training and mask construction.
 3. **Compile and reuse query shapes.** Normalize the sign, shallow packed
    requirements, child routes, and repeated-variable pattern into a compact
    instruction key.  Cache only shapes whose measured candidate work repays
    construction; keep the compressed matcher as final authority.
 4. **Measure and generalize batched construction.** Blocks mode now scans the
-   retained bank once for up to eight co-occurring ready SAME instructions.
-   Keep this only if long runs report useful batch widths and amortization;
-   extend it to RIGID instructions only after that evidence.
+   retained bank once for up to eight co-occurring ready SAME or selected
+   RIGID instructions.  Keep this only if long runs report useful batch
+   widths and amortization.
 5. **Remove avoidable startup work.** Compare eager construction with one
    sequential post-input build from the exact retained compressed bank.  The
    rejected raw-input pre-sizing policy must not return, and lazy construction
