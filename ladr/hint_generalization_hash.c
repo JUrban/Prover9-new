@@ -269,13 +269,27 @@ static size_t gh_initial_capacity(unsigned expected_hints)
   return capacity;
 }
 
+static size_t gh_slot_position(uint64_t primary, uint32_t check,
+                               size_t capacity)
+{
+  return (size_t) gh_mix(primary ^ check) & (capacity - 1);
+}
+
+static size_t gh_slot_step(uint64_t primary, uint32_t check,
+                           size_t capacity)
+{
+  return ((size_t) gh_mix(primary +
+           ((uint64_t) check << 32) + UINT64_C(0x517cc1b727220a95)) | 1) &
+         (capacity - 1);
+}
+
 static void gh_insert_existing(struct gh_slot *slots, size_t capacity,
                                struct gh_slot entry)
 {
-  size_t position = (size_t) gh_mix(entry.primary ^ entry.check) &
-                    (capacity - 1);
+  size_t position = gh_slot_position(entry.primary, entry.check, capacity);
+  size_t step = gh_slot_step(entry.primary, entry.check, capacity);
   while (slots[position].primary != 0)
-    position = (position + 1) & (capacity - 1);
+    position = (position + step) & (capacity - 1);
   slots[position] = entry;
 }
 
@@ -299,13 +313,14 @@ static int gh_insert(Hint_generalization_hash table, struct gh_key key,
                      unsigned id, BOOL exact)
 {
   size_t position;
+  size_t step;
   uint32_t value;
   if (id == 0 || id > GH_ID_MASK)
     fatal_error("generalized hint hash stable ID overflow");
   if (!exact)
     table->generated_attempts++;
-  position = (size_t) gh_mix(key.primary ^ key.check) &
-             (table->capacity - 1);
+  position = gh_slot_position(key.primary, key.check, table->capacity);
+  step = gh_slot_step(key.primary, key.check, table->capacity);
   value = id | (exact ? GH_EXACT_BIT : 0);
   while (table->slots[position].primary != 0) {
     struct gh_slot *slot = table->slots + position;
@@ -317,7 +332,7 @@ static int gh_insert(Hint_generalization_hash table, struct gh_key key,
       table->duplicates++;
       return 0;
     }
-    position = (position + 1) & (table->capacity - 1);
+    position = (position + step) & (table->capacity - 1);
   }
   if (!exact && table->count >= table->maximum_entries)
     return -1;
@@ -326,10 +341,10 @@ static int gh_insert(Hint_generalization_hash table, struct gh_key key,
     if (table->capacity > SIZE_MAX / 2)
       fatal_error("generalized hint hash capacity overflow");
     gh_rehash(table, table->capacity * 2);
-    position = (size_t) gh_mix(key.primary ^ key.check) &
-               (table->capacity - 1);
+    position = gh_slot_position(key.primary, key.check, table->capacity);
+    step = gh_slot_step(key.primary, key.check, table->capacity);
     while (table->slots[position].primary != 0)
-      position = (position + 1) & (table->capacity - 1);
+      position = (position + step) & (table->capacity - 1);
   }
   table->slots[position].primary = key.primary;
   table->slots[position].check = key.check;
@@ -644,13 +659,14 @@ unsigned hint_generalization_hash_lookup(Hint_generalization_hash table,
 {
   struct gh_key key;
   size_t position;
+  size_t step;
   unsigned long long probes = 0;
   if (table == NULL || !table->finalized || clause == NULL)
     return 0;
   table->queries++;
   key = gh_clause_key(clause, NULL);
-  position = (size_t) gh_mix(key.primary ^ key.check) &
-             (table->capacity - 1);
+  position = gh_slot_position(key.primary, key.check, table->capacity);
+  step = gh_slot_step(key.primary, key.check, table->capacity);
   while (table->slots[position].primary != 0) {
     probes++;
     if (table->slots[position].primary == key.primary &&
@@ -661,7 +677,7 @@ unsigned hint_generalization_hash_lookup(Hint_generalization_hash table,
         table->maximum_probe = probes;
       return table->slots[position].value & GH_ID_MASK;
     }
-    position = (position + 1) & (table->capacity - 1);
+    position = (position + step) & (table->capacity - 1);
   }
   probes++;
   table->probes += probes;
