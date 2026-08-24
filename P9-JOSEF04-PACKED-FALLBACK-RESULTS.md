@@ -94,6 +94,38 @@ only 2.18 seconds (0.83%) and wall time by 3.78 seconds (1.42%).  Therefore the
 large delay before the given loop is not primarily output dumping: it is hint
 parsing, compression, indexing, and initial equivalence processing.
 
+## Paired ar-2 result at 3,000 givens
+
+The subsequent no-dump 3,000-given pair used the same pinned binaries and the
+same machine.  It confirms that the improvement persists beyond the first
+1,000 selected clauses.
+
+| Measurement | Control `be72aa6` | Candidate `74363b1` | Change |
+|---|---:|---:|---:|
+| User CPU | 1,679.85 s | 1,534.66 s | -145.19 s (-8.64%) |
+| System CPU | 2.09 s | 2.11 s | +0.02 s (+0.96%) |
+| Total CPU | 1,681.94 s | 1,536.77 s | -145.17 s (-8.63%) |
+| Wall time | 1,682.20 s | 1,536.98 s | -145.22 s (-8.63%) |
+| Maximum RSS | 2,041,088 KiB | 2,041,088 KiB | identical |
+| Given counter | 3,001 | 3,001 | identical |
+| Generated | 21,289,896 | 21,289,896 | identical |
+| Kept | 12,053 | 12,053 | identical |
+| Matched active hints | 11,711 | 11,711 | identical |
+
+All 3,000 printed `given #...` lines are byte-identical.  Their SHA-256 in both
+runs is:
+
+```text
+e754d7adb87b98d5dbb82b2687a1ff6470028f906d46b857c1ba3b26bfd65833
+```
+
+Measured only over the additional work from the 1,000-given endpoint to the
+3,000-given endpoint, control user CPU was 1,419.50 seconds and candidate user
+CPU was 1,294.04 seconds.  That segment improves by 125.46 seconds, or 8.84%.
+The saving therefore grows slightly rather than fading over this interval.
+Both runs ended normally at `max_given`, reported no swaps, and had only 14
+major page faults.
+
 ## What the new counters show
 
 At the common endpoint, the candidate performed 2,832,866,041 early profile
@@ -104,13 +136,13 @@ ar-2.  Most of the remaining matcher cost is paid
 before that point while reading and combining posting bitplanes, and the
 authoritative matching work and generated search are unchanged.
 
-This is a safe, measurable improvement, but the 1,000-given data alone do not
-establish a radical speedup.  The fixed hint initialization cost is paid once,
-whereas the optimized fallback queries accumulate with generated clauses.  A
-paired 3,000-given ar-2 run is therefore the next scaling measurement.  If its
-relative gain does not grow, the next optimization should avoid bitplane
-reads/intersections themselves (or change their representation), rather than
-only making result materialization cheaper.
+This is a safe, measurable improvement, but an 8.64% whole-run saving is not a
+radical speedup.  The fixed hint initialization cost is paid once, whereas the
+optimized fallback queries accumulate with generated clauses.  The 3,000-given
+measurement shows that the improvement survives this transition.  The next
+optimization should now avoid portions of the remaining per-ID checklist work
+before result materialization, while retaining the complete authoritative
+matching checks.
 
 ## How to run the candidate on ar-2
 
