@@ -257,6 +257,36 @@ static BOOL packed_unit_atom(Topform c, BOOL positive,
   return TRUE;
 }
 
+BOOL compressed_unit_atom_visit(Topform compressed, BOOL *positive,
+                                compressed_term_node_visitor visitor,
+                                void *context)
+{
+  const unsigned char *data;
+  unsigned offset, end, pending = 1;
+  BOOL sign;
+  if (compressed == NULL || positive == NULL || visitor == NULL)
+    return FALSE;
+  sign = !compressed->neg_compressed;
+  if (!packed_unit_atom(compressed, sign, &data, &offset, &end))
+    return FALSE;
+  while (pending != 0) {
+    BOOL variable;
+    unsigned number, arity;
+    if (!read_packed_node(
+          data, end, &offset, &variable, &number, &arity) ||
+        !visitor(context, variable, number, arity))
+      return FALSE;
+    pending--;
+    if (arity > UINT_MAX - pending)
+      return FALSE;
+    pending += arity;
+  }
+  if (offset != end)
+    return FALSE;
+  *positive = sign;
+  return TRUE;
+}
+
 /* Match an ordinary Term pattern against a preorder packed target. */
 static BOOL resident_matches_packed(Term pattern,
                                     const unsigned char *data,

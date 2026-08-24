@@ -1,0 +1,30 @@
+clear(auto_denials).
+clear(auto_inference).
+clear(predicate_elim).
+clear(print_initial_clauses).
+clear(print_given).
+clear(print_kept).
+clear(back_demod).
+clear(back_demod_hints).
+assign(search_loop,discount).
+assign(passive_store,compressed).
+assign(hint_index,packed_compiled).
+assign(hint_compiled_min_candidates,0).
+assign(ancestor_store,memory).
+assign(stats,all).
+assign(max_given,1).
+set(process_initial_sos).
+set(hint_trace).
+
+% The deep d/1 routes at k/65 positions 7 and 28 collide in the established
+% conservative path mask.  Candidate 2 therefore reaches SAME: its position
+% 7 target is a variable, so navigation below it fails.  Candidate 1 comes
+% later in packed ID order and must still be tested and matched.
+formulas(hints).
+  nav(f(k(g,g,g,g,g,g,g,d(a),g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,d(a),g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g))).
+  nav(f(k(g,g,g,g,g,g,g,y,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,d(x),g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g))).
+end_of_list.
+
+formulas(sos).
+  nav(f(k(g,g,g,g,g,g,g,d(x),g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,d(x),g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g,g))).
+end_of_list.

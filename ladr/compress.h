@@ -63,6 +63,11 @@ struct compressed_unit_match_profile {
   unsigned long long repeated_compare_nodes;
 };
 
+/* Allocation-free preorder access to one compressed unit atom.  The
+   callback receives variable/symbol identity and arity for each node. */
+typedef BOOL (*compressed_term_node_visitor)(
+  void *context, BOOL variable, unsigned number, unsigned arity);
+
 /* End of public definitions */
 
 /* Public function prototypes from compress.c */
@@ -116,6 +121,10 @@ BOOL compressed_unit_target_match_profile(
 BOOL compressed_unit_pattern_matches(Topform compressed,
                                      Literals resident,
                                      BOOL *matched);
+
+BOOL compressed_unit_atom_visit(Topform compressed, BOOL *positive,
+                                compressed_term_node_visitor visitor,
+                                void *context);
 
 unsigned compressed_clause_justification_bytes(Topform c);
 

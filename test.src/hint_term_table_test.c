@@ -19,7 +19,7 @@ static Topform normalized_clause(const char *text)
 int main(void)
 {
   Hint_term_table table;
-  Topform first, renamed, shared, replacement;
+  Topform first, renamed, shared, replacement, compressed;
   uint32_t first_root, renamed_root, shared_root, replacement_root;
   unsigned left_path[2] = {0, 0};
   unsigned right_path[2] = {0, 1};
@@ -85,6 +85,14 @@ int main(void)
   query = normalized_clause("p(f(x,x)).");
   mismatch = normalized_clause("p(f(g(a),g(b))).");
   rigid_mismatch = normalized_clause("p(k(x)).");
+  compressed = normalized_clause("p(f(g(a),g(a))).");
+  CHECK(compress_clause(compressed) == CLAUSE_COMPRESS_OK &&
+        compressed->literals == NULL,
+        "prepare packed unit target for streaming construction");
+  CHECK(hint_term_table_add_compressed(table, 30, compressed) &&
+        hint_term_table_root(table, 30) == shared_root &&
+        hint_term_table_positive(table, 30),
+        "compressed preorder stream interns to the existing exact root");
   CHECK(hint_term_table_matches(
           table, 12, TRUE, query->literals->atom, &matched) && matched,
         "canonical handles match a repeated generated variable");
@@ -110,7 +118,7 @@ int main(void)
   CHECK(frozen.finalized && frozen.hash_bytes == 0 &&
         frozen.scratch_bytes == 0,
         "finalization releases immutable construction workspace");
-  CHECK(frozen.active_records == 4 && frozen.total_bytes != 0,
+  CHECK(frozen.active_records == 5 && frozen.total_bytes != 0,
         "finalized table retains compact roots and nodes");
   CHECK(frozen.match_attempts == 4 && frozen.match_successes == 1 &&
         frozen.match_rigid_rejects == 1 &&
@@ -143,6 +151,7 @@ int main(void)
   delete_clause(query);
   delete_clause(mismatch);
   delete_clause(rigid_mismatch);
+  delete_clause(compressed);
 
   if (Failures != 0) {
     fprintf(stderr, "hint_term_table_test: %d failure(s)\n", Failures);

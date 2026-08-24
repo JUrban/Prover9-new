@@ -106,6 +106,10 @@ void set_hint_compiled_census(BOOL on);
    remains authoritative. */
 void set_hint_compiled_term_table(BOOL on);
 
+/* Delay canonical term construction until a broad compiled prefilter first
+   needs a retained unit hint.  Valid only for non-authoritative filtering. */
+void set_hint_compiled_lazy(BOOL on);
+
 void set_hint_compiled_paths(BOOL on);
 
 void set_hint_compiled_min_candidates(unsigned minimum);

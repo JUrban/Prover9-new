@@ -720,7 +720,7 @@ static void run_compiled_same_cache_lifecycle_case(int bsub)
   delete_clause(equal);
 }
 
-static void run_compiled_rigid_cache_lifecycle_case(int bsub)
+static void run_compiled_rigid_cache_lifecycle_case(int bsub, BOOL lazy)
 {
   Topform matching =
     parse_clause_from_string("rigid_cache(f(g(h(a)))).");
@@ -746,6 +746,7 @@ static void run_compiled_rigid_cache_lifecycle_case(int bsub)
   init_hints(ORDINARY_UNIF, bsub, FALSE, FALSE, 2,
              TRUE, TRUE, TRUE, 0, 0, 0, 8, NULL);
   set_hint_compiled_term_table(TRUE);
+  set_hint_compiled_lazy(lazy);
   set_hint_compiled_filter(TRUE);
   set_hint_compiled_min_candidates(0);
   set_hint_compiled_cache_build_factor(0);
@@ -836,7 +837,8 @@ int main(void)
   run_terminal_bulk_discard_case(bsub);
   run_cache_ring_wrap_case(bsub);
   run_compiled_same_cache_lifecycle_case(bsub);
-  run_compiled_rigid_cache_lifecycle_case(bsub);
+  run_compiled_rigid_cache_lifecycle_case(bsub, FALSE);
+  run_compiled_rigid_cache_lifecycle_case(bsub, TRUE);
   if (Failures != 0) {
     fprintf(stderr, "hint_preview_test: %d failure(s)\n", Failures);
     return 1;

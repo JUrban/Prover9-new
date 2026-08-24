@@ -58,6 +58,11 @@ void hint_term_table_destroy(Hint_term_table table);
 BOOL hint_term_table_add(Hint_term_table table, unsigned id,
                          BOOL positive, Term atom);
 
+/* Add a supported compressed unit clause by streaming its preorder bytes
+   directly into the canonical arena, without materializing a Term tree. */
+BOOL hint_term_table_add_compressed(Hint_term_table table, unsigned id,
+                                    Topform compressed);
+
 /* Deactivate ID without reclaiming immutable nodes. */
 BOOL hint_term_table_remove(Hint_term_table table, unsigned id);
 

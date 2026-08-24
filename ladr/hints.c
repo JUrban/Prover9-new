@@ -62,9 +62,15 @@ static unsigned long long Packed_candidate_checks = 0;
 static BOOL Compiled_term_table_enabled = FALSE;
 static BOOL Compiled_term_table_authoritative = FALSE;
 static BOOL Compiled_term_table_shadow = FALSE;
+static BOOL Compiled_term_table_lazy = FALSE;
 static BOOL Compiled_filter_enabled = FALSE;
 static BOOL Compiled_path_index_enabled = FALSE;
 static Hint_term_table Compiled_term_table = NULL;
+static unsigned long long Compiled_lazy_root_requests = 0;
+static unsigned long long Compiled_lazy_root_builds = 0;
+static unsigned long long Compiled_lazy_root_deferred = 0;
+static unsigned long long Compiled_lazy_stream_builds = 0;
+static unsigned long long Compiled_lazy_materializations = 0;
 
 /* The first collective compiled-matcher index.  packed_fast already indexes
    exact symbols through depth two.  This table extends the same necessary
@@ -1901,7 +1907,7 @@ void finalize_hint_conjunction_index(void)
   BOOL denied = FALSE;
   BOOL estimator_live = TRUE;
   compiled_census_finalize_bank();
-  if (Compiled_term_table != NULL)
+  if (Compiled_term_table != NULL && !Compiled_term_table_lazy)
     hint_term_table_finalize(Compiled_term_table);
   if (Compiled_filter_enabled)
     Compiled_same_cache_ready = TRUE;
@@ -3036,7 +3042,13 @@ void init_hints(Uniftype utype,
   Compiled_term_table_enabled = FALSE;
   Compiled_term_table_authoritative = FALSE;
   Compiled_term_table_shadow = FALSE;
+  Compiled_term_table_lazy = FALSE;
   Compiled_filter_enabled = FALSE;
+  Compiled_lazy_root_requests = 0;
+  Compiled_lazy_root_builds = 0;
+  Compiled_lazy_root_deferred = 0;
+  Compiled_lazy_stream_builds = 0;
+  Compiled_lazy_materializations = 0;
   Compiled_path_index_enabled = FALSE;
   Compiled_path_serial = 1;
   Compiled_path_key_count = 0;
@@ -3341,7 +3353,13 @@ void done_with_hints(void)
   Compiled_term_table_enabled = FALSE;
   Compiled_term_table_authoritative = FALSE;
   Compiled_term_table_shadow = FALSE;
+  Compiled_term_table_lazy = FALSE;
   Compiled_filter_enabled = FALSE;
+  Compiled_lazy_root_requests = 0;
+  Compiled_lazy_root_builds = 0;
+  Compiled_lazy_root_deferred = 0;
+  Compiled_lazy_stream_builds = 0;
+  Compiled_lazy_materializations = 0;
   Compiled_path_index_enabled = FALSE;
   Compiled_term_table = NULL;
   Compiled_path_serial = 1;
@@ -3958,6 +3976,53 @@ static BOOL compiled_cache_budget_allows(unsigned long long additional)
     Compiled_same_cache_dense_bytes - scratch;
 }
 
+static void compiled_same_cache_index_hint(unsigned id);
+
+/* Resolve one retained unit hint into the canonical arena only after the
+   compiled filter has admitted a broad query.  Missing roots remain an
+   explicit conservative fallback during preview and initial hint loading. */
+static uint32_t compiled_hint_root(unsigned id, BOOL build)
+{
+  uint32_t root = hint_term_table_root(Compiled_term_table, id);
+  Topform h;
+  BOOL was_compressed;
+  BOOL added = FALSE;
+  if (root != 0 || !Compiled_term_table_lazy)
+    return root;
+  Compiled_lazy_root_requests++;
+  if (!build || !Compiled_same_cache_ready ||
+      id == 0 || id >= Packed_hint_capacity ||
+      !Packed_hint_active[id] || Packed_hint_anyconst[id] ||
+      Better_hint_positive_count[id] + Better_hint_negative_count[id] != 1) {
+    Compiled_lazy_root_deferred++;
+    return 0;
+  }
+  h = Packed_hint_by_id[id];
+  if (h == NULL)
+    fatal_error("lazy compiled hint has no stable owner");
+  was_compressed = h->compressed != NULL;
+  if (was_compressed &&
+      hint_term_table_add_compressed(Compiled_term_table, id, h)) {
+    added = TRUE;
+    Compiled_lazy_stream_builds++;
+  }
+  if (!added && was_compressed) {
+    if (!materialize_clause(h))
+      fatal_error("lazy compiled hint cannot materialize target");
+    Compiled_lazy_materializations++;
+  }
+  if (!added &&
+      (h->literals == NULL || h->literals->next != NULL ||
+       !hint_term_table_add(
+         Compiled_term_table, id, h->literals->sign, h->literals->atom)))
+    fatal_error("lazy compiled hint cannot add canonical target");
+  if (!added && was_compressed && !recompress_clause(h))
+    fatal_error("lazy compiled hint cannot recompress target");
+  Compiled_lazy_root_builds++;
+  compiled_same_cache_index_hint(id);
+  return hint_term_table_root(Compiled_term_table, id);
+}
+
 static void compiled_same_cache_build(
   struct compiled_same_cache_entry *entry)
 {
@@ -3977,7 +4042,8 @@ static void compiled_same_cache_build(
   entry->dense_words = words;
   Compiled_same_cache_dense_bytes += bytes;
   for (id = 1; id < Packed_hint_capacity; id++) {
-    uint32_t root = hint_term_table_root(Compiled_term_table, id);
+    uint32_t root = Packed_hint_active[id] ?
+      compiled_hint_root(id, TRUE) : 0;
     if (root != 0) {
       Compiled_same_cache_build_scans++;
       if (compiled_same_cache_compare(entry, root) == 1) {
@@ -3988,6 +4054,11 @@ static void compiled_same_cache_build(
       }
     }
   }
+  /* A cache build has just resolved every eligible active target.  Seal the
+     lazy arena now, reclaiming construction hash/scratch memory and routing
+     later rewrites or additions through the existing mutable delta. */
+  if (Compiled_term_table_lazy)
+    hint_term_table_finalize(Compiled_term_table);
   entry->built = 1;
   Compiled_same_cache_builds++;
 }
@@ -4309,7 +4380,7 @@ static void compiled_same_filter_candidates(void)
   direct_before = Packed_candidates_count;
   for (i = 0; i < direct_before; i++) {
     unsigned id = Packed_candidates[i];
-    uint32_t root = hint_term_table_root(Compiled_term_table, id);
+    uint32_t root = compiled_hint_root(id, account);
     BOOL accepted = TRUE;
     if (root == 0) {
       Packed_candidates[keep++] = id;
@@ -4328,9 +4399,8 @@ static void compiled_same_filter_candidates(void)
       if (comparison < 0) {
         navigation_rejects++;
         accepted = FALSE;
-        break;
       }
-      if (comparison == 0) {
+      else if (comparison == 0) {
         unequal_rejects++;
         accepted = FALSE;
       }
@@ -4412,7 +4482,7 @@ static void compiled_rigid_filter_candidates(void)
       unsigned position = (unsigned)
         (((unsigned long long) j * before) / samples);
       unsigned id = Packed_candidates[position];
-      uint32_t root = hint_term_table_root(Compiled_term_table, id);
+      uint32_t root = compiled_hint_root(id, account);
       int result;
       if (root == 0)
         continue;
@@ -4468,7 +4538,7 @@ static void compiled_rigid_filter_candidates(void)
   }
   for (i = 0; i < before; i++) {
     unsigned id = Packed_candidates[i];
-    uint32_t root = hint_term_table_root(Compiled_term_table, id);
+    uint32_t root = compiled_hint_root(id, account);
     int result;
     if (root == 0) {
       Packed_candidates[keep++] = id;
@@ -4514,6 +4584,7 @@ static void compiled_path_filter_candidates(
      asks whether the query can rewrite an arbitrary stored subterm, so these
      root-relative conditions are not necessary there. */
   if (op == PACKED_HINT_BACK_DEMOD || !Compiled_filter_enabled ||
+      (Compiled_term_table_lazy && !Compiled_same_cache_ready) ||
       c->literals == NULL ||
       c->literals->next != NULL || Packed_candidates_count == 0 ||
       (MATCH_HINTS_ANYCONST && AnyConstsEnabled &&
@@ -5041,7 +5112,8 @@ void index_hint(Topform c)
       packed_index_hint_terms(c, anyconst);
       better_index_hint_terms(c, anyconst);
       compiled_census_observe_hint(c, anyconst);
-      if (Compiled_term_table_enabled && !anyconst &&
+      if (Compiled_term_table_enabled && !Compiled_term_table_lazy &&
+          !anyconst &&
           c->literals != NULL && c->literals->next == NULL) {
         if (!hint_term_table_add(
               Compiled_term_table, (unsigned) c->id, c->literals->sign,
@@ -5623,10 +5695,23 @@ void set_hint_compiled_term_table(BOOL on)
 }  /* set_hint_compiled_term_table */
 
 /* PUBLIC */
+void set_hint_compiled_lazy(BOOL on)
+{
+  if (on && Compiled_term_table == NULL)
+    fatal_error("lazy compiled hints require term table");
+  if (on && (Compiled_term_table_authoritative ||
+             Compiled_term_table_shadow || Compiled_path_index_enabled))
+    fatal_error("lazy compiled hints require prefilter-only mode");
+  Compiled_term_table_lazy = on;
+}
+
+/* PUBLIC */
 void set_hint_compiled_paths(BOOL on)
 {
   if (on && Compiled_term_table == NULL)
     fatal_error("compiled hint paths require term table");
+  if (on && Compiled_term_table_lazy)
+    fatal_error("compiled hint paths require eager term table");
   if (on && Compiled_path_postings == NULL)
     Compiled_path_postings = hint_postings_init();
   if (on && Compiled_path_mark == NULL && Packed_hint_capacity != 0)
@@ -5658,6 +5743,8 @@ void set_hint_compiled_authoritative(BOOL on)
 {
   if (on && Compiled_term_table == NULL)
     fatal_error("authoritative compiled hints require term table");
+  if (on && Compiled_term_table_lazy)
+    fatal_error("authoritative compiled hints require eager term table");
   Compiled_term_table_authoritative = on;
 }  /* set_hint_compiled_authoritative */
 
@@ -5666,6 +5753,8 @@ void set_hint_compiled_shadow(BOOL on)
 {
   if (on && Compiled_term_table == NULL)
     fatal_error("compiled hint shadow requires term table");
+  if (on && Compiled_term_table_lazy)
+    fatal_error("compiled hint shadow requires eager term table");
   Compiled_term_table_shadow = on;
 }
 
@@ -6053,7 +6142,11 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             "base_rehashes=%llu, delta_rehashes=%llu, "
             "node_bytes=%llu, child_bytes=%llu, record_bytes=%llu, "
             "hash_bytes=%llu, hash_peak_bytes=%llu, scratch_bytes=%llu, "
-            "total_bytes=%llu, match_attempts=%llu, match_successes=%llu, "
+            "total_bytes=%llu, lazy=%d, lazy_root_requests=%llu, "
+            "lazy_root_builds=%llu, lazy_root_deferred=%llu, "
+            "lazy_stream_builds=%llu, "
+            "lazy_materializations=%llu, "
+            "match_attempts=%llu, match_successes=%llu, "
             "match_nodes=%llu, match_rigid_tests=%llu, "
             "match_rigid_rejects=%llu, match_first_bindings=%llu, "
             "match_repeated_tests=%llu, match_repeated_rejects=%llu.\n",
@@ -6066,6 +6159,10 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             s.base_rehashes, s.delta_rehashes,
             s.node_bytes, s.child_bytes, s.record_bytes, s.hash_bytes,
             s.hash_peak_bytes, s.scratch_bytes, s.total_bytes,
+            Compiled_term_table_lazy,
+            Compiled_lazy_root_requests, Compiled_lazy_root_builds,
+            Compiled_lazy_root_deferred, Compiled_lazy_stream_builds,
+            Compiled_lazy_materializations,
             s.match_attempts, s.match_successes, s.match_nodes,
             s.match_rigid_tests, s.match_rigid_rejects,
             s.match_first_bindings, s.match_repeated_tests,

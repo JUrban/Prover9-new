@@ -1,4 +1,5 @@
 #include "hint_term_table.h"
+#include "compress.h"
 #include "memory.h"
 #include "fatal.h"
 #include <limits.h>
@@ -182,15 +183,55 @@ static BOOL hint_term_prepare_hash(struct hint_term_arena *arena)
   return TRUE;
 }
 
+static uint32_t hint_term_intern_node(struct hint_term_arena *arena,
+                                      uint32_t code, uint32_t arity,
+                                      const uint32_t *children)
+{
+  uint64_t hash;
+  uint32_t position;
+  arena->occurrences++;
+  if (arena->finalized || code == 0 ||
+      arity > UINT32_MAX - arena->child_count ||
+      (arity != 0 && children == NULL) || !hint_term_prepare_hash(arena))
+    return 0;
+  hash = hint_term_key_hash(code, arity, children);
+  position = (uint32_t) hash & (arena->hash_capacity - 1);
+  while (arena->hash_slots[position] != 0) {
+    uint32_t handle = arena->hash_slots[position];
+    if (hint_term_node_equal(arena, handle, code, arity, children)) {
+      arena->intern_hits++;
+      return handle;
+    }
+    position = (position + 1) & (arena->hash_capacity - 1);
+  }
+  if (arena->node_count == HINT_TERM_HANDLE_MASK ||
+      arity > UINT32_MAX - arena->child_count ||
+      !hint_term_reserve_nodes(arena, arena->node_count + 1) ||
+      !hint_term_reserve_words(
+        &arena->children, &arena->child_capacity,
+        arena->child_count + arity))
+    return 0;
+  if (arity != 0)
+    memcpy(arena->children + arena->child_count,
+           children,
+           (size_t) arity * sizeof(uint32_t));
+  arena->nodes[arena->node_count].code = code;
+  arena->nodes[arena->node_count].child_offset = arena->child_count;
+  arena->nodes[arena->node_count].arity = arity;
+  arena->child_count += arity;
+  arena->node_count++;
+  arena->hash_slots[position] = arena->node_count;
+  arena->hash_count++;
+  return arena->node_count;
+}
+
 static uint32_t hint_term_intern(struct hint_term_arena *arena, Term term)
 {
   uint32_t arity = VARIABLE(term) ? 0 : (uint32_t) ARITY(term);
   uint32_t code;
   uint32_t scratch_start = arena->scratch_count;
-  uint64_t hash;
-  uint32_t position;
+  uint32_t result;
   uint32_t i;
-  arena->occurrences++;
   if (arena->finalized ||
       arity > UINT32_MAX - scratch_start ||
       !hint_term_reserve_words(&arena->scratch, &arena->scratch_capacity,
@@ -221,45 +262,11 @@ static uint32_t hint_term_intern(struct hint_term_arena *arena, Term term)
     }
     code = (uint32_t) symbol;
   }
-  if (!hint_term_prepare_hash(arena)) {
-    arena->scratch_count = scratch_start;
-    return 0;
-  }
-  hash = hint_term_key_hash(
-    code, arity, arena->scratch + scratch_start);
-  position = (uint32_t) hash & (arena->hash_capacity - 1);
-  while (arena->hash_slots[position] != 0) {
-    uint32_t handle = arena->hash_slots[position];
-    if (hint_term_node_equal(arena, handle, code, arity,
-                             arena->scratch + scratch_start)) {
-      arena->intern_hits++;
-      arena->scratch_count = scratch_start;
-      return handle;
-    }
-    position = (position + 1) & (arena->hash_capacity - 1);
-  }
-  if (arena->node_count == HINT_TERM_HANDLE_MASK ||
-      arity > UINT32_MAX - arena->child_count ||
-      !hint_term_reserve_nodes(arena, arena->node_count + 1) ||
-      !hint_term_reserve_words(
-        &arena->children, &arena->child_capacity,
-        arena->child_count + arity)) {
-    arena->scratch_count = scratch_start;
-    return 0;
-  }
-  if (arity != 0)
-    memcpy(arena->children + arena->child_count,
-           arena->scratch + scratch_start,
-           (size_t) arity * sizeof(uint32_t));
-  arena->nodes[arena->node_count].code = code;
-  arena->nodes[arena->node_count].child_offset = arena->child_count;
-  arena->nodes[arena->node_count].arity = arity;
-  arena->child_count += arity;
-  arena->node_count++;
-  arena->hash_slots[position] = arena->node_count;
-  arena->hash_count++;
+  result = hint_term_intern_node(
+    arena, code, arity, arity == 0 ? NULL :
+      arena->scratch + scratch_start);
   arena->scratch_count = scratch_start;
-  return arena->node_count;
+  return result;
 }
 
 static BOOL hint_term_reserve_records(Hint_term_table table, unsigned id)
@@ -334,6 +341,104 @@ BOOL hint_term_table_add(Hint_term_table table, unsigned id,
     return FALSE;
   encoded = table->finalized ? local | HINT_TERM_DELTA_HANDLE : local;
   table->roots[id] = encoded;
+  table->record_flags[id] = HINT_TERM_RECORD_ACTIVE |
+    HINT_TERM_RECORD_EVER | (positive ? HINT_TERM_RECORD_SIGN : 0);
+  table->active_records++;
+  table->additions++;
+  if (old_flags & HINT_TERM_RECORD_EVER)
+    table->reinsertions++;
+  return TRUE;
+}
+
+struct hint_term_stream_frame {
+  uint32_t code;
+  uint32_t arity;
+  uint32_t filled;
+  uint32_t scratch_start;
+};
+
+struct hint_term_stream_context {
+  struct hint_term_arena *arena;
+  struct hint_term_stream_frame frames[1000];
+  unsigned top;
+  uint32_t root;
+};
+
+static BOOL hint_term_stream_node(void *context, BOOL variable,
+                                  unsigned number, unsigned arity)
+{
+  struct hint_term_stream_context *state = context;
+  struct hint_term_arena *arena = state->arena;
+  struct hint_term_stream_frame *frame;
+  uint32_t code;
+  if (state->top >=
+      sizeof(state->frames) / sizeof(state->frames[0]) ||
+      (number == 0 && !variable) || number > HINT_TERM_HANDLE_MASK ||
+      (variable && arity != 0) ||
+      arity > UINT32_MAX - arena->scratch_count ||
+      !hint_term_reserve_words(
+        &arena->scratch, &arena->scratch_capacity,
+        arena->scratch_count + (uint32_t) arity))
+    return FALSE;
+  code = variable ? HINT_TERM_VARIABLE_CODE | (uint32_t) number :
+                    (uint32_t) number;
+  frame = state->frames + state->top++;
+  frame->code = code;
+  frame->arity = (uint32_t) arity;
+  frame->filled = 0;
+  frame->scratch_start = arena->scratch_count;
+  arena->scratch_count += (uint32_t) arity;
+
+  while (state->top != 0) {
+    uint32_t local, encoded;
+    frame = state->frames + state->top - 1;
+    if (frame->filled != frame->arity)
+      break;
+    local = hint_term_intern_node(
+      arena, frame->code, frame->arity,
+      frame->arity == 0 ? NULL :
+        arena->scratch + frame->scratch_start);
+    arena->scratch_count = frame->scratch_start;
+    state->top--;
+    if (local == 0)
+      return FALSE;
+    encoded = local | arena->handle_tag;
+    if (state->top == 0)
+      state->root = local;
+    else {
+      struct hint_term_stream_frame *parent =
+        state->frames + state->top - 1;
+      if (parent->filled >= parent->arity)
+        return FALSE;
+      arena->scratch[parent->scratch_start + parent->filled++] = encoded;
+    }
+  }
+  return TRUE;
+}
+
+BOOL hint_term_table_add_compressed(Hint_term_table table, unsigned id,
+                                    Topform compressed)
+{
+  struct hint_term_stream_context state;
+  struct hint_term_arena *arena;
+  unsigned char old_flags;
+  BOOL positive;
+  if (table == NULL || compressed == NULL || id == 0 ||
+      !hint_term_reserve_records(table, id) ||
+      (table->record_flags[id] & HINT_TERM_RECORD_ACTIVE) != 0)
+    return FALSE;
+  arena = table->finalized ? &table->delta : &table->base;
+  memset(&state, 0, sizeof(state));
+  state.arena = arena;
+  old_flags = table->record_flags[id];
+  if (!compressed_unit_atom_visit(
+        compressed, &positive, hint_term_stream_node, &state) ||
+      state.top != 0 || state.root == 0) {
+    arena->scratch_count = 0;
+    return FALSE;
+  }
+  table->roots[id] = table->finalized ?
+    state.root | HINT_TERM_DELTA_HANDLE : state.root;
   table->record_flags[id] = HINT_TERM_RECORD_ACTIVE |
     HINT_TERM_RECORD_EVER | (positive ? HINT_TERM_RECORD_SIGN : 0);
   table->active_records++;
