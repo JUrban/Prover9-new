@@ -110,6 +110,8 @@ void set_hint_compiled_paths(BOOL on);
 
 void set_hint_compiled_min_candidates(unsigned minimum);
 
+void set_hint_compiled_cache_build_factor(unsigned factor);
+
 void set_hint_compiled_authoritative(BOOL on);
 
 void set_hint_compiled_shadow(BOOL on);

@@ -640,6 +640,86 @@ static void run_terminal_bulk_discard_case(int bsub)
   }
 }
 
+static void run_compiled_same_cache_lifecycle_case(int bsub)
+{
+  Topform equal = parse_clause_from_string("same_cache(f(a,a)).");
+  Topform unequal = parse_clause_from_string("same_cache(f(a,b)).");
+  Topform late = parse_clause_from_string("same_cache(f(c,c)).");
+  Topform first = parse_clause_from_string("same_cache(f(x,x)).");
+  Topform second = parse_clause_from_string("same_cache(f(x,x)).");
+  Topform cached = parse_clause_from_string("same_cache(f(x,x)).");
+  Topform after_remove = parse_clause_from_string("same_cache(f(x,x)).");
+  Topform after_add = parse_clause_from_string("same_cache(f(x,x)).");
+  unsigned long long builds = 0, hits = 0;
+  BOOL saw_cache = FALSE;
+  FILE *stats;
+  char line[4096];
+
+  init_hints(ORDINARY_UNIF, bsub, FALSE, FALSE, 2,
+             TRUE, TRUE, TRUE, 0, 0, 0, 8, NULL);
+  set_hint_compiled_term_table(TRUE);
+  set_hint_compiled_filter(TRUE);
+  set_hint_compiled_min_candidates(0);
+  set_hint_compiled_cache_build_factor(0);
+  index_hint(equal);
+  index_hint(unequal);
+  finalize_hint_conjunction_index();
+
+  adjust_weight_with_hints(first, FALSE, FALSE);
+  adjust_weight_with_hints(second, FALSE, FALSE);
+  adjust_weight_with_hints(cached, FALSE, FALSE);
+  CHECK(first->matching_hint == equal && second->matching_hint == equal &&
+        cached->matching_hint == equal,
+        "compiled SAME cache preserves the authoritative repeated match");
+
+  /* A retired match may remain a stale positive in a built bitset.  The
+     ordinary active-state check and exact matcher must still reject it. */
+  unindex_hint(equal);
+  adjust_weight_with_hints(after_remove, FALSE, FALSE);
+  CHECK(after_remove->matching_hint == NULL,
+        "compiled SAME cache removal leaves only a conservative stale bit");
+
+  /* Hints admitted after the bitset was built must be tested against every
+     built path pair so that a new true member cannot become a false negative. */
+  index_hint(late);
+  adjust_weight_with_hints(after_add, FALSE, FALSE);
+  CHECK(after_add->matching_hint == late,
+        "compiled SAME cache indexes a matching late hint");
+
+  stats = tmpfile();
+  CHECK(stats != NULL, "open compiled SAME cache statistics stream");
+  if (stats != NULL) {
+    fprint_packed_hint_operation_stats(stats);
+    rewind(stats);
+    while (fgets(line, sizeof(line), stats) != NULL)
+      if (strstr(line, "Compiled_hint_same_cache:") != NULL) {
+        char *field;
+        saw_cache = TRUE;
+        field = strstr(line, "cache_hits=");
+        if (field != NULL)
+          hits = strtoull(field + strlen("cache_hits="), NULL, 10);
+        field = strstr(line, "builds=");
+        if (field != NULL)
+          builds = strtoull(field + strlen("builds="), NULL, 10);
+      }
+    fclose(stats);
+  }
+  CHECK(saw_cache && builds == 1 && hits >= 3,
+        "compiled SAME cache reports one build and reused lookups");
+
+  unindex_hint(unequal);
+  unindex_hint(late);
+  done_with_hints();
+  delete_clause(after_add);
+  delete_clause(after_remove);
+  delete_clause(cached);
+  delete_clause(second);
+  delete_clause(first);
+  delete_clause(late);
+  delete_clause(unequal);
+  delete_clause(equal);
+}
+
 int main(void)
 {
   init_standard_ladr();
@@ -664,6 +744,7 @@ int main(void)
   run_hint_lifecycle_case(TRUE, TRUE, TRUE, bsub);
   run_terminal_bulk_discard_case(bsub);
   run_cache_ring_wrap_case(bsub);
+  run_compiled_same_cache_lifecycle_case(bsub);
   if (Failures != 0) {
     fprintf(stderr, "hint_preview_test: %d failure(s)\n", Failures);
     return 1;

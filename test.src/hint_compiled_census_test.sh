@@ -5,7 +5,7 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 prover9=${PROVER9:-"$script_dir/../provers.src/prover9"}
 tmp=${TMPDIR:-/tmp}/hint-compiled-census.$$
 trap 'rm -f "$tmp.out" "$tmp.err" "$tmp.path.out" "$tmp.path.err" \
-  "$tmp.same.out" "$tmp.same.err"' \
+  "$tmp.same.out" "$tmp.same.err" "$tmp.cache.out" "$tmp.cache.err"' \
   EXIT HUP INT TERM
 
 "$prover9" < "$script_dir/hint_compiled_census.in" \
@@ -69,5 +69,21 @@ printf '%s\n' "$same_line" | grep -Eq \
   'queries=[1-9][0-9]*, query_tests=[1-9][0-9]*,'
 printf '%s\n' "$same_line" | grep -Eq \
   'candidates_before=[1-9][0-9]*, candidates_after=[0-9]+, candidates_rejected=[1-9][0-9]*'
+
+"$prover9" < "$script_dir/hint_compiled_cache.in" \
+  > "$tmp.cache.out" 2> "$tmp.cache.err" || cache_status=$?
+cache_status=${cache_status:-0}
+if [ "$cache_status" -ne 2 ] && [ "$cache_status" -ne 5 ]; then
+  cat "$tmp.cache.err" >&2
+  echo "hint_compiled_census_test: cache run returned $cache_status" >&2
+  exit 1
+fi
+cache_line=$(grep '^Compiled_hint_same_cache:' "$tmp.cache.out")
+printf '%s\n' "$cache_line" | grep -Eq \
+  'entries=1, built=1, build_factor=0, lookups=[1-9][0-9]*,'
+printf '%s\n' "$cache_line" | grep -Eq \
+  'cache_hits=[1-9][0-9]*, builds=1, build_scans=[1-9][0-9]*, build_matches=[1-9][0-9]*,'
+printf '%s\n' "$cache_line" | grep -Eq \
+  'dense_keys=1, dense_bit_bytes=[1-9][0-9]*,.*dense_denials=0,'
 
 echo "hint_compiled_census_test: PASS"

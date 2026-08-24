@@ -119,6 +119,42 @@ static unsigned Compiled_same_min_candidates = 128;
 static unsigned long long Compiled_same_admission_skips = 0;
 static unsigned long long Compiled_same_skipped_candidates = 0;
 
+#define COMPILED_SAME_CACHE_BUILD_FACTOR 2U
+#define COMPILED_SAME_CACHE_DENSE_BYTES \
+  (32ULL * 1024ULL * 1024ULL)
+struct compiled_same_cache_entry {
+  unsigned long long hash;
+  unsigned long long queries;
+  unsigned long long candidate_work;
+  unsigned first_offset;
+  unsigned first_length;
+  unsigned second_offset;
+  unsigned second_length;
+  unsigned match_count;
+  unsigned next;
+  unsigned char built;
+};
+static struct compiled_same_cache_entry *Compiled_same_cache_entries = NULL;
+static unsigned Compiled_same_cache_count = 0;
+static unsigned Compiled_same_cache_capacity = 0;
+static unsigned *Compiled_same_cache_buckets = NULL;
+static unsigned Compiled_same_cache_bucket_capacity = 0;
+static unsigned *Compiled_same_cache_paths = NULL;
+static unsigned Compiled_same_cache_path_count = 0;
+static unsigned Compiled_same_cache_path_capacity = 0;
+static Hint_postings Compiled_same_cache_postings = NULL;
+static BOOL Compiled_same_cache_ready = FALSE;
+static unsigned long long Compiled_same_cache_lookups = 0;
+static unsigned long long Compiled_same_cache_hits = 0;
+static unsigned long long Compiled_same_cache_builds = 0;
+static unsigned long long Compiled_same_cache_build_scans = 0;
+static unsigned long long Compiled_same_cache_build_matches = 0;
+static unsigned long long Compiled_same_cache_filter_candidates = 0;
+static unsigned long long Compiled_same_cache_filter_rejects = 0;
+static unsigned long long Compiled_same_cache_dense_denials = 0;
+static unsigned Compiled_same_cache_build_factor =
+  COMPILED_SAME_CACHE_BUILD_FACTOR;
+
 /* Dedicated read-only-preview query workspace.  It is allocated alongside
    the packed bank, never aliases authoritative matcher scratch, and is not
    part of persistent hint semantics or authoritative operation accounting. */
@@ -1820,6 +1856,8 @@ void finalize_hint_conjunction_index(void)
   compiled_census_finalize_bank();
   if (Compiled_term_table != NULL)
     hint_term_table_finalize(Compiled_term_table);
+  if (Compiled_filter_enabled)
+    Compiled_same_cache_ready = TRUE;
   if (!Fast_conjunction_planning)
     return;
   fast_conjunction_estimator_init(&estimator);
@@ -2976,6 +3014,15 @@ void init_hints(Uniftype utype,
   Compiled_same_unequal_rejects = 0;
   Compiled_same_admission_skips = 0;
   Compiled_same_skipped_candidates = 0;
+  Compiled_same_cache_ready = FALSE;
+  Compiled_same_cache_lookups = 0;
+  Compiled_same_cache_hits = 0;
+  Compiled_same_cache_builds = 0;
+  Compiled_same_cache_build_scans = 0;
+  Compiled_same_cache_build_matches = 0;
+  Compiled_same_cache_filter_candidates = 0;
+  Compiled_same_cache_filter_rejects = 0;
+  Compiled_same_cache_dense_denials = 0;
   Hint_match_once = FALSE;
   memset(Compiled_census, 0, sizeof(Compiled_census));
   memset(Compiled_census_printed, 0, sizeof(Compiled_census_printed));
@@ -3086,12 +3133,16 @@ void done_with_hints(void)
   if (Compiled_query_path) safe_free(Compiled_query_path);
   if (Compiled_plan_paths) safe_free(Compiled_plan_paths);
   if (Compiled_same_tests) safe_free(Compiled_same_tests);
+  if (Compiled_same_cache_entries) safe_free(Compiled_same_cache_entries);
+  if (Compiled_same_cache_buckets) safe_free(Compiled_same_cache_buckets);
+  if (Compiled_same_cache_paths) safe_free(Compiled_same_cache_paths);
   hint_term_table_destroy(Compiled_term_table);
   if (Compiled_subterm_fingerprints != NULL)
     safe_free(Compiled_subterm_fingerprints);
   hint_postings_destroy(Better_postings);
   hint_postings_destroy(Fast_conjunction_postings);
   hint_postings_destroy(Compiled_path_postings);
+  hint_postings_destroy(Compiled_same_cache_postings);
   if (Better_rebuild_clock != NULL)
     free_clock(Better_rebuild_clock);
   if (Better_equivalence_buckets) safe_free(Better_equivalence_buckets);
@@ -3116,6 +3167,10 @@ void done_with_hints(void)
   Compiled_query_path = NULL;
   Compiled_plan_paths = NULL;
   Compiled_same_tests = NULL;
+  Compiled_same_cache_entries = NULL;
+  Compiled_same_cache_buckets = NULL;
+  Compiled_same_cache_paths = NULL;
+  Compiled_same_cache_postings = NULL;
   Better_equivalence_buckets = NULL;
   Better_equivalence_references = NULL;
   Better_anyconst_references = NULL;
@@ -3241,6 +3296,19 @@ void done_with_hints(void)
   Compiled_same_min_candidates = 128;
   Compiled_same_admission_skips = 0;
   Compiled_same_skipped_candidates = 0;
+  Compiled_same_cache_count = Compiled_same_cache_capacity = 0;
+  Compiled_same_cache_bucket_capacity = 0;
+  Compiled_same_cache_path_count = Compiled_same_cache_path_capacity = 0;
+  Compiled_same_cache_ready = FALSE;
+  Compiled_same_cache_lookups = 0;
+  Compiled_same_cache_hits = 0;
+  Compiled_same_cache_builds = 0;
+  Compiled_same_cache_build_scans = 0;
+  Compiled_same_cache_build_matches = 0;
+  Compiled_same_cache_filter_candidates = 0;
+  Compiled_same_cache_filter_rejects = 0;
+  Compiled_same_cache_dense_denials = 0;
+  Compiled_same_cache_build_factor = COMPILED_SAME_CACHE_BUILD_FACTOR;
   Packed_index = FALSE;
   Better_packed_index = FALSE;
   Fast_packed_index = FALSE;
@@ -3502,6 +3570,284 @@ static void compiled_plan_sort_same_tests(void)
   }
 }
 
+static int compiled_same_path_order(const unsigned *first,
+                                    unsigned first_length,
+                                    const unsigned *second,
+                                    unsigned second_length)
+{
+  unsigned i;
+  unsigned common = first_length < second_length ?
+    first_length : second_length;
+  for (i = 0; i < common; i++) {
+    if (first[i] < second[i])
+      return -1;
+    if (first[i] > second[i])
+      return 1;
+  }
+  return first_length < second_length ? -1 :
+         first_length > second_length ? 1 : 0;
+}
+
+static unsigned long long compiled_same_cache_hash(
+  const unsigned *first, unsigned first_length,
+  const unsigned *second, unsigned second_length)
+{
+  unsigned long long hash = compiled_path_mix(
+    UINT64_C(0x53414d4550415448) ^ first_length);
+  unsigned i;
+  for (i = 0; i < first_length; i++)
+    hash = compiled_path_mix(hash ^
+      ((unsigned long long) first[i] + 1) *
+        UINT64_C(0x9e3779b97f4a7c15));
+  hash = compiled_path_mix(hash ^
+    UINT64_C(0xd6e8feb86659fd93) ^ second_length);
+  for (i = 0; i < second_length; i++)
+    hash = compiled_path_mix(hash ^
+      ((unsigned long long) second[i] + 1) *
+        UINT64_C(0xa5a3564e27f8862b));
+  return hash;
+}
+
+static void compiled_same_cache_init(void)
+{
+  if (Compiled_same_cache_buckets == NULL) {
+    Compiled_same_cache_bucket_capacity = 256;
+    Compiled_same_cache_buckets = safe_calloc(
+      Compiled_same_cache_bucket_capacity,
+      sizeof(*Compiled_same_cache_buckets));
+  }
+  if (Compiled_same_cache_postings == NULL) {
+    Compiled_same_cache_postings = hint_postings_init();
+    hint_postings_set_dense_budget(
+      Compiled_same_cache_postings, COMPILED_SAME_CACHE_DENSE_BYTES);
+  }
+}
+
+static void compiled_same_cache_rehash(unsigned capacity)
+{
+  unsigned *buckets = safe_calloc(capacity, sizeof(*buckets));
+  unsigned i;
+  for (i = 0; i < Compiled_same_cache_count; i++) {
+    unsigned bucket = (unsigned) Compiled_same_cache_entries[i].hash &
+                      (capacity - 1);
+    Compiled_same_cache_entries[i].next = buckets[bucket];
+    buckets[bucket] = i + 1;
+  }
+  safe_free(Compiled_same_cache_buckets);
+  Compiled_same_cache_buckets = buckets;
+  Compiled_same_cache_bucket_capacity = capacity;
+}
+
+static unsigned compiled_same_cache_copy_path(const unsigned *path,
+                                              unsigned length)
+{
+  unsigned offset = Compiled_same_cache_path_count;
+  if (length > UINT_MAX - Compiled_same_cache_path_count)
+    fatal_error("compiled SAME cache path overflow");
+  if (Compiled_same_cache_path_count + length >
+      Compiled_same_cache_path_capacity) {
+    unsigned capacity = Compiled_same_cache_path_capacity == 0 ? 128 :
+      Compiled_same_cache_path_capacity;
+    while (capacity < Compiled_same_cache_path_count + length) {
+      if (capacity > UINT_MAX / 2)
+        fatal_error("compiled SAME cache path capacity overflow");
+      capacity *= 2;
+    }
+    Compiled_same_cache_paths = safe_realloc(
+      Compiled_same_cache_paths,
+      (size_t) capacity * sizeof(*Compiled_same_cache_paths));
+    Compiled_same_cache_path_capacity = capacity;
+  }
+  if (length != 0)
+    memcpy(Compiled_same_cache_paths + offset, path,
+           (size_t) length * sizeof(*Compiled_same_cache_paths));
+  Compiled_same_cache_path_count += length;
+  return offset;
+}
+
+static BOOL compiled_same_cache_key_equal(
+  const struct compiled_same_cache_entry *entry,
+  const unsigned *first, unsigned first_length,
+  const unsigned *second, unsigned second_length)
+{
+  return entry->first_length == first_length &&
+    entry->second_length == second_length &&
+    (first_length == 0 ||
+     memcmp(Compiled_same_cache_paths + entry->first_offset, first,
+            (size_t) first_length * sizeof(*first)) == 0) &&
+    (second_length == 0 ||
+     memcmp(Compiled_same_cache_paths + entry->second_offset, second,
+            (size_t) second_length * sizeof(*second)) == 0);
+}
+
+static struct compiled_same_cache_entry *compiled_same_cache_lookup(
+  const struct compiled_same_test *test, BOOL create)
+{
+  const unsigned *first = test->first_length == 0 ? NULL :
+    Compiled_plan_paths + test->first_offset;
+  const unsigned *second = test->second_length == 0 ? NULL :
+    Compiled_plan_paths + test->second_offset;
+  unsigned first_length = test->first_length;
+  unsigned second_length = test->second_length;
+  unsigned long long hash;
+  unsigned bucket, position;
+  if (compiled_same_path_order(
+        first, first_length, second, second_length) > 0) {
+    const unsigned *path = first;
+    unsigned length = first_length;
+    first = second;
+    first_length = second_length;
+    second = path;
+    second_length = length;
+  }
+  if (Compiled_same_cache_buckets == NULL) {
+    if (!create)
+      return NULL;
+    compiled_same_cache_init();
+  }
+  hash = compiled_same_cache_hash(
+    first, first_length, second, second_length);
+  bucket = (unsigned) hash & (Compiled_same_cache_bucket_capacity - 1);
+  position = Compiled_same_cache_buckets[bucket];
+  while (position != 0) {
+    struct compiled_same_cache_entry *entry =
+      Compiled_same_cache_entries + position - 1;
+    if (entry->hash == hash && compiled_same_cache_key_equal(
+          entry, first, first_length, second, second_length))
+      return entry;
+    position = entry->next;
+  }
+  if (!create)
+    return NULL;
+  if (Compiled_same_cache_count >=
+      Compiled_same_cache_bucket_capacity / 2) {
+    if (Compiled_same_cache_bucket_capacity > UINT_MAX / 2)
+      fatal_error("compiled SAME cache bucket capacity overflow");
+    compiled_same_cache_rehash(
+      Compiled_same_cache_bucket_capacity * 2);
+    bucket = (unsigned) hash & (Compiled_same_cache_bucket_capacity - 1);
+  }
+  if (Compiled_same_cache_count == Compiled_same_cache_capacity) {
+    unsigned old = Compiled_same_cache_capacity;
+    unsigned capacity = old == 0 ? 64 : old * 2;
+    if (capacity <= old)
+      fatal_error("compiled SAME cache entry capacity overflow");
+    Compiled_same_cache_entries = safe_realloc(
+      Compiled_same_cache_entries,
+      (size_t) capacity * sizeof(*Compiled_same_cache_entries));
+    Compiled_same_cache_capacity = capacity;
+  }
+  {
+    struct compiled_same_cache_entry *entry =
+      Compiled_same_cache_entries + Compiled_same_cache_count;
+    memset(entry, 0, sizeof(*entry));
+    entry->hash = hash;
+    entry->first_offset = compiled_same_cache_copy_path(
+      first, first_length);
+    entry->first_length = first_length;
+    entry->second_offset = compiled_same_cache_copy_path(
+      second, second_length);
+    entry->second_length = second_length;
+    entry->next = Compiled_same_cache_buckets[bucket];
+    Compiled_same_cache_buckets[bucket] = ++Compiled_same_cache_count;
+    return entry;
+  }
+}
+
+static int compiled_same_cache_compare(
+  const struct compiled_same_cache_entry *entry, uint32_t root)
+{
+  return hint_term_table_compare_paths(
+    Compiled_term_table, root,
+    entry->first_length == 0 ? NULL :
+      Compiled_same_cache_paths + entry->first_offset,
+    entry->first_length,
+    entry->second_length == 0 ? NULL :
+      Compiled_same_cache_paths + entry->second_offset,
+    entry->second_length);
+}
+
+static void compiled_same_cache_build(
+  struct compiled_same_cache_entry *entry)
+{
+  unsigned entry_id =
+    (unsigned) (entry - Compiled_same_cache_entries) + 1;
+  unsigned id;
+  struct hint_dense_view view;
+  for (id = 1; id < Packed_hint_capacity; id++) {
+    uint32_t root = hint_term_table_root(Compiled_term_table, id);
+    if (root != 0) {
+      Compiled_same_cache_build_scans++;
+      if (compiled_same_cache_compare(entry, root) == 1) {
+        hint_postings_add(Compiled_same_cache_postings, entry_id, id);
+        if (entry->match_count != UINT_MAX)
+          entry->match_count++;
+        Compiled_same_cache_build_matches++;
+      }
+    }
+  }
+  entry->built = 1;
+  Compiled_same_cache_builds++;
+  if (entry->match_count != 0 &&
+      !hint_postings_dense_view(
+        Compiled_same_cache_postings, entry_id, Packed_hint_capacity,
+        TRUE, &view))
+    Compiled_same_cache_dense_denials++;
+}
+
+static BOOL compiled_same_cache_filter(
+  struct compiled_same_cache_entry *entry)
+{
+  unsigned entry_id =
+    (unsigned) (entry - Compiled_same_cache_entries) + 1;
+  struct hint_dense_view view;
+  unsigned before = Packed_candidates_count;
+  unsigned i, keep = 0;
+  if (entry->match_count != 0 &&
+      !hint_postings_dense_view(
+        Compiled_same_cache_postings, entry_id, Packed_hint_capacity,
+        !Hint_preview_active, &view)) {
+    if (!Hint_preview_active)
+      Compiled_same_cache_dense_denials++;
+    return FALSE;
+  }
+  for (i = 0; i < before; i++) {
+    unsigned id = Packed_candidates[i];
+    uint32_t root = hint_term_table_root(Compiled_term_table, id);
+    if (root == 0 ||
+        (entry->match_count != 0 && id / 64 < view.words &&
+         (view.bits[id / 64] & (1ULL << (id % 64))) != 0))
+      Packed_candidates[keep++] = id;
+  }
+  Packed_candidates_count = keep;
+  if (!Hint_preview_active) {
+    Compiled_same_cache_hits++;
+    Compiled_same_cache_filter_candidates += before;
+    Compiled_same_cache_filter_rejects += before - keep;
+  }
+  return TRUE;
+}
+
+static void compiled_same_cache_index_hint(unsigned id)
+{
+  uint32_t root;
+  unsigned i;
+  if (!Compiled_same_cache_ready || Compiled_same_cache_postings == NULL)
+    return;
+  root = hint_term_table_root(Compiled_term_table, id);
+  if (root == 0)
+    return;
+  for (i = 0; i < Compiled_same_cache_count; i++) {
+    struct compiled_same_cache_entry *entry =
+      Compiled_same_cache_entries + i;
+    if (entry->built && compiled_same_cache_compare(entry, root) == 1) {
+      hint_postings_add(Compiled_same_cache_postings, i + 1, id);
+      if (entry->match_count != UINT_MAX)
+        entry->match_count++;
+    }
+  }
+}
+
 static void compiled_path_collect_query(Term t, BOOL sign,
                                         unsigned long long path,
                                         unsigned depth)
@@ -3572,6 +3918,8 @@ static void compiled_same_filter_candidates(void)
   unsigned long long candidate_tests = 0;
   unsigned long long navigation_rejects = 0;
   unsigned long long unequal_rejects = 0;
+  struct compiled_same_cache_entry *cache_entry = NULL;
+  BOOL account = !Hint_preview_active;
 
   if (Compiled_same_test_count == 0 || before == 0)
     return;
@@ -3585,9 +3933,28 @@ static void compiled_same_filter_candidates(void)
   compiled_plan_sort_same_tests();
   /* One cheap equality condition captures the dominant rejection without
      recreating the full matcher as a sequence of root-to-path walks.  The
-     authoritative handle matcher confirms every survivor and checks all
+     authoritative compressed matcher confirms every survivor and checks all
      remaining repeated occurrences. */
   Compiled_same_test_count = 1;
+  if (Compiled_same_cache_ready) {
+    cache_entry = compiled_same_cache_lookup(
+      Compiled_same_tests, account);
+    if (account) {
+      Compiled_same_cache_lookups++;
+      if (cache_entry != NULL)
+        cache_entry->queries++;
+    }
+    if (cache_entry != NULL && cache_entry->built &&
+        compiled_same_cache_filter(cache_entry)) {
+      if (account) {
+        Compiled_same_queries++;
+        Compiled_same_query_tests++;
+        Compiled_same_candidates_before += before;
+        Compiled_same_candidates_after += Packed_candidates_count;
+      }
+      return;
+    }
+  }
   for (i = 0; i < before; i++) {
     unsigned id = Packed_candidates[i];
     uint32_t root = hint_term_table_root(Compiled_term_table, id);
@@ -3622,7 +3989,7 @@ static void compiled_same_filter_candidates(void)
       Packed_candidates[keep++] = id;
   }
   Packed_candidates_count = keep;
-  if (!Hint_preview_active) {
+  if (account) {
     Compiled_same_queries++;
     Compiled_same_query_tests += Compiled_same_test_count;
     Compiled_same_candidates_before += before;
@@ -3630,6 +3997,18 @@ static void compiled_same_filter_candidates(void)
     Compiled_same_candidate_tests += candidate_tests;
     Compiled_same_navigation_rejects += navigation_rejects;
     Compiled_same_unequal_rejects += unequal_rejects;
+    if (cache_entry != NULL) {
+      if (ULLONG_MAX - cache_entry->candidate_work < candidate_tests)
+        cache_entry->candidate_work = ULLONG_MAX;
+      else
+        cache_entry->candidate_work += candidate_tests;
+      if (!cache_entry->built && Active_hints_count > 0 &&
+          cache_entry->queries >= 2 &&
+          cache_entry->candidate_work >=
+            (unsigned long long) Active_hints_count *
+              Compiled_same_cache_build_factor)
+        compiled_same_cache_build(cache_entry);
+    }
   }
 }
 
@@ -4180,6 +4559,7 @@ void index_hint(Topform c)
               c->literals->atom))
           fatal_error("index_hint: cannot add compiled unit-hint term");
         compiled_path_index_hint(c);
+        compiled_same_cache_index_hint((unsigned) c->id);
       }
       if (compress_clause(c) == CLAUSE_COMPRESS_INVALID)
         fatal_error("index_hint: cannot compact active packed hint");
@@ -4773,6 +5153,12 @@ void set_hint_compiled_min_candidates(unsigned minimum)
 }
 
 /* PUBLIC */
+void set_hint_compiled_cache_build_factor(unsigned factor)
+{
+  Compiled_same_cache_build_factor = factor;
+}
+
+/* PUBLIC */
 void set_hint_compiled_authoritative(BOOL on)
 {
   if (on && Compiled_term_table == NULL)
@@ -4970,6 +5356,20 @@ void packed_hint_index_stats(unsigned long long *node_bytes,
       (unsigned long long) Packed_hint_capacity * sizeof(unsigned) +
       (unsigned long long) Compiled_path_key_capacity *
         sizeof(*Compiled_path_key_scratch);
+  }
+  if (Compiled_same_cache_postings != NULL) {
+    struct hint_postings_stats cache_stats;
+    hint_postings_get_stats(Compiled_same_cache_postings, &cache_stats);
+    *node_bytes += cache_stats.table_bytes;
+    *reference_bytes += cache_stats.reference_bytes +
+      cache_stats.dense_bit_bytes + cache_stats.dense_summary_bytes;
+    *table_bytes +=
+      (unsigned long long) Compiled_same_cache_capacity *
+        sizeof(*Compiled_same_cache_entries) +
+      (unsigned long long) Compiled_same_cache_bucket_capacity *
+        sizeof(*Compiled_same_cache_buckets) +
+      (unsigned long long) Compiled_same_cache_path_capacity *
+        sizeof(*Compiled_same_cache_paths);
   }
 }
 
@@ -5222,6 +5622,64 @@ void fprint_packed_hint_operation_stats(FILE *fp)
               sizeof(*Compiled_plan_paths),
             (unsigned long long) Compiled_same_test_capacity *
               sizeof(*Compiled_same_tests));
+  }
+  if (Compiled_filter_enabled) {
+    struct hint_postings_stats s;
+    unsigned i, built = 0;
+    unsigned long long observed_queries = 0;
+    unsigned long long observed_work = 0;
+    unsigned long long maximum_queries = 0;
+    unsigned long long maximum_work = 0;
+    hint_postings_get_stats(Compiled_same_cache_postings, &s);
+    for (i = 0; i < Compiled_same_cache_count; i++) {
+      struct compiled_same_cache_entry *entry =
+        Compiled_same_cache_entries + i;
+      if (entry->built)
+        built++;
+      if (ULLONG_MAX - observed_queries < entry->queries)
+        observed_queries = ULLONG_MAX;
+      else
+        observed_queries += entry->queries;
+      if (ULLONG_MAX - observed_work < entry->candidate_work)
+        observed_work = ULLONG_MAX;
+      else
+        observed_work += entry->candidate_work;
+      if (entry->queries > maximum_queries)
+        maximum_queries = entry->queries;
+      if (entry->candidate_work > maximum_work)
+        maximum_work = entry->candidate_work;
+    }
+    fprintf(fp,
+            "Compiled_hint_same_cache: ready=%d, entries=%u, built=%u, "
+            "build_factor=%u, lookups=%llu, observed_queries=%llu, "
+            "observed_candidate_work=%llu, maximum_queries=%llu, "
+            "maximum_candidate_work=%llu, cache_hits=%llu, builds=%llu, "
+            "build_scans=%llu, build_matches=%llu, "
+            "filter_candidates=%llu, filter_rejects=%llu, "
+            "posting_keys=%llu, posting_references=%llu, "
+            "posting_table_bytes=%llu, posting_reference_bytes=%llu, "
+            "dense_keys=%llu, dense_bit_bytes=%llu, "
+            "dense_summary_bytes=%llu, dense_budget_bytes=%llu, "
+            "dense_denials=%llu, entry_bytes=%llu, bucket_bytes=%llu, "
+            "path_bytes=%llu.\n",
+            Compiled_same_cache_ready, Compiled_same_cache_count, built,
+            Compiled_same_cache_build_factor,
+            Compiled_same_cache_lookups, observed_queries, observed_work,
+            maximum_queries, maximum_work,
+            Compiled_same_cache_hits, Compiled_same_cache_builds,
+            Compiled_same_cache_build_scans,
+            Compiled_same_cache_build_matches,
+            Compiled_same_cache_filter_candidates,
+            Compiled_same_cache_filter_rejects,
+            s.keys, s.references, s.table_bytes, s.reference_bytes,
+            s.dense_keys, s.dense_bit_bytes, s.dense_summary_bytes,
+            s.dense_budget_bytes, Compiled_same_cache_dense_denials,
+            (unsigned long long) Compiled_same_cache_capacity *
+              sizeof(*Compiled_same_cache_entries),
+            (unsigned long long) Compiled_same_cache_bucket_capacity *
+              sizeof(*Compiled_same_cache_buckets),
+            (unsigned long long) Compiled_same_cache_path_capacity *
+              sizeof(*Compiled_same_cache_paths));
   }
   fprintf(fp,
           "Packed_hint_preview_workspace: initialized=%d, bytes=%llu.\n",

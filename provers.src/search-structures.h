@@ -287,6 +287,7 @@ struct prover_options {
     hint_cache_kb,         // packed-fast exact profile cache byte budget
     hint_cache_min_candidates, // minimum posting work admitted to cache
     hint_compiled_min_candidates, // minimum IDs for compiled SAME pretest
+    hint_compiled_cache_build_factor, // work/live ratio before SAME bitset
     hint_conjunction_kb,   // packed-fast subset-conjunction resident cap
     hint_rebuild_scan_ratio, // stale scans/live index before posting rebuild
     rewrite_refresh_hot_ratio, // hinted refresh turns per fair general turn
