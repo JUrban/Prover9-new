@@ -13,8 +13,8 @@ assign(hint_index,packed_fast).
 ```
 
 Use `packed_compiled` only for bounded experiments.  It now removes a large
-amount of repeated-variable candidate work, but it has not yet passed the
-whole-CPU promotion gate.  The current mode is safe: its new structures can
+amount of repeated-variable and deep fixed-symbol candidate work, but it has
+not yet passed the whole-CPU promotion gate.  The current mode is safe: its new structures can
 only reject candidates that fail a necessary condition, and the established
 compressed matcher still chooses and returns the hint.
 
@@ -74,11 +74,28 @@ The direct pretest is skipped when the packed candidate population is below
 `hint_compiled_min_candidates`, which defaults to 128.  This protects small
 queries where another pass over the IDs is unlikely to pay.
 
+### Demand-learned fixed symbols and mixed programs
+
+For an admitted query, the compiler also records at most 32 fixed symbols
+below the depth already covered exactly by `packed_fast`.  It tests at most
+eight evenly spaced candidates per position, chooses one condition predicted
+to reject at least 25%, and performs only that one full direct pass.  Thus the
+policy learns `RIGID(child route,symbol)` conditions from actual search work;
+it does not rebuild the rejected all-path sidecar.
+
+Previously learned SAME and RIGID conditions are ordered by measured
+selectivity and compiled into a program of at most eight dense stable-ID
+sets.  A multi-condition program intersects 64 IDs at a time in reusable
+scratch, then preserves the original candidate-vector order for the exact
+compressed matcher.  If the scratch cannot fit, it falls back to bounded
+per-candidate bit membership tests.  Scratch and persistent dense sets share
+one hard cache budget.
+
 ### Adaptive collective cache
 
-Long searches often generate the same repeated-position condition many
-times.  The matcher learns an exact unordered pair of child routes.  It first
-checks candidates directly and counts that work.  Once one route pair has:
+Long searches often generate the same structural condition many times.  The
+matcher learns exact SAME route pairs and RIGID route/symbol keys.  It first
+checks candidates directly and counts that work.  Once one condition has:
 
 - been observed at least twice; and
 - accumulated at least `active hints × hint_compiled_cache_build_factor`
@@ -90,22 +107,36 @@ until the measured direct work is large enough to repay two bank scans.
 Later queries filter candidate IDs by bit lookup instead of repeatedly walking
 the retained terms.
 
-The dense-bit payload has a hard aggregate budget, controlled by
-`hint_compiled_cache_kb` and defaulting to 32768 KiB.  It stores no duplicate
-sparse ID lists.  Metadata is separately capped at 4,096 learned route pairs
+The dense-bit payload and word-intersection scratch have a hard aggregate
+budget, controlled by `hint_compiled_cache_kb` and defaulting to 32768 KiB.
+It stores no duplicate sparse ID lists.  Metadata is separately capped at
+4,096 learned conditions
 and 262,144 stored route words (1 MiB of route storage).  If a bitset or a
 later matching hint cannot fit, or either metadata ceiling is reached, that
-route pair falls back to direct exact-handle checking.  A partial set is never
+condition falls back to direct exact-handle checking.  A partial set is never
 used.
 
 Lifecycle behavior is conservative:
 
 - a removed or rewritten hint may leave a stale positive bit, but the active
   check and compressed matcher reject it;
-- a new or reinserted hint is checked against every already-built route pair,
+- a new or reinserted hint is checked against every already-built condition,
   preventing a false negative; and
 - preview queries read existing cache state but neither train it nor change
   accounting.
+
+### Demand-built canonical bank experiment
+
+`packed_compiled_lazy` leaves the canonical table empty while input hints are
+loaded.  An admitted broad query resolves a retained target directly from the
+existing compressed preorder byte stream, without allocating a temporary
+term or recompressing the clause.  Missing roots are conservative fallbacks.
+If a learned bitset earns a full-bank scan, the completed base is sealed and
+its construction hash/scratch is released; later rewrites use the delta.
+
+This is an explicit experiment, not a new default.  It helps when the search
+touches only part of the bank, but it is slower when most hints are eventually
+decoded.  The measurements below demonstrate both cases.
 
 ### Rejected deep-path sidecar
 
@@ -128,6 +159,9 @@ assign(hint_index,packed_compiled_shadow).
 
 % Experimental repeated-variable prefilter, compressed final authority:
 assign(hint_index,packed_compiled).
+
+% Experimental demand-built form of the same prefilter:
+assign(hint_index,packed_compiled_lazy).
 
 % Negative deep-path experiment; normally do not use:
 assign(hint_index,packed_compiled_paths).
@@ -158,6 +192,10 @@ The shutdown statistics contain:
   lifecycle counts, and handle-matcher work;
 - `Compiled_hint_same_filter`: admitted queries, candidates before/after,
   direct handle comparisons, and admission skips; and
+- `Compiled_hint_rigid_filter`: sampled fixed positions, admitted scans, and
+  exact fixed-symbol rejections;
+- `Compiled_hint_program`: dense instructions combined, word operations,
+  fallback membership tests, and jointly budgeted scratch; and
 - `Compiled_hint_same_cache`: learned route pairs, hottest pair, builds,
   scans, hits, rejections, denials, and exact allocated/budgeted bytes.
 
@@ -190,33 +228,47 @@ index over every path.
 
 ### Current structural pruning
 
-On admitted repeated-variable queries:
+On the latest corrected bounded runs:
 
-| Problem/boundary | Queries | Candidates before | Candidates after | Rejected |
-|---|---:|---:|---:|---:|
-| CHAT/100 | 113 | 66,696 | 3,735 | 62,961 |
-| Osborn/100 | 414 | 355,671 | 103,762 | 251,909 |
+| Problem/boundary | Condition | Queries | Candidates before | Candidates after | Rejected |
+|---|---|---:|---:|---:|---:|
+| CHAT/100 | SAME | 128 | 72,319 | 4,586 | 67,733 |
+| CHAT/100 | RIGID | 0 | 0 | 0 | 0 |
+| Osborn/100 | SAME | 397 | 344,018 | 94,077 | 249,941 |
+| Osborn/100 | RIGID | 63 | 9,632 | 6,192 | 3,440 |
+| Josef 01/300 | SAME | 970 | 966,789 | 95,899 | 870,890 |
+| Josef 01/300 | RIGID | 56 | 24,701 | 5,152 | 19,549 |
+| Josef 02/300 | SAME | 626 | 299,127 | 85,279 | 213,848 |
+| Josef 02/300 | RIGID | 18 | 2,955 | 943 | 2,012 |
 
-The reported compressed exact attempts fell from 77,227 to 14,468 on the
-CHAT prefix and from 253,561 to 93,973 on Osborn.  These counters are the
-strong result: the prefilter is removing the intended work.
+Earlier SAME-only measurements reduced compressed exact attempts from 77,227
+to 14,468 on the CHAT prefix and from 253,561 to 93,973 on Osborn.  These
+counters are the strong result: the prefilter is removing the intended work.
 
-The 100-given Osborn adaptive-cache run observed 27 distinct route pairs and
-351,914 direct candidate comparisons in total, but built none.  That is
-expected: repayment is decided per exact route pair, not from the misleading
-sum over unrelated pairs.  Longer runs will report `maximum_queries` and
+The 100-given Osborn adaptive-cache run observed 37 condition keys and
+349,898 direct candidate comparisons in total, but built none.  That is
+expected: repayment is decided per exact condition, not from the misleading
+sum over unrelated conditions.  Longer runs will report `maximum_queries` and
 `maximum_candidate_work`, showing whether one pair approaches construction.
 
 ### CPU and RAM
 
-Short-prefix wall/CPU measurements remain noisy and are not a promotion case:
+Short-prefix wall/CPU measurements remain noisy and are not a promotion case.
+The latest adjacent or same-build observations are:
 
-- one adjacent CHAT/100 pair favored `packed_compiled` (15.43 versus 17.24
-  user seconds), while another gated measurement regressed;
-- the pinned Osborn/100 control used 22.24 user seconds, whereas current
-  compiled variants used about 25.3--25.9 seconds;
-- on that Osborn prefix, roughly 2.6--3.3 seconds of the regression was table
-  construction/startup, and search CPU was also slightly worse.
+- corrected eager Osborn/100 used 26.01 user seconds; lazy used 24.59 with
+  identical match candidates and positives;
+- eager Josef 01/300 used 14.19 user seconds; direct-stream lazy used 17.56,
+  because all 96,225 retained unit hints were eventually needed;
+- eager Josef 02/300 used 13.87 user seconds; and
+- CHAT/100 used 17.76 user seconds, but hint matching itself remained too
+  small a CPU fraction to establish a promotion.
+
+On Osborn, lazy constructed 103,171 of 248,809 cumulative canonical
+additions and used 15.2 MiB for the term table versus eager's 20.0 MiB.  Both
+processes were about 301 MiB RSS because other structures dominate.  On
+Josef 01 the lazy scan built the complete 6.5 MiB table and raised total time;
+this rejects lazy construction as a universal policy.
 
 A follow-up pre-sizing experiment reduced the immutable-base hash from ten
 geometric builds to one, but the raw hint count selected 2,097,152 slots for
@@ -250,7 +302,9 @@ test.src/hint_preview_test
 Coverage includes exact trace agreement with the established index modes,
 positive/negative units, equations/disequations, `_AnyConst`, equality
 flipping, preview isolation, match-once and expiry lifecycle, late additions,
-stale removals, forced cache construction, and zero-budget fallback.
+stale removals, forced cache construction, mixed SAME/RIGID word programs,
+zero-budget fallback, lazy byte-stream construction, and the case where an
+invalid SAME route precedes a later valid candidate.
 
 Bounded experiments were run one memory-relevant process at a time with a
 2-GiB address-space cap.  The machine had old pages in swap but no active
@@ -258,25 +312,20 @@ swap-in/swap-out during the checks.
 
 ## Next implementation work
 
-The next step should not be another threshold sweep.  It should complete the
-collective program promised by the plan:
+The set-at-a-time foundation is now implemented.  The next work is gated
+rather than open-ended threshold tuning:
 
-1. **Remove avoidable construction cost.** Equivalent input hints are already
-   rejected before canonical insertion, and raw-count pre-sizing failed.
-   Either bulk-build from an exact retained population or construct canonical
-   roots on demand, so short runs do not pay for the full bank.
-2. **Learn selective fixed-symbol tests.** Within one sign/root population,
-   observe useful fixed child routes and build only those whose measured
-   candidate work repays a bounded bitset.  Do not restore the eager all-path
-   sidecar.
-3. **Compile a short query program.** Combine a few independent fixed-symbol
-   bitsets with one or more repeated-subterm conditions, ordered by measured
-   selectivity.  Share programs for identical query shapes.
-4. **Filter set-at-a-time.** Intersect machine-word blocks first, then run the
-   exact compressed matcher only on surviving stable IDs.  This is the
-   Waldmeister-like part: one compact program acts on a population instead of
-   walking one pointer-rich term tree per candidate.
-5. **Freeze before long gates.** After bounded CHAT/Osborn/Josef tests pass,
+1. **Measure program maturity.** Run eager `packed_compiled` at 1,000 givens
+   on Josef 01/02 and a larger CHAT/Osborn boundary.  Record how often two or
+   more conditions actually coexist; a correct multi-program that is never
+   reused is not a speedup.
+2. **Instrument interval cost.** Report root construction, direct tests,
+   dense builds, program widths, and exact-match CPU per interval so a long
+   run cannot hide a rising per-query slope.
+3. **Keep lazy experimental.** Do not promote it unless retained-bank
+   coverage can be predicted cheaply; current evidence is positive on
+   Osborn and negative on Josef 01.
+4. **Freeze before long gates.** After the 1,000-given gates pass,
    freeze thresholds and use ar-2 for Josef 04 at 1,000 and 3,000 givens,
    without hint dumping.  Record startup CPU, search CPU, RSS, cache builds,
    and interval cost slopes.

@@ -22,15 +22,16 @@ The next project should build a compiled, set-at-a-time instance matcher that
 can skip entire subterms and choose its tests by selectivity.  This is a
 different architecture, not a faster version of the present traversal.
 
-> Implementation update (2026-08-24): Phase 0 and the compact term-table part
-> of Phase 1 are complete.  `packed_compiled` now applies one selected
-> repeated-variable equality test before the established compressed matcher.
-> A repeated child-route pair is promoted to a dense stable-ID set only after
-> its measured direct work can repay construction.  Exact matching remains
-> the final authority.  A broad deep-path posting experiment was not
-> worthwhile and is isolated in `packed_compiled_paths`; it is not part of the
-> proposed production route.  Structural pruning is large, but bounded
-> whole-run CPU is not yet a promotable win.  See
+> Implementation update (2026-08-24): Phases 0 and 1 and the structural part
+> of Phase 2 are complete.  `packed_compiled` learns exact repeated-subterm
+> and selective deep fixed-symbol conditions, promotes only conditions whose
+> measured work can repay a dense stable-ID set, and intersects up to eight
+> learned sets 64 IDs at a time.  The established compressed matcher remains
+> the final authority.  The eager all-path experiment was not worthwhile and
+> is isolated in `packed_compiled_paths`.  A demand-built canonical-bank mode,
+> `packed_compiled_lazy`, saves construction on Osborn but loses when a search
+> eventually touches most hints, so it too remains diagnostic.  Structural
+> pruning is large, but bounded whole-run CPU is not yet a promotable win. See
 > [P9-COMPILED-HINT-MATCHER-REPORT.md](P9-COMPILED-HINT-MATCHER-REPORT.md).
 
 ## A terminology correction
@@ -106,12 +107,15 @@ go into a small mutable delta.  This provides:
 
 Handles are exact, not hashes, so equality has no collision case.  Stable-ID
 tombstones preserve safe deletion.  Equivalent input hints are rejected
-before they enter this table.  The current construction issue is instead the
-cost of incrementally hashing every subterm of the large retained bank.  Phase
-2 must bulk-build or construct that state lazily, or enable it only when the
-expected search is long enough to repay startup.  Pre-sizing from the raw
-input-hint count has been measured and rejected: it overestimated Osborn's
-hash by one power of two and was slower despite eliminating nine rebuilds.
+before they enter this table.  The startup cost of incrementally hashing every
+subterm of the large retained bank remains relevant.  `packed_compiled_lazy`
+now constructs canonical roots directly from the retained compressed byte
+streams as queries demand them, without materializing temporary terms.  This
+reduces construction on Osborn, but a Josef 01 prefix needed every retained
+unit and made the lazy mode slower.  It is therefore an explicit experiment,
+not a universal replacement.  Pre-sizing from the raw input-hint count was
+also measured and rejected: it overestimated Osborn's hash by one power of
+two and was slower despite eliminating nine rebuilds.
 
 ### 3. Compile each generated unit into a short matching program
 
@@ -216,7 +220,7 @@ gate and remains available only as `packed_compiled_paths` for diagnosis.
 
 ### Phase 2: compiled multi-test query plans
 
-Status: **in progress.**
+Status: **structural implementation complete; performance gate pending.**
 
 Add rarity-ordered posting intersections and repeated-variable `BIND/SAME`
 instructions.  Keep allocations out of the query loop and report instructions
@@ -226,20 +230,30 @@ Implemented so far:
 
 - discover all repeated generated variables without allocating in the hot
   loop;
-- select the cheapest one by the two child-route lengths;
+- retain all valid repeated-variable conditions and order them by measured
+  selectivity;
 - compare canonical subterm handles while sharing their common route prefix;
 - skip the pretest below `hint_compiled_min_candidates` (default 128);
-- learn exact child-route pairs during search and, after enough direct work,
-  scan the live hint bank once to build a dense stable-ID membership set;
-- hard-bound those sets to 32 MiB by default and cap learned route metadata at
-  4,096 pairs and 262,144 route words;
+- sample at most 32 deep fixed-symbol conditions per admitted query, perform a
+  full direct pass only when the best sample predicts at least 25% rejection,
+  and avoid duplicating the exact depth-2 filtering already in `packed_fast`;
+- learn exact repeated-subterm and fixed-symbol conditions during search and,
+  after enough direct work, scan the live hint bank once to build a dense
+  stable-ID membership set;
+- compile up to eight learned conditions into one query program and intersect
+  the dense sets word at a time in reusable scratch, with a bounded
+  per-candidate fallback when scratch cannot fit;
+- hard-bound dense sets and intersection scratch jointly to 32 MiB by default,
+  while separately capping learned metadata at 4,096 conditions and 262,144
+  route words;
 - keep additions complete and removals conservative across rewriting; and
 - retain the compressed matcher as final authority for every survivor.
 
-The next part is a genuinely collective plan: choose rare fixed-symbol tests
-within each sign/root population, combine them with learned repeated-subterm
-sets, and cache the resulting short program by exact query shape.  It must
-avoid the rejected policy of eagerly indexing every deep path.
+The next step is measurement rather than another speculative index: determine
+at 1,000-given boundaries how often several learned conditions coexist, how
+often the word-wise executor is reused, and whether total matcher CPU—not
+only candidate count—improves.  Exact-query-shape program caching is deferred
+until those counters show that reconstructing the small plan is material.
 
 Gate: identical traces and proof objects; at least 2x hint-matching CPU
 improvement on two structurally different training problems; no more than 5%
@@ -259,7 +273,9 @@ assign(hint_index,packed_compiled).
 
 The canonical base/delta table, stable-ID tombstones, late additions,
 back-demodulated reinsertion, preview isolation, `_AnyConst` fallback, and
-equality-flip trace coverage exist.  Despite the option name, the compiled
+equality-flip trace coverage exist.  Mixed repeated-subterm/fixed-symbol
+programs and the demand-built bank have matching trace coverage as well.
+Despite the option name, the compiled
 structure is currently a conservative prefilter.  It is not allowed to choose
 the returned hint; the compressed matcher still does that.  This is deliberate
 until the Phase-2 CPU gate is passed.
