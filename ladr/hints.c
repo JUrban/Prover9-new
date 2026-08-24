@@ -1736,6 +1736,7 @@ static void better_intersect_scratch_candidates(
 {
   unsigned i, j;
   unsigned keys_to_scan;
+  unsigned ordinary_seed = 0;
   unsigned long long required_fingerprint;
   if (Better_key_scratch_count == 0)
     return;
@@ -1750,25 +1751,45 @@ static void better_intersect_scratch_candidates(
                  1;
   required_fingerprint = all_features ? 0 : better_match_fingerprint();
 
-  /* Put posting keys in increasing raw-count order.  Stale entries can only
-     make a posting appear less selective; they cannot remove an answer. */
-  for (i = 0; i < keys_to_scan; i++) {
-    unsigned best = i;
+  /* Ordinary matching reads only the rarest posting.  Remember its index
+     instead of moving it to the front of the shared feature vector: the
+     deterministic collection order is also the exact result-cache key.
+     Back-demodulation consumes every key and has no result-cache identity to
+     preserve, so retain its established increasing-count ordering.  Stale
+     entries can only make a posting appear less selective; they cannot
+     remove an answer. */
+  if (!all_features) {
     unsigned best_count = UINT_MAX;
-    for (j = i; j < Better_key_scratch_count; j++) {
+    for (j = 0; j < Better_key_scratch_count; j++) {
       unsigned count;
       hint_postings_get(Better_postings, Better_key_scratch[j], &count);
       if (count == 0)
         return;
       if (count < best_count) {
-        best = j;
+        ordinary_seed = j;
         best_count = count;
       }
     }
-    if (best != i) {
-      unsigned long long key = Better_key_scratch[i];
-      Better_key_scratch[i] = Better_key_scratch[best];
-      Better_key_scratch[best] = key;
+  }
+  else {
+    for (i = 0; i < keys_to_scan; i++) {
+      unsigned best = i;
+      unsigned best_count = UINT_MAX;
+      for (j = i; j < Better_key_scratch_count; j++) {
+        unsigned count;
+        hint_postings_get(Better_postings, Better_key_scratch[j], &count);
+        if (count == 0)
+          return;
+        if (count < best_count) {
+          best = j;
+          best_count = count;
+        }
+      }
+      if (best != i) {
+        unsigned long long key = Better_key_scratch[i];
+        Better_key_scratch[i] = Better_key_scratch[best];
+        Better_key_scratch[best] = key;
+      }
     }
   }
 
@@ -1782,8 +1803,10 @@ static void better_intersect_scratch_candidates(
   for (i = 0; i < keys_to_scan; i++) {
     unsigned count;
     const unsigned *ids;
+    unsigned key_index = all_features ? i : ordinary_seed;
     Packed_operation_stats[op].posting_lists++;
-    ids = hint_postings_get(Better_postings, Better_key_scratch[i], &count);
+    ids = hint_postings_get(
+      Better_postings, Better_key_scratch[key_index], &count);
     Better_match_serial++;
     if (Better_match_serial == 0) {
       memset(Better_intersection_match, 0,
@@ -1910,27 +1933,15 @@ static unsigned long long fast_profile_hash(
   return h ^ (h >> 31);
 }
 
-static int fast_key_order(const void *a, const void *b)
-{
-  unsigned long long x = *(const unsigned long long *) a;
-  unsigned long long y = *(const unsigned long long *) b;
-  return x < y ? -1 : x > y ? 1 : 0;
-}
-
 static BOOL fast_cache_profile(const unsigned long long **keys,
                                unsigned *key_count)
 {
   if (Fast_match_cache == NULL)
     return FALSE;
   *key_count = Better_key_scratch_count;
-  /* The complete conjunction path consumes the collection-order vector
-     without mutating it, so that deterministic order is already an exact
-     cache identity.  The fallback posting intersection selects rare keys by
-     reordering this shared vector; canonicalize only for that path so cache
-     stores and later lookups agree. */
-  if (Fast_conjunction_postings == NULL && *key_count > 1)
-    qsort(Better_key_scratch, *key_count,
-          sizeof(*Better_key_scratch), fast_key_order);
+  /* Feature collection order is deterministic and neither the conjunction
+     nor ordinary fallback path mutates it.  It is therefore an exact cache
+     identity without a per-query comparison sort. */
   *keys = Better_key_scratch;
   return TRUE;
 }
@@ -2875,13 +2886,6 @@ static void better_collect_clause_candidates(
   }
   Packed_candidates_count = keep;
   if (fast_eligible) {
-    /* The sparse fallback chooses a rare posting by reordering the scratch
-       keys after the lookup.  Restore its canonical identity before storing;
-       otherwise every later lookup sorts the same profile but cannot hit the
-       permuted entry.  Conjunction collection never mutates the keys. */
-    if (Fast_conjunction_postings == NULL && fast_key_count > 1)
-      qsort(Better_key_scratch, fast_key_count,
-            sizeof(*Better_key_scratch), fast_key_order);
     fast_cache_store(
       fast_keys, fast_key_count, first_mask, positive, negative,
       Packed_operation_stats[op].posting_candidates -
