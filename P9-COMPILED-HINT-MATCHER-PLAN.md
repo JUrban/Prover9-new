@@ -22,12 +22,15 @@ The next project should build a compiled, set-at-a-time instance matcher that
 can skip entire subterms and choose its tests by selectivity.  This is a
 different architecture, not a faster version of the present traversal.
 
-> Implementation update (2026-08-24): Phase 0 is implemented and passes its
-> stop/go gate on bounded CHAT, Osborn, Josef 01, and Josef 02 measurements.
-> Fixed-symbol and repeated-variable conditions reject 89.95--99.57% of
-> profiled unit candidates.  They account for about 2.90 seconds of a
-> 5.76-second Osborn search phase and 1.00 second of a 4.07-second Josef 01
-> search phase.  Retained subterm sharing is 8.27--9.51×.  See
+> Implementation update (2026-08-24): Phase 0 and the compact term-table part
+> of Phase 1 are complete.  `packed_compiled` now applies one selected
+> repeated-variable equality test before the established compressed matcher.
+> A repeated child-route pair is promoted to a dense stable-ID set only after
+> its measured direct work can repay construction.  Exact matching remains
+> the final authority.  A broad deep-path posting experiment was not
+> worthwhile and is isolated in `packed_compiled_paths`; it is not part of the
+> proposed production route.  Structural pruning is large, but bounded
+> whole-run CPU is not yet a promotable win.  See
 > [P9-COMPILED-HINT-MATCHER-REPORT.md](P9-COMPILED-HINT-MATCHER-REPORT.md).
 
 ## A terminology correction
@@ -85,27 +88,28 @@ proper-subsumee preference, match-once behavior, equality flipping,
 
 ### 2. Store retained hint atoms in a compact immutable term table
 
-Build this table only after Prover9 has discarded redundant input hints.  Do
-not size it from Josef 04's 1.81 million input formulas when only about 846,000
-remain active.
+Build the permanent form only after Prover9 has discarded redundant input
+hints.  Do not size it from Josef 04's 1.81 million input formulas when only
+about 846,000 remain active.
 
-For each flattened symbol position store compact arrays containing:
+The implemented table interns subterms into 12-byte canonical nodes with
+children held as flat 32-bit handles.  Each ordinary unit hint has one root
+handle and sign.  During input it uses a mutable hash table; finalization
+freezes that base and releases the construction hash.  Later rewritten hints
+go into a small mutable delta.  This provides:
 
-- the symbol or normalized stored-variable number;
-- the position immediately after the complete subterm;
-- a 64-bit structural fingerprint;
-- optionally a canonical 32-bit subterm ID when measured sharing justifies
-  interning; and
-- the owning stable hint ID at term boundaries.
+- normalized stored variables and symbol/arity in canonical nodes;
+- constant-time skipping through a whole subterm by following one handle;
+- one 32-bit equality comparison for shared subterms;
+- stable hint-ID roots and signs; and
+- base/delta lifecycle support for back-demodulation and reinsertion.
 
-The end position makes `skip-subterm` constant time.  A subterm ID makes most
-`same-subterm` tests one integer comparison.  With fingerprints, equality is
-confirmed by an exact compact-token comparison before a candidate is
-accepted, so collisions cannot change semantics.
-
-Use immutable geometrically sized arrays plus a small mutable delta for
-back-demodulated/reinserted hints.  Stable-ID tombstones and measured stale
-rebuilds preserve lifecycle behavior without pointer-rich per-hint nodes.
+Handles are exact, not hashes, so equality has no collision case.  Stable-ID
+tombstones preserve safe deletion.  Equivalent input hints are rejected
+before they enter this table.  The current construction issue is instead the
+cost of incrementally hashing every subterm of the large retained bank.  Phase
+2 must bulk-build or pre-size that state more cheaply, or enable it only when
+the expected search is long enough to repay startup.
 
 ### 3. Compile each generated unit into a short matching program
 
@@ -172,6 +176,8 @@ large held-out CPU gate.
 
 ### Phase 0: measure what an ideal matcher could save
 
+Status: **complete; gate passed.**
+
 Add read-only interval counters to `packed_fast`:
 
 - candidates after each existing filter;
@@ -189,6 +195,8 @@ stop before allocating a new index.
 
 ### Phase 1: compact term table and one rare-path posting
 
+Status: **term table complete; broad deep-path posting rejected.**
+
 Implement subterm end positions and fingerprints, then one selected rigid-path
 posting per root group.  Run in shadow and compare the complete ordered ID
 stream with `packed_fast`.
@@ -197,17 +205,47 @@ Gate: zero semantic differences; incremental index memory below 128 MiB on
 the retained Josef 04 bank, or below 15% of packed hint storage on smaller
 problems; at least 4x fewer exact candidate checks on a training problem.
 
+The canonical table passes unit and lifecycle tests and exact trace
+comparisons.  It achieves the intended sharing and small memory footprint.
+The depth-3--6 posting sidecar removed only about 13 additional candidates on
+the measured Osborn prefix after the repeated-variable test, while adding
+roughly 10 MiB and startup work.  It therefore fails the CPU/value part of the
+gate and remains available only as `packed_compiled_paths` for diagnosis.
+
 ### Phase 2: compiled multi-test query plans
+
+Status: **in progress.**
 
 Add rarity-ordered posting intersections and repeated-variable `BIND/SAME`
 instructions.  Keep allocations out of the query loop and report instructions
 executed, IDs intersected, subterm comparisons, exact confirmations, and CPU.
+
+Implemented so far:
+
+- discover all repeated generated variables without allocating in the hot
+  loop;
+- select the cheapest one by the two child-route lengths;
+- compare canonical subterm handles while sharing their common route prefix;
+- skip the pretest below `hint_compiled_min_candidates` (default 128);
+- learn exact child-route pairs during search and, after enough direct work,
+  scan the live hint bank once to build a dense stable-ID membership set;
+- hard-bound those sets to 32 MiB by default and cap learned route metadata at
+  4,096 pairs and 262,144 route words;
+- keep additions complete and removals conservative across rewriting; and
+- retain the compressed matcher as final authority for every survivor.
+
+The next part is a genuinely collective plan: choose rare fixed-symbol tests
+within each sign/root population, combine them with learned repeated-subterm
+sets, and cache the resulting short program by exact query shape.  It must
+avoid the rejected policy of eagerly indexing every deep path.
 
 Gate: identical traces and proof objects; at least 2x hint-matching CPU
 improvement on two structurally different training problems; no more than 5%
 whole-run CPU regression on any training case.
 
 ### Phase 3: lifecycle and authoritative mode
+
+Status: **partly complete, but authority intentionally deferred.**
 
 Add delta segments, tombstones, back-demodulation reinsertion, stale rebuild,
 checkpoint reconstruction, `_AnyConst` merge tests, and equality-flip tests.
@@ -216,6 +254,13 @@ Then introduce an explicit option such as:
 ```text
 assign(hint_index,packed_compiled).
 ```
+
+The canonical base/delta table, stable-ID tombstones, late additions,
+back-demodulated reinsertion, preview isolation, `_AnyConst` fallback, and
+equality-flip trace coverage exist.  Despite the option name, the compiled
+structure is currently a conservative prefilter.  It is not allowed to choose
+the returned hint; the compressed matcher still does that.  This is deliberate
+until the Phase-2 CPU gate is passed.
 
 Gate: exact matching-hint checksum and given/generated/kept counters through
 bounded CHAT, Osborn, Josef 01, and Josef 02 comparisons.
