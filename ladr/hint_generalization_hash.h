@@ -76,6 +76,14 @@ BOOL hint_generalization_hash_lookup_unit_paramod(
   unsigned *term_nodes, BOOL *reflexive,
   unsigned long long *probes);
 
+/* Allocation-free, non-accounting lookup of an already materialized unit
+   equality in both side orders.  Used to distinguish virtual-walker errors
+   from later simplification changes. */
+BOOL hint_generalization_hash_preview_unit_equality(
+  Hint_generalization_hash table, Literals literal,
+  unsigned *normal_id, unsigned *flipped_id,
+  unsigned long long *probes);
+
 void hint_generalization_hash_get_stats(
   Hint_generalization_hash table, struct hint_generalization_hash_stats *stats);
 

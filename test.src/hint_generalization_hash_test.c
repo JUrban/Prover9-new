@@ -24,6 +24,58 @@ static unsigned lookup(Hint_generalization_hash table, const char *text)
   return id;
 }
 
+static void virtual_case(const char *from_text, int from_side,
+                         const char *into_text,
+                         const int *coordinates, unsigned coordinate_count,
+                         const char *expected_text, BOOL expected_reflexive,
+                         const char *message)
+{
+  Hint_generalization_hash table;
+  Topform from = clause(from_text);
+  Topform into = clause(into_text);
+  Topform expected = clause(expected_text);
+  Topform result;
+  Literals from_lit = from->literals;
+  Literals into_lit = into->literals;
+  Context cf = get_context();
+  Context ci = get_context();
+  Trail trail = NULL;
+  Ilist position = NULL, p;
+  Term target = into_lit->atom;
+  unsigned i, normal_id, flipped_id, nodes;
+  unsigned long long probes;
+  BOOL reflexive;
+
+  for (i = 0; i < coordinate_count; i++)
+    position = ilist_append(position, coordinates[i]);
+  for (p = position->next; p != NULL; p = p->next)
+    target = ARG(target, p->i - 1);
+  table = hint_generalization_hash_init(1, 0, 1000, 1);
+  CHECK(hint_generalization_hash_add_exact(table, 1, expected), message);
+  hint_generalization_hash_finalize(table);
+  CHECK(unify(ARG(from_lit->atom, from_side), cf, target, ci, &trail),
+        message);
+  CHECK(hint_generalization_hash_lookup_unit_paramod(
+          table, from_lit, from_side, cf, into_lit, position, ci,
+          &normal_id, &flipped_id, &nodes, &reflexive, &probes), message);
+  result = paramodulate(from_lit, from_side, cf, into, position, ci);
+  renumber_variables(result, MAX_VARS);
+  CHECK(normal_id == 1, message);
+  CHECK(reflexive == expected_reflexive, message);
+  CHECK(nodes == (unsigned) clause_symbol_count(result->literals), message);
+  CHECK(hint_generalization_hash_lookup(table, result) == normal_id, message);
+  CHECK(clause_ident(result->literals, expected->literals), message);
+  delete_clause(result);
+  undo_subst(trail);
+  free_context(cf);
+  free_context(ci);
+  zap_ilist(position);
+  hint_generalization_hash_destroy(table);
+  delete_clause(from);
+  delete_clause(into);
+  delete_clause(expected);
+}
+
 int main(void)
 {
   Hint_generalization_hash complete, partial, virtual;
@@ -37,6 +89,42 @@ int main(void)
   unsigned long long probes;
 
   init_standard_ladr();
+
+  {
+    static const int deep_left[] = {1, 1, 1};
+    static const int deep_right[] = {1, 2, 1};
+    static const int root_left[] = {1, 1};
+    virtual_case("f(x)=g(x).", 0, "h(f(a))=k(y).",
+                 deep_left, 3, "h(g(a))=k(y).", FALSE,
+                 "deep left-side virtual rewrite");
+    virtual_case("f(x)=g(x).", 0, "k(y)=h(f(a)).",
+                 deep_right, 3, "k(y)=h(g(a)).", FALSE,
+                 "deep right-side virtual rewrite");
+    virtual_case("f(x)=g(x).", 0, "f(a)=k(y).",
+                 root_left, 2, "g(a)=k(y).", FALSE,
+                 "root-side virtual rewrite");
+    virtual_case("f(x)=x.", 0, "h(f(a),a)=k(a).",
+                 deep_left, 3, "h(a,a)=k(a).", FALSE,
+                 "variable replacement side");
+    virtual_case("f(x)=c.", 0, "h(f(a))=k(a).",
+                 deep_left, 3, "h(c)=k(a).", FALSE,
+                 "constant replacement side");
+    virtual_case("f(x)=g(x).", 0, "h(f(a))=h(g(a)).",
+                 deep_left, 3, "h(g(a))=h(g(a)).", TRUE,
+                 "reflexive virtual conclusion");
+    virtual_case("f(x)=g(x).", 0, "h(f(z),z)=k(z).",
+                 deep_left, 3, "h(g(z),z)=k(z).", FALSE,
+                 "shared variable across conclusion sides");
+    virtual_case("f(x,x)=g(x).", 0, "h(f(a,y),y)=k(y).",
+                 deep_left, 3, "h(g(a),a)=k(a).", FALSE,
+                 "unification merges variables from both parents");
+    virtual_case("f(x)=g(u).", 0, "h(f(a),y)=k(y).",
+                 deep_left, 3, "h(g(u),y)=k(y).", FALSE,
+                 "independent unbound parent variables");
+    virtual_case("g(x)=f(x).", 1, "h(f(a))=k(a).",
+                 deep_left, 3, "h(g(a))=k(a).", FALSE,
+                 "right source side virtual rewrite");
+  }
 
   h1 = clause("p(f(a,b)).");
   h2 = clause("p(f(a,a)).");

@@ -802,6 +802,24 @@ static struct gh_key gh_virtual_unit_key(
   return gh_finish_key(&state.hash);
 }
 
+static struct gh_key gh_materialized_unit_key(Literals literal, BOOL flipped)
+{
+  struct gh_virtual_hash_state state;
+  Term atom = literal->atom;
+  int output_position;
+  memset(&state, 0, sizeof(state));
+  state.hash = gh_hash_begin(1);
+  gh_emit(&state.hash, literal->sign ? UINT64_C(0x500000001) :
+                                         UINT64_C(0x500000000));
+  state.term_nodes++;
+  gh_hash_rigid(&state.hash, atom);
+  for (output_position = 0; output_position < 2; output_position++) {
+    int source_position = flipped ? 1 - output_position : output_position;
+    gh_hash_applied_term(&state, ARG(atom, source_position), NULL);
+  }
+  return gh_finish_key(&state.hash);
+}
+
 struct gh_term_view {
   Term term;
   Context context;
@@ -953,6 +971,41 @@ BOOL hint_generalization_hash_lookup_unit_paramod(
     *reflexive = gh_virtual_unit_reflexive(
       from_lit, from_side, from_subst, into_lit, into_pos->next,
       into_subst);
+  if (probes != NULL)
+    *probes = normal_probes + flipped_probes;
+  return TRUE;
+}
+
+BOOL hint_generalization_hash_preview_unit_equality(
+  Hint_generalization_hash table, Literals literal,
+  unsigned *normal_id, unsigned *flipped_id,
+  unsigned long long *probes)
+{
+  struct gh_key normal_key, flipped_key;
+  unsigned found_normal, found_flipped;
+  unsigned long long normal_probes = 0, flipped_probes = 0;
+  if (normal_id != NULL)
+    *normal_id = 0;
+  if (flipped_id != NULL)
+    *flipped_id = 0;
+  if (probes != NULL)
+    *probes = 0;
+  if (table == NULL || !table->finalized || literal == NULL ||
+      !unit_clause(((Topform) literal->atom->container)->literals) ||
+      !literal->sign || !eq_term(literal->atom) ||
+      ARITY(literal->atom) != 2)
+    return FALSE;
+  normal_key = gh_materialized_unit_key(literal, FALSE);
+  flipped_key = gh_materialized_unit_key(literal, TRUE);
+  found_normal = gh_lookup_key(table, normal_key, &normal_probes);
+  if (gh_key_compare(normal_key, flipped_key) == 0)
+    found_flipped = found_normal;
+  else
+    found_flipped = gh_lookup_key(table, flipped_key, &flipped_probes);
+  if (normal_id != NULL)
+    *normal_id = found_normal;
+  if (flipped_id != NULL)
+    *flipped_id = found_flipped;
   if (probes != NULL)
     *probes = normal_probes + flipped_probes;
   return TRUE;

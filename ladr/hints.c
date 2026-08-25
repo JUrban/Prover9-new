@@ -6686,6 +6686,15 @@ BOOL preview_generalized_hash_unit_paramod(
     term_nodes, reflexive, probes);
 }
 
+/* PUBLIC */
+BOOL preview_generalized_hash_unit_equality(
+  Literals literal, unsigned *normal_id, unsigned *flipped_id,
+  unsigned long long *probes)
+{
+  return hint_generalization_hash_preview_unit_equality(
+    Generalization_hash, literal, normal_id, flipped_id, probes);
+}
+
 /*************
  *
  *   adjust_weight_with_hints()

@@ -39,9 +39,9 @@ shadow=$(grep '^Hash_inference_gate: mode=shadow,' "$tmp.shadow.out")
 safe=$(grep '^Hash_inference_gate: mode=safe,' "$tmp.safe.out")
 hit=$(grep '^Hash_inference_gate: mode=hit_only,' "$tmp.hit_only.out")
 printf '%s\n' "$shadow" | grep -Eq \
-  'virtual_hits=[1-9][0-9]*, virtual_misses=[1-9][0-9]*,.*false_misses=0, false_hits=0, changed_hint_ids=0,'
+  'virtual_hits=[1-9][0-9]*, virtual_misses=[1-9][0-9]*,.*raw_mismatches=0,.*postprocess_false_misses=0, postprocess_false_hits=0, postprocess_changed_hint_ids=0,'
 printf '%s\n' "$safe" | grep -Eq \
-  'materialized_hits=[1-9][0-9]*,.*certified_skips=[1-9][0-9]*,.*false_misses=0, false_hits=0, changed_hint_ids=0,'
+  'materialized_hits=[1-9][0-9]*,.*certified_skips=[1-9][0-9]*,.*raw_mismatches=0,.*postprocess_false_misses=0, postprocess_false_hits=0, postprocess_changed_hint_ids=0,'
 printf '%s\n' "$hit" | grep -Eq \
   'materialized_hits=[1-9][0-9]*,.*hit_only_skips=[1-9][0-9]*,'
 grep -Eq '^Hash_inference_stages: candidates=[1-9][0-9]*, materialized=[1-9][0-9]*,' \

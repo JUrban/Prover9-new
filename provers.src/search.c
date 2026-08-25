@@ -147,6 +147,12 @@ struct hash_inference_gate_stats {
   unsigned long long certified_skips;
   unsigned long long hit_only_skips;
   unsigned long long sampled_miss_validations;
+  unsigned long long raw_validations;
+  unsigned long long raw_validation_probes;
+  unsigned long long raw_key_mismatches;
+  unsigned long long raw_false_misses;
+  unsigned long long raw_false_hits;
+  unsigned long long raw_changed_hint_ids;
   unsigned long long authoritative_validations;
   unsigned long long unvalidated_materializations;
   unsigned long long false_misses;
@@ -162,6 +168,8 @@ struct hash_inference_prediction {
   unsigned flipped_id;
   unsigned term_nodes;
   unsigned long long authoritative_id;
+  unsigned raw_normal_id;
+  unsigned raw_flipped_id;
   BOOL reflexive;
   BOOL supported;
   BOOL validated;
@@ -169,6 +177,7 @@ struct hash_inference_prediction {
   BOOL expect_certified_delete;
   BOOL deleted;
   BOOL generation_recorded;
+  BOOL raw_mismatch;
 };
 
 static struct hash_inference_gate_stats Hash_gate_stats;
@@ -443,6 +452,9 @@ static Para_candidate_decision hash_inference_candidate(
 
 static void hash_inference_materialized(Topform conclusion)
 {
+  unsigned raw_normal = 0, raw_flipped = 0;
+  unsigned long long raw_probes = 0;
+  BOOL virtual_hit, raw_hit;
   Hash_gate_prediction.conclusion = conclusion;
   if (!Hash_gate_prediction.supported)
     return;
@@ -451,6 +463,27 @@ static void hash_inference_materialized(Topform conclusion)
     Hash_gate_stats.materialized_hits++;
   else
     Hash_gate_stats.materialized_misses++;
+  if (!preview_generalized_hash_unit_equality(
+        conclusion->literals, &raw_normal, &raw_flipped, &raw_probes))
+    fatal_error("materialized hash-inference result changed raw shape");
+  Hash_gate_prediction.raw_normal_id = raw_normal;
+  Hash_gate_prediction.raw_flipped_id = raw_flipped;
+  Hash_gate_stats.raw_validations++;
+  Hash_gate_stats.raw_validation_probes += raw_probes;
+  virtual_hit = Hash_gate_prediction.normal_id != 0 ||
+                Hash_gate_prediction.flipped_id != 0;
+  raw_hit = raw_normal != 0 || raw_flipped != 0;
+  if (Hash_gate_prediction.normal_id != raw_normal ||
+      Hash_gate_prediction.flipped_id != raw_flipped) {
+    Hash_gate_prediction.raw_mismatch = TRUE;
+    Hash_gate_stats.raw_key_mismatches++;
+    if (!virtual_hit && raw_hit)
+      Hash_gate_stats.raw_false_misses++;
+    else if (virtual_hit && !raw_hit)
+      Hash_gate_stats.raw_false_hits++;
+    else
+      Hash_gate_stats.raw_changed_hint_ids++;
+  }
 }
 
 static void hash_inference_validate(Topform conclusion)
@@ -486,7 +519,8 @@ static void hash_inference_finish_materialized(Topform conclusion)
   if (Hash_gate_prediction.expect_certified_delete &&
       (!Hash_gate_prediction.deleted || Hash_gate_prediction.normal_id != 0 ||
        Hash_gate_prediction.flipped_id != 0 ||
-       Hash_gate_prediction.authoritative_id != 0))
+       Hash_gate_prediction.authoritative_id != 0 ||
+       Hash_gate_prediction.raw_mismatch))
     fatal_error("safe hash-inference miss validation failed");
   if (Hash_gate_prediction.sampled_miss &&
       !Hash_gate_prediction.deleted)
@@ -4168,8 +4202,11 @@ static void fprint_hash_inference_gate_stats(FILE *fp)
           "materialized_hits=%llu, materialized_misses=%llu, "
           "safety_fallbacks=%llu, certified_skips=%llu, "
           "hit_only_skips=%llu, sampled_miss_validations=%llu, "
-          "authoritative_validations=%llu, unvalidated=%llu, "
-          "false_misses=%llu, false_hits=%llu, changed_hint_ids=%llu, "
+          "raw_validations=%llu, raw_probes=%llu, raw_mismatches=%llu, "
+          "raw_false_misses=%llu, raw_false_hits=%llu, "
+          "raw_changed_hint_ids=%llu, postprocess_validations=%llu, "
+          "unvalidated=%llu, postprocess_false_misses=%llu, "
+          "postprocess_false_hits=%llu, postprocess_changed_hint_ids=%llu, "
           "orientation_fallbacks=%llu, validation_survivors=%llu, "
           "estimated_allocations_avoided=%llu, "
           "estimated_bytes_avoided=%llu.\n",
@@ -4183,6 +4220,12 @@ static void fprint_hash_inference_gate_stats(FILE *fp)
           Hash_gate_stats.materialized_safety_fallbacks,
           Hash_gate_stats.certified_skips, Hash_gate_stats.hit_only_skips,
           Hash_gate_stats.sampled_miss_validations,
+          Hash_gate_stats.raw_validations,
+          Hash_gate_stats.raw_validation_probes,
+          Hash_gate_stats.raw_key_mismatches,
+          Hash_gate_stats.raw_false_misses,
+          Hash_gate_stats.raw_false_hits,
+          Hash_gate_stats.raw_changed_hint_ids,
           Hash_gate_stats.authoritative_validations,
           Hash_gate_stats.unvalidated_materializations,
           Hash_gate_stats.false_misses, Hash_gate_stats.false_hits,

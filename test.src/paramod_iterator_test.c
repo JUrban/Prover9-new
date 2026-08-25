@@ -8,6 +8,7 @@ static int Failures;
 static Topform Results[MAX_RESULTS];
 static unsigned Result_count;
 static unsigned Cancel_after;
+static unsigned Materialized_callbacks;
 
 #define CHECK(test, message) do {                                        \
   if (!(test)) {                                                         \
@@ -22,6 +23,26 @@ static BOOL collect_result(Topform c)
     fatal_error("paramod iterator test result capacity exceeded");
   Results[Result_count++] = c;
   return Cancel_after == 0 || Result_count < Cancel_after;
+}
+
+static Para_candidate_decision cancel_candidate(
+  const Para_candidate *candidate)
+{
+  (void) candidate;
+  return PARA_CANDIDATE_CANCEL;
+}
+
+static Para_candidate_decision skip_candidate(
+  const Para_candidate *candidate)
+{
+  (void) candidate;
+  return PARA_CANDIDATE_SKIP;
+}
+
+static void note_materialized(Topform conclusion)
+{
+  CHECK(conclusion != NULL, "materialized callback receives conclusion");
+  Materialized_callbacks++;
 }
 
 static void clear_results(void)
@@ -191,6 +212,62 @@ static void one_case(Topform from, Topform into, BOOL check_top)
     zap_topform(expected[budget]);
 }
 
+static void candidate_hook_tests(Topform from, Topform into)
+{
+  struct para_candidate_stats stats;
+  Context cf, ci;
+  Para_iterator it;
+  unsigned long long steps, yielded;
+  BOOL complete = FALSE;
+
+  reset_paramodulation_candidate_stats();
+  set_paramodulation_candidate_proc(cancel_candidate, 1);
+  set_paramodulation_materialized_proc(note_materialized);
+  Materialized_callbacks = 0;
+  cf = get_context();
+  ci = get_context();
+  CHECK(!para_from_into(from, cf, into, ci, FALSE, collect_result),
+        "candidate cancellation stops eager traversal");
+  CHECK(Result_count == 0 && Materialized_callbacks == 0,
+        "cancelled candidate is never materialized");
+  free_context(cf);
+  free_context(ci);
+  get_paramodulation_candidate_stats(&stats);
+  CHECK(stats.candidates == 1 && stats.cancelled == 1 &&
+        stats.materialized == 0,
+        "eager cancellation statistics are exact");
+
+  reset_paramodulation_candidate_stats();
+  para_iterator_init(&it);
+  CHECK(para_from_into_bounded(from, into, FALSE, &it, 100000, 100000,
+                               collect_result, &steps, &yielded),
+        "candidate cancellation completes bounded traversal");
+  CHECK(it.complete && yielded == 0 && Result_count == 0,
+        "bounded cancellation yields no conclusion");
+  para_iterator_zap(&it);
+  get_paramodulation_candidate_stats(&stats);
+  CHECK(stats.candidates == 1 && stats.cancelled == 1,
+        "bounded cancellation statistics are exact");
+
+  reset_paramodulation_candidate_stats();
+  set_paramodulation_candidate_proc(skip_candidate, 1);
+  para_iterator_init(&it);
+  while (!complete)
+    complete = para_from_into_bounded(
+      from, into, FALSE, &it, 3, 2, collect_result, &steps, &yielded);
+  CHECK(Result_count == 0 && Materialized_callbacks == 0,
+        "skipped bounded candidates cross yield boundaries without output");
+  get_paramodulation_candidate_stats(&stats);
+  CHECK(stats.candidates != 0 && stats.skipped == stats.candidates &&
+        stats.materialized == 0,
+        "bounded skip statistics account every successful candidate");
+  para_iterator_zap(&it);
+
+  set_paramodulation_candidate_proc(NULL, 0);
+  set_paramodulation_materialized_proc(NULL);
+  reset_paramodulation_candidate_stats();
+}
+
 int main(void)
 {
   Topform a, b, c, d;
@@ -200,6 +277,7 @@ int main(void)
 
   a = test_clause("f(x) = x | g(x) = h(x).", 1);
   b = test_clause("P(f(a),g(f(b))) | f(a) = g(b).", 2);
+  candidate_hook_tests(a, b);
   one_case(a, b, FALSE);
   one_case(a, b, TRUE);
   one_case(b, a, FALSE);

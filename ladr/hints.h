@@ -66,6 +66,10 @@ BOOL preview_generalized_hash_unit_paramod(
   unsigned *term_nodes, BOOL *reflexive,
   unsigned long long *probes);
 
+BOOL preview_generalized_hash_unit_equality(
+  Literals literal, unsigned *normal_id, unsigned *flipped_id,
+  unsigned long long *probes);
+
 void done_with_hints(void);
 
 /* Complete the population-wide packed-fast conjunction plan after all input
