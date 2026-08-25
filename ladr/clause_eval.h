@@ -40,4 +40,7 @@ BOOL eval_clause_in_rule(Topform c, Clause_eval p);
 
 BOOL rule_contains_semantics(Clause_eval p);
 
+/* TRUE only if satisfaction of this rule logically requires a hint match. */
+BOOL clause_eval_rule_requires_hint(Clause_eval p);
+
 #endif  /* conditional compilation of whole file */

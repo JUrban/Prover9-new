@@ -33,6 +33,12 @@ static Plist Generated_rules = NULL;
 static Plist Kept_rules      = NULL;
 static Plist Level_rules     = NULL;
 
+/* PUBLIC */
+BOOL generated_actions_exist(void)
+{
+  return Generated_rules != NULL;
+}
+
 /* Some changes to flags or parms require rebuilding the sos index;
    a pointer to the procedure to do so is stored here.
 */
@@ -426,4 +432,3 @@ void actions_in_proof(Plist proof,
     proof_action(p->v, att->action2);
   }
 }  /* actions_in_proof */
-

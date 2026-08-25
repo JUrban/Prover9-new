@@ -33,6 +33,7 @@ int main(void)
   Trail trail = NULL;
   Ilist position = NULL;
   unsigned normal_id, flipped_id, term_nodes;
+  BOOL reflexive;
   unsigned long long probes;
 
   init_standard_ladr();
@@ -104,7 +105,7 @@ int main(void)
         "prepare virtual paramodulation substitution");
   CHECK(hint_generalization_hash_lookup_unit_paramod(
           virtual, from->literals, 0, cf, into->literals, position, ci,
-          &normal_id, &flipped_id, &term_nodes, &probes),
+          &normal_id, &flipped_id, &term_nodes, &reflexive, &probes),
         "virtual unit-paramodulation shape is supported");
   CHECK(normal_id == 1 && flipped_id == 0,
         "virtual lookup finds normal equality orientation only");
@@ -115,6 +116,7 @@ int main(void)
         "virtual and materialized paramodulants have identical keys");
   CHECK(term_nodes == (unsigned) clause_symbol_count(result->literals),
         "virtual node count equals materialized default weight");
+  CHECK(!reflexive, "virtual result is correctly non-reflexive");
   delete_clause(result);
   undo_subst(trail);
   free_context(cf);

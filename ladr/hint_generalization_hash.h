@@ -73,7 +73,8 @@ BOOL hint_generalization_hash_lookup_unit_paramod(
   Literals from_lit, int from_side, Context from_subst,
   Literals into_lit, Ilist into_pos, Context into_subst,
   unsigned *normal_id, unsigned *flipped_id,
-  unsigned *term_nodes, unsigned long long *probes);
+  unsigned *term_nodes, BOOL *reflexive,
+  unsigned long long *probes);
 
 void hint_generalization_hash_get_stats(
   Hint_generalization_hash table, struct hint_generalization_hash_stats *stats);

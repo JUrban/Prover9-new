@@ -18,6 +18,7 @@
 
 #include "paramod.h"
 #include "clock.h"
+#include "memory.h"
 
 /* Private definitions and types */
 
@@ -32,6 +33,7 @@ static unsigned long long Para_instance_prunes = 0;     /* counter */
 static unsigned long long Basic_prunes = 0;             /* counter */
 
 static Para_candidate_proc Candidate_proc = NULL;
+static Para_materialized_proc Materialized_proc = NULL;
 static unsigned Candidate_sample_rate = 0;
 static struct para_candidate_stats Candidate_stats;
 
@@ -41,6 +43,12 @@ void set_paramodulation_candidate_proc(Para_candidate_proc proc,
 {
   Candidate_proc = proc;
   Candidate_sample_rate = sample_rate;
+}
+
+/* PUBLIC */
+void set_paramodulation_materialized_proc(Para_materialized_proc proc)
+{
+  Materialized_proc = proc;
 }
 
 /* PUBLIC */
@@ -473,6 +481,9 @@ BOOL para_into(Literals from_lit, int from_side, Context cf, Ilist from_pos,
           Para_candidate_decision decision;
           Topform p;
           double started = 0;
+          unsigned long long allocation_calls = 0;
+          unsigned long long allocation_bytes = 0;
+          struct memory_stats memory_before;
           candidate.from_lit = from_lit;
           candidate.from_side = from_side;
           candidate.from_subst = cf;
@@ -480,7 +491,10 @@ BOOL para_into(Literals from_lit, int from_side, Context cf, Ilist from_pos,
           candidate.into_lit = into_lit;
           candidate.into_pos = into_pos;
           candidate.into_subst = ci;
-          decision = inspect_candidate(&candidate);
+          decision = Candidate_proc == NULL ? PARA_CANDIDATE_MATERIALIZE :
+                                               inspect_candidate(&candidate);
+          if (Candidate_proc == NULL)
+            candidate.timing_sample = FALSE;
           if (decision == PARA_CANDIDATE_CANCEL) {
             path_base->next = NULL;
             undo_subst(tr);
@@ -491,8 +505,12 @@ BOOL para_into(Literals from_lit, int from_side, Context cf, Ilist from_pos,
             top--;
             continue;
           }
-          if (candidate.timing_sample)
+          if (candidate.timing_sample) {
             started = user_seconds();
+            allocation_calls = memory_allocation_calls();
+            memory_get_stats(&memory_before);
+            allocation_bytes = memory_before.cumulative_bytes;
+          }
           p = paramodulate(from_lit, from_side, cf,
                            into_clause, into_pos, ci);
           p->justification = para_just(PARA_JUST,
@@ -500,21 +518,45 @@ BOOL para_into(Literals from_lit, int from_side, Context cf, Ilist from_pos,
                                         copy_ilist(from_pos),
                                         into_clause,
                                         copy_ilist(into_pos));
+          if (Materialized_proc != NULL)
+            (*Materialized_proc)(p);
           if (candidate.timing_sample) {
+            struct memory_stats memory_after;
             Candidate_stats.construction_seconds += user_seconds() - started;
+            memory_get_stats(&memory_after);
+            Candidate_stats.construction_allocation_calls +=
+              memory_allocation_calls() - allocation_calls;
+            Candidate_stats.construction_allocation_bytes +=
+              memory_after.cumulative_bytes - allocation_bytes;
             started = user_seconds();
+            allocation_calls = memory_allocation_calls();
+            allocation_bytes = memory_after.cumulative_bytes;
           }
           if (!(*proc_proc)(p)) {
-            if (candidate.timing_sample)
+            if (candidate.timing_sample) {
+              struct memory_stats memory_after;
               Candidate_stats.consumer_seconds += user_seconds() - started;
+              memory_get_stats(&memory_after);
+              Candidate_stats.consumer_allocation_calls +=
+                memory_allocation_calls() - allocation_calls;
+              Candidate_stats.consumer_allocation_bytes +=
+                memory_after.cumulative_bytes - allocation_bytes;
+            }
             /* The dynamic suffix consists of stack-owned traversal nodes.
                Detach it before returning to para_into_lit(). */
             path_base->next = NULL;
             undo_subst(tr);
             return FALSE;
           }
-          if (candidate.timing_sample)
+          if (candidate.timing_sample) {
+            struct memory_stats memory_after;
             Candidate_stats.consumer_seconds += user_seconds() - started;
+            memory_get_stats(&memory_after);
+            Candidate_stats.consumer_allocation_calls +=
+              memory_allocation_calls() - allocation_calls;
+            Candidate_stats.consumer_allocation_bytes +=
+              memory_after.cumulative_bytes - allocation_bytes;
+          }
         }
         undo_subst(tr);
       }
@@ -894,6 +936,9 @@ BOOL para_from_into_bounded(Topform from, Topform into, BOOL check_top,
           Para_candidate candidate;
           Para_candidate_decision decision;
           double started = 0;
+          unsigned long long allocation_calls = 0;
+          unsigned long long allocation_bytes = 0;
+          struct memory_stats memory_before;
           from_pos = para_iterator_from_position(it);
           into_pos = para_iterator_into_position(it);
           candidate.from_lit = from_lit;
@@ -903,7 +948,10 @@ BOOL para_from_into_bounded(Topform from, Topform into, BOOL check_top,
           candidate.into_lit = into_lit;
           candidate.into_pos = into_pos;
           candidate.into_subst = ci;
-          decision = inspect_candidate(&candidate);
+          decision = Candidate_proc == NULL ? PARA_CANDIDATE_MATERIALIZE :
+                                               inspect_candidate(&candidate);
+          if (Candidate_proc == NULL)
+            candidate.timing_sample = FALSE;
           if (decision == PARA_CANDIDATE_CANCEL) {
             undo_subst(tr);
             zap_ilist(from_pos);
@@ -920,15 +968,28 @@ BOOL para_from_into_bounded(Topform from, Topform into, BOOL check_top,
             zap_ilist(into_pos);
             continue;
           }
-          if (candidate.timing_sample)
+          if (candidate.timing_sample) {
             started = user_seconds();
+            allocation_calls = memory_allocation_calls();
+            memory_get_stats(&memory_before);
+            allocation_bytes = memory_before.cumulative_bytes;
+          }
           result = paramodulate(from_lit, (int) it->from_side, cf,
                                 into, into_pos, ci);
           result->justification = para_just(
             PARA_JUST, from_lit->atom->container, copy_ilist(from_pos),
             into, copy_ilist(into_pos));
-          if (candidate.timing_sample)
+          if (Materialized_proc != NULL)
+            (*Materialized_proc)(result);
+          if (candidate.timing_sample) {
+            struct memory_stats memory_after;
             Candidate_stats.construction_seconds += user_seconds() - started;
+            memory_get_stats(&memory_after);
+            Candidate_stats.construction_allocation_calls +=
+              memory_allocation_calls() - allocation_calls;
+            Candidate_stats.construction_allocation_bytes +=
+              memory_after.cumulative_bytes - allocation_bytes;
+          }
         }
         undo_subst(tr);
       }
@@ -942,16 +1003,38 @@ BOOL para_from_into_bounded(Topform from, Topform into, BOOL check_top,
         BOOL sampled = Candidate_sample_rate != 0 &&
           Candidate_stats.candidates % Candidate_sample_rate == 0;
         double started = sampled ? user_seconds() : 0;
+        unsigned long long allocation_calls = sampled ?
+          memory_allocation_calls() : 0;
+        unsigned long long allocation_bytes = 0;
+        struct memory_stats memory_before;
+        if (sampled) {
+          memory_get_stats(&memory_before);
+          allocation_bytes = memory_before.cumulative_bytes;
+        }
       if (!(*proc_proc)(result)) {
-        if (sampled)
+        if (sampled) {
+          struct memory_stats memory_after;
           Candidate_stats.consumer_seconds += user_seconds() - started;
+          memory_get_stats(&memory_after);
+          Candidate_stats.consumer_allocation_calls +=
+            memory_allocation_calls() - allocation_calls;
+          Candidate_stats.consumer_allocation_bytes +=
+            memory_after.cumulative_bytes - allocation_bytes;
+        }
         it->complete = TRUE;
         free_context(cf);
         free_context(ci);
         return TRUE;
       }
-        if (sampled)
+        if (sampled) {
+          struct memory_stats memory_after;
           Candidate_stats.consumer_seconds += user_seconds() - started;
+          memory_get_stats(&memory_after);
+          Candidate_stats.consumer_allocation_calls +=
+            memory_allocation_calls() - allocation_calls;
+          Candidate_stats.consumer_allocation_bytes +=
+            memory_after.cumulative_bytes - allocation_bytes;
+        }
       }
     }
   }

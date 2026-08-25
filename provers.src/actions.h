@@ -41,6 +41,8 @@ void register_action(char *stat, char *val, char *op, char *arg1, char *arg2);
 
 void statistic_actions(char *stat, int n);
 
+BOOL generated_actions_exist(void);
+
 void actions_in_proof(Plist proof,
 		      Prover_attributes att);
 

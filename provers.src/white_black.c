@@ -194,3 +194,13 @@ BOOL white_tests(Topform c)
   }
   return FALSE;
 }  /* white_tests */
+
+/* PUBLIC */
+BOOL white_rules_require_hint(void)
+{
+  Plist p;
+  for (p = White_rules; p != NULL; p = p->next)
+    if (!clause_eval_rule_requires_hint((Clause_eval) p->v))
+      return FALSE;
+  return TRUE;
+}

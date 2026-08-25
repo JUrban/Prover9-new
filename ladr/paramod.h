@@ -73,6 +73,8 @@ typedef enum {
 typedef Para_candidate_decision
   (*Para_candidate_proc)(const Para_candidate *candidate);
 
+typedef void (*Para_materialized_proc)(Topform conclusion);
+
 struct para_candidate_stats {
   unsigned long long candidates;
   unsigned long long materialized;
@@ -83,6 +85,10 @@ struct para_candidate_stats {
   double precheck_seconds;
   double construction_seconds;
   double consumer_seconds;
+  unsigned long long construction_allocation_calls;
+  unsigned long long construction_allocation_bytes;
+  unsigned long long consumer_allocation_calls;
+  unsigned long long consumer_allocation_bytes;
 };
 
 /* End of public definitions */
@@ -106,6 +112,8 @@ unsigned long long basic_paramodulation_prunes(void);
    disables timing; otherwise every Nth successful candidate is timed. */
 void set_paramodulation_candidate_proc(Para_candidate_proc proc,
                                        unsigned sample_rate);
+
+void set_paramodulation_materialized_proc(Para_materialized_proc proc);
 
 void reset_paramodulation_candidate_stats(void);
 

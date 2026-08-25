@@ -134,12 +134,53 @@ static unsigned long long Compact_passive_retention_fallbacks;
 static unsigned long long Compact_passive_payload_bytes_avoided;
 static unsigned long long Cpu_report_time_reads;
 
+struct hash_inference_gate_stats {
+  unsigned long long supported_results;
+  unsigned long long unsupported_fallbacks;
+  unsigned long long virtual_queries;
+  unsigned long long virtual_hits;
+  unsigned long long virtual_misses;
+  unsigned long long virtual_probes;
+  unsigned long long materialized_hits;
+  unsigned long long materialized_misses;
+  unsigned long long materialized_safety_fallbacks;
+  unsigned long long certified_skips;
+  unsigned long long hit_only_skips;
+  unsigned long long sampled_miss_validations;
+  unsigned long long authoritative_validations;
+  unsigned long long unvalidated_materializations;
+  unsigned long long false_misses;
+  unsigned long long false_hits;
+  unsigned long long changed_hint_ids;
+  unsigned long long orientation_fallbacks;
+  unsigned long long sampled_validation_survivors;
+};
+
+struct hash_inference_prediction {
+  Topform conclusion;
+  unsigned normal_id;
+  unsigned flipped_id;
+  unsigned term_nodes;
+  unsigned long long authoritative_id;
+  BOOL reflexive;
+  BOOL supported;
+  BOOL validated;
+  BOOL sampled_miss;
+  BOOL expect_certified_delete;
+  BOOL deleted;
+  BOOL generation_recorded;
+};
+
+static struct hash_inference_gate_stats Hash_gate_stats;
+static struct hash_inference_prediction Hash_gate_prediction;
+
 static void update_rewrite_only_stats(void);
 static void current_demodulate_clause(Topform, int, int, BOOL, BOOL);
 static Topform compact_otter_resolve_clause(unsigned long long, void *);
 static void compact_otter_release_clause(Topform, void *);
 static void compact_otter_advise_rebuild_batch(
   const unsigned long long *, size_t, void *);
+static void record_generated_event(void);
 
 /* Progress callback for shared-memory IPC (set by -cores scheduler) */
 static Search_progress_fn Progress_callback = NULL;
@@ -287,6 +328,176 @@ static BOOL generalized_hint_hash_mode(void)
 {
   return Opt != NULL &&
     str_ident(stringparm1(Opt->hint_index), "generalized_hash");
+}
+
+static BOOL hash_inference_gate_mode(char *mode)
+{
+  return Opt != NULL && str_ident(stringparm1(Opt->hash_inference_gate), mode);
+}
+
+static Para_candidate_decision hash_inference_candidate(
+  const Para_candidate *candidate)
+{
+  unsigned normal_id = 0, flipped_id = 0, term_nodes = 0;
+  unsigned long long probes = 0;
+  BOOL supported, reflexive = FALSE;
+  memset(&Hash_gate_prediction, 0, sizeof(Hash_gate_prediction));
+  supported = preview_generalized_hash_unit_paramod(
+    candidate->from_lit, candidate->from_side, candidate->from_subst,
+    candidate->into_lit, candidate->into_pos, candidate->into_subst,
+    &normal_id, &flipped_id, &term_nodes, &reflexive, &probes);
+  Hash_gate_prediction.supported = supported;
+  if (!supported) {
+    Hash_gate_stats.unsupported_fallbacks++;
+    return PARA_CANDIDATE_MATERIALIZE;
+  }
+  Hash_gate_prediction.normal_id = normal_id;
+  Hash_gate_prediction.flipped_id = flipped_id;
+  Hash_gate_prediction.term_nodes = term_nodes;
+  Hash_gate_prediction.reflexive = reflexive;
+  Hash_gate_stats.supported_results++;
+  Hash_gate_stats.virtual_queries++;
+  Hash_gate_stats.virtual_probes += probes;
+  if (normal_id != 0 || flipped_id != 0) {
+    Hash_gate_stats.virtual_hits++;
+    if (normal_id == 0 && flipped_id != 0)
+      Hash_gate_stats.orientation_fallbacks++;
+  }
+  else
+    Hash_gate_stats.virtual_misses++;
+
+  if (normal_id != 0 || flipped_id != 0 ||
+      hash_inference_gate_mode("shadow"))
+    return PARA_CANDIDATE_MATERIALIZE;
+
+  if (hash_inference_gate_mode("safe")) {
+    BOOL certified =
+      !flag(Opt->eval_rewrite) &&
+      !demodulation_rules_available() &&
+      !flag(Opt->unit_deletion) &&
+      !flag(Opt->cac_redundancy) &&
+      !flag(Opt->safe_unit_conflict) &&
+      !flag(Opt->print_gen) &&
+      !flag(Opt->hint_trace) &&
+      !generated_actions_exist() &&
+      default_symbol_clause_weighting() &&
+      white_rules_require_hint() &&
+      (double) term_nodes > floatparm(Opt->max_weight);
+    if (!certified) {
+      Hash_gate_stats.materialized_safety_fallbacks++;
+      return PARA_CANDIDATE_MATERIALIZE;
+    }
+    if (parm(Opt->hash_inference_validate_rate) > 0 &&
+        Hash_gate_stats.virtual_misses %
+          (unsigned long long) parm(Opt->hash_inference_validate_rate) == 0) {
+      Hash_gate_prediction.sampled_miss = TRUE;
+      Hash_gate_prediction.expect_certified_delete = TRUE;
+      Hash_gate_stats.sampled_miss_validations++;
+      return PARA_CANDIDATE_MATERIALIZE;
+    }
+    if (!Hash_gate_prediction.generation_recorded) {
+      record_generated_event();
+      Hash_gate_prediction.generation_recorded = TRUE;
+    }
+    if (reflexive)
+      Stats.subsumed++;
+    else
+      Stats.deleted_by_rule++;
+    Hash_gate_stats.certified_skips++;
+    return PARA_CANDIDATE_SKIP;
+  }
+
+  if (hash_inference_gate_mode("hit_only")) {
+    /* This mode is an explicitly incomplete performance ceiling.  Preserve
+       explicit safe-unit-conflict checking and goal-parent inferences; omit
+       all other supported raw hash misses before allocation. */
+    if (flag(Opt->safe_unit_conflict) || flag(Opt->print_gen) ||
+        flag(Opt->hint_trace) ||
+        ((Topform) candidate->from_lit->atom->container)->goal_derived ||
+        candidate->into_clause->goal_derived)
+      return PARA_CANDIDATE_MATERIALIZE;
+    if (generated_actions_exist()) {
+      record_generated_event();
+      Hash_gate_prediction.generation_recorded = TRUE;
+      if (flag(Opt->safe_unit_conflict) || flag(Opt->print_gen) ||
+          flag(Opt->hint_trace))
+        return PARA_CANDIDATE_MATERIALIZE;
+    }
+    if (parm(Opt->hash_inference_validate_rate) > 0 &&
+        Hash_gate_stats.virtual_misses %
+          (unsigned long long) parm(Opt->hash_inference_validate_rate) == 0) {
+      Hash_gate_prediction.sampled_miss = TRUE;
+      Hash_gate_stats.sampled_miss_validations++;
+      return PARA_CANDIDATE_MATERIALIZE;
+    }
+    if (!Hash_gate_prediction.generation_recorded) {
+      record_generated_event();
+      Hash_gate_prediction.generation_recorded = TRUE;
+    }
+    Hash_gate_stats.hit_only_skips++;
+    return PARA_CANDIDATE_SKIP;
+  }
+
+  return PARA_CANDIDATE_MATERIALIZE;
+}
+
+static void hash_inference_materialized(Topform conclusion)
+{
+  Hash_gate_prediction.conclusion = conclusion;
+  if (!Hash_gate_prediction.supported)
+    return;
+  if (Hash_gate_prediction.normal_id != 0 ||
+      Hash_gate_prediction.flipped_id != 0)
+    Hash_gate_stats.materialized_hits++;
+  else
+    Hash_gate_stats.materialized_misses++;
+}
+
+static void hash_inference_validate(Topform conclusion)
+{
+  unsigned long long actual;
+  BOOL predicted_hit;
+  if (Hash_gate_prediction.conclusion != conclusion ||
+      !Hash_gate_prediction.supported)
+    return;
+  actual = conclusion->matching_hint == NULL ? 0 :
+             conclusion->matching_hint->id;
+  Hash_gate_prediction.authoritative_id = actual;
+  predicted_hit = Hash_gate_prediction.normal_id != 0 ||
+                  Hash_gate_prediction.flipped_id != 0;
+  Hash_gate_prediction.validated = TRUE;
+  Hash_gate_stats.authoritative_validations++;
+  if (!predicted_hit && actual != 0)
+    Hash_gate_stats.false_misses++;
+  else if (predicted_hit && actual == 0)
+    Hash_gate_stats.false_hits++;
+  else if (actual != 0 &&
+           actual != Hash_gate_prediction.normal_id &&
+           actual != Hash_gate_prediction.flipped_id)
+    Hash_gate_stats.changed_hint_ids++;
+}
+
+static void hash_inference_finish_materialized(Topform conclusion)
+{
+  if (Hash_gate_prediction.conclusion != conclusion)
+    return;
+  if (Hash_gate_prediction.supported && !Hash_gate_prediction.validated)
+    Hash_gate_stats.unvalidated_materializations++;
+  if (Hash_gate_prediction.expect_certified_delete &&
+      (!Hash_gate_prediction.deleted || Hash_gate_prediction.normal_id != 0 ||
+       Hash_gate_prediction.flipped_id != 0 ||
+       Hash_gate_prediction.authoritative_id != 0))
+    fatal_error("safe hash-inference miss validation failed");
+  if (Hash_gate_prediction.sampled_miss &&
+      !Hash_gate_prediction.deleted)
+    Hash_gate_stats.sampled_validation_survivors++;
+  memset(&Hash_gate_prediction, 0, sizeof(Hash_gate_prediction));
+}
+
+static void hash_inference_note_outcome(Topform conclusion, BOOL deleted)
+{
+  if (Hash_gate_prediction.conclusion == conclusion)
+    Hash_gate_prediction.deleted = deleted;
 }
 
 static BOOL better_packed_hint_mode(void)
@@ -2282,6 +2493,10 @@ Prover_options init_prover_options(void)
     init_parm("hint_hash_partial_per_hint", 32, 0, 1024);
   p->hint_hash_max_entries =
     init_parm("hint_hash_max_entries", 100000000, 1, INT_MAX);
+  p->hash_inference_sample_rate =
+    init_parm("hash_inference_sample_rate", 65536, 1, INT_MAX);
+  p->hash_inference_validate_rate =
+    init_parm("hash_inference_validate_rate", 0, 0, INT_MAX);
   p->rewrite_refresh_hot_ratio =
     init_parm("rewrite_refresh_hot_ratio", 7, 0, INT_MAX);
   p->rewrite_refresh_raw_budget =
@@ -2387,6 +2602,12 @@ Prover_options init_prover_options(void)
 				  "hybrid",
 				  "packed_legacy",
 				  "generalized_hash");
+
+  p->hash_inference_gate = init_stringparm("hash_inference_gate", 4,
+					   "off",
+					   "shadow",
+					   "safe",
+					   "hit_only");
 
   p->inference_frontier = init_stringparm("inference_frontier", 2,
 					  "clauses",
@@ -3911,7 +4132,90 @@ void fprint_prover_clocks(FILE *fp, struct prover_clocks clks)
  *************/
 
 /* DOCUMENTATION
-*/
+ */
+
+static void fprint_hash_inference_gate_stats(FILE *fp)
+{
+  struct para_candidate_stats stages;
+  double precheck_estimate, construction_estimate, consumer_estimate;
+  unsigned long long skipped, avoided_calls, avoided_bytes;
+  if (Opt == NULL || hash_inference_gate_mode("off"))
+    return;
+  get_paramodulation_candidate_stats(&stages);
+  precheck_estimate = stages.timing_samples == 0 ? 0 :
+    stages.precheck_seconds * (double) stages.candidates /
+      (double) stages.timing_samples;
+  construction_estimate = stages.timing_materialized_samples == 0 ? 0 :
+    stages.construction_seconds * (double) stages.materialized /
+      (double) stages.timing_materialized_samples;
+  consumer_estimate = stages.timing_materialized_samples == 0 ? 0 :
+    stages.consumer_seconds * (double) stages.materialized /
+      (double) stages.timing_materialized_samples;
+  skipped = Hash_gate_stats.certified_skips +
+            Hash_gate_stats.hit_only_skips;
+  avoided_calls = stages.timing_materialized_samples == 0 ? 0 :
+    (unsigned long long) ((double) skipped *
+      (double) stages.construction_allocation_calls /
+      (double) stages.timing_materialized_samples);
+  avoided_bytes = stages.timing_materialized_samples == 0 ? 0 :
+    (unsigned long long) ((double) skipped *
+      (double) stages.construction_allocation_bytes /
+      (double) stages.timing_materialized_samples);
+  fprintf(fp,
+          "Hash_inference_gate: mode=%s, supported=%llu, "
+          "unsupported_fallbacks=%llu, virtual_queries=%llu, "
+          "virtual_hits=%llu, virtual_misses=%llu, probes=%llu, "
+          "materialized_hits=%llu, materialized_misses=%llu, "
+          "safety_fallbacks=%llu, certified_skips=%llu, "
+          "hit_only_skips=%llu, sampled_miss_validations=%llu, "
+          "authoritative_validations=%llu, unvalidated=%llu, "
+          "false_misses=%llu, false_hits=%llu, changed_hint_ids=%llu, "
+          "orientation_fallbacks=%llu, validation_survivors=%llu, "
+          "estimated_allocations_avoided=%llu, "
+          "estimated_bytes_avoided=%llu.\n",
+          stringparm1(Opt->hash_inference_gate),
+          Hash_gate_stats.supported_results,
+          Hash_gate_stats.unsupported_fallbacks,
+          Hash_gate_stats.virtual_queries, Hash_gate_stats.virtual_hits,
+          Hash_gate_stats.virtual_misses, Hash_gate_stats.virtual_probes,
+          Hash_gate_stats.materialized_hits,
+          Hash_gate_stats.materialized_misses,
+          Hash_gate_stats.materialized_safety_fallbacks,
+          Hash_gate_stats.certified_skips, Hash_gate_stats.hit_only_skips,
+          Hash_gate_stats.sampled_miss_validations,
+          Hash_gate_stats.authoritative_validations,
+          Hash_gate_stats.unvalidated_materializations,
+          Hash_gate_stats.false_misses, Hash_gate_stats.false_hits,
+          Hash_gate_stats.changed_hint_ids,
+          Hash_gate_stats.orientation_fallbacks,
+          Hash_gate_stats.sampled_validation_survivors,
+          avoided_calls, avoided_bytes);
+  fprintf(fp,
+          "Hash_inference_stages: candidates=%llu, materialized=%llu, "
+          "skipped=%llu, cancelled=%llu, sample_rate=1/%d, "
+          "samples=%llu, materialized_samples=%llu, "
+          "sampled_precheck_seconds=%.6f, "
+          "sampled_construction_seconds=%.6f, "
+          "sampled_consumer_seconds=%.6f, "
+          "sampled_construction_allocations=%llu, "
+          "sampled_construction_bytes=%llu, "
+          "sampled_consumer_allocations=%llu, "
+          "sampled_consumer_bytes=%llu, "
+          "estimated_precheck_seconds=%.3f, "
+          "estimated_construction_seconds=%.3f, "
+          "estimated_consumer_seconds=%.3f.\n",
+          stages.candidates, stages.materialized, stages.skipped,
+          stages.cancelled, parm(Opt->hash_inference_sample_rate),
+          stages.timing_samples, stages.timing_materialized_samples,
+          stages.precheck_seconds, stages.construction_seconds,
+          stages.consumer_seconds,
+          stages.construction_allocation_calls,
+          stages.construction_allocation_bytes,
+          stages.consumer_allocation_calls,
+          stages.consumer_allocation_bytes,
+          precheck_estimate,
+          construction_estimate, consumer_estimate);
+}
 
 /* PUBLIC */
 void fprint_all_stats(FILE *fp, char *stats_level)
@@ -3944,6 +4248,8 @@ void fprint_all_stats(FILE *fp, char *stats_level)
             "linear_steps=%llu, packed_id_sum=%llu.\n",
             Hint_id_lookup_queries, Hint_id_lookup_packed_hits,
             Hint_id_lookup_linear_steps, Hint_id_lookup_packed_id_sum);
+
+  fprint_hash_inference_gate_stats(fp);
 
   if (str_ident(stats_level, "all")) {
     print_memory_stats(fp);
@@ -8750,6 +9056,7 @@ BOOL cl_process_delete(Topform c)
   }
 
   clause_wt_with_adjustments(c);  // possibly sets c->matching_hint
+  hash_inference_validate(c);
 
   // White-black tests
 
@@ -8809,6 +9116,27 @@ BOOL cl_process_delete(Topform c)
   }
 }  // cl_process_delete
 
+/* Record the logical generation event independently of whether a concrete
+   Topform exists.  The lazy gate uses this for conclusions that the ordinary
+   path would immediately delete. */
+static void record_generated_event(void)
+{
+  exit_if_over_limit();
+  if (parm(Opt->report) > 0 || parm(Opt->report_stderr) > 0 ||
+      parm(Opt->report_given) > 0)
+    possible_report();
+
+  Stats.generated++;
+  switch (Current_inference_source) {
+  case INFER_SOURCE_BINARY: Stats.generated_binary++; break;
+  case INFER_SOURCE_HYPER:  Stats.generated_hyper++; break;
+  case INFER_SOURCE_UR:     Stats.generated_ur++; break;
+  case INFER_SOURCE_PARAMOD: Stats.generated_paramod++; break;
+  default: Stats.generated_other++; break;
+  }
+  statistic_actions("generated", Stats.generated);
+}
+
 static
 BOOL cl_process(Topform c)
 {
@@ -8826,19 +9154,9 @@ BOOL cl_process(Topform c)
   }
   clock_start(Clocks.preprocess);
 
-  exit_if_over_limit();
-  if (parm(Opt->report) > 0 || parm(Opt->report_stderr) > 0 || parm(Opt->report_given) > 0)
-    possible_report();
-
-  Stats.generated++;
-  switch (Current_inference_source) {
-  case INFER_SOURCE_BINARY: Stats.generated_binary++; break;
-  case INFER_SOURCE_HYPER:  Stats.generated_hyper++; break;
-  case INFER_SOURCE_UR:     Stats.generated_ur++; break;
-  case INFER_SOURCE_PARAMOD: Stats.generated_paramod++; break;
-  default: Stats.generated_other++; break;
-  }
-  statistic_actions("generated", Stats.generated);
+  if (!(Hash_gate_prediction.conclusion == c &&
+        Hash_gate_prediction.generation_recorded))
+    record_generated_event();
   if (flag(Opt->print_gen)) {
     printf("\n%sgenerated: ", TPTP_PFX);
     fwrite_clause(stdout, c, CL_FORM_STD);
@@ -8859,6 +9177,7 @@ BOOL cl_process(Topform c)
 
     {
       BOOL deleted = cl_process_delete(c);
+      hash_inference_note_outcome(c, deleted);
       if (Current_collective_commit_entry != NULL) {
         unsigned long long actual_hint = c->matching_hint == NULL ? 0 :
                                          c->matching_hint->id;
@@ -8910,6 +9229,7 @@ BOOL cl_process(Topform c)
   }  // not empty clause
   
 cl_process_done:
+  hash_inference_finish_materialized(c);
   clock_stop(Clocks.preprocess);
   if (infer_clock_stopped)
     clock_start(Clocks.infer);
@@ -16774,6 +17094,8 @@ Prover_results search(Prover_input p)
     if (!Opt || !flag(Opt->quiet))
       print_separator(stdout, "end of search", TRUE);
     Glob.return_code = (return_code == INT_MAX ? 0 : return_code);
+    set_paramodulation_candidate_proc(NULL, 0);
+    set_paramodulation_materialized_proc(NULL);
     fatal_setjmp();  /* This makes longjmps cause a fatal_error. */
     return collect_prover_results(p->xproofs);
   }
@@ -16798,6 +17120,11 @@ Prover_results search(Prover_input p)
     Terminal_empty = NULL;
     Terminal_print_snapshot = NULL;
     Current_inference_source = INFER_SOURCE_OTHER;
+    memset(&Hash_gate_stats, 0, sizeof(Hash_gate_stats));
+    memset(&Hash_gate_prediction, 0, sizeof(Hash_gate_prediction));
+    reset_paramodulation_candidate_stats();
+    set_paramodulation_candidate_proc(NULL, 0);
+    set_paramodulation_materialized_proc(NULL);
     collective_reset_state();
     Simplifier_epoch = 1;
     Rewrite_epoch = 1;
@@ -16822,6 +17149,22 @@ Prover_results search(Prover_input p)
         fatal_error("hint_index=generalized_hash does not support hint_match_once");
       if (parm(Opt->hint_expiry) > 0)
         fatal_error("hint_index=generalized_hash does not support hint_expiry");
+    }
+    if (!hash_inference_gate_mode("off")) {
+      if (!generalized_hint_hash_mode())
+        fatal_error("hash_inference_gate requires hint_index=generalized_hash");
+      if (discount_mode())
+        fatal_error("hash_inference_gate currently requires search_loop=otter");
+      if (!str_ident(stringparm1(Opt->inference_frontier), "clauses"))
+        fatal_error("hash_inference_gate currently requires inference_frontier=clauses");
+      set_paramodulation_candidate_proc(
+        hash_inference_candidate,
+        (unsigned) parm(Opt->hash_inference_sample_rate));
+      set_paramodulation_materialized_proc(hash_inference_materialized);
+      if (hash_inference_gate_mode("hit_only") && !flag(Opt->quiet))
+        fprintf(stderr,
+                "WARNING: hash_inference_gate=hit_only is intentionally "
+                "incomplete; it omits supported raw hash misses.\n");
     }
     if (flag(Opt->collective_promising_scheduler) &&
         !str_ident(stringparm1(Opt->inference_frontier), "collective"))

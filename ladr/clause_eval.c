@@ -400,3 +400,20 @@ BOOL rule_contains_semantics(Clause_eval p)
     return p->type == CL_EVAL_TRUE || p->type == CL_EVAL_FALSE;
 }  /* rule_contains_semantics */
 
+/* PUBLIC */
+BOOL clause_eval_rule_requires_hint(Clause_eval p)
+{
+  if (p == NULL)
+    return FALSE;
+  if (p->type == CL_EVAL_HINT)
+    return TRUE;
+  if (p->type == CL_EVAL_AND)
+    return clause_eval_rule_requires_hint(p->left) ||
+           clause_eval_rule_requires_hint(p->right);
+  if (p->type == CL_EVAL_OR)
+    return clause_eval_rule_requires_hint(p->left) &&
+           clause_eval_rule_requires_hint(p->right);
+  /* In particular, do not reason through NOT.  Returning FALSE merely
+     forces materialization, which is the conservative outcome. */
+  return FALSE;
+}

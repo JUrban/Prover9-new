@@ -38,4 +38,7 @@ BOOL black_tests(Topform c);
 
 BOOL white_tests(Topform c);
 
+/* TRUE iff every configured keep rule can succeed only on a hint match. */
+BOOL white_rules_require_hint(void);
+
 #endif  /* conditional compilation of whole file */

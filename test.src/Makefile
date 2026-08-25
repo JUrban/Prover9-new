@@ -171,6 +171,7 @@ hint-postings-test: hint_postings_test hint_preview_test compressed_unit_match_t
 	./hint_term_table_test
 	./hint_generalization_hash_test
 	./hint_compiled_census_test.sh
+	./hash_inference_gate_test.sh
 
 weight-test: default_weight_test
 	./default_weight_test

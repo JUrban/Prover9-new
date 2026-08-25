@@ -802,12 +802,109 @@ static struct gh_key gh_virtual_unit_key(
   return gh_finish_key(&state.hash);
 }
 
+struct gh_term_view {
+  Term term;
+  Context context;
+  Ilist path;
+  Term beta;
+  Context beta_context;
+  BOOL substitute;
+};
+
+static struct gh_term_view gh_applied_view(Term term, Context context)
+{
+  struct gh_term_view view;
+  memset(&view, 0, sizeof(view));
+  view.term = term;
+  view.context = context;
+  return view;
+}
+
+static struct gh_term_view gh_substituted_view(
+  Term term, Context context, Ilist path, Term beta, Context beta_context)
+{
+  struct gh_term_view view = gh_applied_view(term, context);
+  view.path = path;
+  view.beta = beta;
+  view.beta_context = beta_context;
+  view.substitute = TRUE;
+  return view;
+}
+
+static void gh_normalize_view(struct gh_term_view *view)
+{
+  if (view->substitute && view->path == NULL) {
+    view->term = view->beta;
+    view->context = view->beta_context;
+    view->substitute = FALSE;
+  }
+  else if (view->substitute && VARIABLE(view->term))
+    view->substitute = FALSE;
+  if (!view->substitute)
+    DEREFERENCE(view->term, view->context);
+}
+
+static int gh_view_variable_number(const struct gh_term_view *view)
+{
+  return (view->context == NULL ? 0 :
+          view->context->multiplier * MAX_VARS) + VARNUM(view->term);
+}
+
+static struct gh_term_view gh_view_child(
+  const struct gh_term_view *view, int child)
+{
+  if (view->substitute && view->path->i - 1 == child)
+    return gh_substituted_view(
+      ARG(view->term, child), view->context, view->path->next,
+      view->beta, view->beta_context);
+  return gh_applied_view(ARG(view->term, child), view->context);
+}
+
+static BOOL gh_views_ident(struct gh_term_view first,
+                           struct gh_term_view second)
+{
+  int i;
+  gh_normalize_view(&first);
+  gh_normalize_view(&second);
+  if (VARIABLE(first.term) || VARIABLE(second.term))
+    return VARIABLE(first.term) && VARIABLE(second.term) &&
+           gh_view_variable_number(&first) ==
+             gh_view_variable_number(&second);
+  if (SYMNUM(first.term) != SYMNUM(second.term) ||
+      ARITY(first.term) != ARITY(second.term))
+    return FALSE;
+  for (i = 0; i < ARITY(first.term); i++)
+    if (!gh_views_ident(gh_view_child(&first, i),
+                        gh_view_child(&second, i)))
+      return FALSE;
+  return TRUE;
+}
+
+static BOOL gh_virtual_unit_reflexive(
+  Literals from_lit, int from_side, Context from_subst,
+  Literals into_lit, Ilist atom_path, Context into_subst)
+{
+  Term atom = into_lit->atom;
+  Term beta = ARG(from_lit->atom, from_side == 0 ? 1 : 0);
+  struct gh_term_view sides[2];
+  int i;
+  for (i = 0; i < 2; i++) {
+    if (atom_path->i - 1 == i)
+      sides[i] = gh_substituted_view(
+        ARG(atom, i), into_subst, atom_path->next, beta, from_subst);
+    else
+      sides[i] = gh_applied_view(ARG(atom, i), into_subst);
+  }
+  return gh_views_ident(sides[0], sides[1]);
+}
+
 BOOL hint_generalization_hash_lookup_unit_paramod(
   Hint_generalization_hash table,
   Literals from_lit, int from_side, Context from_subst,
   Literals into_lit, Ilist into_pos, Context into_subst,
   unsigned *normal_id, unsigned *flipped_id,
-  unsigned *term_nodes, unsigned long long *probes)
+  unsigned *term_nodes, BOOL *reflexive,
+  unsigned long long *probes)
 {
   struct gh_key normal_key, flipped_key;
   unsigned found_normal, found_flipped;
@@ -819,6 +916,8 @@ BOOL hint_generalization_hash_lookup_unit_paramod(
     *flipped_id = 0;
   if (term_nodes != NULL)
     *term_nodes = 0;
+  if (reflexive != NULL)
+    *reflexive = FALSE;
   if (probes != NULL)
     *probes = 0;
   if (table == NULL || !table->finalized || from_lit == NULL ||
@@ -850,6 +949,10 @@ BOOL hint_generalization_hash_lookup_unit_paramod(
     *flipped_id = found_flipped;
   if (term_nodes != NULL)
     *term_nodes = normal_nodes;
+  if (reflexive != NULL)
+    *reflexive = gh_virtual_unit_reflexive(
+      from_lit, from_side, from_subst, into_lit, into_pos->next,
+      into_subst);
   if (probes != NULL)
     *probes = normal_probes + flipped_probes;
   return TRUE;

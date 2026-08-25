@@ -294,6 +294,8 @@ struct prover_options {
     hint_hash_complete_nodes, // exhaustive generalized-hash clause length
     hint_hash_partial_per_hint, // one-hole keys retained for longer hints
     hint_hash_max_entries, // hard unique-key cap for hash-only experiment
+    hash_inference_sample_rate, // sampled gate/construction timing cadence
+    hash_inference_validate_rate, // sampled materialization of virtual misses
     rewrite_refresh_hot_ratio, // hinted refresh turns per fair general turn
     rewrite_refresh_raw_budget, // dense records inspected per refresh turn
     rewrite_refresh_inference_ratio, // inference turns per background repair
@@ -319,6 +321,7 @@ struct prover_options {
     compact_back_demod_strategy, // mask8/mask32, signature32, trees, position, adaptive
     discount_demodulation, // selected, eager_legacy, eager_interreduced
     hint_index,          // fpa, compact, shallow, packed/hybrid, packed_legacy
+    hash_inference_gate, // off, shadow, safe, hit_only
     inference_frontier,  // clauses, collective
     collective_scheduler, // legacy, balanced_hint
     ancestor_store,      // off, memory, mmap, file

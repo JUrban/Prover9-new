@@ -51,6 +51,9 @@ double weight(Term t, Context subst);
 
 double clause_weight(Literals lits);
 
+/* TRUE iff clause_weight() is exactly the number of term nodes. */
+BOOL default_symbol_clause_weighting(void);
+
 int number_of_resonators(void);
 
 int number_of_resonator_matches(void);

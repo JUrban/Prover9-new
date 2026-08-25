@@ -685,6 +685,12 @@ static double default_symbol_clause_weight(Literals lits)
 }
 
 /* PUBLIC */
+BOOL default_symbol_clause_weighting(void)
+{
+  return Default_symbol_weighting && Resonators == NULL;
+}
+
+/* PUBLIC */
 double clause_weight(Literals lits)
 {
   double wt;

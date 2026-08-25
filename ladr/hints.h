@@ -63,7 +63,8 @@ BOOL preview_generalized_hash_unit_paramod(
   Literals from_lit, int from_side, Context from_subst,
   Literals into_lit, Ilist into_pos, Context into_subst,
   unsigned *normal_id, unsigned *flipped_id,
-  unsigned *term_nodes, unsigned long long *probes);
+  unsigned *term_nodes, BOOL *reflexive,
+  unsigned long long *probes);
 
 void done_with_hints(void);
 

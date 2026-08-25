@@ -6677,12 +6677,13 @@ BOOL preview_generalized_hash_unit_paramod(
   Literals from_lit, int from_side, Context from_subst,
   Literals into_lit, Ilist into_pos, Context into_subst,
   unsigned *normal_id, unsigned *flipped_id,
-  unsigned *term_nodes, unsigned long long *probes)
+  unsigned *term_nodes, BOOL *reflexive,
+  unsigned long long *probes)
 {
   return hint_generalization_hash_lookup_unit_paramod(
     Generalization_hash, from_lit, from_side, from_subst,
     into_lit, into_pos, into_subst, normal_id, flipped_id,
-    term_nodes, probes);
+    term_nodes, reflexive, probes);
 }
 
 /*************
