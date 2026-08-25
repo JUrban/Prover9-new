@@ -2,11 +2,17 @@
 
 Date: 2026-08-25
 
-Status: **review only; no implementation has started**
+Status: **Stage 1 implemented on `lazy-hash-gate`; Stage 2 remains a plan**
 
 Branch: `experimental-generalized-hint-hash`
 
 Planning base: `d9e912a91c7b2cf57010743d5176e644fec675d5`
+
+Implementation note (2026-08-25): the lazy-gate work described in Stage 1
+now lives on branch `lazy-hash-gate`.  Its implementation, options, tests,
+measurements, and limitations are documented in
+`P9-LAZY-HASH-GATE-REPORT.md`.  The target-directed Stage 2 has not been
+implemented.
 
 ## Decision
 

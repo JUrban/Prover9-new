@@ -2,6 +2,11 @@
 
 Branch: `experimental-generalized-hint-hash`
 
+The follow-on `lazy-hash-gate` branch can query this table directly from a
+virtual positive unit-paramodulation result before allocating a conclusion.
+See `P9-LAZY-HASH-GATE-REPORT.md` for its options, safety boundary, tests, and
+measurements.
+
 This branch adds a deliberately incomplete, hash-only definition of hint
 matching.  Its purpose is to measure the speed and search usefulness of
 precomputing subsumption answers, not to preserve the legacy search.
