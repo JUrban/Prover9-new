@@ -1,4 +1,5 @@
 #include "hash_target_inference.h"
+#include "compact_unit_index.h"
 
 #include "../ladr/clause_misc.h"
 #include "../ladr/clock.h"
@@ -8,19 +9,26 @@
 #include <stdint.h>
 
 struct target_requirement {
-  Term atom;
+  unsigned long long id;
   Topform from;
-  int from_side;
-  unsigned long long charged_bytes;
   struct target_requirement *next_from;
 };
 
 struct hash_target_inference {
   Hash_target_index targets;
   Mindex active_units;
-  Mindex requirements;
+  Compact_unit_index requirements;
   struct target_requirement **requirements_by_clause;
   unsigned requirement_clause_capacity;
+  struct target_requirement **requirement_by_id;
+  unsigned requirement_id_capacity;
+  unsigned long long next_requirement_id;
+  unsigned long long *free_requirement_ids;
+  unsigned free_requirement_count;
+  unsigned free_requirement_capacity;
+  unsigned long long *retired_requirement_ids;
+  unsigned retired_requirement_count;
+  unsigned retired_requirement_capacity;
   unsigned *from_marks;
   unsigned *into_marks;
   unsigned mark_capacity;
@@ -94,7 +102,13 @@ static void refresh_workspace_stats(Hash_target_inference inference)
     (unsigned long long) inference->into_partner_capacity *
       sizeof(*inference->into_partners) +
     (unsigned long long) inference->requirement_clause_capacity *
-      sizeof(*inference->requirements_by_clause);
+      sizeof(*inference->requirements_by_clause) +
+    (unsigned long long) inference->requirement_id_capacity *
+      sizeof(*inference->requirement_by_id) +
+    (unsigned long long) inference->free_requirement_capacity *
+      sizeof(*inference->free_requirement_ids) +
+    (unsigned long long) inference->retired_requirement_capacity *
+      sizeof(*inference->retired_requirement_ids);
   inference->stats.workspace_bytes = bytes;
   if (bytes > inference->stats.workspace_peak_bytes)
     inference->stats.workspace_peak_bytes = bytes;
@@ -156,18 +170,6 @@ static void query_required_atom(Hash_target_inference inference, Term atom)
   free_context(found_context);
 }
 
-static unsigned long long requirement_term_bytes(Term t)
-{
-  unsigned long long bytes = 0;
-  int i;
-  if (!VARIABLE(t))
-    bytes += (unsigned long long)
-      (PTRS(sizeof(struct term)) + ARITY(t)) * BYTES_POINTER;
-  for (i = 0; i < ARITY(t); i++)
-    bytes += requirement_term_bytes(ARG(t, i));
-  return bytes;
-}
-
 static void reserve_requirement_clauses(Hash_target_inference inference,
                                         unsigned long long id)
 {
@@ -195,37 +197,134 @@ static void reserve_requirement_clauses(Hash_target_inference inference,
   refresh_workspace_stats(inference);
 }
 
+static void reserve_requirement_ids(Hash_target_inference inference,
+                                    unsigned long long id)
+{
+  unsigned capacity;
+  if (id > UINT_MAX)
+    fatal_error("target-directed requirement ID overflow");
+  if (id < inference->requirement_id_capacity)
+    return;
+  capacity = inference->requirement_id_capacity == 0 ? 1024 :
+             inference->requirement_id_capacity;
+  while (capacity <= (unsigned) id) {
+    unsigned next = capacity + (capacity + 1) / 2;
+    if (next <= capacity)
+      fatal_error("target-directed requirement ID directory overflow");
+    capacity = next;
+  }
+  inference->requirement_by_id = safe_realloc(
+    inference->requirement_by_id,
+    (size_t) capacity * sizeof(*inference->requirement_by_id));
+  memset(inference->requirement_by_id + inference->requirement_id_capacity, 0,
+         (size_t) (capacity - inference->requirement_id_capacity) *
+           sizeof(*inference->requirement_by_id));
+  inference->requirement_id_capacity = capacity;
+  refresh_workspace_stats(inference);
+}
+
+static void append_requirement_id(unsigned long long **ids,
+                                  unsigned *count, unsigned *capacity,
+                                  unsigned long long id)
+{
+  if (*count == *capacity) {
+    unsigned next = *capacity == 0 ? 1024 :
+      *capacity + (*capacity + 1) / 2;
+    if (next <= *capacity)
+      fatal_error("target-directed retired-ID workspace overflow");
+    *ids = safe_realloc(*ids, (size_t) next * sizeof(**ids));
+    *capacity = next;
+  }
+  (*ids)[(*count)++] = id;
+}
+
+static unsigned long long new_requirement_id(Hash_target_inference inference)
+{
+  unsigned long long id;
+  if (inference->free_requirement_count != 0)
+    id = inference->free_requirement_ids[--inference->free_requirement_count];
+  else {
+    if (inference->next_requirement_id == UINT_MAX)
+      fatal_error("target-directed requirement ID overflow");
+    id = ++inference->next_requirement_id;
+  }
+  if (id == 0 || id > UINT_MAX)
+    fatal_error("target-directed requirement ID is not compact");
+  return id;
+}
+
+static void release_reclaimed_requirement_ids(
+  Hash_target_inference inference)
+{
+  unsigned i;
+  for (i = 0; i < inference->retired_requirement_count; i++)
+    append_requirement_id(&inference->free_requirement_ids,
+                          &inference->free_requirement_count,
+                          &inference->free_requirement_capacity,
+                          inference->retired_requirement_ids[i]);
+  inference->retired_requirement_count = 0;
+  refresh_workspace_stats(inference);
+}
+
+static void refresh_requirement_bytes(Hash_target_inference inference)
+{
+  struct compact_unit_index_stats compact;
+  unsigned long long bytes;
+  compact_unit_index_get_stats(inference->requirements, &compact);
+  bytes = compact.total_bytes +
+    inference->stats.requirements * sizeof(struct target_requirement) +
+    (unsigned long long) inference->requirement_id_capacity *
+      sizeof(*inference->requirement_by_id) +
+    (unsigned long long) inference->requirement_clause_capacity *
+      sizeof(*inference->requirements_by_clause);
+  inference->stats.requirement_physical = compact.physical;
+  inference->stats.requirement_compactions = compact.compactions;
+  inference->stats.requirement_bytes_reclaimed = compact.bytes_reclaimed;
+  inference->stats.requirement_code_nodes = compact.node_items;
+  inference->stats.requirement_code_postings = compact.posting_items;
+  inference->stats.requirement_code_queries = compact.code_tree_queries;
+  inference->stats.requirement_code_nodes_examined =
+    compact.code_tree_nodes_examined;
+  inference->stats.requirement_code_postings_examined =
+    compact.code_tree_postings_examined;
+  inference->stats.requirement_exact_tests = compact.unifier_exact_tests;
+  inference->stats.requirement_token_bytes = compact.token_bytes;
+  inference->stats.requirement_bytes = bytes;
+  if (bytes > inference->stats.requirement_peak_bytes)
+    inference->stats.requirement_peak_bytes = bytes;
+  if (inference->stats.requirement_budget_bytes != 0 &&
+      bytes > inference->stats.requirement_budget_bytes)
+    fatal_error("target-directed requirements exceed hash_target_index_kb");
+}
+
 static void store_requirement(Hash_target_inference inference, Term atom,
                               Topform from, int from_side)
 {
   struct target_requirement *requirement;
-  unsigned long long bytes = sizeof(*requirement) +
-                             requirement_term_bytes(atom);
-  if (inference->stats.requirement_budget_bytes != 0 &&
-      inference->stats.requirement_bytes + bytes >
-        inference->stats.requirement_budget_bytes) {
-    zap_term(atom);
-    fatal_error("target-directed requirements exceed hash_target_index_kb");
-  }
+  Topform packed = get_topform();
+  unsigned long long id = new_requirement_id(inference);
+  (void) from_side;
   reserve_requirement_clauses(inference, from->id);
+  reserve_requirement_ids(inference, id);
+  packed->id = id;
+  packed->literals = new_literal(TRUE, atom);
+  upward_clause_links(packed);
+  if (!compact_unit_index_add(inference->requirements, packed)) {
+    delete_clause(packed);
+    fatal_error("cannot add target-directed compact requirement");
+  }
   requirement = safe_malloc(sizeof(*requirement));
-  requirement->atom = atom;
+  requirement->id = id;
   requirement->from = from;
-  requirement->from_side = from_side;
-  requirement->charged_bytes = bytes;
   requirement->next_from =
     inference->requirements_by_clause[(unsigned) from->id];
   inference->requirements_by_clause[(unsigned) from->id] = requirement;
-  atom->container = requirement;
-  mindex_update(inference->requirements, atom, INSERT);
+  inference->requirement_by_id[(unsigned) id] = requirement;
+  delete_clause(packed);
   inference->stats.requirements++;
-  inference->stats.requirement_bytes += bytes;
   if (inference->stats.requirements > inference->stats.requirement_peak)
     inference->stats.requirement_peak = inference->stats.requirements;
-  if (inference->stats.requirement_bytes >
-      inference->stats.requirement_peak_bytes)
-    inference->stats.requirement_peak_bytes =
-      inference->stats.requirement_bytes;
+  refresh_requirement_bytes(inference);
 }
 
 static void query_required_orientations(Hash_target_inference inference,
@@ -239,7 +338,6 @@ static void query_required_orientations(Hash_target_inference inference,
   ARG(atom, 0) = ARG(atom, 1);
   ARG(atom, 1) = tmp;
   query_required_atom(inference, atom);
-  store_requirement(inference, copy_term(atom), from, from_side);
 }
 
 static void plan_target_term(Hash_target_inference inference,
@@ -324,9 +422,11 @@ Hash_target_inference hash_target_inference_init(Hash_target_index targets,
   Hash_target_inference inference = safe_calloc(1, sizeof(*inference));
   inference->targets = targets;
   inference->active_units = mindex_init(FPA, ORDINARY_UNIF, fpa_depth);
-  inference->requirements = mindex_init(FPA, ORDINARY_UNIF, fpa_depth);
+  inference->requirements =
+    compact_unit_index_init_strategy(COMPACT_UNIT_CODE_TREE);
   inference->stats.requirement_budget_bytes = requirement_budget_bytes;
   inference->mark_serial = 1;
+  refresh_requirement_bytes(inference);
   return inference;
 }
 
@@ -336,11 +436,15 @@ void hash_target_inference_destroy(Hash_target_inference inference)
     return;
   if (!mindex_empty(inference->active_units))
     fatal_error("target-directed active-unit index is not empty");
-  if (!mindex_empty(inference->requirements))
+  if (inference->stats.requirements != 0 ||
+      compact_unit_index_active_records(inference->requirements) != 0)
     fatal_error("target-directed requirement index is not empty");
   mindex_destroy(inference->active_units);
-  mindex_destroy(inference->requirements);
+  compact_unit_index_free(inference->requirements);
   safe_free(inference->requirements_by_clause);
+  safe_free(inference->requirement_by_id);
+  safe_free(inference->free_requirement_ids);
+  safe_free(inference->retired_requirement_ids);
   safe_free(inference->from_marks);
   safe_free(inference->into_marks);
   safe_free(inference->from_partners);
@@ -361,22 +465,45 @@ void hash_target_inference_update(Hash_target_inference inference,
   }
   else {
     struct target_requirement *requirement, *next;
+    BOOL removed_requirement = FALSE;
     if (clause->id < inference->requirement_clause_capacity) {
       requirement =
         inference->requirements_by_clause[(unsigned) clause->id];
       inference->requirements_by_clause[(unsigned) clause->id] = NULL;
       while (requirement != NULL) {
         next = requirement->next_from;
-        mindex_update(inference->requirements, requirement->atom, DELETE);
-        zap_term(requirement->atom);
-        if (inference->stats.requirements == 0 ||
-            inference->stats.requirement_bytes < requirement->charged_bytes)
-          fatal_error("target-directed requirement accounting underflow");
+        if (!compact_unit_index_remove(inference->requirements,
+                                       requirement->id))
+          fatal_error("cannot remove target-directed compact requirement");
+        if (requirement->id >= inference->requirement_id_capacity ||
+            inference->requirement_by_id[(unsigned) requirement->id] !=
+              requirement)
+          fatal_error("target-directed requirement directory mismatch");
+        inference->requirement_by_id[(unsigned) requirement->id] = NULL;
+        append_requirement_id(&inference->retired_requirement_ids,
+                              &inference->retired_requirement_count,
+                              &inference->retired_requirement_capacity,
+                              requirement->id);
+        if (inference->stats.requirements == 0)
+          fatal_error("target-directed requirement count underflow");
         inference->stats.requirements--;
-        inference->stats.requirement_bytes -= requirement->charged_bytes;
+        removed_requirement = TRUE;
         safe_free(requirement);
         requirement = next;
       }
+      if (removed_requirement && inference->stats.requirements == 0) {
+        compact_unit_index_free(inference->requirements);
+        inference->requirements =
+          compact_unit_index_init_strategy(COMPACT_UNIT_CODE_TREE);
+        inference->stats.requirement_resets++;
+        release_reclaimed_requirement_ids(inference);
+      }
+      else if (removed_requirement &&
+               compact_unit_index_compaction_needed(inference->requirements) &&
+               compact_unit_index_reclaim_owning_pool(
+                 inference->requirements))
+        release_reclaimed_requirement_ids(inference);
+      refresh_requirement_bytes(inference);
     }
     if (inference->stats.active_units == 0)
       fatal_error("target-directed active-unit count underflow");
@@ -387,26 +514,35 @@ void hash_target_inference_update(Hash_target_inference inference,
 static void plan_into_from_requirements(Hash_target_inference inference,
                                         Topform given)
 {
-  Context query_context, found_context;
-  Mindex_pos position = NULL;
-  Term found;
+  Term query_atom;
+  int orientation;
   if (!target_active_unit(given))
     return;
-  query_context = get_context();
-  found_context = get_context();
-  inference->stats.requirement_queries++;
-  found = mindex_retrieve_first(given->literals->atom,
-                                inference->requirements, UNIFY,
-                                query_context, found_context, FALSE,
-                                &position);
-  while (found != NULL) {
-    struct target_requirement *requirement = found->container;
-    inference->stats.requirement_answers++;
-    add_partner(inference, requirement->from, FALSE);
-    found = mindex_retrieve_next(position);
+  query_atom = copy_term(given->literals->atom);
+  for (orientation = 0; orientation < 2; orientation++) {
+    unsigned long long *ids;
+    size_t count, i;
+    if (orientation == 1) {
+      Term tmp = ARG(query_atom, 0);
+      ARG(query_atom, 0) = ARG(query_atom, 1);
+      ARG(query_atom, 1) = tmp;
+    }
+    inference->stats.requirement_queries++;
+    ids = compact_unit_unifier_ids(inference->requirements, query_atom,
+                                   TRUE, 0, &count);
+    inference->stats.requirement_answers += count;
+    for (i = 0; i < count; i++) {
+      struct target_requirement *requirement;
+      if (ids[i] >= inference->requirement_id_capacity ||
+          (requirement =
+             inference->requirement_by_id[(unsigned) ids[i]]) == NULL)
+        fatal_error("target-directed compact result has no owner");
+      add_partner(inference, requirement->from, FALSE);
+    }
+    safe_free(ids);
   }
-  free_context(query_context);
-  free_context(found_context);
+  zap_term(query_atom);
+  refresh_requirement_bytes(inference);
 }
 
 void hash_target_inference_plan_from(Hash_target_inference inference,
@@ -490,8 +626,11 @@ void hash_target_inference_get_stats(Hash_target_inference inference,
 {
   if (inference == NULL)
     memset(stats, 0, sizeof(*stats));
-  else
+  else {
+    refresh_workspace_stats(inference);
+    refresh_requirement_bytes(inference);
     *stats = inference->stats;
+  }
 }
 
 void fprint_hash_target_inference_stats(FILE *fp,
@@ -507,9 +646,17 @@ void fprint_hash_target_inference_stats(FILE *fp,
           "ordinary_hash_hits=%llu, covered_hash_hits=%llu, "
           "missed_hash_hits=%llu, planning_seconds=%.3f, "
           "requirements=%llu, requirement_peak=%llu, "
-          "requirement_bytes=%llu, requirement_peak_bytes=%llu, "
+          "requirement_physical=%llu, requirement_bytes=%llu, "
+          "requirement_peak_bytes=%llu, requirement_token_bytes=%llu, "
+          "requirement_compactions=%llu, requirement_resets=%llu, "
+          "requirement_bytes_reclaimed=%llu, requirement_code_nodes=%llu, "
+          "requirement_code_postings=%llu, requirement_code_queries=%llu, "
+          "requirement_code_nodes_examined=%llu, "
+          "requirement_code_postings_examined=%llu, "
+          "requirement_exact_tests=%llu, "
           "requirement_budget_bytes=%llu, requirement_queries=%llu, "
-          "requirement_answers=%llu, workspace_bytes=%llu, "
+          "requirement_answers=%llu, requirement_duplicates=%llu, "
+          "workspace_bytes=%llu, "
           "workspace_peak_bytes=%llu.\n",
           s.active_units, s.active_unit_peak, s.plans, s.from_sides,
           s.variable_from_sides, s.target_recipes, s.target_positions,
@@ -517,8 +664,15 @@ void fprint_hash_target_inference_stats(FILE *fp,
           s.required_query_answers, s.unique_partners,
           s.duplicate_partners, s.ordinary_hash_hits,
           s.covered_hash_hits, s.missed_hash_hits, s.planning_seconds,
-          s.requirements, s.requirement_peak, s.requirement_bytes,
-          s.requirement_peak_bytes, s.requirement_budget_bytes,
+          s.requirements, s.requirement_peak, s.requirement_physical,
+          s.requirement_bytes, s.requirement_peak_bytes,
+          s.requirement_token_bytes, s.requirement_compactions,
+          s.requirement_resets, s.requirement_bytes_reclaimed,
+          s.requirement_code_nodes, s.requirement_code_postings,
+          s.requirement_code_queries, s.requirement_code_nodes_examined,
+          s.requirement_code_postings_examined,
+          s.requirement_exact_tests, s.requirement_budget_bytes,
           s.requirement_queries, s.requirement_answers,
+          s.requirement_duplicates,
           s.workspace_bytes, s.workspace_peak_bytes);
 }

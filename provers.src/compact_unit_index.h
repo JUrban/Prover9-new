@@ -92,6 +92,11 @@ struct compact_unit_index_stats {
 
 Compact_unit_index compact_unit_index_init(void);
 
+/* Construct an independently configured index without changing the global
+   strategy used by the ordinary search unit index. */
+Compact_unit_index compact_unit_index_init_strategy(
+  Compact_unit_strategy strategy);
+
 Compact_unit_index compact_unit_index_init_with_pool(Compact_term_pool pool);
 
 void compact_unit_index_set_compaction_stale_pct(unsigned percentage);
@@ -114,6 +119,13 @@ BOOL compact_unit_index_compaction_needed(Compact_unit_index index);
 void compact_unit_index_compact(Compact_unit_index index);
 
 void compact_unit_index_compact_all_stale(Compact_unit_index index);
+
+/* For an independently owning index, remove stale records and rebuild its
+   private serialized-term pool from the live records.  This is deliberately
+   separate from compact_unit_index_compact(): the ordinary search indexes
+   share a pool and must coordinate their term rebases, whereas private
+   target-planning indexes can reclaim their pool atomically. */
+BOOL compact_unit_index_reclaim_owning_pool(Compact_unit_index index);
 
 void compact_unit_index_copy_live_clauses(Compact_unit_index index,
                                           Compact_term_pool destination,

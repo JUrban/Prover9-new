@@ -16,6 +16,52 @@ static Topform indexed_unit(const char *text)
   return c;
 }
 
+static void check_private_pool_reclamation(void)
+{
+  Compact_unit_index index =
+    compact_unit_index_init_strategy(COMPACT_UNIT_CODE_TREE);
+  Topform retired = indexed_unit("reclaim(old).");
+  Topform live1 = indexed_unit("reclaim(f(x)).");
+  Topform live2 = indexed_unit("reclaim(g(a)).");
+  Topform replacement;
+  Topform query;
+  unsigned long long recycled_id = retired->id;
+  unsigned long long *ids;
+  size_t count;
+  struct compact_unit_index_stats before, after;
+
+  CHECK(compact_unit_index_add(index, retired) &&
+        compact_unit_index_add(index, live1) &&
+        compact_unit_index_add(index, live2),
+        "populate an independently owned code-tree index");
+  CHECK(compact_unit_index_remove(index, recycled_id),
+        "retire a private-pool unit");
+  compact_unit_index_get_stats(index, &before);
+  CHECK(compact_unit_index_reclaim_owning_pool(index),
+        "reclaim stale private records and serialized terms together");
+  compact_unit_index_get_stats(index, &after);
+  CHECK(before.physical == 3 && after.active == 2 && after.physical == 2,
+        "private-pool reclamation retains only live records");
+
+  replacement = parse_clause_from_string("reclaim(new).");
+  replacement->id = recycled_id;
+  CHECK(compact_unit_index_add(index, replacement),
+        "a reclaimed proof ID can safely name different serialized terms");
+  query = parse_clause_from_string("reclaim(new).");
+  ids = compact_unit_unifier_ids(index, query->literals->atom, TRUE,
+                                 0, &count);
+  CHECK(count == 1 && ids != NULL && ids[0] == recycled_id,
+        "the reused ID retrieves the replacement rather than stale tokens");
+  safe_free(ids);
+  delete_clause(query);
+
+  compact_unit_index_free(index);
+  delete_clause(retired);
+  delete_clause(live1);
+  delete_clause(live2);
+  delete_clause(replacement);
+}
+
 static void check_high_variable_generalization(void)
 {
   Compact_unit_index index = compact_unit_index_init();
@@ -175,6 +221,7 @@ int main(void)
   size_t count;
 
   init_standard_ladr();
+  check_private_pool_reclamation();
   check_high_variable_generalization();
   check_deep_generalization_stack();
   index = compact_unit_index_init();

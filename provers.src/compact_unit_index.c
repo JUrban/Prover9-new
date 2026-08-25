@@ -795,6 +795,21 @@ Compact_unit_index compact_unit_index_init(void)
   return index;
 }
 
+Compact_unit_index compact_unit_index_init_strategy(
+  Compact_unit_strategy strategy)
+{
+  Compact_term_pool pool;
+  Compact_unit_index index;
+  if (strategy < COMPACT_UNIT_ROOT_SCAN ||
+      strategy > COMPACT_UNIT_ADAPTIVE)
+    fatal_error("compact_unit_index_init_strategy: invalid strategy");
+  pool = compact_term_pool_init();
+  index = compact_unit_index_init_with_pool_strategy(pool, strategy);
+  index->owns_term_pool = TRUE;
+  update_peak(index);
+  return index;
+}
+
 BOOL compact_unit_index_add(Compact_unit_index index, Topform unit)
 {
   struct cui_record *record;
@@ -1067,6 +1082,24 @@ void compact_unit_index_compact(Compact_unit_index index)
 void compact_unit_index_compact_all_stale(Compact_unit_index index)
 {
   compact_unit_index_compact_internal(index, TRUE);
+}
+
+BOOL compact_unit_index_reclaim_owning_pool(Compact_unit_index index)
+{
+  Compact_term_rebase_map map;
+  Compact_term_pool pool;
+  if (index == NULL || !index->owns_term_pool || index->active == 0 ||
+      index->record_count - 1 == index->active)
+    return FALSE;
+  compact_unit_index_compact_all_stale(index);
+  pool = index->term_pool;
+  map = compact_term_rebase_map_init();
+  compact_unit_index_retain_live_clauses(index, map);
+  compact_term_pool_compact_retained(pool, map);
+  compact_unit_index_rebase_term_pool(index, pool, map);
+  compact_term_rebase_map_free(map);
+  update_peak(index);
+  return TRUE;
 }
 
 void compact_unit_index_copy_live_clauses(Compact_unit_index index,

@@ -953,6 +953,12 @@ static void build_hash_target_planner(void)
     Hash_targets, parm(Opt->fpa_depth), remaining);
   for (p = Glob.usable->first; p != NULL; p = p->next)
     hash_target_inference_update(Hash_target_planner, p->c, INSERT);
+  /* Requirements normally arise when a newly selected given is planned.
+     Initial and checkpoint-restored Usable clauses have already crossed that
+     boundary, so derive their requirements explicitly after every active unit
+     is visible.  The transient partner answer is intentionally ignored. */
+  for (p = Glob.usable->first; p != NULL; p = p->next)
+    hash_target_inference_plan_from(Hash_target_planner, p->c);
 }
 
 static BOOL demodulation_rules_available(void)
@@ -10953,17 +10959,19 @@ BOOL given_infer(Topform given)
 	    (good_given ||
 	     p->c->id < (unsigned long long) parm(Opt->para_restr_beg) ||
 	     p->c->id > (unsigned long long) parm(Opt->para_restr_end));
-	  if (good_pair) {
-	    BOOL from_planned =
-	      hash_target_inference_partner_planned(
-	        Hash_target_planner, p->c, TRUE);
+		  if (good_pair) {
+		    BOOL target_supported_pair = targeted_unit &&
+		      unit_clause(p->c->literals) && pos_eq(p->c->literals);
+		    BOOL from_planned =
+		      hash_target_inference_partner_planned(
+		        Hash_target_planner, p->c, TRUE);
 	    BOOL into_planned =
 	      hash_target_inference_partner_planned(
 	        Hash_target_planner, p->c, FALSE);
 	    Current_inference_source = INFER_SOURCE_PARAMOD;
 	    Hash_target_current_pair_covered = from_planned;
-	    if ((!targeted_unit || from_planned) &&
-	        !para_from_into(given, cf, p->c, ci, FALSE, cl_process)) {
+		    if ((!target_supported_pair || from_planned) &&
+		        !para_from_into(given, cf, p->c, ci, FALSE, cl_process)) {
               Hash_target_current_pair_covered = FALSE;
               free_context(cf);
               free_context(ci);
@@ -10971,8 +10979,8 @@ BOOL given_infer(Topform given)
             }
 	    Hash_target_current_pair_covered = FALSE;
 	    Hash_target_current_pair_covered = into_planned;
-	    if ((!targeted_unit || into_planned) &&
-	        !para_from_into(p->c, cf, given, ci, TRUE, cl_process)) {
+		    if ((!target_supported_pair || into_planned) &&
+		        !para_from_into(p->c, cf, given, ci, TRUE, cl_process)) {
               Hash_target_current_pair_covered = FALSE;
               free_context(cf);
               free_context(ci);
