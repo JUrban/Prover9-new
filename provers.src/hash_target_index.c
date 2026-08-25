@@ -9,14 +9,11 @@
 
 struct target_feature_slot {
   uint64_t key;
-  uint64_t count;
-  uint64_t first;
-  uint64_t cursor;
 };
 
 struct hash_target_index {
   uint32_t *postings;
-  uint32_t *feature_postings;
+  uint64_t *feature_masks;
   uint64_t *offsets;
   struct target_feature_slot *features;
   unsigned feature_capacity;
@@ -50,18 +47,6 @@ static unsigned feature_slot_index(uint64_t key, unsigned capacity)
   return (unsigned) mix_target_feature(key) & (capacity - 1);
 }
 
-static struct target_feature_slot *find_feature_slot(
-  Hash_target_index index, uint64_t key)
-{
-  unsigned at;
-  if (index->feature_capacity == 0)
-    return NULL;
-  at = feature_slot_index(key, index->feature_capacity);
-  while (index->features[at].key != 0 && index->features[at].key != key)
-    at = (at + 1) & (index->feature_capacity - 1);
-  return index->features[at].key == key ? index->features + at : NULL;
-}
-
 static void rehash_target_features(Hash_target_index index,
                                    unsigned capacity)
 {
@@ -80,7 +65,7 @@ static void rehash_target_features(Hash_target_index index,
   safe_free(old);
 }
 
-static struct target_feature_slot *insert_target_feature(
+static void insert_target_feature(
   Hash_target_index index, uint64_t key)
 {
   unsigned at;
@@ -99,7 +84,16 @@ static struct target_feature_slot *insert_target_feature(
     index->features[at].key = key;
     index->feature_count++;
   }
-  return index->features + at;
+}
+
+/* This signature is only a necessary-condition filter.  Collisions admit
+   extra candidates, never remove a compatible target, because indexing and
+   querying set the same two bits for an exact structural feature. */
+static uint64_t target_feature_mask(uint64_t key)
+{
+  unsigned first = (unsigned) key & 63;
+  unsigned second = (unsigned) (key >> 32) & 63;
+  return (UINT64_C(1) << first) | (UINT64_C(1) << second);
 }
 
 static int compare_u64(const void *a, const void *b)
@@ -177,18 +171,6 @@ static void fill_target_term(Term t, unsigned *seen, unsigned serial,
                      postings, recipe_id);
 }
 
-static void collect_target_features(Term t, uint64_t **features,
-                                    unsigned *count, unsigned *capacity)
-{
-  int i;
-  for (i = 0; i < ARITY(t); i++) {
-    if (!VARIABLE(t) && !VARIABLE(ARG(t, i)))
-      append_target_feature(target_child_feature(t, (unsigned) i),
-                            features, count, capacity);
-    collect_target_features(ARG(t, i), features, count, capacity);
-  }
-}
-
 static unsigned unique_target_features(uint64_t *features, unsigned count)
 {
   unsigned i, unique = 0;
@@ -235,6 +217,7 @@ Hash_target_index hash_target_index_build(unsigned long long budget_bytes)
   index->stats.root_keys = key_count;
   index->stats.recipe_bytes = generalized_hash_target_storage_bytes();
   index->stats.budget_bytes = budget_bytes;
+  index->feature_masks = safe_calloc(targets, sizeof(*index->feature_masks));
   counts = safe_calloc(key_count, sizeof(*counts));
   seen = safe_calloc(key_count, sizeof(*seen));
 
@@ -255,9 +238,8 @@ Hash_target_index hash_target_index_build(unsigned long long budget_bytes)
     {
       unsigned j;
       for (j = 0; j < feature_scratch_count; j++) {
-        struct target_feature_slot *slot = insert_target_feature(
-          index, feature_scratch[j]);
-        slot->count++;
+        insert_target_feature(index, feature_scratch[j]);
+        index->feature_masks[i] |= target_feature_mask(feature_scratch[j]);
         index->stats.feature_records++;
       }
     }
@@ -280,44 +262,26 @@ Hash_target_index hash_target_index_build(unsigned long long budget_bytes)
     fatal_error("hash target root census is inconsistent");
   if (index->stats.root_records > SIZE_MAX / sizeof(*index->postings))
     fatal_error("hash target root postings exceed address space");
-  {
-    unsigned long long feature_offset = 0;
-    for (i = 0; i < index->feature_capacity; i++)
-      if (index->features[i].key != 0) {
-        index->features[i].first = feature_offset;
-        index->features[i].cursor = feature_offset;
-        if (ULLONG_MAX - feature_offset < index->features[i].count)
-          fatal_error("hash target feature posting count overflow");
-        feature_offset += index->features[i].count;
-        if (index->features[i].count > index->stats.maximum_posting)
-          index->stats.maximum_posting = index->features[i].count;
-      }
-    if (feature_offset != index->stats.feature_records)
-      fatal_error("hash target feature census is inconsistent");
-  }
   index->stats.feature_keys = index->feature_count;
-  if (index->stats.feature_records >
-      SIZE_MAX / sizeof(*index->feature_postings))
-    fatal_error("hash target feature postings exceed address space");
   resident_bytes = index->stats.recipe_bytes +
     ((unsigned long long) key_count + 1) * sizeof(*index->offsets) +
     index->stats.root_records * sizeof(*index->postings) +
-    index->stats.feature_records * sizeof(*index->feature_postings) +
-    (unsigned long long) index->feature_capacity * sizeof(*index->features) +
+    (unsigned long long) targets * sizeof(*index->feature_masks) +
     sizeof(*index);
   construction_bytes = resident_bytes +
     (unsigned long long) key_count *
       (sizeof(*counts) + sizeof(*cursor) + sizeof(*seen)) +
-    (unsigned long long) feature_scratch_capacity * sizeof(*feature_scratch);
+    (unsigned long long) feature_scratch_capacity * sizeof(*feature_scratch) +
+    (unsigned long long) index->feature_capacity * sizeof(*index->features);
   if (budget_bytes != 0 && resident_bytes > budget_bytes)
     fatal_error("hash target root directory exceeds hash_target_index_kb");
   index->stats.index_bytes = resident_bytes - index->stats.recipe_bytes;
   index->stats.construction_peak_bytes = construction_bytes;
   index->postings = safe_malloc(
     (size_t) index->stats.root_records * sizeof(*index->postings));
-  index->feature_postings = safe_malloc(
-    (size_t) index->stats.feature_records *
-      sizeof(*index->feature_postings));
+  safe_free(index->features);
+  index->features = NULL;
+  index->feature_capacity = 0;
   cursor = safe_malloc((size_t) key_count * sizeof(*cursor));
   memcpy(cursor, index->offsets, (size_t) key_count * sizeof(*cursor));
   memset(seen, 0, (size_t) key_count * sizeof(*seen));
@@ -331,23 +295,6 @@ Hash_target_index hash_target_index_build(unsigned long long budget_bytes)
                      index->postings, i);
     fill_target_term(right, seen, i + 1, key_count, cursor,
                      index->postings, i);
-    feature_scratch_count = 0;
-    collect_target_features(left, &feature_scratch, &feature_scratch_count,
-                            &feature_scratch_capacity);
-    collect_target_features(right, &feature_scratch, &feature_scratch_count,
-                            &feature_scratch_capacity);
-    feature_scratch_count = unique_target_features(
-      feature_scratch, feature_scratch_count);
-    {
-      unsigned j;
-      for (j = 0; j < feature_scratch_count; j++) {
-        struct target_feature_slot *slot = find_feature_slot(
-          index, feature_scratch[j]);
-        if (slot == NULL || slot->cursor >= slot->first + slot->count)
-          fatal_error("hash target feature posting fill is inconsistent");
-        index->feature_postings[slot->cursor++] = (uint32_t) i;
-      }
-    }
     index->stats.reconstructed_targets++;
     delete_clause(target);
   }
@@ -355,11 +302,6 @@ Hash_target_index hash_target_index_build(unsigned long long budget_bytes)
   for (i = 0; i < key_count; i++)
     if (cursor[i] != index->offsets[i + 1])
       fatal_error("hash target root posting fill is inconsistent");
-  for (i = 0; i < index->feature_capacity; i++)
-    if (index->features[i].key != 0 &&
-        index->features[i].cursor !=
-          index->features[i].first + index->features[i].count)
-      fatal_error("hash target feature posting fill is incomplete");
   safe_free(cursor);
   safe_free(seen);
   safe_free(counts);
@@ -373,7 +315,7 @@ void hash_target_index_destroy(Hash_target_index index)
   if (index == NULL)
     return;
   safe_free(index->postings);
-  safe_free(index->feature_postings);
+  safe_free(index->feature_masks);
   safe_free(index->offsets);
   safe_free(index->features);
   safe_free(index);
@@ -396,19 +338,10 @@ void hash_target_query_init(Hash_target_index index, Term replacement,
   query->first_end = index->offsets[key + 1];
   if (COMPLEX(replacement)) {
     int i;
-    for (i = 0; i < ARITY(replacement) && query->filter_count < 32; i++)
-      if (!VARIABLE(ARG(replacement, i))) {
-        struct target_feature_slot *slot = find_feature_slot(
-          index, target_child_feature(replacement, (unsigned) i));
-        if (slot == NULL) {
-          query->first = query->first_end;
-          query->filter_count = 0;
-          return;
-        }
-        query->filters[query->filter_count].first = slot->first;
-        query->filters[query->filter_count].end = slot->first + slot->count;
-        query->filter_count++;
-      }
+    for (i = 0; i < ARITY(replacement); i++)
+      if (!VARIABLE(ARG(replacement, i)))
+        query->required_feature_mask |= target_feature_mask(
+          target_child_feature(replacement, (unsigned) i));
   }
 }
 
@@ -423,31 +356,18 @@ BOOL hash_target_query_next(Hash_target_query *query, unsigned *recipe_id)
   else {
     while (query->first < query->first_end) {
       uint32_t candidate = index->postings[query->first++];
-      unsigned i;
-      BOOL keep = TRUE;
-      for (i = 0; i < query->filter_count; i++) {
-        unsigned long long first = query->filters[i].first;
-        unsigned long long end = query->filters[i].end;
-        unsigned long long lo = first, hi = end;
+      if (query->required_feature_mask != 0) {
         index->stats.feature_tests++;
-        while (lo < hi) {
-          unsigned long long middle = lo + (hi - lo) / 2;
-          if (index->feature_postings[middle] < candidate)
-            lo = middle + 1;
-          else
-            hi = middle;
-        }
-        if (lo == end || index->feature_postings[lo] != candidate) {
-          keep = FALSE;
+        if ((index->feature_masks[candidate] &
+             query->required_feature_mask) !=
+            query->required_feature_mask) {
           index->stats.feature_rejects++;
-          break;
+          continue;
         }
       }
-      if (keep) {
-        *recipe_id = candidate;
-        index->stats.candidates++;
-        return TRUE;
-      }
+      *recipe_id = candidate;
+      index->stats.candidates++;
+      return TRUE;
     }
     return FALSE;
   }

@@ -49,6 +49,8 @@ struct hash_target_inference_stats {
   unsigned long long requirement_answers;
   unsigned long long requirement_duplicates;
   unsigned long long requirement_budget_bytes;
+  BOOL symmetric_requirements_enabled;
+  unsigned long long omitted_symmetric_requirements;
   unsigned long long workspace_bytes;
   unsigned long long workspace_peak_bytes;
   double planning_seconds;
@@ -57,7 +59,8 @@ struct hash_target_inference_stats {
 Hash_target_inference hash_target_inference_init(Hash_target_index targets,
                                                  int fpa_depth,
                                                  unsigned long long
-                                                   requirement_budget_bytes);
+                                                   requirement_budget_bytes,
+                                                 BOOL retain_symmetric);
 
 void hash_target_inference_destroy(Hash_target_inference inference);
 

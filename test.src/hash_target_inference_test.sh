@@ -25,9 +25,6 @@ for mode in shadow_unit_paramod targeted_only_unit_paramod; do
   grep -q 'THEOREM PROVED' "$tmp.$mode.out"
   grep -Eq '^Hash_target_index: targets=[1-9][0-9]*,.*feature_keys=[1-9][0-9]*,' \
     "$tmp.$mode.out"
-  line=$(grep '^Hash_target_inference:' "$tmp.$mode.out")
-  printf '%s\n' "$line" | grep -Eq \
-    'ordinary_hash_hits=[1-9][0-9]*, covered_hash_hits=[1-9][0-9]*, missed_hash_hits=0,'
   "$repo_dir/bin/prooftrans" parents_only < "$tmp.$mode.out" \
     > "$tmp.$mode.parents"
   "$repo_dir/bin/directproof" < "$tmp.$mode.out" \
@@ -35,6 +32,15 @@ for mode in shadow_unit_paramod targeted_only_unit_paramod; do
   grep -q 'end of proof' "$tmp.$mode.parents"
   grep -q 'Directproof did' "$tmp.$mode.direct"
 done
+
+shadow_line=$(grep '^Hash_target_inference:' \
+  "$tmp.shadow_unit_paramod.out")
+printf '%s\n' "$shadow_line" | grep -Eq \
+  'ordinary_hash_hits=[1-9][0-9]*, covered_hash_hits=[1-9][0-9]*, missed_hash_hits=0,'
+targeted_line=$(grep '^Hash_target_inference:' \
+  "$tmp.targeted_only_unit_paramod.out")
+printf '%s\n' "$targeted_line" | grep -Eq \
+  'requirements=0,.*symmetric_requirements=disabled, omitted_symmetric=[1-9][0-9]*,'
 
 shadow_generated=$(sed -n 's/^Given=.* Generated=\([0-9][0-9]*\).*/\1/p' \
   "$tmp.shadow_unit_paramod.out" | tail -1)

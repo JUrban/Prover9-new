@@ -25,6 +25,7 @@ struct hash_target_inference {
   struct target_requirement **requirement_by_id;
   unsigned requirement_id_capacity;
   unsigned long long next_requirement_id;
+  BOOL retain_symmetric;
   unsigned long long *free_requirement_ids;
   unsigned free_requirement_count;
   unsigned free_requirement_capacity;
@@ -335,7 +336,10 @@ static void query_required_orientations(Hash_target_inference inference,
 {
   Term tmp;
   query_required_atom(inference, atom);
-  store_requirement(inference, copy_term(atom), from, from_side);
+  if (inference->retain_symmetric)
+    store_requirement(inference, copy_term(atom), from, from_side);
+  else
+    inference->stats.omitted_symmetric_requirements++;
   tmp = ARG(atom, 0);
   ARG(atom, 0) = ARG(atom, 1);
   ARG(atom, 1) = tmp;
@@ -419,15 +423,18 @@ static void plan_from_side(Hash_target_inference inference, Topform given,
 Hash_target_inference hash_target_inference_init(Hash_target_index targets,
                                                  int fpa_depth,
                                                  unsigned long long
-                                                   requirement_budget_bytes)
+                                                   requirement_budget_bytes,
+                                                 BOOL retain_symmetric)
 {
   Hash_target_inference inference = safe_calloc(1, sizeof(*inference));
   inference->targets = targets;
   inference->active_units = mindex_init(FPA, ORDINARY_UNIF, fpa_depth);
   inference->ordinary_partners = clist_init("hash_target_ordinary_partners");
+  inference->retain_symmetric = retain_symmetric;
   inference->requirements =
     compact_unit_index_init_strategy(COMPACT_UNIT_CODE_TREE);
   inference->stats.requirement_budget_bytes = requirement_budget_bytes;
+  inference->stats.symmetric_requirements_enabled = retain_symmetric;
   inference->mark_serial = 1;
   refresh_requirement_bytes(inference);
   return inference;
@@ -541,6 +548,8 @@ static void plan_into_from_requirements(Hash_target_inference inference,
   Term query_atom;
   int orientation;
   if (!target_active_unit(given))
+    return;
+  if (!inference->retain_symmetric)
     return;
   query_atom = copy_term(given->literals->atom);
   for (orientation = 0; orientation < 2; orientation++) {
@@ -702,6 +711,7 @@ void fprint_hash_target_inference_stats(FILE *fp,
           "requirement_code_nodes_examined=%llu, "
           "requirement_code_postings_examined=%llu, "
           "requirement_exact_tests=%llu, "
+          "symmetric_requirements=%s, omitted_symmetric=%llu, "
           "requirement_budget_bytes=%llu, requirement_queries=%llu, "
           "requirement_answers=%llu, requirement_duplicates=%llu, "
           "workspace_bytes=%llu, "
@@ -722,7 +732,9 @@ void fprint_hash_target_inference_stats(FILE *fp,
           s.requirement_code_nodes, s.requirement_code_postings,
           s.requirement_code_queries, s.requirement_code_nodes_examined,
           s.requirement_code_postings_examined,
-          s.requirement_exact_tests, s.requirement_budget_bytes,
+          s.requirement_exact_tests,
+          s.symmetric_requirements_enabled ? "enabled" : "disabled",
+          s.omitted_symmetric_requirements, s.requirement_budget_bytes,
           s.requirement_queries, s.requirement_answers,
           s.requirement_duplicates,
           s.workspace_bytes, s.workspace_peak_bytes);

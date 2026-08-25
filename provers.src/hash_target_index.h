@@ -13,11 +13,7 @@ typedef struct hash_target_query {
   Hash_target_index index;
   unsigned long long first;
   unsigned long long first_end;
-  unsigned filter_count;
-  struct {
-    unsigned long long first;
-    unsigned long long end;
-  } filters[32];
+  unsigned long long required_feature_mask;
   unsigned all_next;
   BOOL all_targets;
 } Hash_target_query;

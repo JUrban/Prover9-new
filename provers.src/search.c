@@ -950,15 +950,17 @@ static void build_hash_target_planner(void)
     fatal_error("hash target index budget accounting is inconsistent");
   remaining = budget - resident;
   Hash_target_planner = hash_target_inference_init(
-    Hash_targets, parm(Opt->fpa_depth), remaining);
+    Hash_targets, parm(Opt->fpa_depth), remaining,
+    !hash_targeted_inference_mode("targeted_only_unit_paramod"));
   for (p = Glob.usable->first; p != NULL; p = p->next)
     hash_target_inference_update(Hash_target_planner, p->c, INSERT);
   /* Requirements normally arise when a newly selected given is planned.
      Initial and checkpoint-restored Usable clauses have already crossed that
      boundary, so derive their requirements explicitly after every active unit
      is visible.  The transient partner answer is intentionally ignored. */
-  for (p = Glob.usable->first; p != NULL; p = p->next)
-    hash_target_inference_plan_from(Hash_target_planner, p->c);
+  if (!hash_targeted_inference_mode("targeted_only_unit_paramod"))
+    for (p = Glob.usable->first; p != NULL; p = p->next)
+      hash_target_inference_plan_from(Hash_target_planner, p->c);
 }
 
 static BOOL demodulation_rules_available(void)
@@ -17386,8 +17388,9 @@ Prover_results search(Prover_input p)
           !flag(Opt->quiet))
         fprintf(stderr,
                 "WARNING: targeted_only_unit_paramod is intentionally "
-                "incomplete; variable replacement sides and ordinary "
-                "unit-paramodulation misses are omitted.\n");
+                "incomplete; symmetric historical unit directions, variable "
+                "replacement sides, and ordinary unit-paramodulation misses "
+                "are omitted.\n");
     }
     if (!hash_inference_gate_mode("off")) {
       if (!generalized_hint_hash_mode())
