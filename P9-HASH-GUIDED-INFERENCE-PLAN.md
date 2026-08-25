@@ -2,17 +2,22 @@
 
 Date: 2026-08-25
 
-Status: **Stage 1 implemented on `lazy-hash-gate`; Stage 2 remains a plan**
+Status: **Stage 1 implemented; Stage 2 prototype implemented on
+`target-directed-inference`, but the Josef stop/go CPU gate failed**
 
-Branch: `experimental-generalized-hint-hash`
+Branch: `target-directed-inference`
 
 Planning base: `d9e912a91c7b2cf57010743d5176e644fec675d5`
 
-Implementation note (2026-08-25): the lazy-gate work described in Stage 1
-now lives on branch `lazy-hash-gate`.  Its implementation, options, tests,
-measurements, and limitations are documented in
-`P9-LAZY-HASH-GATE-REPORT.md`.  The target-directed Stage 2 has not been
-implemented.
+Implementation note (2026-08-25): Stage 1 lives on `lazy-hash-gate` and is
+documented in `P9-LAZY-HASH-GATE-REPORT.md`.  The Stage-2 structural index,
+reverse planner, shadow accounting, and incomplete target-only experiment
+now live on `target-directed-inference`.  Small tests establish sound emitted
+inferences and zero misses in their supported shadow domain, but a
+deterministic Josef_04 hint sample shows that the reverse target join is much
+broader and slower than ordinary lazy enumeration.  See
+`P9-TARGET-DIRECTED-INFERENCE-REPORT.md`; do not start a long Stage-2 run from
+this prototype.
 
 ## Decision
 
