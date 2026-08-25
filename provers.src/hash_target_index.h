@@ -13,8 +13,11 @@ typedef struct hash_target_query {
   Hash_target_index index;
   unsigned long long first;
   unsigned long long first_end;
-  unsigned long long second;
-  unsigned long long second_end;
+  unsigned filter_count;
+  struct {
+    unsigned long long first;
+    unsigned long long end;
+  } filters[32];
   unsigned all_next;
   BOOL all_targets;
 } Hash_target_query;
@@ -25,6 +28,8 @@ struct hash_target_index_stats {
   unsigned long long root_records;
   unsigned long long rigid_root_records;
   unsigned long long variable_root_records;
+  unsigned feature_keys;
+  unsigned long long feature_records;
   unsigned long long reconstructed_targets;
   unsigned long long reconstructed_positions;
   unsigned long long recipe_bytes;
@@ -34,6 +39,8 @@ struct hash_target_index_stats {
   unsigned long long queries;
   unsigned long long variable_queries;
   unsigned long long candidates;
+  unsigned long long feature_tests;
+  unsigned long long feature_rejects;
   unsigned long long maximum_posting;
   double build_seconds;
 };
