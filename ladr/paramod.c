@@ -657,6 +657,21 @@ BOOL para_from_into(Topform from, Context cf,
   return TRUE;
 }  /* para_from_into */
 
+/* PUBLIC */
+BOOL para_unit_from_side_eligible(Topform from, int side)
+{
+  Literals lit;
+  if (from == NULL || side < 0 || side > 1 ||
+      !unit_clause(from->literals))
+    return FALSE;
+  lit = from->literals;
+  if (!from_parent_test(lit, FLAG_CHECK))
+    return FALSE;
+  if (side == 1 && !para_from_right(lit->atom))
+    return FALSE;
+  return !VARIABLE(ARG(lit->atom, side)) || Para_from_vars;
+}
+
 static Literals para_iterator_literal(Literals lits, unsigned position)
 {
   while (lits != NULL && position != 0) {

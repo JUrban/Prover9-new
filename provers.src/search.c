@@ -22,6 +22,7 @@
 #include "rewrite_only_store.h"
 #include "compact_rewrite.h"
 #include "hash_target_index.h"
+#include "hash_target_inference.h"
 #include "../ladr/ac_redun.h"
 #include "../ladr/std_options.h"
 #include "../ladr/memory.h"
@@ -71,6 +72,8 @@ static Rewrite_only_store Rewrite_only_rules = NULL;
 static Compact_rewrite_bank Compact_rewrite_rules = NULL;
 static Compact_term_pool Compact_terms = NULL;
 static Hash_target_index Hash_targets = NULL;
+static Hash_target_inference Hash_target_planner = NULL;
+static BOOL Hash_target_current_pair_covered = FALSE;
 static unsigned long long Compact_term_next_reclaim_serialization = 0;
 static unsigned long long Compact_term_reclaim_cooldown_skips = 0;
 static unsigned long long Compact_term_reclaim_deferrals = 0;
@@ -352,6 +355,8 @@ static BOOL hash_targeted_inference_mode(char *mode)
     str_ident(stringparm1(Opt->hash_targeted_inference), mode);
 }
 
+static void build_hash_target_planner(void);
+
 static Para_candidate_decision hash_inference_candidate(
   const Para_candidate *candidate)
 {
@@ -377,6 +382,8 @@ static Para_candidate_decision hash_inference_candidate(
   Hash_gate_stats.virtual_probes += probes;
   if (normal_id != 0 || flipped_id != 0) {
     Hash_gate_stats.virtual_hits++;
+    hash_target_inference_note_hash_hit(
+      Hash_target_planner, Hash_target_current_pair_covered);
     if (normal_id == 0 && flipped_id != 0)
       Hash_gate_stats.orientation_fallbacks++;
   }
@@ -913,6 +920,29 @@ static struct {
 
   int return_code;     // result of search
 } Glob;
+
+static void build_hash_target_planner(void)
+{
+  Clist_pos p;
+  struct hash_target_index_stats stats;
+  unsigned long long budget =
+    (unsigned long long) parm(Opt->hash_target_index_kb) * 1024;
+  unsigned long long resident, remaining;
+  if (hash_targeted_inference_mode("off"))
+    return;
+  if (Hash_targets != NULL || Hash_target_planner != NULL)
+    fatal_error("hash target planner is already initialized");
+  Hash_targets = hash_target_index_build(budget);
+  hash_target_index_get_stats(Hash_targets, &stats);
+  resident = stats.recipe_bytes + stats.index_bytes;
+  if (resident > budget)
+    fatal_error("hash target index budget accounting is inconsistent");
+  remaining = budget - resident;
+  Hash_target_planner = hash_target_inference_init(
+    Hash_targets, parm(Opt->fpa_depth), remaining);
+  for (p = Glob.usable->first; p != NULL; p = p->next)
+    hash_target_inference_update(Hash_target_planner, p->c, INSERT);
+}
 
 static BOOL demodulation_rules_available(void)
 {
@@ -4013,6 +4043,8 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
       fprint_packed_hint_operation_stats(fp);
       if (Hash_targets != NULL)
         fprint_hash_target_index_stats(fp, Hash_targets);
+      if (Hash_target_planner != NULL)
+        fprint_hash_target_inference_stats(fp, Hash_target_planner);
     }
   fprintf(fp,
           "Ancestor_store: records=%s, record_bytes=%s, backing_bytes=%s, "
@@ -7362,6 +7394,7 @@ void disable_clause(Topform c)
 
   if (clist_member(c, Glob.usable)) {
     collective_note_deactivation(c);
+    hash_target_inference_update(Hash_target_planner, c, DELETE);
     index_literals(c, DELETE, Clocks.index, FALSE);
     index_back_demod(c, DELETE, Clocks.index, flag(Opt->back_demod));
     if (!restricted_denial(c))
@@ -7478,6 +7511,8 @@ void free_search_memory(void)
   Dense_body_store = NULL;
   Dense_arena_bytes_reclaimed = 0;
 
+  hash_target_inference_destroy(Hash_target_planner);
+  Hash_target_planner = NULL;
   if (!Terminal_hint_index_released) {
     hash_target_index_destroy(Hash_targets);
     Hash_targets = NULL;
@@ -10891,6 +10926,8 @@ BOOL given_infer(Topform given)
       Context cf = get_context();
       Context ci = get_context();
       Clist_pos p;
+      if (Hash_target_planner != NULL)
+        hash_target_inference_plan_from(Hash_target_planner, given);
       BOOL good_given =
 	(given->id < (unsigned long long) parm(Opt->para_restr_beg) ||
 	 given->id > (unsigned long long) parm(Opt->para_restr_end));
@@ -10903,9 +10940,24 @@ BOOL given_infer(Topform given)
 	     p->c->id < (unsigned long long) parm(Opt->para_restr_beg) ||
 	     p->c->id > (unsigned long long) parm(Opt->para_restr_end));
 	  if (good_pair) {
+	    BOOL from_planned =
+	      hash_target_inference_partner_planned(
+	        Hash_target_planner, p->c, TRUE);
+	    BOOL into_planned =
+	      hash_target_inference_partner_planned(
+	        Hash_target_planner, p->c, FALSE);
 	    Current_inference_source = INFER_SOURCE_PARAMOD;
-	    if (!para_from_into(given, cf, p->c, ci, FALSE, cl_process) ||
-	        !para_from_into(p->c, cf, given, ci, TRUE, cl_process)) {
+	    Hash_target_current_pair_covered = from_planned;
+	    if (!para_from_into(given, cf, p->c, ci, FALSE, cl_process)) {
+              Hash_target_current_pair_covered = FALSE;
+              free_context(cf);
+              free_context(ci);
+              goto cancelled;
+            }
+	    Hash_target_current_pair_covered = FALSE;
+	    Hash_target_current_pair_covered = into_planned;
+	    if (!para_from_into(p->c, cf, given, ci, TRUE, cl_process)) {
+              Hash_target_current_pair_covered = FALSE;
               free_context(cf);
               free_context(ci);
               goto cancelled;
@@ -10915,6 +10967,7 @@ BOOL given_infer(Topform given)
       }
       free_context(cf);
       free_context(ci);
+      Hash_target_current_pair_covered = FALSE;
     }
   }
 
@@ -11466,6 +11519,7 @@ void make_inferences(void)
 
       activated = find_clause_by_id(given_id);
       if (activated != NULL && clist_member(activated, Glob.usable)) {
+	hash_target_inference_update(Hash_target_planner, activated, INSERT);
 	if (!restricted_denial(activated))
 	  index_clashable(activated, INSERT);
 	collective_note_activation(
@@ -11477,6 +11531,7 @@ void make_inferences(void)
     }
     else {
       clist_append(given_clause, Glob.usable);
+      hash_target_inference_update(Hash_target_planner, given_clause, INSERT);
       index_clashable(given_clause, INSERT);
       if (!given_infer(given_clause))
         return;
@@ -12250,9 +12305,7 @@ void index_and_process_initial_clauses(void)
     }
   }
   finalize_hint_conjunction_index();
-  if (!hash_targeted_inference_mode("off"))
-    Hash_targets = hash_target_index_build(
-      (unsigned long long) parm(Opt->hash_target_index_kb) * 1024);
+  build_hash_target_planner();
 
   ////////////////////////////////////////////////////////////////////////////
   // Sos
@@ -16992,9 +17045,7 @@ void load_checkpoint_into_loop(void)
         }
       }
       finalize_hint_conjunction_index();
-      if (!hash_targeted_inference_mode("off"))
-        Hash_targets = hash_target_index_build(
-          (unsigned long long) parm(Opt->hash_target_index_kb) * 1024);
+      build_hash_target_planner();
       /* Index reconstruction advances the epoch internally; restore the
          logical search-state epoch saved at the checkpoint boundary. */
       set_hint_state_epoch(Resume_hint_epoch);
@@ -17203,6 +17254,9 @@ Prover_results search(Prover_input p)
     reset_paramodulation_candidate_stats();
     set_paramodulation_candidate_proc(NULL, 0);
     set_paramodulation_materialized_proc(NULL);
+    Hash_target_current_pair_covered = FALSE;
+    if (Hash_targets != NULL || Hash_target_planner != NULL)
+      fatal_error("previous search left hash target indexes behind");
     collective_reset_state();
     Simplifier_epoch = 1;
     Rewrite_epoch = 1;
@@ -17237,6 +17291,8 @@ Prover_results search(Prover_input p)
         fatal_error("hash_targeted_inference currently requires inference_frontier=clauses");
       if (!flag(Opt->paramodulation))
         fatal_error("hash_targeted_inference requires paramodulation");
+      if (hash_inference_gate_mode("off"))
+        fatal_error("hash_targeted_inference requires a hash_inference_gate mode");
     }
     if (!hash_inference_gate_mode("off")) {
       if (!generalized_hint_hash_mode())

@@ -127,6 +127,11 @@ BOOL para_from_into(Topform from, Context cf,
                     BOOL check_top,
                     Topform_proc proc_proc);
 
+/* Exact public form of the unit/from-side eligibility checks used by
+   para_from_into().  This lets target planners avoid inventing a second
+   interpretation of ordering and para-from flags. */
+BOOL para_unit_from_side_eligible(Topform from, int side);
+
 void para_iterator_init(Para_iterator *it);
 
 void para_iterator_reset(Para_iterator *it);
