@@ -30,11 +30,29 @@ struct hint_generalization_hash_stats {
   unsigned partial_per_hint;
   unsigned long long maximum_entries;
   BOOL finalized;
+  unsigned long long target_recipes;
+  unsigned long long target_exact_recipes;
+  unsigned long long target_partial_recipes;
+  unsigned long long target_complete_recipes;
+  unsigned long long target_position_records;
+  unsigned long long target_variable_positions;
+  unsigned long long target_rigid_positions;
+  unsigned long long target_recipe_bytes;
+  unsigned long long target_complete_token_bytes;
+  unsigned target_max_nodes;
+  unsigned target_max_depth;
+  unsigned long long target_budget_bytes;
 };
 
 Hint_generalization_hash hint_generalization_hash_init(
   unsigned complete_nodes, unsigned partial_per_hint,
   unsigned long long maximum_entries, unsigned expected_hints);
+
+/* Retain compact reconstruction recipes for unique positive unit-equation
+   targets while they are generated.  A zero budget leaves the sidecar off.
+   Construction stops rather than silently exceeding a nonzero budget. */
+void hint_generalization_hash_enable_target_recipes(
+  Hint_generalization_hash table, unsigned long long budget_bytes);
 
 void hint_generalization_hash_destroy(Hint_generalization_hash table);
 

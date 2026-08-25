@@ -14,6 +14,29 @@
 #define GH_MAX_COMPLETE_LITERALS 8U
 #define GH_MAX_PENDING \
   (GH_MAX_COMPLETE_NODES + 2 * GH_MAX_COMPLETE_LITERALS)
+#define GH_TARGET_KIND_SHIFT 30U
+#define GH_TARGET_PAYLOAD_MASK UINT32_C(0x3fffffff)
+#define GH_MAX_TARGET_TOKENS (GH_MAX_COMPLETE_NODES + 1U)
+
+enum gh_target_recipe_kind {
+  GH_TARGET_EXACT = 0,
+  GH_TARGET_PARTIAL = 1,
+  GH_TARGET_COMPLETE = 2
+};
+
+/* Eight bytes per unique target.  Exact and one-hole targets reconstruct
+   from the compressed active hint; exhaustive targets refer to a short
+   serialized preorder stream because no single hole recipe describes them. */
+struct gh_target_recipe {
+  uint32_t hint_id;
+  uint32_t descriptor;
+};
+
+struct gh_complete_target {
+  uint32_t token_offset;
+  uint16_t token_count;
+  uint16_t maximum_depth;
+};
 
 struct gh_key {
   uint64_t primary;
@@ -43,12 +66,17 @@ struct gh_pending {
   Term term;
   unsigned char type;
   unsigned char sign;
+  unsigned char depth;
 };
 
 struct gh_generation_state {
   struct gh_hash_state hash;
   Term targets[GH_MAX_COMPLETE_NODES];
   unsigned target_count;
+  int target_tokens[GH_MAX_TARGET_TOKENS];
+  unsigned target_token_count;
+  unsigned target_maximum_depth;
+  BOOL capture_unit_target;
 };
 
 struct gh_virtual_variable {
@@ -95,8 +123,185 @@ struct hint_generalization_hash {
   unsigned long long hits;
   unsigned long long probes;
   unsigned long long maximum_probe;
+  struct gh_target_recipe *target_recipes;
+  unsigned target_recipe_count;
+  unsigned target_recipe_capacity;
+  struct gh_complete_target *complete_targets;
+  unsigned complete_target_count;
+  unsigned complete_target_capacity;
+  int *complete_target_tokens;
+  unsigned complete_target_token_count;
+  unsigned complete_target_token_capacity;
+  unsigned long long target_position_records;
+  unsigned long long target_variable_positions;
+  unsigned long long target_rigid_positions;
+  unsigned long long target_exact_recipes;
+  unsigned long long target_partial_recipes;
+  unsigned long long target_complete_recipes;
+  unsigned target_max_nodes;
+  unsigned target_max_depth;
+  unsigned long long target_budget_bytes;
+  BOOL target_recipes_enabled;
   BOOL finalized;
 };
+
+static unsigned long long gh_target_allocated_bytes(
+  Hint_generalization_hash table)
+{
+  return (unsigned long long) table->target_recipe_capacity *
+           sizeof(*table->target_recipes) +
+         (unsigned long long) table->complete_target_capacity *
+           sizeof(*table->complete_targets) +
+         (unsigned long long) table->complete_target_token_capacity *
+           sizeof(*table->complete_target_tokens);
+}
+
+static void gh_target_check_budget(Hint_generalization_hash table,
+                                   unsigned long long bytes)
+{
+  if (table->target_budget_bytes != 0 && bytes > table->target_budget_bytes)
+    fatal_error("hash target recipe sidecar exceeds hash_target_index_kb");
+}
+
+static void gh_target_recipe_reserve(Hint_generalization_hash table,
+                                     unsigned needed)
+{
+  unsigned capacity;
+  unsigned long long bytes;
+  if (needed <= table->target_recipe_capacity)
+    return;
+  capacity = table->target_recipe_capacity == 0 ? 1024 :
+             table->target_recipe_capacity;
+  while (capacity < needed) {
+    unsigned next = capacity + (capacity + 1) / 2;
+    if (next <= capacity)
+      fatal_error("hash target recipe capacity overflow");
+    capacity = next;
+  }
+  bytes = (unsigned long long) capacity * sizeof(*table->target_recipes) +
+          (unsigned long long) table->complete_target_capacity *
+            sizeof(*table->complete_targets) +
+          (unsigned long long) table->complete_target_token_capacity *
+            sizeof(*table->complete_target_tokens);
+  gh_target_check_budget(table, bytes);
+  table->target_recipes = safe_realloc(
+    table->target_recipes,
+    (size_t) capacity * sizeof(*table->target_recipes));
+  table->target_recipe_capacity = capacity;
+}
+
+static void gh_complete_target_reserve(Hint_generalization_hash table,
+                                       unsigned records,
+                                       unsigned tokens)
+{
+  unsigned record_capacity = table->complete_target_capacity;
+  unsigned token_capacity = table->complete_target_token_capacity;
+  unsigned long long bytes;
+  if (records > record_capacity) {
+    record_capacity = record_capacity == 0 ? 64 : record_capacity;
+    while (record_capacity < records) {
+      unsigned next = record_capacity + (record_capacity + 1) / 2;
+      if (next <= record_capacity)
+        fatal_error("complete hash target capacity overflow");
+      record_capacity = next;
+    }
+  }
+  if (tokens > token_capacity) {
+    token_capacity = token_capacity == 0 ? 1024 : token_capacity;
+    while (token_capacity < tokens) {
+      unsigned next = token_capacity + (token_capacity + 1) / 2;
+      if (next <= token_capacity)
+        fatal_error("complete hash target token overflow");
+      token_capacity = next;
+    }
+  }
+  bytes = (unsigned long long) table->target_recipe_capacity *
+            sizeof(*table->target_recipes) +
+          (unsigned long long) record_capacity *
+            sizeof(*table->complete_targets) +
+          (unsigned long long) token_capacity *
+            sizeof(*table->complete_target_tokens);
+  gh_target_check_budget(table, bytes);
+  if (record_capacity != table->complete_target_capacity) {
+    table->complete_targets = safe_realloc(
+      table->complete_targets,
+      (size_t) record_capacity * sizeof(*table->complete_targets));
+    table->complete_target_capacity = record_capacity;
+  }
+  if (token_capacity != table->complete_target_token_capacity) {
+    table->complete_target_tokens = safe_realloc(
+      table->complete_target_tokens,
+      (size_t) token_capacity * sizeof(*table->complete_target_tokens));
+    table->complete_target_token_capacity = token_capacity;
+  }
+}
+
+static BOOL gh_positive_unit_equality(Topform hint)
+{
+  return hint != NULL && hint->literals != NULL &&
+         hint->literals->next == NULL && pos_eq(hint->literals) &&
+         ARITY(hint->literals->atom) == 2;
+}
+
+static void gh_target_term_census(Term term, Term abstract, unsigned depth,
+                                  unsigned *nodes, unsigned *variables,
+                                  unsigned *maximum_depth)
+{
+  int i;
+  (*nodes)++;
+  if (depth > *maximum_depth)
+    *maximum_depth = depth;
+  if (term == abstract || VARIABLE(term)) {
+    (*variables)++;
+    return;
+  }
+  for (i = 0; i < ARITY(term); i++)
+    gh_target_term_census(ARG(term, i), abstract, depth + 1,
+                          nodes, variables, maximum_depth);
+}
+
+static void gh_record_target_census(Hint_generalization_hash table,
+                                    Topform hint, Term abstract)
+{
+  unsigned nodes = 0, variables = 0, maximum_depth = 0;
+  Term atom;
+  int side;
+  if (!table->target_recipes_enabled || !gh_positive_unit_equality(hint))
+    return;
+  atom = hint->literals->atom;
+  for (side = 0; side < 2; side++)
+    gh_target_term_census(ARG(atom, side), abstract, 1,
+                          &nodes, &variables, &maximum_depth);
+  table->target_position_records += nodes;
+  table->target_variable_positions += variables;
+  table->target_rigid_positions += nodes - variables;
+  if (nodes + 1 > table->target_max_nodes)
+    table->target_max_nodes = nodes + 1;
+  if (maximum_depth > table->target_max_depth)
+    table->target_max_depth = maximum_depth;
+}
+
+static void gh_append_target_recipe(Hint_generalization_hash table,
+                                    unsigned hint_id,
+                                    enum gh_target_recipe_kind kind,
+                                    unsigned payload)
+{
+  struct gh_target_recipe *recipe;
+  if (!table->target_recipes_enabled)
+    return;
+  if (payload > GH_TARGET_PAYLOAD_MASK)
+    fatal_error("hash target recipe payload overflow");
+  gh_target_recipe_reserve(table, table->target_recipe_count + 1);
+  recipe = table->target_recipes + table->target_recipe_count++;
+  recipe->hint_id = hint_id;
+  recipe->descriptor = ((uint32_t) kind << GH_TARGET_KIND_SHIFT) | payload;
+  if (kind == GH_TARGET_EXACT)
+    table->target_exact_recipes++;
+  else if (kind == GH_TARGET_PARTIAL)
+    table->target_partial_recipes++;
+  else
+    table->target_complete_recipes++;
+}
 
 static uint64_t gh_mix(uint64_t x)
 {
@@ -468,6 +673,15 @@ Hint_generalization_hash hint_generalization_hash_init(
   return table;
 }
 
+void hint_generalization_hash_enable_target_recipes(
+  Hint_generalization_hash table, unsigned long long budget_bytes)
+{
+  if (table == NULL || table->finalized || table->count != 0)
+    fatal_error("target recipes must be enabled before adding hints");
+  table->target_budget_bytes = budget_bytes;
+  table->target_recipes_enabled = budget_bytes != 0;
+}
+
 void hint_generalization_hash_destroy(Hint_generalization_hash table)
 {
   if (table == NULL)
@@ -478,6 +692,12 @@ void hint_generalization_hash_destroy(Hint_generalization_hash table)
     safe_free(table->hint_nodes);
   if (table->partial != NULL)
     safe_free(table->partial);
+  if (table->target_recipes != NULL)
+    safe_free(table->target_recipes);
+  if (table->complete_targets != NULL)
+    safe_free(table->complete_targets);
+  if (table->complete_target_tokens != NULL)
+    safe_free(table->complete_target_tokens);
   safe_free(table);
 }
 
@@ -493,6 +713,11 @@ BOOL hint_generalization_hash_add_exact(Hint_generalization_hash table,
   table->exact_hints++;
   if (inserted > 0)
     table->exact_new_entries++;
+  if (inserted > 0 && table->target_recipes_enabled &&
+      gh_positive_unit_equality(hint)) {
+    gh_append_target_recipe(table, id, GH_TARGET_EXACT, 0);
+    gh_record_target_census(table, hint, NULL);
+  }
   if (table->count > table->maximum_entries)
     fatal_error("exact hints exceed hint_hash_max_entries");
   return TRUE;
@@ -504,6 +729,57 @@ BOOL hint_generalization_hash_is_complete_hint(
   return table != NULL && id < table->hint_capacity &&
          table->hint_nodes[id] != 0 &&
          table->hint_nodes[id] <= table->complete_nodes;
+}
+
+static void gh_capture_target_token(struct gh_generation_state *state,
+                                    int token, unsigned depth)
+{
+  if (!state->capture_unit_target)
+    return;
+  if (state->target_token_count >= GH_MAX_TARGET_TOKENS)
+    fatal_error("complete hash target token bound exceeded");
+  state->target_tokens[state->target_token_count++] = token;
+  if (depth > state->target_maximum_depth)
+    state->target_maximum_depth = depth;
+}
+
+static void gh_record_complete_target(Hint_generalization_hash table,
+                                      unsigned id,
+                                      const struct gh_generation_state *state)
+{
+  struct gh_complete_target *target;
+  unsigned index;
+  unsigned variables = 0, i;
+  if (!table->target_recipes_enabled || !state->capture_unit_target)
+    return;
+  if (state->target_token_count == 0 || state->target_token_count > UINT16_MAX)
+    fatal_error("invalid complete hash target token stream");
+  if (table->complete_target_count > GH_TARGET_PAYLOAD_MASK)
+    fatal_error("complete hash target recipe overflow");
+  gh_complete_target_reserve(
+    table, table->complete_target_count + 1,
+    table->complete_target_token_count + state->target_token_count);
+  index = table->complete_target_count++;
+  target = table->complete_targets + index;
+  target->token_offset = table->complete_target_token_count;
+  target->token_count = (uint16_t) state->target_token_count;
+  target->maximum_depth = (uint16_t) state->target_maximum_depth;
+  memcpy(table->complete_target_tokens + table->complete_target_token_count,
+         state->target_tokens,
+         state->target_token_count * sizeof(*state->target_tokens));
+  table->complete_target_token_count += state->target_token_count;
+  for (i = 1; i < state->target_token_count; i++)
+    if (state->target_tokens[i] < 0)
+      variables++;
+  table->target_position_records += state->target_token_count - 1;
+  table->target_variable_positions += variables;
+  table->target_rigid_positions +=
+    state->target_token_count - 1 - variables;
+  if (state->target_token_count > table->target_max_nodes)
+    table->target_max_nodes = state->target_token_count;
+  if (state->target_maximum_depth > table->target_max_depth)
+    table->target_max_depth = state->target_maximum_depth;
+  gh_append_target_recipe(table, id, GH_TARGET_COMPLETE, index);
 }
 
 static void gh_pending_recurse(Hint_generalization_hash table, unsigned id,
@@ -518,8 +794,11 @@ static void gh_pending_recurse(Hint_generalization_hash table, unsigned id,
   if (!*complete)
     return;
   if (pending_count == 0) {
-    if (gh_insert(table, gh_finish_key(&state.hash), id, FALSE) < 0)
+    int inserted = gh_insert(table, gh_finish_key(&state.hash), id, FALSE);
+    if (inserted < 0)
       *complete = FALSE;
+    else if (inserted > 0)
+      gh_record_complete_target(table, id, &state);
     return;
   }
   item = pending[0];
@@ -535,6 +814,7 @@ static void gh_pending_recurse(Hint_generalization_hash table, unsigned id,
       if (term_ident(state.targets[i], item.term)) {
         struct gh_generation_state reused = state;
         gh_emit(&reused.hash, UINT64_C(0x200000000) + i);
+        gh_capture_target_token(&reused, -(int) i - 1, item.depth);
         gh_pending_recurse(
           table, id, pending + 1, rest, reused, complete);
       }
@@ -548,6 +828,8 @@ static void gh_pending_recurse(Hint_generalization_hash table, unsigned id,
       fresh.targets[fresh.target_count] = item.term;
       gh_emit(&fresh.hash,
               UINT64_C(0x200000000) + fresh.target_count);
+      gh_capture_target_token(
+        &fresh, -(int) fresh.target_count - 1, item.depth);
       fresh.target_count++;
       gh_pending_recurse(
         table, id, pending + 1, rest, fresh, complete);
@@ -561,10 +843,12 @@ static void gh_pending_recurse(Hint_generalization_hash table, unsigned id,
       return;
     }
     gh_hash_rigid(&rigid.hash, item.term);
+    gh_capture_target_token(&rigid, SYMNUM(item.term), item.depth);
     for (i = 0; i < arity; i++) {
       next[i].term = ARG(item.term, i);
       next[i].type = GH_PENDING_TERM;
       next[i].sign = 0;
+      next[i].depth = item.depth + 1;
     }
     if (rest != 0)
       memcpy(next + arity, pending + 1, rest * sizeof(*next));
@@ -585,13 +869,18 @@ static void gh_generate_selected(Hint_generalization_hash table, unsigned id,
   unsigned i;
   memset(&state, 0, sizeof(state));
   state.hash = gh_hash_begin(count);
+  state.capture_unit_target = count == 1 &&
+    literals[selected[0]]->sign && eq_term(literals[selected[0]]->atom) &&
+    ARITY(literals[selected[0]]->atom) == 2;
   for (i = 0; i < count; i++) {
     pending[2*i].term = NULL;
     pending[2*i].type = GH_PENDING_SIGN;
     pending[2*i].sign = literals[selected[i]]->sign;
+    pending[2*i].depth = 0;
     pending[2*i+1].term = literals[selected[i]]->atom;
     pending[2*i+1].type = GH_PENDING_FORCE_RIGID;
     pending[2*i+1].sign = 0;
+    pending[2*i+1].depth = 0;
   }
   gh_pending_recurse(table, id, pending, 2 * count, state, complete);
 }
@@ -713,12 +1002,19 @@ BOOL hint_generalization_hash_add_partial(Hint_generalization_hash table,
   limit = table->partial_count < table->partial_per_hint ?
           table->partial_count : table->partial_per_hint;
   for (i = 0; i < limit; i++) {
-    if (gh_insert(table,
-                  gh_clause_key(hint, table->partial[i].term),
-                  id, FALSE) < 0) {
+    int inserted = gh_insert(table,
+                             gh_clause_key(hint, table->partial[i].term),
+                             id, FALSE);
+    if (inserted < 0) {
       table->partial_cap_skips += limit - i;
       table->partial_hints++;
       return FALSE;
+    }
+    if (inserted > 0 && table->target_recipes_enabled &&
+        gh_positive_unit_equality(hint)) {
+      gh_append_target_recipe(table, id, GH_TARGET_PARTIAL,
+                              table->partial[i].ordinal);
+      gh_record_target_census(table, hint, table->partial[i].term);
     }
   }
   table->partial_hints++;
@@ -1024,7 +1320,8 @@ void hint_generalization_hash_get_stats(
                  (unsigned long long) table->hint_capacity *
                    sizeof(*table->hint_nodes) +
                  (unsigned long long) table->partial_capacity *
-                   sizeof(*table->partial) + sizeof(*table);
+                   sizeof(*table->partial) +
+                 gh_target_allocated_bytes(table) + sizeof(*table);
   stats->exact_hints = table->exact_hints;
   stats->exact_new_entries = table->exact_new_entries;
   stats->complete_hints = table->complete_hints;
@@ -1042,4 +1339,22 @@ void hint_generalization_hash_get_stats(
   stats->partial_per_hint = table->partial_per_hint;
   stats->maximum_entries = table->maximum_entries;
   stats->finalized = table->finalized;
+  stats->target_recipes = table->target_recipe_count;
+  stats->target_exact_recipes = table->target_exact_recipes;
+  stats->target_partial_recipes = table->target_partial_recipes;
+  stats->target_complete_recipes = table->target_complete_recipes;
+  stats->target_position_records = table->target_position_records;
+  stats->target_variable_positions = table->target_variable_positions;
+  stats->target_rigid_positions = table->target_rigid_positions;
+  stats->target_recipe_bytes =
+    (unsigned long long) table->target_recipe_capacity *
+      sizeof(*table->target_recipes) +
+    (unsigned long long) table->complete_target_capacity *
+      sizeof(*table->complete_targets);
+  stats->target_complete_token_bytes =
+    (unsigned long long) table->complete_target_token_capacity *
+      sizeof(*table->complete_target_tokens);
+  stats->target_max_nodes = table->target_max_nodes;
+  stats->target_max_depth = table->target_max_depth;
+  stats->target_budget_bytes = table->target_budget_bytes;
 }

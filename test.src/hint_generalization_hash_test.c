@@ -91,6 +91,53 @@ int main(void)
   init_standard_ladr();
 
   {
+    Hint_generalization_hash targets =
+      hint_generalization_hash_init(12, 0, 100000, 1);
+    Topform equality = clause("f(a)=g(b).");
+    hint_generalization_hash_enable_target_recipes(targets, 1024 * 1024);
+    CHECK(hint_generalization_hash_add_exact(targets, 1, equality),
+          "target sidecar adds an exact unit equality");
+    CHECK(hint_generalization_hash_add_complete(targets, 1, equality),
+          "target sidecar captures exhaustive unit generalizations");
+    hint_generalization_hash_finalize(targets);
+    hint_generalization_hash_get_stats(targets, &stats);
+    CHECK(stats.target_exact_recipes == 1 &&
+          stats.target_complete_recipes > 0,
+          "target sidecar distinguishes exact and exhaustive recipes");
+    CHECK(stats.target_recipes == stats.target_exact_recipes +
+          stats.target_complete_recipes &&
+          stats.target_position_records > stats.target_recipes,
+          "target sidecar reports unique recipes and rewrite positions");
+    CHECK(stats.target_variable_positions > 0 &&
+          stats.target_rigid_positions > 0 &&
+          stats.target_recipe_bytes > 0 &&
+          stats.target_complete_token_bytes > 0,
+          "target census accounts structure and allocated sidecar bytes");
+    hint_generalization_hash_destroy(targets);
+    delete_clause(equality);
+  }
+
+  {
+    Hint_generalization_hash targets =
+      hint_generalization_hash_init(2, 3, 100000, 1);
+    Topform equality = clause("f(g(a))=k(h(b)).");
+    hint_generalization_hash_enable_target_recipes(targets, 1024 * 1024);
+    CHECK(hint_generalization_hash_add_exact(targets, 1, equality),
+          "partial target sidecar adds its exact equation");
+    CHECK(hint_generalization_hash_add_partial(targets, 1, equality),
+          "partial target sidecar adds bounded one-hole equations");
+    hint_generalization_hash_finalize(targets);
+    hint_generalization_hash_get_stats(targets, &stats);
+    CHECK(stats.target_exact_recipes == 1 &&
+          stats.target_partial_recipes == 3,
+          "partial target recipes retain the admitted hole ordinals");
+    CHECK(stats.target_max_nodes >= 4 && stats.target_max_depth >= 2,
+          "partial target census retains size and depth bounds");
+    hint_generalization_hash_destroy(targets);
+    delete_clause(equality);
+  }
+
+  {
     static const int deep_left[] = {1, 1, 1};
     static const int deep_right[] = {1, 2, 1};
     static const int root_left[] = {1, 1};
