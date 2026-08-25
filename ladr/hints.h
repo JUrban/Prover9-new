@@ -59,6 +59,12 @@ void set_hint_generalization_hash(BOOL on, unsigned complete_nodes,
                                   unsigned long long maximum_entries,
                                   unsigned expected_hints);
 
+BOOL preview_generalized_hash_unit_paramod(
+  Literals from_lit, int from_side, Context from_subst,
+  Literals into_lit, Ilist into_pos, Context into_subst,
+  unsigned *normal_id, unsigned *flipped_id,
+  unsigned *term_nodes, unsigned long long *probes);
+
 void done_with_hints(void);
 
 /* Complete the population-wide packed-fast conjunction plan after all input

@@ -26,9 +26,14 @@ static unsigned lookup(Hint_generalization_hash table, const char *text)
 
 int main(void)
 {
-  Hint_generalization_hash complete, partial;
-  Topform h1, h2, h3, h4;
+  Hint_generalization_hash complete, partial, virtual;
+  Topform h1, h2, h3, h4, h5, from, into, result;
   struct hint_generalization_hash_stats stats;
+  Context cf, ci;
+  Trail trail = NULL;
+  Ilist position = NULL;
+  unsigned normal_id, flipped_id, term_nodes;
+  unsigned long long probes;
 
   init_standard_ladr();
 
@@ -82,12 +87,50 @@ int main(void)
   CHECK(lookup(partial, "t(f(g(x),h(y))).") == 0,
         "unrecorded two-hole generalization misses without fallback");
 
+  h5 = clause("h(g(a)) = k(y).");
+  from = clause("f(x) = g(x).");
+  into = clause("h(f(a)) = k(y).");
+  virtual = hint_generalization_hash_init(2, 0, 100000, 1);
+  CHECK(hint_generalization_hash_add_exact(virtual, 1, h5),
+        "add virtual-paramodulant exact hint");
+  hint_generalization_hash_finalize(virtual);
+  cf = get_context();
+  ci = get_context();
+  position = ilist_append(position, 1);  /* literal */
+  position = ilist_append(position, 1);  /* equality left side */
+  position = ilist_append(position, 1);  /* h argument */
+  CHECK(unify(ARG(from->literals->atom, 0), cf,
+              ARG(ARG(into->literals->atom, 0), 0), ci, &trail),
+        "prepare virtual paramodulation substitution");
+  CHECK(hint_generalization_hash_lookup_unit_paramod(
+          virtual, from->literals, 0, cf, into->literals, position, ci,
+          &normal_id, &flipped_id, &term_nodes, &probes),
+        "virtual unit-paramodulation shape is supported");
+  CHECK(normal_id == 1 && flipped_id == 0,
+        "virtual lookup finds normal equality orientation only");
+  CHECK(probes >= 2, "virtual lookup reports both table probes");
+  result = paramodulate(from->literals, 0, cf, into, position, ci);
+  renumber_variables(result, MAX_VARS);
+  CHECK(hint_generalization_hash_lookup(virtual, result) == normal_id,
+        "virtual and materialized paramodulants have identical keys");
+  CHECK(term_nodes == (unsigned) clause_symbol_count(result->literals),
+        "virtual node count equals materialized default weight");
+  delete_clause(result);
+  undo_subst(trail);
+  free_context(cf);
+  free_context(ci);
+  zap_ilist(position);
+
   hint_generalization_hash_destroy(complete);
   hint_generalization_hash_destroy(partial);
+  hint_generalization_hash_destroy(virtual);
   delete_clause(h1);
   delete_clause(h2);
   delete_clause(h3);
   delete_clause(h4);
+  delete_clause(h5);
+  delete_clause(from);
+  delete_clause(into);
 
   if (Failures != 0) {
     fprintf(stderr, "hint_generalization_hash_test: %d failure(s)\n", Failures);

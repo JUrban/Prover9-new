@@ -50,6 +50,41 @@ typedef struct para_iterator {
   BOOL complete;
 } Para_iterator;
 
+/* A successful paramodulation candidate immediately before its conclusion
+   is materialized.  The terms and position lists remain owned by the
+   inference traversal and are valid only for the duration of the callback. */
+typedef struct para_candidate {
+  Literals from_lit;
+  int from_side;
+  Context from_subst;
+  Topform into_clause;
+  Literals into_lit;
+  Ilist into_pos;
+  Context into_subst;
+  BOOL timing_sample;
+} Para_candidate;
+
+typedef enum {
+  PARA_CANDIDATE_MATERIALIZE,
+  PARA_CANDIDATE_SKIP,
+  PARA_CANDIDATE_CANCEL
+} Para_candidate_decision;
+
+typedef Para_candidate_decision
+  (*Para_candidate_proc)(const Para_candidate *candidate);
+
+struct para_candidate_stats {
+  unsigned long long candidates;
+  unsigned long long materialized;
+  unsigned long long skipped;
+  unsigned long long cancelled;
+  unsigned long long timing_samples;
+  unsigned long long timing_materialized_samples;
+  double precheck_seconds;
+  double construction_seconds;
+  double consumer_seconds;
+};
+
 /* End of public definitions */
 
 /* Public function prototypes from paramod.c */
@@ -66,6 +101,15 @@ void paramodulation_options(BOOL ordered_inference,
 unsigned long long para_instance_prunes();
 
 unsigned long long basic_paramodulation_prunes(void);
+
+/* Install an optional pre-materialization callback.  A zero sample rate
+   disables timing; otherwise every Nth successful candidate is timed. */
+void set_paramodulation_candidate_proc(Para_candidate_proc proc,
+                                       unsigned sample_rate);
+
+void reset_paramodulation_candidate_stats(void);
+
+void get_paramodulation_candidate_stats(struct para_candidate_stats *stats);
 
 Topform paramodulate(Literals from_lit, int from_side, Context from_subst,
 		     Topform into_clause, Ilist into_pos, Context into_subst);

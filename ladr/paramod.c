@@ -17,6 +17,7 @@
 */
 
 #include "paramod.h"
+#include "clock.h"
 
 /* Private definitions and types */
 
@@ -29,6 +30,64 @@ static BOOL  Check_instances   = FALSE;  /* non-oriented from lits */
 
 static unsigned long long Para_instance_prunes = 0;     /* counter */
 static unsigned long long Basic_prunes = 0;             /* counter */
+
+static Para_candidate_proc Candidate_proc = NULL;
+static unsigned Candidate_sample_rate = 0;
+static struct para_candidate_stats Candidate_stats;
+
+/* PUBLIC */
+void set_paramodulation_candidate_proc(Para_candidate_proc proc,
+                                       unsigned sample_rate)
+{
+  Candidate_proc = proc;
+  Candidate_sample_rate = sample_rate;
+}
+
+/* PUBLIC */
+void reset_paramodulation_candidate_stats(void)
+{
+  memset(&Candidate_stats, 0, sizeof(Candidate_stats));
+}
+
+/* PUBLIC */
+void get_paramodulation_candidate_stats(struct para_candidate_stats *stats)
+{
+  *stats = Candidate_stats;
+}
+
+static Para_candidate_decision inspect_candidate(Para_candidate *candidate)
+{
+  Para_candidate_decision decision;
+  double started = 0;
+  Candidate_stats.candidates++;
+  candidate->timing_sample =
+    Candidate_sample_rate != 0 &&
+    Candidate_stats.candidates % Candidate_sample_rate == 0;
+  if (candidate->timing_sample) {
+    Candidate_stats.timing_samples++;
+    started = user_seconds();
+  }
+  decision = Candidate_proc == NULL ? PARA_CANDIDATE_MATERIALIZE :
+                                      (*Candidate_proc)(candidate);
+  if (candidate->timing_sample)
+    Candidate_stats.precheck_seconds += user_seconds() - started;
+  switch (decision) {
+  case PARA_CANDIDATE_MATERIALIZE:
+    Candidate_stats.materialized++;
+    if (candidate->timing_sample)
+      Candidate_stats.timing_materialized_samples++;
+    break;
+  case PARA_CANDIDATE_SKIP:
+    Candidate_stats.skipped++;
+    break;
+  case PARA_CANDIDATE_CANCEL:
+    Candidate_stats.cancelled++;
+    break;
+  default:
+    fatal_error("invalid paramodulation candidate decision");
+  }
+  return decision;
+}
 
 /*************
  *
@@ -410,20 +469,52 @@ BOOL para_into(Literals from_lit, int from_side, Context cf, Ilist from_pos,
       Term alpha = ARG(from_lit->atom, from_side);
       if (unify(alpha, cf, cur, ci, &tr)) {
         if (check_instances(from_lit, from_side, cf, into_lit, cur, ci)) {
-          Topform p = paramodulate(from_lit, from_side, cf,
-                                    into_clause, into_pos, ci);
+          Para_candidate candidate;
+          Para_candidate_decision decision;
+          Topform p;
+          double started = 0;
+          candidate.from_lit = from_lit;
+          candidate.from_side = from_side;
+          candidate.from_subst = cf;
+          candidate.into_clause = into_clause;
+          candidate.into_lit = into_lit;
+          candidate.into_pos = into_pos;
+          candidate.into_subst = ci;
+          decision = inspect_candidate(&candidate);
+          if (decision == PARA_CANDIDATE_CANCEL) {
+            path_base->next = NULL;
+            undo_subst(tr);
+            return FALSE;
+          }
+          if (decision == PARA_CANDIDATE_SKIP) {
+            undo_subst(tr);
+            top--;
+            continue;
+          }
+          if (candidate.timing_sample)
+            started = user_seconds();
+          p = paramodulate(from_lit, from_side, cf,
+                           into_clause, into_pos, ci);
           p->justification = para_just(PARA_JUST,
                                         from_lit->atom->container,
                                         copy_ilist(from_pos),
                                         into_clause,
                                         copy_ilist(into_pos));
+          if (candidate.timing_sample) {
+            Candidate_stats.construction_seconds += user_seconds() - started;
+            started = user_seconds();
+          }
           if (!(*proc_proc)(p)) {
+            if (candidate.timing_sample)
+              Candidate_stats.consumer_seconds += user_seconds() - started;
             /* The dynamic suffix consists of stack-owned traversal nodes.
                Detach it before returning to para_into_lit(). */
             path_base->next = NULL;
             undo_subst(tr);
             return FALSE;
           }
+          if (candidate.timing_sample)
+            Candidate_stats.consumer_seconds += user_seconds() - started;
         }
         undo_subst(tr);
       }
@@ -800,13 +891,44 @@ BOOL para_from_into_bounded(Topform from, Topform into, BOOL check_top,
       if (unify(alpha, cf, cur, ci, &tr)) {
         if (check_instances(from_lit, (int) it->from_side, cf,
                             into_lit, cur, ci)) {
+          Para_candidate candidate;
+          Para_candidate_decision decision;
+          double started = 0;
           from_pos = para_iterator_from_position(it);
           into_pos = para_iterator_into_position(it);
+          candidate.from_lit = from_lit;
+          candidate.from_side = (int) it->from_side;
+          candidate.from_subst = cf;
+          candidate.into_clause = into;
+          candidate.into_lit = into_lit;
+          candidate.into_pos = into_pos;
+          candidate.into_subst = ci;
+          decision = inspect_candidate(&candidate);
+          if (decision == PARA_CANDIDATE_CANCEL) {
+            undo_subst(tr);
+            zap_ilist(from_pos);
+            zap_ilist(into_pos);
+            it->complete = TRUE;
+            free_context(cf);
+            free_context(ci);
+            return TRUE;
+          }
+          if (decision == PARA_CANDIDATE_SKIP) {
+            undo_subst(tr);
+            para_iterator_advance(it, root);
+            zap_ilist(from_pos);
+            zap_ilist(into_pos);
+            continue;
+          }
+          if (candidate.timing_sample)
+            started = user_seconds();
           result = paramodulate(from_lit, (int) it->from_side, cf,
                                 into, into_pos, ci);
           result->justification = para_just(
             PARA_JUST, from_lit->atom->container, copy_ilist(from_pos),
             into, copy_ilist(into_pos));
+          if (candidate.timing_sample)
+            Candidate_stats.construction_seconds += user_seconds() - started;
         }
         undo_subst(tr);
       }
@@ -816,11 +938,20 @@ BOOL para_from_into_bounded(Topform from, Topform into, BOOL check_top,
     zap_ilist(into_pos);
     if (result != NULL) {
       (*yielded)++;
+      {
+        BOOL sampled = Candidate_sample_rate != 0 &&
+          Candidate_stats.candidates % Candidate_sample_rate == 0;
+        double started = sampled ? user_seconds() : 0;
       if (!(*proc_proc)(result)) {
+        if (sampled)
+          Candidate_stats.consumer_seconds += user_seconds() - started;
         it->complete = TRUE;
         free_context(cf);
         free_context(ci);
         return TRUE;
+      }
+        if (sampled)
+          Candidate_stats.consumer_seconds += user_seconds() - started;
       }
     }
   }

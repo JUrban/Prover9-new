@@ -51,6 +51,18 @@ struct gh_generation_state {
   unsigned target_count;
 };
 
+struct gh_virtual_variable {
+  int multiplier;
+  unsigned variable;
+};
+
+struct gh_virtual_hash_state {
+  struct gh_hash_state hash;
+  struct gh_virtual_variable variables[2 * MAX_VARS + 2];
+  unsigned variable_count;
+  unsigned term_nodes;
+};
+
 struct gh_partial_candidate {
   Term term;
   unsigned depth;
@@ -131,6 +143,71 @@ static void gh_hash_rigid(struct gh_hash_state *state, Term term)
 {
   gh_emit(state, UINT64_C(0x300000000) + (unsigned) SYMNUM(term));
   gh_emit(state, UINT64_C(0x400000000) + (unsigned) ARITY(term));
+}
+
+static void gh_virtual_variable(struct gh_virtual_hash_state *state,
+                                Term term, Context context)
+{
+  int multiplier = context == NULL ? -1 : context->multiplier;
+  unsigned variable = (unsigned) VARNUM(term);
+  unsigned i;
+  for (i = 0; i < state->variable_count; i++)
+    if (state->variables[i].multiplier == multiplier &&
+        state->variables[i].variable == variable) {
+      gh_emit(&state->hash, UINT64_C(0x200000000) + i);
+      return;
+    }
+  if (state->variable_count >= 2 * MAX_VARS + 2)
+    fatal_error("virtual generalized-hash variable overflow");
+  state->variables[state->variable_count].multiplier = multiplier;
+  state->variables[state->variable_count].variable = variable;
+  gh_emit(&state->hash,
+          UINT64_C(0x200000000) + state->variable_count);
+  state->variable_count++;
+}
+
+static void gh_hash_applied_term(struct gh_virtual_hash_state *state,
+                                 Term term, Context context)
+{
+  int i;
+  DEREFERENCE(term, context);
+  state->term_nodes++;
+  if (VARIABLE(term)) {
+    gh_virtual_variable(state, term, context);
+    return;
+  }
+  gh_hash_rigid(&state->hash, term);
+  for (i = 0; i < ARITY(term); i++)
+    gh_hash_applied_term(state, ARG(term, i), context);
+}
+
+/* Hash the apply_substitute2() result without constructing its spine. */
+static void gh_hash_substituted_term(struct gh_virtual_hash_state *state,
+                                     Term term, Context into_context,
+                                     Ilist path,
+                                     Term beta, Context from_context)
+{
+  int selected, i;
+  if (path == NULL) {
+    gh_hash_applied_term(state, beta, from_context);
+    return;
+  }
+  if (VARIABLE(term)) {
+    gh_hash_applied_term(state, term, into_context);
+    return;
+  }
+  selected = path->i - 1;
+  if (selected < 0 || selected >= ARITY(term))
+    fatal_error("invalid virtual paramodulation position");
+  state->term_nodes++;
+  gh_hash_rigid(&state->hash, term);
+  for (i = 0; i < ARITY(term); i++) {
+    if (i == selected)
+      gh_hash_substituted_term(state, ARG(term, i), into_context,
+                               path->next, beta, from_context);
+    else
+      gh_hash_applied_term(state, ARG(term, i), into_context);
+  }
 }
 
 static struct gh_key gh_finish_key(const struct gh_hash_state *state)
@@ -654,36 +731,128 @@ void hint_generalization_hash_finalize(Hint_generalization_hash table)
     table->finalized = TRUE;
 }
 
-unsigned hint_generalization_hash_lookup(Hint_generalization_hash table,
-                                         Topform clause)
+static unsigned gh_lookup_key(Hint_generalization_hash table,
+                              struct gh_key key,
+                              unsigned long long *probe_count)
 {
-  struct gh_key key;
-  size_t position;
-  size_t step;
+  size_t position = gh_slot_position(key.primary, key.check, table->capacity);
+  size_t step = gh_slot_step(key.primary, key.check, table->capacity);
   unsigned long long probes = 0;
-  if (table == NULL || !table->finalized || clause == NULL)
-    return 0;
-  table->queries++;
-  key = gh_clause_key(clause, NULL);
-  position = gh_slot_position(key.primary, key.check, table->capacity);
-  step = gh_slot_step(key.primary, key.check, table->capacity);
   while (table->slots[position].primary != 0) {
     probes++;
     if (table->slots[position].primary == key.primary &&
         table->slots[position].check == key.check) {
-      table->hits++;
-      table->probes += probes;
-      if (probes > table->maximum_probe)
-        table->maximum_probe = probes;
+      if (probe_count != NULL)
+        *probe_count = probes;
       return table->slots[position].value & GH_ID_MASK;
     }
     position = (position + step) & (table->capacity - 1);
   }
   probes++;
+  if (probe_count != NULL)
+    *probe_count = probes;
+  return 0;
+}
+
+unsigned hint_generalization_hash_lookup(Hint_generalization_hash table,
+                                         Topform clause)
+{
+  struct gh_key key;
+  unsigned long long probes = 0;
+  unsigned id;
+  if (table == NULL || !table->finalized || clause == NULL)
+    return 0;
+  table->queries++;
+  key = gh_clause_key(clause, NULL);
+  id = gh_lookup_key(table, key, &probes);
+  if (id != 0)
+    table->hits++;
   table->probes += probes;
   if (probes > table->maximum_probe)
     table->maximum_probe = probes;
-  return 0;
+  return id;
+}
+
+static struct gh_key gh_virtual_unit_key(
+  Literals from_lit, int from_side, Context from_subst,
+  Literals into_lit, Ilist atom_path, Context into_subst,
+  BOOL flipped, unsigned *term_nodes)
+{
+  struct gh_virtual_hash_state state;
+  Term atom = into_lit->atom;
+  Term beta = ARG(from_lit->atom, from_side == 0 ? 1 : 0);
+  int output_position;
+  memset(&state, 0, sizeof(state));
+  state.hash = gh_hash_begin(1);
+  gh_emit(&state.hash, into_lit->sign ? UINT64_C(0x500000001) :
+                                           UINT64_C(0x500000000));
+  state.term_nodes++;
+  gh_hash_rigid(&state.hash, atom);
+  for (output_position = 0; output_position < 2; output_position++) {
+    int source_position = flipped ? 1 - output_position : output_position;
+    if (atom_path != NULL && atom_path->i - 1 == source_position)
+      gh_hash_substituted_term(&state, ARG(atom, source_position),
+                               into_subst, atom_path->next,
+                               beta, from_subst);
+    else
+      gh_hash_applied_term(&state, ARG(atom, source_position), into_subst);
+  }
+  if (term_nodes != NULL)
+    *term_nodes = state.term_nodes;
+  return gh_finish_key(&state.hash);
+}
+
+BOOL hint_generalization_hash_lookup_unit_paramod(
+  Hint_generalization_hash table,
+  Literals from_lit, int from_side, Context from_subst,
+  Literals into_lit, Ilist into_pos, Context into_subst,
+  unsigned *normal_id, unsigned *flipped_id,
+  unsigned *term_nodes, unsigned long long *probes)
+{
+  struct gh_key normal_key, flipped_key;
+  unsigned found_normal, found_flipped;
+  unsigned normal_nodes = 0, flipped_nodes = 0;
+  unsigned long long normal_probes = 0, flipped_probes = 0;
+  if (normal_id != NULL)
+    *normal_id = 0;
+  if (flipped_id != NULL)
+    *flipped_id = 0;
+  if (term_nodes != NULL)
+    *term_nodes = 0;
+  if (probes != NULL)
+    *probes = 0;
+  if (table == NULL || !table->finalized || from_lit == NULL ||
+      into_lit == NULL || into_pos == NULL || into_pos->next == NULL ||
+      !unit_clause(((Topform) from_lit->atom->container)->literals) ||
+      !unit_clause(((Topform) into_lit->atom->container)->literals) ||
+      !pos_eq(from_lit) || !into_lit->sign || !eq_term(into_lit->atom) ||
+      ARITY(into_lit->atom) != 2)
+    return FALSE;
+  if (into_pos->next->i < 1 || into_pos->next->i > 2)
+    fatal_error("invalid virtual paramodulation atom position");
+  normal_key = gh_virtual_unit_key(
+    from_lit, from_side, from_subst, into_lit, into_pos->next, into_subst,
+    FALSE, &normal_nodes);
+  flipped_key = gh_virtual_unit_key(
+    from_lit, from_side, from_subst, into_lit, into_pos->next, into_subst,
+    TRUE, &flipped_nodes);
+  if (normal_nodes != flipped_nodes)
+    fatal_error("virtual generalized-hash node count mismatch");
+  found_normal = gh_lookup_key(table, normal_key, &normal_probes);
+  if (gh_key_compare(normal_key, flipped_key) == 0) {
+    found_flipped = found_normal;
+  }
+  else
+    found_flipped = gh_lookup_key(table, flipped_key, &flipped_probes);
+  if (normal_id != NULL)
+    *normal_id = found_normal;
+  if (flipped_id != NULL)
+    *flipped_id = found_flipped;
+  if (term_nodes != NULL)
+    *term_nodes = normal_nodes;
+  if (probes != NULL)
+    *probes = normal_probes + flipped_probes;
+  return TRUE;
 }
 
 void hint_generalization_hash_get_stats(

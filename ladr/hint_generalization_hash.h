@@ -4,6 +4,7 @@
 #define TP_HINT_GENERALIZATION_HASH_H
 
 #include "topform.h"
+#include "unify.h"
 #include <stdint.h>
 
 typedef struct hint_generalization_hash *Hint_generalization_hash;
@@ -60,6 +61,19 @@ void hint_generalization_hash_finalize(Hint_generalization_hash table);
 /* Return the selected stable hint ID, or zero on a hash miss. */
 unsigned hint_generalization_hash_lookup(Hint_generalization_hash table,
                                          Topform clause);
+
+/* Hash a positive unit paramodulant directly from the live substitutions,
+   without allocating its Literal, Term, Topform, or justification.  Both
+   equality orientations are queried because later equality orientation can
+   swap the sides.  TRUE reports that this candidate shape was supported;
+   IDs are zero on misses.  These preview probes are accounted by the caller,
+   not in the authoritative query counters above. */
+BOOL hint_generalization_hash_lookup_unit_paramod(
+  Hint_generalization_hash table,
+  Literals from_lit, int from_side, Context from_subst,
+  Literals into_lit, Ilist into_pos, Context into_subst,
+  unsigned *normal_id, unsigned *flipped_id,
+  unsigned *term_nodes, unsigned long long *probes);
 
 void hint_generalization_hash_get_stats(
   Hint_generalization_hash table, struct hint_generalization_hash_stats *stats);
