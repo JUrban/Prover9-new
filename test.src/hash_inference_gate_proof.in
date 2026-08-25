@@ -1,0 +1,28 @@
+clear(auto).
+set(paramodulation).
+set(para_from_small).
+clear(back_demod_hints).
+clear(back_demod).
+clear(cac_redundancy).
+assign(hint_index,generalized_hash).
+assign(hint_hash_complete_nodes,1).
+assign(hint_hash_partial_per_hint,0).
+assign(hash_inference_gate,safe).
+assign(hash_inference_sample_rate,1).
+assign(max_given,20).
+assign(max_weight,5).
+assign(stats,lots).
+
+list(keep).
+hint.
+end_of_list.
+
+formulas(sos).
+a = f(f(a)).
+h(a) = b.
+h(f(f(a))) != b.
+end_of_list.
+
+formulas(hints).
+h(f(f(a))) = b.
+end_of_list.

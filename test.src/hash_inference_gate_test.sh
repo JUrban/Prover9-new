@@ -2,6 +2,7 @@
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
 prover9=${PROVER9:-"$script_dir/../provers.src/prover9"}
 tmp=${TMPDIR:-/tmp}/hash-inference-gate.$$
 trap 'rm -f "$tmp".*' EXIT HUP INT TERM
@@ -49,5 +50,18 @@ grep -Eq '^Hash_inference_stages: candidates=[1-9][0-9]*, materialized=[1-9][0-9
 grep -Eq 'sampled_construction_allocations=[1-9][0-9]*,' \
   "$tmp.safe.out"
 grep -q 'intentionally incomplete' "$tmp.hit_only.err"
+
+"$prover9" < "$script_dir/hash_inference_gate_proof.in" \
+  > "$tmp.proof.out" 2> "$tmp.proof.err"
+grep -q 'THEOREM PROVED' "$tmp.proof.out"
+proof_gate=$(grep '^Hash_inference_gate: mode=safe,' "$tmp.proof.out")
+printf '%s\n' "$proof_gate" | grep -Eq \
+  'materialized_hits=[1-9][0-9]*,.*certified_skips=[1-9][0-9]*,.*raw_mismatches=0,'
+"$repo_dir/bin/prooftrans" parents_only < "$tmp.proof.out" \
+  > "$tmp.proof.parents"
+"$repo_dir/bin/directproof" < "$tmp.proof.out" \
+  > "$tmp.proof.direct"
+grep -q 'end of proof' "$tmp.proof.parents"
+grep -q 'Directproof did' "$tmp.proof.direct"
 
 echo "hash_inference_gate_test: PASS"
