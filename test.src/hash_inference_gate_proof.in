@@ -9,6 +9,7 @@ assign(hint_hash_complete_nodes,1).
 assign(hint_hash_partial_per_hint,0).
 assign(hash_inference_gate,safe).
 assign(hash_inference_sample_rate,1).
+assign(max_proofs,-1).
 assign(max_given,20).
 assign(max_weight,5).
 assign(stats,lots).
