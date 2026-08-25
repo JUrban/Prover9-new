@@ -394,6 +394,17 @@ static Para_candidate_decision hash_inference_candidate(
       hash_inference_gate_mode("shadow"))
     return PARA_CANDIDATE_MATERIALIZE;
 
+  if (hash_targeted_inference_mode("targeted_only_unit_paramod")) {
+    /* This review mode is intentionally incomplete: a planned unit pair can
+       still have many conclusions, but only virtual target hits survive. */
+    if (!Hash_gate_prediction.generation_recorded) {
+      record_generated_event();
+      Hash_gate_prediction.generation_recorded = TRUE;
+    }
+    Hash_gate_stats.hit_only_skips++;
+    return PARA_CANDIDATE_SKIP;
+  }
+
   if (hash_inference_gate_mode("safe")) {
     BOOL certified =
       !flag(Opt->eval_rewrite) &&
@@ -10926,6 +10937,9 @@ BOOL given_infer(Topform given)
       Context cf = get_context();
       Context ci = get_context();
       Clist_pos p;
+      BOOL targeted_unit =
+        hash_targeted_inference_mode("targeted_only_unit_paramod") &&
+        unit_clause(given->literals) && pos_eq(given->literals);
       if (Hash_target_planner != NULL)
         hash_target_inference_plan_from(Hash_target_planner, given);
       BOOL good_given =
@@ -10948,7 +10962,8 @@ BOOL given_infer(Topform given)
 	        Hash_target_planner, p->c, FALSE);
 	    Current_inference_source = INFER_SOURCE_PARAMOD;
 	    Hash_target_current_pair_covered = from_planned;
-	    if (!para_from_into(given, cf, p->c, ci, FALSE, cl_process)) {
+	    if ((!targeted_unit || from_planned) &&
+	        !para_from_into(given, cf, p->c, ci, FALSE, cl_process)) {
               Hash_target_current_pair_covered = FALSE;
               free_context(cf);
               free_context(ci);
@@ -10956,7 +10971,8 @@ BOOL given_infer(Topform given)
             }
 	    Hash_target_current_pair_covered = FALSE;
 	    Hash_target_current_pair_covered = into_planned;
-	    if (!para_from_into(p->c, cf, given, ci, TRUE, cl_process)) {
+	    if ((!targeted_unit || into_planned) &&
+	        !para_from_into(p->c, cf, given, ci, TRUE, cl_process)) {
               Hash_target_current_pair_covered = FALSE;
               free_context(cf);
               free_context(ci);
@@ -17293,6 +17309,12 @@ Prover_results search(Prover_input p)
         fatal_error("hash_targeted_inference requires paramodulation");
       if (hash_inference_gate_mode("off"))
         fatal_error("hash_targeted_inference requires a hash_inference_gate mode");
+      if (hash_targeted_inference_mode("targeted_only_unit_paramod") &&
+          !flag(Opt->quiet))
+        fprintf(stderr,
+                "WARNING: targeted_only_unit_paramod is intentionally "
+                "incomplete; variable replacement sides and ordinary "
+                "unit-paramodulation misses are omitted.\n");
     }
     if (!hash_inference_gate_mode("off")) {
       if (!generalized_hint_hash_mode())
