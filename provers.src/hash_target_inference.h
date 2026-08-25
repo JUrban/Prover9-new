@@ -12,6 +12,8 @@ typedef struct hash_target_inference *Hash_target_inference;
 struct hash_target_inference_stats {
   unsigned long long active_units;
   unsigned long long active_unit_peak;
+  unsigned long long active_ordinary_partners;
+  unsigned long long active_ordinary_partner_peak;
   unsigned long long plans;
   unsigned long long from_sides;
   unsigned long long variable_from_sides;
@@ -21,6 +23,9 @@ struct hash_target_inference_stats {
   unsigned long long required_queries;
   unsigned long long required_query_answers;
   unsigned long long unique_partners;
+  unsigned long long potential_unit_pair_directions;
+  unsigned long long planned_unit_pair_directions;
+  unsigned long long avoided_unit_pair_directions;
   unsigned long long ordinary_hash_hits;
   unsigned long long covered_hash_hits;
   unsigned long long missed_hash_hits;
@@ -68,6 +73,12 @@ unsigned hash_target_inference_partner_count(Hash_target_inference inference,
 
 Topform hash_target_inference_partner(Hash_target_inference inference,
                                       BOOL given_is_from, unsigned index);
+
+/* Clauses outside the positive-unit-equality target domain.  Authoritative
+   targeted mode retains their ordinary paramodulation path without scanning
+   the usually much larger active unit population. */
+Clist hash_target_inference_ordinary_partners(
+  Hash_target_inference inference);
 
 BOOL hash_target_inference_partner_planned(Hash_target_inference inference,
                                            Topform clause,

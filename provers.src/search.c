@@ -10875,6 +10875,44 @@ BOOL collective_expand_one_batch(void)
  *
  *************/
 
+static BOOL infer_paramodulation_pair(Topform given, Topform partner,
+                                      Context cf, Context ci,
+                                      BOOL good_given,
+                                      BOOL given_is_from,
+                                      BOOL given_is_into,
+                                      BOOL from_covered,
+                                      BOOL into_covered)
+{
+  BOOL good_pair;
+  if (restricted_denial(partner) ||
+      over_parm_limit(number_of_literals(partner->literals),
+                      Opt->para_lit_limit))
+    return TRUE;
+  good_pair = good_given ||
+    partner->id < (unsigned long long) parm(Opt->para_restr_beg) ||
+    partner->id > (unsigned long long) parm(Opt->para_restr_end);
+  if (!good_pair)
+    return TRUE;
+  Current_inference_source = INFER_SOURCE_PARAMOD;
+  if (given_is_from) {
+    Hash_target_current_pair_covered = from_covered;
+    if (!para_from_into(given, cf, partner, ci, FALSE, cl_process)) {
+      Hash_target_current_pair_covered = FALSE;
+      return FALSE;
+    }
+  }
+  Hash_target_current_pair_covered = FALSE;
+  if (given_is_into) {
+    Hash_target_current_pair_covered = into_covered;
+    if (!para_from_into(partner, cf, given, ci, TRUE, cl_process)) {
+      Hash_target_current_pair_covered = FALSE;
+      return FALSE;
+    }
+  }
+  Hash_target_current_pair_covered = FALSE;
+  return TRUE;
+}
+
 static
 BOOL given_infer(Topform given)
 {
@@ -10942,52 +10980,77 @@ BOOL given_infer(Topform given)
       /* This paramodulation does not use indexing. */
       Context cf = get_context();
       Context ci = get_context();
-      Clist_pos p;
       BOOL targeted_unit =
         hash_targeted_inference_mode("targeted_only_unit_paramod") &&
         unit_clause(given->literals) && pos_eq(given->literals);
+      BOOL good_given =
+        given->id < (unsigned long long) parm(Opt->para_restr_beg) ||
+        given->id > (unsigned long long) parm(Opt->para_restr_end);
       if (Hash_target_planner != NULL)
         hash_target_inference_plan_from(Hash_target_planner, given);
-      BOOL good_given =
-	(given->id < (unsigned long long) parm(Opt->para_restr_beg) ||
-	 given->id > (unsigned long long) parm(Opt->para_restr_end));
-      for (p = Glob.usable->first; p; p = p->next) {
-	if (!restricted_denial(p->c) &&
-	    !over_parm_limit(number_of_literals(p->c->literals),
-			     Opt->para_lit_limit)) {
-	  BOOL good_pair =
-	    (good_given ||
-	     p->c->id < (unsigned long long) parm(Opt->para_restr_beg) ||
-	     p->c->id > (unsigned long long) parm(Opt->para_restr_end));
-		  if (good_pair) {
-		    BOOL target_supported_pair = targeted_unit &&
-		      unit_clause(p->c->literals) && pos_eq(p->c->literals);
-		    BOOL from_planned =
-		      hash_target_inference_partner_planned(
-		        Hash_target_planner, p->c, TRUE);
-	    BOOL into_planned =
-	      hash_target_inference_partner_planned(
-	        Hash_target_planner, p->c, FALSE);
-	    Current_inference_source = INFER_SOURCE_PARAMOD;
-	    Hash_target_current_pair_covered = from_planned;
-		    if ((!target_supported_pair || from_planned) &&
-		        !para_from_into(given, cf, p->c, ci, FALSE, cl_process)) {
-              Hash_target_current_pair_covered = FALSE;
-              free_context(cf);
-              free_context(ci);
-              goto cancelled;
-            }
-	    Hash_target_current_pair_covered = FALSE;
-	    Hash_target_current_pair_covered = into_planned;
-		    if ((!target_supported_pair || into_planned) &&
-		        !para_from_into(p->c, cf, given, ci, TRUE, cl_process)) {
-              Hash_target_current_pair_covered = FALSE;
-              free_context(cf);
-              free_context(ci);
-              goto cancelled;
-            }
-	  }
-	}
+      if (targeted_unit) {
+        unsigned from_at = 0, into_at = 0;
+        unsigned from_count = hash_target_inference_partner_count(
+          Hash_target_planner, TRUE);
+        unsigned into_count = hash_target_inference_partner_count(
+          Hash_target_planner, FALSE);
+        Clist ordinary = hash_target_inference_ordinary_partners(
+          Hash_target_planner);
+        Clist_pos p;
+        /* Both target-selected arrays are in increasing proof-ID order.
+           Merge them so a pair selected in both directions is visited once. */
+        while (from_at < from_count || into_at < into_count) {
+          Topform from = from_at < from_count ?
+            hash_target_inference_partner(
+              Hash_target_planner, TRUE, from_at) : NULL;
+          Topform into = into_at < into_count ?
+            hash_target_inference_partner(
+              Hash_target_planner, FALSE, into_at) : NULL;
+          unsigned long long id = from == NULL ? into->id :
+            into == NULL ? from->id : from->id < into->id ? from->id :
+            into->id;
+          Topform partner = from != NULL && from->id == id ? from : into;
+          BOOL do_from = from != NULL && from->id == id;
+          BOOL do_into = into != NULL && into->id == id;
+          if (!infer_paramodulation_pair(
+                given, partner, cf, ci, good_given,
+                do_from, do_into, do_from, do_into)) {
+            free_context(cf);
+            free_context(ci);
+            goto cancelled;
+          }
+          if (do_from)
+            from_at++;
+          if (do_into)
+            into_at++;
+        }
+        /* Unsupported nonunit/negative partners retain the ordinary path.
+           Keeping them on a separate active list avoids an O(|Usable|) scan
+           through the positive unit population on every targeted given. */
+        for (p = ordinary->first; p != NULL; p = p->next)
+          if (!infer_paramodulation_pair(
+                given, p->c, cf, ci, good_given,
+                TRUE, TRUE, FALSE, FALSE)) {
+            free_context(cf);
+            free_context(ci);
+            goto cancelled;
+          }
+      }
+      else {
+        Clist_pos p;
+        for (p = Glob.usable->first; p != NULL; p = p->next) {
+          BOOL from_planned = hash_target_inference_partner_planned(
+            Hash_target_planner, p->c, TRUE);
+          BOOL into_planned = hash_target_inference_partner_planned(
+            Hash_target_planner, p->c, FALSE);
+          if (!infer_paramodulation_pair(
+                given, p->c, cf, ci, good_given,
+                TRUE, TRUE, from_planned, into_planned)) {
+            free_context(cf);
+            free_context(ci);
+            goto cancelled;
+          }
+        }
       }
       free_context(cf);
       free_context(ci);
@@ -17317,6 +17380,8 @@ Prover_results search(Prover_input p)
         fatal_error("hash_targeted_inference requires paramodulation");
       if (hash_inference_gate_mode("off"))
         fatal_error("hash_targeted_inference requires a hash_inference_gate mode");
+      if (hash_targeted_inference_mode("fair_unit_paramod"))
+        fatal_error("fair_unit_paramod is reserved but not implemented; use shadow_unit_paramod or the explicitly incomplete targeted_only_unit_paramod");
       if (hash_targeted_inference_mode("targeted_only_unit_paramod") &&
           !flag(Opt->quiet))
         fprintf(stderr,

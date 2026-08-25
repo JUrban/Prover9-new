@@ -1,0 +1,23 @@
+clear(auto).
+set(binary_resolution).
+set(paramodulation).
+assign(max_proofs,1).
+assign(max_given,100).
+assign(max_weight,100).
+assign(hint_index,generalized_hash).
+assign(hash_inference_gate,safe).
+clear(back_demod_hints).
+
+formulas(sos).
+  a = b.
+  p(a) | q.
+  -p(b).
+  -q.
+end_of_list.
+
+% The nonunit paramodulant p(b) | q is outside the first target-directed
+% domain.  Target-only mode must retain its ordinary inference path.
+formulas(hints).
+  b = a.
+  p(b) | q.
+end_of_list.

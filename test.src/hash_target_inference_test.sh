@@ -43,4 +43,15 @@ targeted_generated=$(sed -n 's/^Given=.* Generated=\([0-9][0-9]*\).*/\1/p' \
 test "$targeted_generated" -lt "$shadow_generated"
 grep -q 'intentionally incomplete' "$tmp.targeted_only_unit_paramod.err"
 
+{
+  printf '%s\n' \
+    'assign(hash_targeted_inference,targeted_only_unit_paramod).' \
+    'assign(hash_target_index_kb,1024).'
+  cat "$script_dir/hash_target_nonunit_proof.in"
+} | "$prover9" > "$tmp.nonunit.out" 2> "$tmp.nonunit.err"
+grep -q 'THEOREM PROVED' "$tmp.nonunit.out"
+"$repo_dir/bin/prooftrans" parents_only < "$tmp.nonunit.out" \
+  > "$tmp.nonunit.parents"
+grep -q 'end of proof' "$tmp.nonunit.parents"
+
 echo "hash_target_inference_test: PASS"

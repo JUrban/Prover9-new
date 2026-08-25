@@ -6,6 +6,7 @@
 #include "../ladr/memory.h"
 #include "../ladr/paramod.h"
 
+#include <limits.h>
 #include <stdint.h>
 
 struct target_requirement {
@@ -17,6 +18,7 @@ struct target_requirement {
 struct hash_target_inference {
   Hash_target_index targets;
   Mindex active_units;
+  Clist ordinary_partners;
   Compact_unit_index requirements;
   struct target_requirement **requirements_by_clause;
   unsigned requirement_clause_capacity;
@@ -422,6 +424,7 @@ Hash_target_inference hash_target_inference_init(Hash_target_index targets,
   Hash_target_inference inference = safe_calloc(1, sizeof(*inference));
   inference->targets = targets;
   inference->active_units = mindex_init(FPA, ORDINARY_UNIF, fpa_depth);
+  inference->ordinary_partners = clist_init("hash_target_ordinary_partners");
   inference->requirements =
     compact_unit_index_init_strategy(COMPACT_UNIT_CODE_TREE);
   inference->stats.requirement_budget_bytes = requirement_budget_bytes;
@@ -436,10 +439,13 @@ void hash_target_inference_destroy(Hash_target_inference inference)
     return;
   if (!mindex_empty(inference->active_units))
     fatal_error("target-directed active-unit index is not empty");
+  if (!clist_empty(inference->ordinary_partners))
+    fatal_error("target-directed ordinary-partner list is not empty");
   if (inference->stats.requirements != 0 ||
       compact_unit_index_active_records(inference->requirements) != 0)
     fatal_error("target-directed requirement index is not empty");
   mindex_destroy(inference->active_units);
+  clist_free(inference->ordinary_partners);
   compact_unit_index_free(inference->requirements);
   safe_free(inference->requirements_by_clause);
   safe_free(inference->requirement_by_id);
@@ -455,8 +461,26 @@ void hash_target_inference_destroy(Hash_target_inference inference)
 void hash_target_inference_update(Hash_target_inference inference,
                                   Topform clause, Indexop op)
 {
-  if (inference == NULL || !target_active_unit(clause))
+  if (inference == NULL)
     return;
+  if (!target_active_unit(clause)) {
+    if (op == INSERT) {
+      clist_append(clause, inference->ordinary_partners);
+      inference->stats.active_ordinary_partners++;
+      if (inference->stats.active_ordinary_partners >
+          inference->stats.active_ordinary_partner_peak)
+        inference->stats.active_ordinary_partner_peak =
+          inference->stats.active_ordinary_partners;
+    }
+    else {
+      if (!clist_member(clause, inference->ordinary_partners) ||
+          inference->stats.active_ordinary_partners == 0)
+        fatal_error("target-directed ordinary-partner lifecycle mismatch");
+      clist_remove(clause, inference->ordinary_partners);
+      inference->stats.active_ordinary_partners--;
+    }
+    return;
+  }
   mindex_update(inference->active_units, clause->literals->atom, op);
   if (op == INSERT) {
     inference->stats.active_units++;
@@ -574,6 +598,21 @@ void hash_target_inference_plan_from(Hash_target_inference inference,
   if (inference->into_partner_count > 1)
     qsort(inference->into_partners, inference->into_partner_count,
           sizeof(*inference->into_partners), compare_partner_id);
+  if (inference->stats.active_units > ULLONG_MAX / 2 ||
+      inference->stats.potential_unit_pair_directions >
+        ULLONG_MAX - inference->stats.active_units * 2)
+    fatal_error("target-directed pair-direction statistics overflow");
+  inference->stats.potential_unit_pair_directions +=
+    inference->stats.active_units * 2;
+  if (inference->stats.planned_unit_pair_directions >
+      ULLONG_MAX - inference->from_partner_count -
+        inference->into_partner_count)
+    fatal_error("target-directed planned-direction statistics overflow");
+  inference->stats.planned_unit_pair_directions +=
+    inference->from_partner_count + inference->into_partner_count;
+  inference->stats.avoided_unit_pair_directions =
+    inference->stats.potential_unit_pair_directions -
+    inference->stats.planned_unit_pair_directions;
   inference->stats.planning_seconds += user_seconds() - started;
 }
 
@@ -594,6 +633,12 @@ Topform hash_target_inference_partner(Hash_target_inference inference,
     return NULL;
   return given_is_from ? inference->from_partners[index] :
                          inference->into_partners[index];
+}
+
+Clist hash_target_inference_ordinary_partners(
+  Hash_target_inference inference)
+{
+  return inference == NULL ? NULL : inference->ordinary_partners;
 }
 
 BOOL hash_target_inference_partner_planned(Hash_target_inference inference,
@@ -639,10 +684,13 @@ void fprint_hash_target_inference_stats(FILE *fp,
   struct hash_target_inference_stats s;
   hash_target_inference_get_stats(inference, &s);
   fprintf(fp,
-          "Hash_target_inference: active_units=%llu, peak=%llu, plans=%llu, "
+          "Hash_target_inference: active_units=%llu, peak=%llu, "
+          "ordinary_partners=%llu, ordinary_partner_peak=%llu, plans=%llu, "
           "from_sides=%llu, variable_from_sides=%llu, recipes=%llu, "
           "positions=%llu, compatible_positions=%llu, required_queries=%llu, "
           "required_answers=%llu, unique_partners=%llu, duplicates=%llu, "
+          "potential_unit_directions=%llu, planned_unit_directions=%llu, "
+          "avoided_unit_directions=%llu, "
           "ordinary_hash_hits=%llu, covered_hash_hits=%llu, "
           "missed_hash_hits=%llu, planning_seconds=%.3f, "
           "requirements=%llu, requirement_peak=%llu, "
@@ -658,11 +706,14 @@ void fprint_hash_target_inference_stats(FILE *fp,
           "requirement_answers=%llu, requirement_duplicates=%llu, "
           "workspace_bytes=%llu, "
           "workspace_peak_bytes=%llu.\n",
-          s.active_units, s.active_unit_peak, s.plans, s.from_sides,
+          s.active_units, s.active_unit_peak, s.active_ordinary_partners,
+          s.active_ordinary_partner_peak, s.plans, s.from_sides,
           s.variable_from_sides, s.target_recipes, s.target_positions,
           s.compatible_positions, s.required_queries,
           s.required_query_answers, s.unique_partners,
-          s.duplicate_partners, s.ordinary_hash_hits,
+          s.duplicate_partners, s.potential_unit_pair_directions,
+          s.planned_unit_pair_directions,
+          s.avoided_unit_pair_directions, s.ordinary_hash_hits,
           s.covered_hash_hits, s.missed_hash_hits, s.planning_seconds,
           s.requirements, s.requirement_peak, s.requirement_physical,
           s.requirement_bytes, s.requirement_peak_bytes,
