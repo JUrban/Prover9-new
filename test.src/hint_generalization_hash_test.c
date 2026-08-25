@@ -94,6 +94,7 @@ int main(void)
     Hint_generalization_hash targets =
       hint_generalization_hash_init(12, 0, 100000, 1);
     Topform equality = clause("f(a)=g(b).");
+    equality->id = 1;
     hint_generalization_hash_enable_target_recipes(targets, 1024 * 1024);
     CHECK(hint_generalization_hash_add_exact(targets, 1, equality),
           "target sidecar adds an exact unit equality");
@@ -113,6 +114,22 @@ int main(void)
           stats.target_recipe_bytes > 0 &&
           stats.target_complete_token_bytes > 0,
           "target census accounts structure and allocated sidecar bytes");
+    {
+      unsigned i;
+      for (i = 0; i < hint_generalization_hash_target_count(targets); i++) {
+        struct hint_target_recipe_view view;
+        Topform reconstructed;
+        CHECK(hint_generalization_hash_target_recipe(targets, i, &view),
+              "read exhaustive target reconstruction recipe");
+        reconstructed = hint_generalization_hash_reconstruct_target(
+          targets, i,
+          view.kind == HINT_TARGET_COMPLETE ? NULL : equality);
+        CHECK(reconstructed != NULL &&
+              hint_generalization_hash_lookup(targets, reconstructed) == 1,
+              "reconstructed exhaustive target has its authoritative key");
+        delete_clause(reconstructed);
+      }
+    }
     hint_generalization_hash_destroy(targets);
     delete_clause(equality);
   }
@@ -121,6 +138,7 @@ int main(void)
     Hint_generalization_hash targets =
       hint_generalization_hash_init(2, 3, 100000, 1);
     Topform equality = clause("f(g(a))=k(h(b)).");
+    equality->id = 1;
     hint_generalization_hash_enable_target_recipes(targets, 1024 * 1024);
     CHECK(hint_generalization_hash_add_exact(targets, 1, equality),
           "partial target sidecar adds its exact equation");
@@ -133,6 +151,17 @@ int main(void)
           "partial target recipes retain the admitted hole ordinals");
     CHECK(stats.target_max_nodes >= 4 && stats.target_max_depth >= 2,
           "partial target census retains size and depth bounds");
+    {
+      unsigned i;
+      for (i = 0; i < hint_generalization_hash_target_count(targets); i++) {
+        Topform reconstructed = hint_generalization_hash_reconstruct_target(
+          targets, i, equality);
+        CHECK(reconstructed != NULL &&
+              hint_generalization_hash_lookup(targets, reconstructed) == 1,
+              "reconstructed one-hole target has its authoritative key");
+        delete_clause(reconstructed);
+      }
+    }
     hint_generalization_hash_destroy(targets);
     delete_clause(equality);
   }

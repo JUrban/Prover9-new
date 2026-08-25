@@ -9,6 +9,18 @@
 
 typedef struct hint_generalization_hash *Hint_generalization_hash;
 
+typedef enum {
+  HINT_TARGET_EXACT,
+  HINT_TARGET_PARTIAL,
+  HINT_TARGET_COMPLETE
+} Hint_target_recipe_kind;
+
+struct hint_target_recipe_view {
+  unsigned hint_id;
+  Hint_target_recipe_kind kind;
+  unsigned payload;
+};
+
 struct hint_generalization_hash_stats {
   unsigned long long entries;
   unsigned long long capacity;
@@ -53,6 +65,19 @@ Hint_generalization_hash hint_generalization_hash_init(
    Construction stops rather than silently exceeding a nonzero budget. */
 void hint_generalization_hash_enable_target_recipes(
   Hint_generalization_hash table, unsigned long long budget_bytes);
+
+unsigned hint_generalization_hash_target_count(
+  Hint_generalization_hash table);
+
+BOOL hint_generalization_hash_target_recipe(
+  Hint_generalization_hash table, unsigned index,
+  struct hint_target_recipe_view *view);
+
+/* Reconstruct an owned positive unit-equation target.  HINT must be the
+   materialized active hint named by the recipe for exact/partial targets;
+   exhaustive targets are self-contained and permit HINT=NULL. */
+Topform hint_generalization_hash_reconstruct_target(
+  Hint_generalization_hash table, unsigned index, Topform hint);
 
 void hint_generalization_hash_destroy(Hint_generalization_hash table);
 

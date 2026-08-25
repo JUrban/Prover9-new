@@ -22,6 +22,7 @@
 #include "hint_postings.h"
 #include "hint_term_table.h"
 #include "hint_generalization_hash.h"
+#include "clause_misc.h"
 #include <stdint.h>
 
 /* Private definitions and types */
@@ -3367,6 +3368,14 @@ void set_hint_generalization_hash(BOOL on, unsigned complete_nodes,
     complete_nodes, partial_per_hint, maximum_entries, expected_hints);
 }
 
+void set_hint_target_recipes(unsigned long long budget_bytes)
+{
+  if (Generalization_hash == NULL)
+    fatal_error("hash target recipes require generalized hint hash");
+  hint_generalization_hash_enable_target_recipes(
+    Generalization_hash, budget_bytes);
+}
+
 /* DOCUMENTATION
 */
 
@@ -6695,6 +6704,45 @@ BOOL preview_generalized_hash_unit_equality(
     Generalization_hash, literal, normal_id, flipped_id, probes);
 }
 
+unsigned generalized_hash_target_count(void)
+{
+  return hint_generalization_hash_target_count(Generalization_hash);
+}
+
+BOOL generalized_hash_target_recipe(
+  unsigned index, struct hint_target_recipe_view *view)
+{
+  return hint_generalization_hash_target_recipe(
+    Generalization_hash, index, view);
+}
+
+Topform reconstruct_generalized_hash_target(unsigned index)
+{
+  struct hint_target_recipe_view view;
+  Topform hint = NULL, target;
+  BOOL was_compressed = FALSE;
+  if (!hint_generalization_hash_target_recipe(
+        Generalization_hash, index, &view))
+    return NULL;
+  if (view.kind != HINT_TARGET_COMPLETE) {
+    if (view.hint_id == 0 || view.hint_id >= Packed_hint_capacity)
+      fatal_error("hash target recipe has invalid hint ID");
+    hint = Packed_hint_by_id[view.hint_id];
+    if (hint == NULL || !Packed_hint_active[view.hint_id])
+      fatal_error("hash target recipe names inactive hint");
+    was_compressed = hint->compressed != NULL;
+    if (was_compressed && !materialize_clause(hint))
+      fatal_error("cannot materialize hash target recipe hint");
+  }
+  target = hint_generalization_hash_reconstruct_target(
+    Generalization_hash, index, hint);
+  if (was_compressed && !recompress_clause(hint)) {
+    delete_clause(target);
+    fatal_error("cannot recompress hash target recipe hint");
+  }
+  return target;
+}
+
 /*************
  *
  *   adjust_weight_with_hints()
@@ -7547,6 +7595,18 @@ void fprint_packed_hint_operation_stats(FILE *fp)
             s.probes, s.queries == 0 ? 0.0 :
               (double) s.probes / (double) s.queries,
             s.maximum_probe);
+    if (s.target_budget_bytes != 0)
+      fprintf(fp,
+              "Hash_target_recipes: recipes=%llu, exact=%llu, partial=%llu, "
+              "complete=%llu, positions=%llu, variable_positions=%llu, "
+              "rigid_positions=%llu, recipe_bytes=%llu, token_bytes=%llu, "
+              "max_nodes=%u, max_depth=%u, budget_bytes=%llu.\n",
+              s.target_recipes, s.target_exact_recipes,
+              s.target_partial_recipes, s.target_complete_recipes,
+              s.target_position_records, s.target_variable_positions,
+              s.target_rigid_positions, s.target_recipe_bytes,
+              s.target_complete_token_bytes, s.target_max_nodes,
+              s.target_max_depth, s.target_budget_bytes);
   }
   if (Hint_compiled_census) {
     fprintf(fp,

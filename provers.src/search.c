@@ -344,6 +344,12 @@ static BOOL hash_inference_gate_mode(char *mode)
   return Opt != NULL && str_ident(stringparm1(Opt->hash_inference_gate), mode);
 }
 
+static BOOL hash_targeted_inference_mode(char *mode)
+{
+  return Opt != NULL &&
+    str_ident(stringparm1(Opt->hash_targeted_inference), mode);
+}
+
 static Para_candidate_decision hash_inference_candidate(
   const Para_candidate *candidate)
 {
@@ -2531,6 +2537,8 @@ Prover_options init_prover_options(void)
     init_parm("hash_inference_sample_rate", 65536, 1, INT_MAX);
   p->hash_inference_validate_rate =
     init_parm("hash_inference_validate_rate", 0, 0, INT_MAX);
+  p->hash_target_index_kb =
+    init_parm("hash_target_index_kb", 524288, 1, INT_MAX);
   p->rewrite_refresh_hot_ratio =
     init_parm("rewrite_refresh_hot_ratio", 7, 0, INT_MAX);
   p->rewrite_refresh_raw_budget =
@@ -2642,6 +2650,13 @@ Prover_options init_prover_options(void)
 					   "shadow",
 					   "safe",
 					   "hit_only");
+
+  p->hash_targeted_inference = init_stringparm(
+    "hash_targeted_inference", 4,
+    "off",
+    "shadow_unit_paramod",
+    "targeted_only_unit_paramod",
+    "fair_unit_paramod");
 
   p->inference_frontier = init_stringparm("inference_frontier", 2,
 					  "clauses",
@@ -12071,6 +12086,9 @@ void index_and_process_initial_clauses(void)
     (unsigned) parm(Opt->hint_hash_partial_per_hint),
     (unsigned long long) parm(Opt->hint_hash_max_entries),
     (unsigned) clist_length(Glob.hints));
+  if (!hash_targeted_inference_mode("off"))
+    set_hint_target_recipes(
+      (unsigned long long) parm(Opt->hash_target_index_kb) * 1024);
   set_hint_match_stats(flag(Opt->hint_match_stats));
   set_hint_compiled_census(flag(Opt->hint_compiled_census));
   set_hint_compiled_term_table(compiled_hint_table_mode());
@@ -16636,6 +16654,9 @@ void load_checkpoint_into_loop(void)
     (unsigned) parm(Opt->hint_hash_partial_per_hint),
     (unsigned long long) parm(Opt->hint_hash_max_entries),
     (unsigned) clist_length(Glob.hints));
+  if (!hash_targeted_inference_mode("off"))
+    set_hint_target_recipes(
+      (unsigned long long) parm(Opt->hash_target_index_kb) * 1024);
   set_hint_match_stats(flag(Opt->hint_match_stats));
   set_hint_compiled_census(flag(Opt->hint_compiled_census));
   set_hint_compiled_term_table(compiled_hint_table_mode());

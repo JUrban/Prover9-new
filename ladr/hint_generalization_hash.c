@@ -1,5 +1,6 @@
 #include "hint_generalization_hash.h"
 #include "fatal.h"
+#include "clause_misc.h"
 #include "literals.h"
 #include "memory.h"
 
@@ -680,6 +681,129 @@ void hint_generalization_hash_enable_target_recipes(
     fatal_error("target recipes must be enabled before adding hints");
   table->target_budget_bytes = budget_bytes;
   table->target_recipes_enabled = budget_bytes != 0;
+}
+
+unsigned hint_generalization_hash_target_count(
+  Hint_generalization_hash table)
+{
+  return table == NULL ? 0 : table->target_recipe_count;
+}
+
+BOOL hint_generalization_hash_target_recipe(
+  Hint_generalization_hash table, unsigned index,
+  struct hint_target_recipe_view *view)
+{
+  struct gh_target_recipe *recipe;
+  unsigned kind;
+  if (table == NULL || view == NULL || index >= table->target_recipe_count)
+    return FALSE;
+  recipe = table->target_recipes + index;
+  kind = recipe->descriptor >> GH_TARGET_KIND_SHIFT;
+  if (kind > GH_TARGET_COMPLETE)
+    fatal_error("invalid hash target recipe kind");
+  view->hint_id = recipe->hint_id;
+  view->kind = (Hint_target_recipe_kind) kind;
+  view->payload = recipe->descriptor & GH_TARGET_PAYLOAD_MASK;
+  return TRUE;
+}
+
+static Term *gh_target_ordinal_slot(Term *slot, unsigned wanted,
+                                    unsigned *ordinal)
+{
+  Term term = *slot;
+  int i;
+  if (*ordinal == wanted)
+    return slot;
+  (*ordinal)++;
+  if (!VARIABLE(term))
+    for (i = 0; i < ARITY(term); i++) {
+      Term *found = gh_target_ordinal_slot(&ARG(term, i), wanted, ordinal);
+      if (found != NULL)
+        return found;
+    }
+  return NULL;
+}
+
+static Term gh_decode_complete_target(const int *tokens, unsigned count,
+                                      unsigned *cursor)
+{
+  int token, arity, i;
+  Term term;
+  if (*cursor >= count)
+    return NULL;
+  token = tokens[(*cursor)++];
+  if (token < 0)
+    return get_variable_term(-token - 1);
+  arity = sn_to_arity(token);
+  if (arity < 0)
+    fatal_error("complete hash target has unknown symbol");
+  term = get_rigid_term_dangerously(token, arity);
+  for (i = 0; i < arity; i++) {
+    ARG(term, i) = gh_decode_complete_target(tokens, count, cursor);
+    if (ARG(term, i) == NULL) {
+      zap_term(term);
+      return NULL;
+    }
+  }
+  return term;
+}
+
+Topform hint_generalization_hash_reconstruct_target(
+  Hint_generalization_hash table, unsigned index, Topform hint)
+{
+  struct hint_target_recipe_view view;
+  Topform target;
+  if (!hint_generalization_hash_target_recipe(table, index, &view))
+    return NULL;
+  if (view.kind == HINT_TARGET_COMPLETE) {
+    struct gh_complete_target *record;
+    unsigned cursor = 0;
+    Term atom;
+    if (view.payload >= table->complete_target_count)
+      fatal_error("complete hash target recipe is out of range");
+    record = table->complete_targets + view.payload;
+    atom = gh_decode_complete_target(
+      table->complete_target_tokens + record->token_offset,
+      record->token_count, &cursor);
+    if (atom == NULL || cursor != record->token_count || !eq_term(atom) ||
+        ARITY(atom) != 2) {
+      if (atom != NULL)
+        zap_term(atom);
+      fatal_error("cannot reconstruct complete hash target");
+    }
+    target = get_topform();
+    target->literals = new_literal(TRUE, atom);
+    upward_clause_links(target);
+    return target;
+  }
+  if (hint == NULL || hint->compressed != NULL ||
+      (unsigned) hint->id != view.hint_id ||
+      !gh_positive_unit_equality(hint))
+    fatal_error("hash target reconstruction requires its materialized hint");
+  target = copy_clause(hint);
+  if (view.kind == HINT_TARGET_PARTIAL) {
+    Term atom = target->literals->atom;
+    Term *slot = NULL;
+    unsigned ordinal = 0;
+    int child;
+    int variable = greatest_variable_in_clause(target->literals) + 1;
+    if (variable >= MAX_VARS) {
+      delete_clause(target);
+      fatal_error("hash target abstraction variable overflow");
+    }
+    for (child = 0; child < ARITY(atom) && slot == NULL; child++)
+      slot = gh_target_ordinal_slot(
+        &ARG(atom, child), view.payload, &ordinal);
+    if (slot == NULL) {
+      delete_clause(target);
+      fatal_error("hash target abstraction ordinal is out of range");
+    }
+    zap_term(*slot);
+    *slot = get_variable_term(variable);
+    upward_clause_links(target);
+    renumber_variables(target, MAX_VARS);
+  }
+  return target;
 }
 
 void hint_generalization_hash_destroy(Hint_generalization_hash table)

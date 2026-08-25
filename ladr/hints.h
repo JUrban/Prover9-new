@@ -59,6 +59,8 @@ void set_hint_generalization_hash(BOOL on, unsigned complete_nodes,
                                   unsigned long long maximum_entries,
                                   unsigned expected_hints);
 
+void set_hint_target_recipes(unsigned long long budget_bytes);
+
 BOOL preview_generalized_hash_unit_paramod(
   Literals from_lit, int from_side, Context from_subst,
   Literals into_lit, Ilist into_pos, Context into_subst,
@@ -69,6 +71,14 @@ BOOL preview_generalized_hash_unit_paramod(
 BOOL preview_generalized_hash_unit_equality(
   Literals literal, unsigned *normal_id, unsigned *flipped_id,
   unsigned long long *probes);
+
+unsigned generalized_hash_target_count(void);
+
+BOOL generalized_hash_target_recipe(
+  unsigned index, struct hint_target_recipe_view *view);
+
+/* Return an owned reconstructed positive unit target. */
+Topform reconstruct_generalized_hash_target(unsigned index);
 
 void done_with_hints(void);
 
