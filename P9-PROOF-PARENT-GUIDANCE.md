@@ -105,10 +105,11 @@ proof used.
 
 Use short limits for the first J04 shadow and authoritative runs.  On the
 development machine, parsing the complete 41 MiB J04 guide and building its
-153,267-node graph took about 22 seconds wall time and peaked at about 262 MiB
-RSS in a one-given loader test.  Graph construction itself reported 0.69 CPU
-seconds.  These are startup measurements, not a prediction of full J04 search
-time or proof success.
+153,267-node graph took 18.8 seconds wall time and peaked at about 262 MiB RSS
+in a one-given loader test.  Graph construction itself reported 0.68 CPU
+seconds, a 66.7 MiB logical clause-body payload, and a 38.9 MiB graph/index.
+These are startup measurements, not a prediction of full J04 search time or
+proof success.
 
 The natural next stages, if mapped-given coverage is high, are exact
 paramodulation position/direction filtering and scheduling complete recorded

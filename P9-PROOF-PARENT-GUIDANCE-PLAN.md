@@ -208,10 +208,11 @@ ordinary inference generation; no unrestricted long run is started on the
 current machine.
 
 Current bounded result: the 153,267-node J04 guide is 41 MiB on disk.  Parsing
-the complete guide plus building the graph took about 22 wall-clock seconds
-and peaked at about 262 MiB RSS on the development machine; graph construction
-itself reported 0.69 CPU seconds.  This was a one-given loader validation with
-an unrelated tiny theory, not a claim about J04 proof-search speed or success.
+the complete guide plus building the graph took 18.8 wall-clock seconds and
+peaked at about 262 MiB RSS on the development machine; graph construction
+itself reported 0.68 CPU seconds, 66.7 MiB of logical clause bodies, and a
+38.9 MiB graph/index.  This was a one-given loader validation with an unrelated
+tiny theory, not a claim about J04 proof-search speed or success.
 
 ## Deferred extensions
 
