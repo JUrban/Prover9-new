@@ -21,6 +21,7 @@
 #include "cold_passive_store.h"
 #include "rewrite_only_store.h"
 #include "compact_rewrite.h"
+#include "hash_target_index.h"
 #include "../ladr/ac_redun.h"
 #include "../ladr/std_options.h"
 #include "../ladr/memory.h"
@@ -69,6 +70,7 @@ static unsigned long long Dense_arena_bytes_reclaimed = 0;
 static Rewrite_only_store Rewrite_only_rules = NULL;
 static Compact_rewrite_bank Compact_rewrite_rules = NULL;
 static Compact_term_pool Compact_terms = NULL;
+static Hash_target_index Hash_targets = NULL;
 static unsigned long long Compact_term_next_reclaim_serialization = 0;
 static unsigned long long Compact_term_reclaim_cooldown_skips = 0;
 static unsigned long long Compact_term_reclaim_deferrals = 0;
@@ -4009,6 +4011,8 @@ void fprint_prover_stats(FILE *fp, struct prover_stats s, char *stats_level)
               comma_num(s.hint_index_table_bytes),
               comma_num(s.hint_candidate_checks));
       fprint_packed_hint_operation_stats(fp);
+      if (Hash_targets != NULL)
+        fprint_hash_target_index_stats(fp, Hash_targets);
     }
   fprintf(fp,
           "Ancestor_store: records=%s, record_bytes=%s, backing_bytes=%s, "
@@ -6233,6 +6237,8 @@ static void release_terminal_hint_index(void)
      retained, linear ID lookup and does not require this index. */
   if (!packed_hints_enabled())
     return;
+  hash_target_index_destroy(Hash_targets);
+  Hash_targets = NULL;
   discard_packed_hint_indexes();
   memory_release_unused();
   Terminal_hint_index_released = TRUE;
@@ -7473,6 +7479,8 @@ void free_search_memory(void)
   Dense_arena_bytes_reclaimed = 0;
 
   if (!Terminal_hint_index_released) {
+    hash_target_index_destroy(Hash_targets);
+    Hash_targets = NULL;
     if (Glob.hints->first) {
       Clist_pos p;
       for(p = Glob.hints->first; p; p = p->next)
@@ -12242,6 +12250,9 @@ void index_and_process_initial_clauses(void)
     }
   }
   finalize_hint_conjunction_index();
+  if (!hash_targeted_inference_mode("off"))
+    Hash_targets = hash_target_index_build(
+      (unsigned long long) parm(Opt->hash_target_index_kb) * 1024);
 
   ////////////////////////////////////////////////////////////////////////////
   // Sos
@@ -16981,6 +16992,9 @@ void load_checkpoint_into_loop(void)
         }
       }
       finalize_hint_conjunction_index();
+      if (!hash_targeted_inference_mode("off"))
+        Hash_targets = hash_target_index_build(
+          (unsigned long long) parm(Opt->hash_target_index_kb) * 1024);
       /* Index reconstruction advances the epoch internally; restore the
          logical search-state epoch saved at the checkpoint boundary. */
       set_hint_state_epoch(Resume_hint_epoch);
@@ -17213,6 +17227,16 @@ Prover_results search(Prover_input p)
         fatal_error("hint_index=generalized_hash does not support hint_match_once");
       if (parm(Opt->hint_expiry) > 0)
         fatal_error("hint_index=generalized_hash does not support hint_expiry");
+    }
+    if (!hash_targeted_inference_mode("off")) {
+      if (!generalized_hint_hash_mode())
+        fatal_error("hash_targeted_inference requires hint_index=generalized_hash");
+      if (discount_mode())
+        fatal_error("hash_targeted_inference currently requires search_loop=otter");
+      if (!str_ident(stringparm1(Opt->inference_frontier), "clauses"))
+        fatal_error("hash_targeted_inference currently requires inference_frontier=clauses");
+      if (!flag(Opt->paramodulation))
+        fatal_error("hash_targeted_inference requires paramodulation");
     }
     if (!hash_inference_gate_mode("off")) {
       if (!generalized_hint_hash_mode())

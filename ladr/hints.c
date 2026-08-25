@@ -62,6 +62,12 @@ static unsigned long long Packed_candidate_checks = 0;
 /* Static hash-only experiment.  The ordinary packed bank still owns and
    deduplicates hint clauses, but it is never consulted by query matching. */
 static Hint_generalization_hash Generalization_hash = NULL;
+static Topform Target_scan_hint = NULL;
+static unsigned Target_scan_hint_id = 0;
+static BOOL Target_scan_hint_was_compressed = FALSE;
+static BOOL Target_scan_active = FALSE;
+
+static void release_target_scan_hint(void);
 
 /* Construction-only precursor of the compiled matcher.  Ordinary unit hints
    receive canonical roots; packed_fast remains authoritative. */
@@ -3593,6 +3599,10 @@ void init_hints(Uniftype utype,
 void done_with_hints(void)
 {
   unsigned i;
+  if (Target_scan_active) {
+    release_target_scan_hint();
+    Target_scan_active = FALSE;
+  }
   if (!lindex_empty(Hints_idx) ||
       !clist_empty(Redundant_hints))
     printf("ERROR: Hints index not empty!\n");
@@ -6709,11 +6719,45 @@ unsigned generalized_hash_target_count(void)
   return hint_generalization_hash_target_count(Generalization_hash);
 }
 
+unsigned long long generalized_hash_target_storage_bytes(void)
+{
+  struct hint_generalization_hash_stats stats;
+  if (Generalization_hash == NULL)
+    return 0;
+  hint_generalization_hash_get_stats(Generalization_hash, &stats);
+  return stats.target_recipe_bytes + stats.target_complete_token_bytes;
+}
+
 BOOL generalized_hash_target_recipe(
   unsigned index, struct hint_target_recipe_view *view)
 {
   return hint_generalization_hash_target_recipe(
     Generalization_hash, index, view);
+}
+
+static void release_target_scan_hint(void)
+{
+  if (Target_scan_hint != NULL && Target_scan_hint_was_compressed &&
+      !recompress_clause(Target_scan_hint))
+    fatal_error("cannot recompress sequential hash target recipe hint");
+  Target_scan_hint = NULL;
+  Target_scan_hint_id = 0;
+  Target_scan_hint_was_compressed = FALSE;
+}
+
+void begin_generalized_hash_target_scan(void)
+{
+  if (Target_scan_active)
+    fatal_error("hash target recipe scans are not reentrant");
+  Target_scan_active = TRUE;
+}
+
+void end_generalized_hash_target_scan(void)
+{
+  if (!Target_scan_active)
+    fatal_error("hash target recipe scan is not active");
+  release_target_scan_hint();
+  Target_scan_active = FALSE;
 }
 
 Topform reconstruct_generalized_hash_target(unsigned index)
@@ -6730,13 +6774,25 @@ Topform reconstruct_generalized_hash_target(unsigned index)
     hint = Packed_hint_by_id[view.hint_id];
     if (hint == NULL || !Packed_hint_active[view.hint_id])
       fatal_error("hash target recipe names inactive hint");
-    was_compressed = hint->compressed != NULL;
-    if (was_compressed && !materialize_clause(hint))
-      fatal_error("cannot materialize hash target recipe hint");
+    if (Target_scan_active) {
+      if (Target_scan_hint_id != view.hint_id) {
+        release_target_scan_hint();
+        Target_scan_hint = hint;
+        Target_scan_hint_id = view.hint_id;
+        Target_scan_hint_was_compressed = hint->compressed != NULL;
+        if (Target_scan_hint_was_compressed && !materialize_clause(hint))
+          fatal_error("cannot materialize sequential hash target recipe hint");
+      }
+    }
+    else {
+      was_compressed = hint->compressed != NULL;
+      if (was_compressed && !materialize_clause(hint))
+        fatal_error("cannot materialize hash target recipe hint");
+    }
   }
   target = hint_generalization_hash_reconstruct_target(
     Generalization_hash, index, hint);
-  if (was_compressed && !recompress_clause(hint)) {
+  if (!Target_scan_active && was_compressed && !recompress_clause(hint)) {
     delete_clause(target);
     fatal_error("cannot recompress hash target recipe hint");
   }

@@ -74,8 +74,16 @@ BOOL preview_generalized_hash_unit_equality(
 
 unsigned generalized_hash_target_count(void);
 
+unsigned long long generalized_hash_target_storage_bytes(void);
+
 BOOL generalized_hash_target_recipe(
   unsigned index, struct hint_target_recipe_view *view);
+
+/* Bracket a sequential target scan so recipes belonging to the same packed
+   hint share one materialization.  Scans are intentionally non-reentrant. */
+void begin_generalized_hash_target_scan(void);
+
+void end_generalized_hash_target_scan(void);
 
 /* Return an owned reconstructed positive unit target. */
 Topform reconstruct_generalized_hash_target(unsigned index);
