@@ -97,6 +97,10 @@ memory-tests:
 bookkeeping-tests:
 	cd test.src && $(MAKE) bookkeeping-tests
 
+proof-parent-guide-test: lib
+	$(MAKE) -C provers.src prover9
+	$(MAKE) -C test.src proof-parent-guide-test
+
 
 hint-postings-test: lib
 	cd test.src && $(MAKE) hint-postings-test

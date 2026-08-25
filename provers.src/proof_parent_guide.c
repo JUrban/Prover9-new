@@ -4,7 +4,6 @@
 #include "../ladr/clock.h"
 #include "../ladr/memory.h"
 
-#include <errno.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -54,6 +53,7 @@ struct proof_parent_guide_stats {
   unsigned long long paramod_steps;
   unsigned long long hyper_steps;
   unsigned long long rewrite_references;
+  unsigned long long guide_body_bytes;
   unsigned long long paramod_relations;
   unsigned long long hyper_relations;
   unsigned long long activations;
@@ -74,6 +74,7 @@ struct proof_parent_guide_stats {
   unsigned long long authoritative_raw_partners;
   unsigned long long authoritative_unique_partners;
   unsigned long long authoritative_duplicate_partners;
+  unsigned long long authoritative_max_partners;
   unsigned long long resident_bytes;
   unsigned long long resident_peak_bytes;
   double build_seconds;
@@ -152,43 +153,16 @@ static unsigned next_power_of_two(unsigned long long needed)
   return capacity;
 }
 
-static uint64_t parse_id(const char *text, const char **end_out)
-{
-  unsigned long long value;
-  char *end;
-  errno = 0;
-  value = strtoull(text, &end, 10);
-  if (errno != 0 || end == text || value == 0)
-    fatal_error("proof-parent guide has a malformed or zero node ID");
-  if (end_out != NULL)
-    *end_out = end;
-  return (uint64_t) value;
-}
-
-static const char *unique_label_value(Topform clause, const char *prefix)
-{
-  const size_t length = strlen(prefix);
-  const char *found = NULL;
-  int occurrence = 1;
-  char *label;
-  while ((label = get_string_attribute(clause->attributes, label_att(),
-                                       occurrence++)) != NULL)
-    if (strncmp(label, prefix, length) == 0) {
-      if (found != NULL)
-        fatal_error("proof-parent guide clause has a duplicate metadata label");
-      found = label + length;
-    }
-  return found;
-}
-
-static unsigned parse_parent_list(const char *text, uint64_t **parents)
+static unsigned read_parent_attributes(Topform clause, int attribute,
+                                       uint64_t **parents)
 {
   unsigned count = 0, capacity = 0;
-  const char *at = text;
+  int value;
   *parents = NULL;
-  while (at != NULL && *at != '\0') {
-    const char *end;
-    uint64_t id = parse_id(at, &end);
+  while ((value = get_int_attribute(
+            clause->attributes, attribute, count + 1)) != INT_MAX) {
+    if (value <= 0)
+      fatal_error("proof-parent guide has a nonpositive parent node");
     if (count == capacity) {
       unsigned next = capacity == 0 ? 4 : capacity * 2;
       if (next <= capacity)
@@ -196,15 +170,8 @@ static unsigned parse_parent_list(const char *text, uint64_t **parents)
       *parents = safe_realloc(*parents, (size_t) next * sizeof(**parents));
       capacity = next;
     }
-    (*parents)[count++] = id;
-    if (*end == '\0')
-      break;
-    if (*end != ',')
-      fatal_error("proof-parent guide parent list is malformed");
-    at = end + 1;
+    (*parents)[count++] = (uint64_t) value;
   }
-  if (count == 0)
-    fatal_error("proof-parent guide has an empty parent label");
   return count;
 }
 
@@ -316,20 +283,24 @@ static void add_relation(Proof_parent_guide guide, unsigned first,
                     &node->hyper_count, &node->hyper_capacity);
 }
 
-static void add_parent_clique(Proof_parent_guide guide, const char *label,
+static void add_parent_clique(Proof_parent_guide guide, Topform clause,
+                              int attribute, unsigned result_node,
                               enum proof_parent_rule rule)
 {
   uint64_t *ids;
   unsigned *nodes;
-  unsigned count = parse_parent_list(label, &ids);
+  unsigned count = read_parent_attributes(clause, attribute, &ids);
   unsigned i, j;
   if (rule == PROOF_PARENT_PARAMOD && count != 2)
     fatal_error("proof-parent paramodulation label must have two parents");
   if (rule == PROOF_PARENT_HYPER && count < 2)
     fatal_error("proof-parent hyperresolution label needs two parents");
   nodes = safe_malloc((size_t) count * sizeof(*nodes));
-  for (i = 0; i < count; i++)
+  for (i = 0; i < count; i++) {
     nodes[i] = source_lookup(guide, ids[i]);
+    if (nodes[i] >= result_node)
+      fatal_error("proof-parent inference references a non-prior parent");
+  }
   for (i = 0; i < count; i++)
     for (j = i + 1; j < count; j++) {
       add_relation(guide, nodes[i], nodes[j], rule);
@@ -392,6 +363,10 @@ Proof_parent_guide proof_parent_guide_build(
   Proof_parent_guide guide;
   Plist p;
   unsigned at = 0, i;
+  int node_attribute = attribute_name_to_id("proof_parent_node");
+  int para_attribute = attribute_name_to_id("proof_parent_para");
+  int hyper_attribute = attribute_name_to_id("proof_parent_hyper");
+  int rewrite_attribute = attribute_name_to_id("proof_parent_rewrite");
   double started = user_seconds();
   if (mode == PROOF_PARENT_GUIDE_OFF)
     return NULL;
@@ -400,6 +375,9 @@ Proof_parent_guide proof_parent_guide_build(
   guide->node_count = count_list(clauses);
   if (guide->node_count == 0)
     fatal_error("proof_parent_guidance requires a proof_parent_guide list");
+  if (node_attribute < 0 || para_attribute < 0 || hyper_attribute < 0 ||
+      rewrite_attribute < 0)
+    fatal_error("proof-parent guide attributes were not registered");
   guide->nodes = safe_calloc(guide->node_count, sizeof(*guide->nodes));
   guide->body_bucket_count = next_power_of_two(
     (unsigned long long) guide->node_count * 2);
@@ -416,18 +394,22 @@ Proof_parent_guide proof_parent_guide_build(
 
   for (p = clauses; p != NULL; p = p->next, at++) {
     Topform clause = p->v;
-    const char *node_label = unique_label_value(
-      clause, "proof_parent_node=");
-    const char *end;
+    int node_id = get_int_attribute(
+      clause->attributes, node_attribute, 1);
     uint64_t hash;
     unsigned group;
-    if (node_label == NULL)
-      fatal_error("proof-parent guide clause has no proof_parent_node label");
-    guide->nodes[at].source_id = parse_id(node_label, &end);
-    if (*end != '\0')
-      fatal_error("proof-parent guide node ID has trailing characters");
+    if (node_id == INT_MAX) {
+      fprintf(stderr, "Proof-parent guide clause missing metadata: ");
+      fwrite_clause(stderr, clause, CL_FORM_STD);
+      fatal_error("proof-parent guide clause has no proof_parent_node attribute");
+    }
+    if (node_id <= 0 ||
+        get_int_attribute(clause->attributes, node_attribute, 2) != INT_MAX)
+      fatal_error("proof-parent guide clause must have one positive node ID");
+    guide->nodes[at].source_id = (uint64_t) node_id;
     source_insert(guide, guide->nodes[at].source_id, at);
     renumber_variables(clause, MAX_VARS);
+    guide->stats.guide_body_bytes += clause_body_storage_bytes(clause);
     hash = clause_hash(clause);
     group = find_body_group(guide, clause, hash);
     if (group == UINT_MAX)
@@ -438,23 +420,28 @@ Proof_parent_guide proof_parent_guide_build(
                     &guide->groups[group].node_capacity);
   }
 
-  for (p = clauses; p != NULL; p = p->next) {
+  at = 0;
+  for (p = clauses; p != NULL; p = p->next, at++) {
     Topform clause = p->v;
-    const char *para = unique_label_value(clause, "proof_parent_para=");
-    const char *hyper = unique_label_value(clause, "proof_parent_hyper=");
-    const char *rewrite = unique_label_value(
-      clause, "proof_parent_rewrite=");
-    if (para != NULL && hyper != NULL)
+    BOOL para = exists_attribute(clause->attributes, para_attribute);
+    BOOL hyper = exists_attribute(clause->attributes, hyper_attribute);
+    if (para && hyper)
       fatal_error("proof-parent node has two primary inference labels");
-    if (para != NULL)
-      add_parent_clique(guide, para, PROOF_PARENT_PARAMOD);
-    if (hyper != NULL)
-      add_parent_clique(guide, hyper, PROOF_PARENT_HYPER);
-    if (rewrite != NULL) {
+    if (para)
+      add_parent_clique(
+        guide, clause, para_attribute, at, PROOF_PARENT_PARAMOD);
+    if (hyper)
+      add_parent_clique(
+        guide, clause, hyper_attribute, at, PROOF_PARENT_HYPER);
+    if (exists_attribute(clause->attributes, rewrite_attribute)) {
       uint64_t *ids;
-      unsigned count = parse_parent_list(rewrite, &ids);
-      for (i = 0; i < count; i++)
-        (void) source_lookup(guide, ids[i]);
+      unsigned count = read_parent_attributes(
+        clause, rewrite_attribute, &ids);
+      for (i = 0; i < count; i++) {
+        unsigned parent = source_lookup(guide, ids[i]);
+        if (parent >= at)
+          fatal_error("proof-parent rewrite references a non-prior parent");
+      }
       guide->stats.rewrite_references += count;
       safe_free(ids);
     }
@@ -468,6 +455,19 @@ Proof_parent_guide proof_parent_guide_build(
       node->hyper_neighbors, node->hyper_count);
     guide->stats.paramod_relations += node->paramod_count;
     guide->stats.hyper_relations += node->hyper_count;
+  }
+  /* Metadata is needed only while constructing the graph.  Do not retain
+     roughly one attribute object per edge throughout a long search. */
+  for (p = clauses; p != NULL; p = p->next) {
+    Topform clause = p->v;
+    clause->attributes = delete_attributes(
+      clause->attributes, node_attribute);
+    clause->attributes = delete_attributes(
+      clause->attributes, para_attribute);
+    clause->attributes = delete_attributes(
+      clause->attributes, hyper_attribute);
+    clause->attributes = delete_attributes(
+      clause->attributes, rewrite_attribute);
   }
   guide->stats.nodes = guide->node_count;
   guide->stats.body_groups = guide->group_count;
@@ -675,6 +675,8 @@ Topform *proof_parent_guide_paramod_partners(Proof_parent_guide guide,
   guide->stats.authoritative_raw_partners += raw;
   guide->stats.authoritative_unique_partners += out;
   guide->stats.authoritative_duplicate_partners += raw - out;
+  if (out > guide->stats.authoritative_max_partners)
+    guide->stats.authoritative_max_partners = out;
   *count = out;
   return guide->partner_workspace;
 }
@@ -692,6 +694,9 @@ void fprint_proof_parent_guide_stats(FILE *fp, Proof_parent_guide guide)
   fprintf(fp, "\nProof-parent guidance:\n");
   fprintf(fp, "  mode=%s, nodes=%u, unique_bodies=%u, build_seconds=%.2f\n",
           mode, s->nodes, s->body_groups, s->build_seconds);
+  fprintf(fp, "  guide_body_bytes=%llu, index_bytes=%llu, "
+              "index_peak_bytes=%llu\n",
+          s->guide_body_bytes, s->resident_bytes, s->resident_peak_bytes);
   fprintf(fp, "  para_steps=%llu, hyper_steps=%llu, rewrite_refs=%llu\n",
           s->paramod_steps, s->hyper_steps, s->rewrite_references);
   fprintf(fp, "  directed_para_relations=%llu, directed_hyper_relations=%llu\n",
@@ -709,12 +714,12 @@ void fprint_proof_parent_guide_stats(FILE *fp, Proof_parent_guide guide)
           s->hyper_pair_tests, s->hyper_pair_accepts,
           s->hyper_pair_rejects);
   fprintf(fp, "  sparse_para_queries=%llu, raw_partners=%llu, "
-              "unique_partners=%llu, duplicate_partners=%llu\n",
+              "unique_partners=%llu, duplicate_partners=%llu, "
+              "max_partners=%llu\n",
           s->authoritative_queries, s->authoritative_raw_partners,
           s->authoritative_unique_partners,
-          s->authoritative_duplicate_partners);
-  fprintf(fp, "  index_bytes=%llu, index_peak_bytes=%llu\n",
-          s->resident_bytes, s->resident_peak_bytes);
+          s->authoritative_duplicate_partners,
+          s->authoritative_max_partners);
 }
 
 void proof_parent_guide_destroy(Proof_parent_guide guide)

@@ -3,6 +3,10 @@
 #include <stdio.h>
 
 static int Failures;
+static int Node_attribute;
+static int Para_attribute;
+static int Hyper_attribute;
+static int Rewrite_attribute;
 
 #define CHECK(test, message) do {                                    \
   if (!(test)) {                                                     \
@@ -11,15 +15,18 @@ static int Failures;
   }                                                                 \
 } while (0)
 
-static Topform labeled_clause(const char *body, const char *node,
-                              const char *primary)
+static Topform labeled_clause(const char *body, int node,
+                              int primary_attribute, int first, int second)
 {
   Topform clause = parse_clause_from_string((char *) body);
-  clause->attributes = set_string_attribute(
-    clause->attributes, label_att(), (char *) node);
-  if (primary != NULL)
-    clause->attributes = set_string_attribute(
-      clause->attributes, label_att(), (char *) primary);
+  clause->attributes = set_int_attribute(
+    clause->attributes, Node_attribute, node);
+  if (primary_attribute >= 0) {
+    clause->attributes = set_int_attribute(
+      clause->attributes, primary_attribute, first);
+    clause->attributes = set_int_attribute(
+      clause->attributes, primary_attribute, second);
+  }
   return clause;
 }
 
@@ -41,17 +48,22 @@ int main(void)
 
   init_standard_ladr();
   (void) register_attribute("label", STRING_ATTRIBUTE);
+  Node_attribute = register_attribute("proof_parent_node", INT_ATTRIBUTE);
+  Para_attribute = register_attribute("proof_parent_para", INT_ATTRIBUTE);
+  Hyper_attribute = register_attribute("proof_parent_hyper", INT_ATTRIBUTE);
+  Rewrite_attribute = register_attribute("proof_parent_rewrite", INT_ATTRIBUTE);
+  (void) Rewrite_attribute;
   clauses = plist_append(clauses, labeled_clause(
-    "p(x).", "proof_parent_node=1", NULL));
+    "p(x).", 1, -1, 0, 0));
   clauses = plist_append(clauses, labeled_clause(
-    "q(x).", "proof_parent_node=2", NULL));
+    "q(x).", 2, -1, 0, 0));
   clauses = plist_append(clauses, labeled_clause(
-    "result(x).", "proof_parent_node=3", "proof_parent_para=1,2"));
+    "result(x).", 3, Para_attribute, 1, 2));
   /* A repeated body must share its exact-body directory entry. */
   clauses = plist_append(clauses, labeled_clause(
-    "p(y).", "proof_parent_node=4", NULL));
+    "p(y).", 4, -1, 0, 0));
   clauses = plist_append(clauses, labeled_clause(
-    "hyper_result(x).", "proof_parent_node=5", "proof_parent_hyper=2,3"));
+    "hyper_result(x).", 5, Hyper_attribute, 2, 3));
 
   guide = proof_parent_guide_build(
     clauses, PROOF_PARENT_GUIDE_AUTHORITATIVE);

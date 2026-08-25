@@ -1,0 +1,48 @@
+clear(auto).
+clear(auto_setup).
+clear(auto_limits).
+clear(auto_denials).
+clear(auto_inference).
+clear(auto_process).
+
+assign(max_given,1).
+assign(max_seconds,10).
+assign(stats,all).
+assign(search_loop,otter).
+assign(inference_frontier,clauses).
+assign(proof_parent_guidance,authoritative).
+
+set(paramodulation).
+clear(binary_resolution).
+clear(pos_hyper_resolution).
+clear(neg_hyper_resolution).
+clear(pos_ur_resolution).
+clear(neg_ur_resolution).
+clear(back_subsume).
+clear(back_demod).
+clear(unit_deletion).
+clear(print_given).
+clear(print_initial_clauses).
+clear(echo_input).
+
+formulas(proof_parent_guide).
+  (ppg_left(x) | ppg_fun(x) = x)
+    # proof_parent_node(1)
+    .
+  (ppg_right(ppg_const) | ppg_fun(ppg_const) = ppg_const)
+    # proof_parent_node(2)
+    .
+  (ppg_result(ppg_const))
+    # proof_parent_node(3)
+    # proof_parent_para(1)
+    # proof_parent_para(2)
+    .
+end_of_list.
+
+formulas(usable).
+  ppg_left(x) | ppg_fun(x) = x.
+end_of_list.
+
+formulas(sos).
+  ppg_right(ppg_const) | ppg_fun(ppg_const) = ppg_const.
+end_of_list.

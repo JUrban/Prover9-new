@@ -20,7 +20,7 @@ SPEC.loader.exec_module(MODULE)
 
 SAMPLE = """\
 ============================== PROOF =================================
-1 a = a.  [assumption].
+1 a = a # label(old_display_label).  [assumption].
 2 b = b.  [assumption].
 3 a = b.  [para(1(a,1),2(a,1,1)),rewrite([1(2)])].
 4 b = a.  [hyper(3,a,2,a,b),rewrite([1(1),2(2)])].
@@ -59,9 +59,12 @@ class ExtractProofParentGuideTest(unittest.TestCase):
         MODULE.write_guide(self.records(), output, "sample.out")
         text = output.getvalue()
         self.assertIn("formulas(proof_parent_guide).", text)
-        self.assertIn('label("proof_parent_node=3")', text)
-        self.assertIn('label("proof_parent_para=1,2")', text)
-        self.assertIn('label("proof_parent_rewrite=1")', text)
+        self.assertIn("  (a = b)\n", text)
+        self.assertNotIn("old_display_label", text)
+        self.assertIn("proof_parent_node(3)", text)
+        self.assertIn("proof_parent_para(1)", text)
+        self.assertIn("proof_parent_para(2)", text)
+        self.assertIn("proof_parent_rewrite(1)", text)
         self.assertTrue(text.endswith("end_of_list.\n"))
 
     def test_rejects_forward_reference(self):

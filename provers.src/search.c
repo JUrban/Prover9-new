@@ -23,6 +23,7 @@
 #include "compact_rewrite.h"
 #include "hash_target_index.h"
 #include "hash_target_inference.h"
+#include "proof_parent_guide.h"
 #include "../ladr/ac_redun.h"
 #include "../ladr/std_options.h"
 #include "../ladr/memory.h"
@@ -73,6 +74,7 @@ static Compact_rewrite_bank Compact_rewrite_rules = NULL;
 static Compact_term_pool Compact_terms = NULL;
 static Hash_target_index Hash_targets = NULL;
 static Hash_target_inference Hash_target_planner = NULL;
+static Proof_parent_guide Proof_parent = NULL;
 static BOOL Hash_target_current_pair_covered = FALSE;
 static unsigned long long Compact_term_next_reclaim_serialization = 0;
 static unsigned long long Compact_term_reclaim_cooldown_skips = 0;
@@ -353,6 +355,17 @@ static BOOL hash_targeted_inference_mode(char *mode)
 {
   return Opt != NULL &&
     str_ident(stringparm1(Opt->hash_targeted_inference), mode);
+}
+
+static enum proof_parent_guide_mode proof_parent_guidance_mode(void)
+{
+  if (Opt == NULL ||
+      str_ident(stringparm1(Opt->proof_parent_guidance), "off"))
+    return PROOF_PARENT_GUIDE_OFF;
+  else if (str_ident(stringparm1(Opt->proof_parent_guidance), "shadow"))
+    return PROOF_PARENT_GUIDE_SHADOW;
+  else
+    return PROOF_PARENT_GUIDE_AUTHORITATIVE;
 }
 
 static void build_hash_target_planner(void);
@@ -2709,6 +2722,12 @@ Prover_options init_prover_options(void)
     "targeted_only_unit_paramod",
     "fair_unit_paramod");
 
+  p->proof_parent_guidance = init_stringparm(
+    "proof_parent_guidance", 3,
+    "off",
+    "shadow",
+    "authoritative");
+
   p->inference_frontier = init_stringparm("inference_frontier", 2,
 					  "clauses",
 					  "collective");
@@ -2949,6 +2968,14 @@ void init_prover_attributes(void)
 
   Att.action           = register_attribute("action",         TERM_ATTRIBUTE);
   Att.action2          = register_attribute("action2",        TERM_ATTRIBUTE);
+  Att.proof_parent_node = register_attribute(
+    "proof_parent_node", INT_ATTRIBUTE);
+  Att.proof_parent_para = register_attribute(
+    "proof_parent_para", INT_ATTRIBUTE);
+  Att.proof_parent_hyper = register_attribute(
+    "proof_parent_hyper", INT_ATTRIBUTE);
+  Att.proof_parent_rewrite = register_attribute(
+    "proof_parent_rewrite", INT_ATTRIBUTE);
 
   declare_term_attribute_inheritable(Att.answer);
   declare_term_attribute_inheritable(Att.action2);
@@ -2976,6 +3003,14 @@ int get_attrib_id(char *str)
     return Att.action;
   else if (str_ident(str, "action2"))
     return Att.action2;
+  else if (str_ident(str, "proof_parent_node"))
+    return Att.proof_parent_node;
+  else if (str_ident(str, "proof_parent_para"))
+    return Att.proof_parent_para;
+  else if (str_ident(str, "proof_parent_hyper"))
+    return Att.proof_parent_hyper;
+  else if (str_ident(str, "proof_parent_rewrite"))
+    return Att.proof_parent_rewrite;
   else {
     fatal_error("get_attrib_id, unknown attribute string");
     return -1;
@@ -4363,6 +4398,7 @@ void fprint_all_stats(FILE *fp, char *stats_level)
             Hint_id_lookup_linear_steps, Hint_id_lookup_packed_id_sum);
 
   fprint_hash_inference_gate_stats(fp);
+  fprint_proof_parent_guide_stats(fp, Proof_parent);
 
   if (str_ident(stats_level, "all")) {
     print_memory_stats(fp);
@@ -7414,6 +7450,7 @@ void disable_clause(Topform c)
   if (clist_member(c, Glob.usable)) {
     collective_note_deactivation(c);
     hash_target_inference_update(Hash_target_planner, c, DELETE);
+    proof_parent_guide_deactivate(Proof_parent, c);
     index_literals(c, DELETE, Clocks.index, FALSE);
     index_back_demod(c, DELETE, Clocks.index, flag(Opt->back_demod));
     if (!restricted_denial(c))
@@ -7546,6 +7583,8 @@ void free_search_memory(void)
   Glob.hints = NULL;
 
   collective_clear_state();
+  proof_parent_guide_destroy(Proof_parent);
+  Proof_parent = NULL;
 
 }  // free_search_memory
 
@@ -10915,13 +10954,29 @@ static BOOL infer_paramodulation_pair(Topform given, Topform partner,
   return TRUE;
 }
 
+struct proof_parent_hyper_test_data {
+  Topform given;
+};
+
+static BOOL proof_parent_hyper_clause_test(Topform candidate, void *data)
+{
+  struct proof_parent_hyper_test_data *test = data;
+  BOOL accepted = proof_parent_guide_pair_test(
+    Proof_parent, test->given, candidate, PROOF_PARENT_HYPER);
+  /* Shadow mode measures the relation without changing enumeration. */
+  return proof_parent_guidance_mode() == PROOF_PARENT_GUIDE_SHADOW ?
+           TRUE : accepted;
+}
+
 static
 BOOL given_infer(Topform given)
 {
   struct collective_batch *tail_before =
     collective_frontier_mode() ? Collective_batch_tail : NULL;
+  struct proof_parent_hyper_test_data proof_hyper = {given};
 
   clock_start(Clocks.infer);
+  proof_parent_guide_note_given(Proof_parent, given);
 
   if (flag(Opt->binary_resolution)) {
     Current_inference_source = INFER_SOURCE_BINARY;
@@ -10946,7 +11001,12 @@ BOOL given_infer(Topform given)
       collective_enqueue_hyper_batch(given, COLLECTIVE_POS_HYPER);
     else {
       Current_inference_source = INFER_SOURCE_HYPER;
-      if (!hyper_resolution(given, POS_RES, Glob.clashable_idx, cl_process))
+      if (!(Proof_parent == NULL ?
+            hyper_resolution(
+              given, POS_RES, Glob.clashable_idx, cl_process) :
+            hyper_resolution_with_clause_test(
+              given, POS_RES, Glob.clashable_idx,
+              proof_parent_hyper_clause_test, &proof_hyper, cl_process)))
         goto cancelled;
     }
   }
@@ -10956,7 +11016,12 @@ BOOL given_infer(Topform given)
       collective_enqueue_hyper_batch(given, COLLECTIVE_NEG_HYPER);
     else {
       Current_inference_source = INFER_SOURCE_HYPER;
-      if (!hyper_resolution(given, NEG_RES, Glob.clashable_idx, cl_process))
+      if (!(Proof_parent == NULL ?
+            hyper_resolution(
+              given, NEG_RES, Glob.clashable_idx, cl_process) :
+            hyper_resolution_with_clause_test(
+              given, NEG_RES, Glob.clashable_idx,
+              proof_parent_hyper_clause_test, &proof_hyper, cl_process)))
         goto cancelled;
     }
   }
@@ -10985,12 +11050,28 @@ BOOL given_infer(Topform given)
       BOOL targeted_unit =
         hash_targeted_inference_mode("targeted_only_unit_paramod") &&
         unit_clause(given->literals) && pos_eq(given->literals);
+      BOOL proof_authoritative = proof_parent_guidance_mode() ==
+        PROOF_PARENT_GUIDE_AUTHORITATIVE;
       BOOL good_given =
         given->id < (unsigned long long) parm(Opt->para_restr_beg) ||
         given->id > (unsigned long long) parm(Opt->para_restr_end);
       if (Hash_target_planner != NULL)
         hash_target_inference_plan_from(Hash_target_planner, given);
-      if (targeted_unit) {
+      if (proof_authoritative) {
+        Topform *partners;
+        unsigned partner_count, partner_at;
+        partners = proof_parent_guide_paramod_partners(
+          Proof_parent, given, &partner_count);
+        for (partner_at = 0; partner_at < partner_count; partner_at++)
+          if (!infer_paramodulation_pair(
+                given, partners[partner_at], cf, ci, good_given,
+                TRUE, TRUE, FALSE, FALSE)) {
+            free_context(cf);
+            free_context(ci);
+            goto cancelled;
+          }
+      }
+      else if (targeted_unit) {
         unsigned from_at = 0, into_at = 0;
         unsigned from_count = hash_target_inference_partner_count(
           Hash_target_planner, TRUE);
@@ -11041,6 +11122,9 @@ BOOL given_infer(Topform given)
       else {
         Clist_pos p;
         for (p = Glob.usable->first; p != NULL; p = p->next) {
+          if (Proof_parent != NULL)
+            (void) proof_parent_guide_pair_test(
+              Proof_parent, given, p->c, PROOF_PARENT_PARAMOD);
           BOOL from_planned = hash_target_inference_partner_planned(
             Hash_target_planner, p->c, TRUE);
           BOOL into_planned = hash_target_inference_partner_planned(
@@ -11609,6 +11693,7 @@ void make_inferences(void)
       activated = find_clause_by_id(given_id);
       if (activated != NULL && clist_member(activated, Glob.usable)) {
 	hash_target_inference_update(Hash_target_planner, activated, INSERT);
+	proof_parent_guide_activate(Proof_parent, activated);
 	if (!restricted_denial(activated))
 	  index_clashable(activated, INSERT);
 	collective_note_activation(
@@ -11621,6 +11706,7 @@ void make_inferences(void)
     else {
       clist_append(given_clause, Glob.usable);
       hash_target_inference_update(Hash_target_planner, given_clause, INSERT);
+      proof_parent_guide_activate(Proof_parent, given_clause);
       index_clashable(given_clause, INSERT);
       if (!given_infer(given_clause))
         return;
@@ -12274,6 +12360,7 @@ void index_and_process_initial_clauses(void)
       orient_equalities(c, FALSE);  // mark, but don't allow flips
     else
       c = orient_input_eq(c);  /* this replaces c if any flipping occurs */
+    proof_parent_guide_activate(Proof_parent, c);
     index_literals(c, INSERT, Clocks.index, FALSE);
     index_back_demod(c, INSERT, Clocks.index, flag(Opt->back_demod));
     index_clashable(c, INSERT);
@@ -17308,6 +17395,7 @@ Prover_results search(Prover_input p)
 {
   int return_code = setjmp(Jump_env);
   if (return_code != 0) {
+    Prover_results results;
     // we just landed from longjmp(); fix return code and return
     if (!Opt || !flag(Opt->quiet))
       print_separator(stdout, "end of search", TRUE);
@@ -17315,7 +17403,10 @@ Prover_results search(Prover_input p)
     set_paramodulation_candidate_proc(NULL, 0);
     set_paramodulation_materialized_proc(NULL);
     fatal_setjmp();  /* This makes longjmps cause a fatal_error. */
-    return collect_prover_results(p->xproofs);
+    results = collect_prover_results(p->xproofs);
+    proof_parent_guide_destroy(Proof_parent);
+    Proof_parent = NULL;
+    return results;
   }
   else {
     // search for a proof
@@ -17346,6 +17437,8 @@ Prover_results search(Prover_input p)
     Hash_target_current_pair_covered = FALSE;
     if (Hash_targets != NULL || Hash_target_planner != NULL)
       fatal_error("previous search left hash target indexes behind");
+    if (Proof_parent != NULL)
+      fatal_error("previous search left a proof-parent guide behind");
     collective_reset_state();
     Simplifier_epoch = 1;
     Rewrite_epoch = 1;
@@ -17407,6 +17500,25 @@ Prover_results search(Prover_input p)
         fprintf(stderr,
                 "WARNING: hash_inference_gate=hit_only is intentionally "
                 "incomplete; it omits supported raw hash misses.\n");
+    }
+    if (proof_parent_guidance_mode() != PROOF_PARENT_GUIDE_OFF) {
+      if (p->proof_parent_guide == NULL)
+        fatal_error("proof_parent_guidance requires formulas(proof_parent_guide)");
+      if (discount_mode())
+        fatal_error("proof_parent_guidance currently requires search_loop=otter");
+      if (!str_ident(stringparm1(Opt->inference_frontier), "clauses"))
+        fatal_error("proof_parent_guidance currently requires inference_frontier=clauses");
+      if (p->resume_dir != NULL)
+        fatal_error("proof_parent_guidance does not yet support checkpoint resume");
+      if (!hash_targeted_inference_mode("off"))
+        fatal_error("proof_parent_guidance and hash_targeted_inference cannot be combined");
+      if (proof_parent_guidance_mode() ==
+            PROOF_PARENT_GUIDE_AUTHORITATIVE && !flag(Opt->quiet))
+        fprintf(stderr,
+                "WARNING: proof_parent_guidance=authoritative is an "
+                "intentionally incomplete proof-confirmation mode; "
+                "unrecorded paramodulation and hyperresolution parent "
+                "combinations are omitted.\n");
     }
     if (flag(Opt->collective_promising_scheduler) &&
         !str_ident(stringparm1(Opt->inference_frontier), "collective"))
@@ -17781,6 +17893,9 @@ Prover_results search(Prover_input p)
 
       init_search();  // init clocks, ordering, auto-mode, init packages
 
+      Proof_parent = proof_parent_guide_build(
+        p->proof_parent_guide, proof_parent_guidance_mode());
+
       if (Progress_callback)
         Progress_callback(STAGE_INDEX_INITIAL, progress_count(Stats.given),
                           progress_count(Stats.kept),
@@ -18004,7 +18119,12 @@ Prover_results search(Prover_input p)
       print_separator(stdout, "end of search", TRUE);
     fatal_setjmp();  /* This makes longjmps cause a fatal_error. */
     Glob.return_code = Glob.empties ? MAX_PROOFS_EXIT : SOS_EMPTY_EXIT;
-    return collect_prover_results(p->xproofs);
+    {
+      Prover_results results = collect_prover_results(p->xproofs);
+      proof_parent_guide_destroy(Proof_parent);
+      Proof_parent = NULL;
+      return results;
+    }
   }
 }  /* search */
 

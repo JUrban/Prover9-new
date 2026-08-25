@@ -219,6 +219,10 @@ compact-long-run-report-test: comma-num-test
 	status=0; ./cgroup_job_memory.sh $$probe /bin/true >/dev/null 2>&1 || status=$$?; \
 	/bin/rm -f $$probe; test $$status -eq 0 -o $$status -eq 77
 
+proof-parent-guide-test: proof_parent_guide_test
+	./proof_parent_guide_test
+	./proof_parent_guidance_test.sh
+
 ancestor-store-scale: ancestor_store_scale_test
 	./ancestor_store_scale_test
 

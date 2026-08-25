@@ -32,7 +32,11 @@ struct prover_attributes {
     answer,
     properties,
     action,
-    action2;
+    action2,
+    proof_parent_node,
+    proof_parent_para,
+    proof_parent_hyper,
+    proof_parent_rewrite;
 };
 
 // Options
@@ -324,6 +328,7 @@ struct prover_options {
     hint_index,          // fpa, compact, shallow, packed/hybrid, packed_legacy
     hash_inference_gate, // off, shadow, safe, hit_only
     hash_targeted_inference, // off, shadow_unit_paramod, targeted_only_unit_paramod
+    proof_parent_guidance, // off, shadow, authoritative
     inference_frontier,  // clauses, collective
     collective_scheduler, // legacy, balanced_hint
     ancestor_store,      // off, memory, mmap, file
@@ -731,7 +736,7 @@ typedef struct prover_input * Prover_input;
 
 struct prover_input {
   // tformula lists
-  Plist usable, sos, demods, goals, hints, unused;
+  Plist usable, sos, demods, goals, hints, proof_parent_guide, unused;
   // term lists
   Plist actions, weights, resonators, kbo_weights, interps;
   Plist given_selection, keep_rules, delete_rules;

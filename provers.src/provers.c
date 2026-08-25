@@ -1223,6 +1223,8 @@ Prover_input std_prover_init_and_input(int argc, char **argv,
   accept_list("usable",       FORMULAS, FALSE, &(pi->usable));
   accept_list("demodulators", FORMULAS, FALSE, &(pi->demods));
   accept_list("hints",        FORMULAS, TRUE,  &(pi->hints));
+  accept_list("proof_parent_guide", FORMULAS, TRUE,
+              &(pi->proof_parent_guide));
   accept_list("unused",       FORMULAS, TRUE,  &(pi->unused));
 
   accept_list("actions",         TERMS, FALSE, &(pi->actions));
@@ -1435,6 +1437,8 @@ Prover_input std_prover_init_and_input(int argc, char **argv,
     pi->usable = embed_formulas_in_topforms(pi->usable, TRUE);
     pi->demods = embed_formulas_in_topforms(pi->demods, TRUE);
     pi->hints  = embed_formulas_in_topforms(pi->hints, TRUE);
+    pi->proof_parent_guide = embed_formulas_in_topforms(
+      pi->proof_parent_guide, TRUE);
     pi->goals  = embed_formulas_in_topforms(pi->goals, FALSE);
 
     pi->has_goals = (pi->goals != NULL);
@@ -1579,6 +1583,11 @@ Prover_input std_prover_init_and_input(int argc, char **argv,
         set_cnf_clause_limit(0);
         set_record_full_clausifications(FALSE);
         pi->hints  = process_input_formulas(pi->hints, echo_clausify);
+        /* Extracted guide bodies are already clauses from a prior proof.
+           They are auxiliary data like hints, but echoing a six-figure guide
+           would dominate startup output and memory. */
+        pi->proof_parent_guide = process_input_formulas(
+          pi->proof_parent_guide, FALSE);
         set_record_full_clausifications(TRUE);
         set_cnf_clause_limit(saved_limit);
       }
@@ -2292,6 +2301,8 @@ Prover_input std_prover_from_scan(Prover_scan_result psr,
     pi->usable = embed_formulas_in_topforms(pi->usable, TRUE);
     pi->demods = embed_formulas_in_topforms(pi->demods, TRUE);
     pi->hints  = embed_formulas_in_topforms(pi->hints, TRUE);
+    pi->proof_parent_guide = embed_formulas_in_topforms(
+      pi->proof_parent_guide, TRUE);
     pi->goals  = embed_formulas_in_topforms(pi->goals, FALSE);
 
     pi->has_goals = (pi->goals != NULL);
@@ -2358,6 +2369,8 @@ Prover_input std_prover_from_scan(Prover_scan_result psr,
         int saved_limit = cnf_clause_limit();
         set_cnf_clause_limit(0);
         pi->hints  = process_input_formulas(pi->hints, echo_clausify);
+        pi->proof_parent_guide = process_input_formulas(
+          pi->proof_parent_guide, FALSE);
         set_cnf_clause_limit(saved_limit);
       }
 #ifdef DEBUG

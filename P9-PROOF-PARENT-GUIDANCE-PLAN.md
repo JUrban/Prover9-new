@@ -4,8 +4,9 @@ Date: 2026-08-25
 
 Branch: `proof-parent-guidance`
 
-Status: implementation plan for an opt-in, sound but deliberately incomplete
-proof-confirmation mode driven by an already known Prover9 proof.
+Status: first parent-filtering implementation complete; bounded J04 guide
+load validated.  Position filtering and direct recipe scheduling remain
+deferred experiments.
 
 ## Objective
 
@@ -47,17 +48,22 @@ an include file containing:
 
 ```prover9
 formulas(proof_parent_guide).
-  <proof clause body>
-    # label("proof_parent_node=<source proof ID>")
-    # label("proof_parent_para=<parent ID>,<parent ID>").
+  (<proof clause body>)
+    # proof_parent_node(<dense node ID>)
+    # proof_parent_para(<dense parent ID>)
+    # proof_parent_para(<dense parent ID>).
   ...
 end_of_list.
 ```
 
-Hyperresolution, binary resolution, back-rewrite, and copy nodes use distinct
-`proof_parent_*` labels.  The complete parent list is retained even when the
-first implementation only consumes a subset of the rule kinds.  Existing
-labels on proof clauses are preserved.
+Hyperresolution parents use repeated `proof_parent_hyper` integer attributes,
+and rewrite dependencies use repeated `proof_parent_rewrite` attributes.
+Unary copy/back-rewrite metadata and the single binary-resolution edge are
+validated by the extractor but need no restricted partner enumeration in this
+first implementation.  Source proof IDs are converted to dense integers so
+the input does not intern hundreds of thousands of unique ID strings.  Old
+display-only clause attributes are stripped because exact clause identity
+does not inspect them.
 
 The search option is:
 
@@ -127,7 +133,7 @@ proof but cannot make an invalid proof sound.
 - `authoritative` prints a prominent incompleteness warning.
 - An empty guide in a non-off mode is a configuration error.
 - Malformed, duplicate, missing, or forward-referencing proof-node metadata
-  is rejected by the extractor or loader with the source node number.
+  is rejected by the extractor or loader.
 - Runtime source IDs are never compared with proof source IDs.
 - Hash matches are always confirmed structurally.
 - An unmapped selected clause has no guided paramodulation partners in
@@ -200,6 +206,12 @@ missing edge loses the proof without crashing or generating an invalid one.
 Gate: guide construction remains comfortably below the RAM saved by avoiding
 ordinary inference generation; no unrestricted long run is started on the
 current machine.
+
+Current bounded result: the 153,267-node J04 guide is 41 MiB on disk.  Parsing
+the complete guide plus building the graph took about 22 wall-clock seconds
+and peaked at about 262 MiB RSS on the development machine; graph construction
+itself reported 0.69 CPU seconds.  This was a one-given loader validation with
+an unrelated tiny theory, not a claim about J04 proof-search speed or success.
 
 ## Deferred extensions
 

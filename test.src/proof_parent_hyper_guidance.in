@@ -1,0 +1,49 @@
+clear(auto).
+clear(auto_setup).
+clear(auto_limits).
+clear(auto_denials).
+clear(auto_inference).
+clear(auto_process).
+
+assign(max_given,2).
+assign(max_seconds,10).
+% Keep searching after the first empty so final guidance statistics print.
+assign(max_proofs,2).
+assign(stats,all).
+assign(search_loop,otter).
+assign(inference_frontier,clauses).
+assign(proof_parent_guidance,authoritative).
+
+clear(paramodulation).
+clear(binary_resolution).
+set(pos_hyper_resolution).
+clear(neg_hyper_resolution).
+clear(pos_ur_resolution).
+clear(neg_ur_resolution).
+clear(back_subsume).
+clear(back_demod).
+clear(unit_deletion).
+clear(print_given).
+clear(print_initial_clauses).
+clear(echo_input).
+
+formulas(proof_parent_guide).
+  (ppg_hp(ppg_hc)) # proof_parent_node(1).
+  (ppg_hq(ppg_hc)) # proof_parent_node(2).
+  (-ppg_hp(x) | -ppg_hq(x)) # proof_parent_node(3).
+  ($F)
+    # proof_parent_node(4)
+    # proof_parent_hyper(1)
+    # proof_parent_hyper(2)
+    # proof_parent_hyper(3).
+end_of_list.
+
+formulas(usable).
+  ppg_hp(ppg_hc).
+  ppg_hp(ppg_other).
+  ppg_hq(ppg_hc).
+end_of_list.
+
+formulas(sos).
+  -ppg_hp(x) | -ppg_hq(x).
+end_of_list.
