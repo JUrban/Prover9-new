@@ -124,6 +124,7 @@ PRVR_OBJ = index_lits.o forward_subsume.o demodulate.o\
 	   hash_target_index.o\
 	   hash_target_inference.o\
 	   proof_parent_guide.o\
+	   proof_recipe_replay.o\
 	   search.o\
 	   utilities.o\
 	   provers.o\

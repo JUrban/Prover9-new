@@ -11,7 +11,7 @@ CFLAGS = $(XFLAGS) -g  -O0 -Wall
 # CFLAGS = $(XFLAGS) -pg -O -Wall
 # CFLAGS = $(XFLAGS)  -Wall -pedantic
 
-PROGRAMS = avltest comma_num_test symbol_table_test default_weight_test renumber_variables_test memory_lifecycle_test allocator_churn_test bookkeeping_lifecycle_test ancestor_store_test ancestor_store_scale_test checkpoint_selector_test dense_selector_compaction_test dense_selector_file_scale_test dense_selector_file_order_test cold_passive_store_test hint_postings_test hint_preview_test compressed_unit_match_test hint_term_table_test hint_generalization_hash_test paramod_iterator_test hyper_iterator_test rewrite_only_store_test compact_term_pool_test compact_id_map_test compact_rewrite_test compact_unit_index_test compact_back_demod_test compact_feature_index_test compact_long_run_test proof_parent_guide_test
+PROGRAMS = avltest comma_num_test symbol_table_test default_weight_test renumber_variables_test memory_lifecycle_test allocator_churn_test bookkeeping_lifecycle_test ancestor_store_test ancestor_store_scale_test checkpoint_selector_test dense_selector_compaction_test dense_selector_file_scale_test dense_selector_file_order_test cold_passive_store_test hint_postings_test hint_preview_test compressed_unit_match_test hint_term_table_test hint_generalization_hash_test paramod_iterator_test hyper_iterator_test rewrite_only_store_test compact_term_pool_test compact_id_map_test compact_rewrite_test compact_unit_index_test compact_back_demod_test compact_feature_index_test compact_long_run_test proof_parent_guide_test proof_recipe_replay_test
 
 all: ladr apps
 
@@ -131,6 +131,9 @@ compact_long_run_test: compact_long_run_test.o provers_compact_feature_index.o p
 proof_parent_guide_test: proof_parent_guide_test.o provers_proof_parent_guide.o ../ladr/libladr.a
 	$(CC) $(CFLAGS) -o proof_parent_guide_test proof_parent_guide_test.o provers_proof_parent_guide.o ../ladr/libladr.a -lm
 
+proof_recipe_replay_test: proof_recipe_replay_test.o provers_proof_recipe_replay.o provers_proof_parent_guide.o ../ladr/libladr.a
+	$(CC) $(CFLAGS) -o proof_recipe_replay_test proof_recipe_replay_test.o provers_proof_recipe_replay.o provers_proof_parent_guide.o ../ladr/libladr.a -lm
+
 compact_long_run_test.o: ../provers.src/compact_back_demod.h ../provers.src/compact_feature_index.h
 
 memory_lifecycle_test.o allocator_churn_test.o bookkeeping_lifecycle_test.o ancestor_store_test.o: ../ladr/topform.h
@@ -219,8 +222,9 @@ compact-long-run-report-test: comma-num-test
 	status=0; ./cgroup_job_memory.sh $$probe /bin/true >/dev/null 2>&1 || status=$$?; \
 	/bin/rm -f $$probe; test $$status -eq 0 -o $$status -eq 77
 
-proof-parent-guide-test: proof_parent_guide_test
+proof-parent-guide-test: proof_parent_guide_test proof_recipe_replay_test
 	./proof_parent_guide_test
+	./proof_recipe_replay_test
 	./proof_parent_guidance_test.sh
 
 ancestor-store-scale: ancestor_store_scale_test
