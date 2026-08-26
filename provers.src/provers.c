@@ -47,6 +47,20 @@
 
 /* Private definitions and types */
 
+static void discard_logical_recipe_hints(Prover_input input)
+{
+  Plist p;
+  if (input == NULL || input->hints == NULL ||
+      !str_ident(stringparm1(input->options->proof_parent_guidance),
+                 "recipe_replay") ||
+      flag(input->options->proof_recipe_hint_audit))
+    return;
+  for (p = input->hints; p != NULL; p = p->next)
+    zap_formula((Formula) p->v);
+  zap_plist(input->hints);
+  input->hints = NULL;
+}
+
 #ifndef __EMSCRIPTEN__
 static volatile sig_atomic_t Checkpoint_requested = 0;
 static volatile sig_atomic_t No_kill = 0;
@@ -1335,6 +1349,11 @@ Prover_input std_prover_init_and_input(int argc, char **argv,
   if (echo)
     print_separator(stdout, "end of input", TRUE);
   process_command_line_args_2(opts, pi->options);  // others, which override
+
+  /* The generic reader can discard hints list-by-list when a recipe prelude
+     was read first.  This fallback covers ordinary single-file inputs that
+     select logical-only recipe replay after their hint lists. */
+  discard_logical_recipe_hints(pi);
 
   if (opts.resume) {
     pi->resume_dir = opts.resume_dir;

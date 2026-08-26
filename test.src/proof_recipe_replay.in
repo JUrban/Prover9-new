@@ -49,3 +49,7 @@ end_of_list.
 formulas(goals).
   p(b).
 end_of_list.
+
+formulas(hints).
+  p(b).
+end_of_list.

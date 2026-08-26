@@ -16,6 +16,20 @@ grep -q 'ordinary_search_indexes=not_built, hint_index=not_built' \
   "$work/control.out"
 grep -q 'Length of proof: 6' "$work/control.out"
 
+sed 's/clear(proof_recipe_hint_audit)/set(proof_recipe_hint_audit)/' \
+  "$test_dir/proof_recipe_replay.in" |
+  "$prover" > "$work/audit.out" 2> "$work/audit.err"
+grep -q 'hint_queries=6, hint_matches=2' "$work/audit.out"
+
+status=0
+sed -e 's/clear(proof_recipe_hint_audit)/set(proof_recipe_hint_audit)/' \
+    -e 's/clear(proof_recipe_require_hint)/set(proof_recipe_require_hint)/' \
+  "$test_dir/proof_recipe_replay.in" |
+  "$prover" > "$work/strict-hint.out" 2> "$work/strict-hint.err" || status=$?
+test "$status" -eq 1
+grep -q 'Proof recipe node 6: verified body does not match' \
+  "$work/strict-hint.err"
+
 status=0
 sed 's/proof_recipe_max_nodes,-1/proof_recipe_max_nodes,5/' \
   "$test_dir/proof_recipe_replay.in" |

@@ -234,6 +234,9 @@ void mark_parents_as_used(Topform c);
 
 int clause_level(Topform c);
 
+/* Compute TARGET's level from an already ID-sorted, closed proof DAG. */
+int proof_clause_level(Plist proof, Topform target);
+
 Just term_to_just(Term lst);
 
 BOOL primary_just_type(Topform c, Just_type t);

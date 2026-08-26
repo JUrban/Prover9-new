@@ -90,6 +90,8 @@ struct proof_recipe_search_stats {
   unsigned long long source_givens;
   unsigned long long hint_queries;
   unsigned long long hint_matches;
+  unsigned long long hint_keep_outcomes;
+  unsigned long long hint_delete_outcomes;
   unsigned long long hint_required_failures;
   unsigned long long digest;
   unsigned long long verified_body_bytes;
@@ -4443,9 +4445,12 @@ static void fprint_proof_recipe_replay_stats(FILE *fp)
           Proof_recipe_stats.verified_body_bytes, elapsed, rate);
   fprintf(fp,
           "  hint_queries=%llu, hint_matches=%llu, "
+          "keep_outcomes=%llu, delete_outcomes=%llu, "
           "hint_required_failures=%llu, digest=%016llx\n",
           Proof_recipe_stats.hint_queries,
           Proof_recipe_stats.hint_matches,
+          Proof_recipe_stats.hint_keep_outcomes,
+          Proof_recipe_stats.hint_delete_outcomes,
           Proof_recipe_stats.hint_required_failures,
           Proof_recipe_stats.digest);
 }
@@ -7821,7 +7826,8 @@ BOOL handle_proof_and_maybe_exit(Topform empty_clause)
     printf("\n%% Proof %s at %.2f (+ %.2f) seconds.\n",
 	   comma_num(Stats.proofs), user_seconds(), system_seconds());
     printf("%% Length of proof is %d.\n", proof_length(proof));
-    printf("%% Level of proof is %d.\n", clause_level(empty_clause));
+    printf("%% Level of proof is %d.\n",
+           proof_clause_level(proof, empty_clause));
     printf("%% Maximum clause weight is %.3f.\n", max_clause_weight(proof));
     printf("%% Given clauses %s.\n\n", comma_num(Stats.given));
     fprint_proof_tptp(stdout, proof);
@@ -7864,7 +7870,7 @@ BOOL handle_proof_and_maybe_exit(Topform empty_clause)
       printf("%% Length of proof: %d (%d new hints)\n",
 	     proof_length(proof), pf_nothint_ct);
 
-      pf_level = clause_level(empty_clause);
+      pf_level = proof_clause_level(proof, empty_clause);
       printf("%% Level of proof: %d\n", pf_level);
 
       max_pf_wt = max_clause_weight(proof);
@@ -8146,8 +8152,11 @@ static Plist snapshot_terminal_proof(Topform empty_clause)
   materialized = materialize_clauses(live);
   validate_terminal_proof_closure(live);
   for (p = live; p != NULL; p = p->next)
-    snapshot = plist_append(snapshot,
-                            copy_terminal_proof_step((Topform) p->v));
+    snapshot = plist_prepend(snapshot,
+                             copy_terminal_proof_step((Topform) p->v));
+  /* LIVE is ID-sorted.  Prepend plus one reversal preserves that order
+     without plist_append's quadratic tail walk on six-figure proofs. */
+  snapshot = reverse_plist(snapshot);
   validate_terminal_proof_closure(snapshot);
   recompress_clauses(materialized);
   zap_plist(materialized);
@@ -8364,6 +8373,103 @@ static const char *proof_recipe_stage_name(
   }
 }
 
+static void init_proof_recipe_hint_audit(void)
+{
+  Clist_pos p;
+  set_hint_cache_min_candidates(
+    (unsigned) parm(Opt->hint_cache_min_candidates));
+  set_hint_compiled_min_candidates(
+    (unsigned) parm(Opt->hint_compiled_min_candidates));
+  set_hint_compiled_cache_build_factor(
+    (unsigned) parm(Opt->hint_compiled_cache_build_factor));
+  set_hint_compiled_cache_kb(
+    (unsigned) parm(Opt->hint_compiled_cache_kb));
+  init_hints(ORDINARY_UNIF, Att.bsub_hint_wt,
+             flag(Opt->collect_hint_labels),
+             /* A proof closure cannot reproduce historical hint
+                back-demodulation by nonproof clauses.  Audit exactly the
+                supplied current hint list instead. */
+             FALSE,
+             configured_hint_fpa_depth(), packed_hint_bank_mode(),
+             better_packed_hint_mode(), fast_packed_hint_mode(),
+             (unsigned) parm(Opt->hint_cache_kb),
+             generalized_hint_hash_mode() ? 0 :
+               (unsigned) parm(Opt->hint_conjunction_kb),
+             (unsigned) clist_length(Glob.hints),
+             (unsigned) parm(Opt->hint_rebuild_scan_ratio),
+             current_demodulate_clause);
+  set_hint_generalization_hash(
+    generalized_hint_hash_mode(),
+    (unsigned) parm(Opt->hint_hash_complete_nodes),
+    (unsigned) parm(Opt->hint_hash_partial_per_hint),
+    (unsigned long long) parm(Opt->hint_hash_max_entries),
+    (unsigned) clist_length(Glob.hints));
+  set_hint_match_stats(flag(Opt->hint_match_stats));
+  set_hint_compiled_census(flag(Opt->hint_compiled_census));
+  set_hint_compiled_term_table(compiled_hint_table_mode());
+  set_hint_compiled_lazy(compiled_hint_lazy_mode());
+  set_hint_compiled_shadow(compiled_hint_shadow_mode());
+  set_hint_compiled_filter(compiled_hint_filter_mode());
+  set_hint_compiled_fused(compiled_hint_fused_mode());
+  set_hint_compiled_paths(compiled_hint_path_mode());
+  set_hint_compiled_authoritative(FALSE);
+  set_hint_match_once(flag(Opt->hint_match_once));
+  init_semantics(Glob.interps, Clocks.semantics,
+                 stringparm1(Opt->multiple_interps),
+                 parm(Opt->eval_limit), parm(Opt->eval_var_limit));
+  {
+    int hint_id = 1;
+    for (p = Glob.hints->first; p != NULL; p = p->next) {
+      Topform hint = p->c;
+      if (hint->compressed != NULL && !materialize_clause(hint))
+        fatal_error("recipe hint audit found an invalid packed hint");
+      hint->id = hint_id++;
+      orient_equalities(hint, TRUE);
+      renumber_variables(hint, MAX_VARS);
+      index_hint(hint);
+    }
+  }
+  finalize_hint_conjunction_index();
+}
+
+static void audit_proof_recipe_hint(unsigned node,
+                                    enum proof_recipe_rule rule,
+                                    Topform verified)
+{
+  Topform audit = verified;
+  BOOL temporary = verified->is_formula;
+  BOOL keep, deleted;
+  if (temporary)
+    audit = copy_clause(proof_parent_guide_node_body(Proof_parent, node));
+  audit->weight = clause_weight(audit->literals);
+  if (!audit->normal_vars)
+    renumber_variables(audit, MAX_VARS);
+  Proof_recipe_stats.hint_queries++;
+  adjust_weight_with_hints(audit, flag(Opt->degrade_hints),
+                           flag(Opt->breadth_first_hints));
+  if (audit->matching_hint != NULL)
+    Proof_recipe_stats.hint_matches++;
+  keep = white_tests(audit);
+  deleted = !keep && black_tests(audit);
+  if (keep)
+    Proof_recipe_stats.hint_keep_outcomes++;
+  if (deleted)
+    Proof_recipe_stats.hint_delete_outcomes++;
+  if (flag(Opt->proof_recipe_require_hint) &&
+      rule != PROOF_RECIPE_ASSUMPTION && rule != PROOF_RECIPE_GOAL &&
+      rule != PROOF_RECIPE_DENY && audit->matching_hint == NULL) {
+    Proof_recipe_stats.hint_required_failures++;
+    fprintf(stderr,
+            "Proof recipe node %u: verified body does not match a current "
+            "input hint.\n", node);
+    if (temporary)
+      delete_clause(audit);
+    fatal_error("proof recipe strict hint audit failed");
+  }
+  if (temporary)
+    delete_clause(audit);
+}
+
 /* Execute an already loaded proof DAG without admitting any node to the
    ordinary search pipeline.  In particular, there is no second round of
    forward demodulation and no inference/passive/hint index is constructed. */
@@ -8390,6 +8496,8 @@ static void run_proof_recipe_replay(void)
   Proof_recipe_stats.target_nodes = target;
   Proof_recipe_stats.digest = UINT64_C(1469598103934665603);
   Proof_recipe_stats.start_seconds = user_seconds();
+  if (flag(Opt->proof_recipe_hint_audit))
+    init_proof_recipe_hint_audit();
   verified = safe_calloc(target, sizeof(*verified));
 
   if (!flag(Opt->quiet))
@@ -8484,6 +8592,8 @@ static void run_proof_recipe_replay(void)
     }
 
     verified[node - 1] = result;
+    if (flag(Opt->proof_recipe_hint_audit))
+      audit_proof_recipe_hint(node, rule, result);
     Proof_recipe_stats.verified_nodes++;
     Proof_recipe_stats.primary[rule]++;
     Proof_recipe_stats.rewrites += rewrites;
@@ -8527,7 +8637,8 @@ static void run_proof_recipe_replay(void)
     Terminal_stats_frozen = TRUE;
     /* No hint index was built in logical-only replay.  The proof snapshot
        must therefore not try to release one as part of terminal handling. */
-    Terminal_hint_index_released = TRUE;
+    if (!flag(Opt->proof_recipe_hint_audit))
+      Terminal_hint_index_released = TRUE;
     (void) handle_proof_and_maybe_exit(empty);
     finish_terminal_proof_at_safe_point();  /* does not return */
   }
@@ -17915,8 +18026,6 @@ Prover_results search(Prover_input p)
         if (flag(Opt->proof_recipe_require_hint) &&
             !flag(Opt->proof_recipe_hint_audit))
           fatal_error("proof_recipe_require_hint requires proof_recipe_hint_audit");
-        if (flag(Opt->proof_recipe_hint_audit))
-          fatal_error("proof_recipe_hint_audit is not enabled in this implementation checkpoint");
         if (!flag(Opt->quiet))
           fprintf(stderr,
                   "NOTE: recipe_replay bypasses the ordinary search loop, "

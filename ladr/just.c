@@ -3637,6 +3637,135 @@ Plist get_clanc(int id, Plist anc)
   return anc;
 }  /* get_clanc */
 
+struct ancestor_id_set {
+  unsigned *slots;
+  size_t capacity;
+  size_t count;
+};
+
+static size_t ancestor_id_hash(unsigned id)
+{
+  uint64_t value = id;
+  value ^= value >> 16;
+  value *= UINT64_C(0x7feb352d);
+  value ^= value >> 15;
+  value *= UINT64_C(0x846ca68b);
+  value ^= value >> 16;
+  return (size_t) value;
+}
+
+static void ancestor_id_set_resize(struct ancestor_id_set *set,
+                                   size_t capacity)
+{
+  unsigned *old = set->slots;
+  size_t old_capacity = set->capacity, i;
+  set->slots = safe_calloc(capacity, sizeof(*set->slots));
+  set->capacity = capacity;
+  set->count = 0;
+  for (i = 0; i < old_capacity; i++)
+    if (old[i] != 0) {
+      size_t at = ancestor_id_hash(old[i]) & (capacity - 1);
+      while (set->slots[at] != 0)
+        at = (at + 1) & (capacity - 1);
+      set->slots[at] = old[i];
+      set->count++;
+    }
+  safe_free(old);
+}
+
+static BOOL ancestor_id_set_insert(struct ancestor_id_set *set, unsigned id)
+{
+  size_t at;
+  if (id == 0)
+    return FALSE;
+  if (set->capacity == 0)
+    ancestor_id_set_resize(set, 1024);
+  else if ((set->count + 1) * 10 >= set->capacity * 7) {
+    if (set->capacity > SIZE_MAX / 2 / sizeof(*set->slots))
+      fatal_error("proof ancestor ID set overflow");
+    ancestor_id_set_resize(set, set->capacity * 2);
+  }
+  at = ancestor_id_hash(id) & (set->capacity - 1);
+  while (set->slots[at] != 0 && set->slots[at] != id)
+    at = (at + 1) & (set->capacity - 1);
+  if (set->slots[at] == id)
+    return FALSE;
+  set->slots[at] = id;
+  set->count++;
+  return TRUE;
+}
+
+static int compare_ancestor_clause_ids(const void *left, const void *right)
+{
+  Topform a = *(Topform const *) left;
+  Topform b = *(Topform const *) right;
+  return a->id < b->id ? -1 : a->id > b->id ? 1 : 0;
+}
+
+/* Hash-indexed proof closure.  The historical get_clanc() inserts each
+   discovered clause into an ID-sorted Plist and checks membership linearly;
+   that is quadratic on large proof-confirmation DAGs.  Keep one hash entry
+   per ID, collect clauses in an array, and sort once at the end. */
+static Plist get_clanc_indexed(unsigned root_id)
+{
+  struct ancestor_id_set seen = {NULL, 0, 0};
+  unsigned *stack = NULL;
+  size_t stack_count = 0, stack_capacity = 1024;
+  Topform *clauses = NULL;
+  size_t clause_count = 0, clause_capacity = 0, i;
+  Plist result = NULL;
+
+  stack = safe_malloc(stack_capacity * sizeof(*stack));
+  stack[stack_count++] = root_id;
+  while (stack_count != 0) {
+    unsigned id = stack[--stack_count];
+    Topform clause;
+    Ilist parents, p;
+    if (!ancestor_id_set_insert(&seen, id))
+      continue;
+    clause = find_clause_by_id(id);
+    if (clause == NULL && clause_id_is_archived(id)) {
+      clause = clause_store_materialize_by_id(id);
+      if (clause == NULL)
+        fatal_error("get_clause_ancestors: corrupt archived ancestor");
+    }
+    if (clause == NULL)
+      continue;
+    if (clause_count == clause_capacity) {
+      size_t next = clause_capacity == 0 ? 1024 : clause_capacity * 2;
+      if (next < clause_capacity || next > SIZE_MAX / sizeof(*clauses))
+        fatal_error("proof ancestor clause array overflow");
+      clauses = safe_realloc(clauses, next * sizeof(*clauses));
+      clause_capacity = next;
+    }
+    clauses[clause_count++] = clause;
+    parents = get_parents(clause->justification, TRUE);
+    for (p = parents; p != NULL; p = p->next) {
+      if (p->i <= 0)
+        fatal_error("get_clause_ancestors: invalid parent ID");
+      if (stack_count == stack_capacity) {
+        size_t next = stack_capacity * 2;
+        if (next < stack_capacity || next > SIZE_MAX / sizeof(*stack))
+          fatal_error("proof ancestor work stack overflow");
+        stack = safe_realloc(stack, next * sizeof(*stack));
+        stack_capacity = next;
+      }
+      stack[stack_count++] = (unsigned) p->i;
+    }
+    zap_ilist(parents);
+  }
+
+  qsort(clauses, clause_count, sizeof(*clauses),
+        compare_ancestor_clause_ids);
+  /* Prepending in reverse order builds an increasing-ID Plist in O(n). */
+  for (i = clause_count; i != 0; i--)
+    result = plist_prepend(result, clauses[i - 1]);
+  safe_free(clauses);
+  safe_free(stack);
+  safe_free(seen.slots);
+  return result;
+}
+
 /*************
  *
  *   get_clause_ancestors()
@@ -3656,7 +3785,7 @@ Plist get_clause_ancestors(Topform c)
 {
   if (c == NULL) return NULL;
   if (c->id != 0)
-    return get_clanc(c->id, NULL);
+    return get_clanc_indexed((unsigned) c->id);
 
   /* Root clause has no ID yet (called from anc_subsume during forward
      subsumption, before assign_clause_id).  Insert c itself, then walk
@@ -3966,6 +4095,72 @@ void mark_parents_as_used(Topform c)
  *   clause_level()
  *
  *************/
+
+struct proof_level_slot {
+  unsigned id;
+  int level;
+};
+
+static size_t proof_level_capacity(size_t count)
+{
+  size_t capacity = 16;
+  while (capacity < count * 2) {
+    if (capacity > SIZE_MAX / 2 / sizeof(struct proof_level_slot))
+      fatal_error("proof level table overflow");
+    capacity *= 2;
+  }
+  return capacity;
+}
+
+static int proof_level_lookup(struct proof_level_slot *slots,
+                              size_t capacity, unsigned id)
+{
+  size_t at = ancestor_id_hash(id) & (capacity - 1);
+  while (slots[at].id != 0 && slots[at].id != id)
+    at = (at + 1) & (capacity - 1);
+  return slots[at].id == id ? slots[at].level : INT_MIN;
+}
+
+/* PUBLIC */
+int proof_clause_level(Plist proof, Topform target)
+{
+  size_t count = (size_t) plist_count(proof);
+  size_t capacity = proof_level_capacity(count == 0 ? 1 : count);
+  struct proof_level_slot *slots = safe_calloc(
+    capacity, sizeof(*slots));
+  Plist q;
+  int result = INT_MIN;
+  for (q = proof; q != NULL; q = q->next) {
+    Topform clause = q->v;
+    Ilist parents = get_parents(clause->justification, TRUE), p;
+    int max = -1;
+    size_t at;
+    if (clause->id == 0 || clause->id > UINT_MAX)
+      fatal_error("proof_clause_level: invalid proof clause ID");
+    for (p = parents; p != NULL; p = p->next) {
+      int parent_level = proof_level_lookup(
+        slots, capacity, (unsigned) p->i);
+      if (parent_level == INT_MIN)
+        fatal_error("proof_clause_level: proof is not topologically closed");
+      if (parent_level > max)
+        max = parent_level;
+    }
+    zap_ilist(parents);
+    at = ancestor_id_hash((unsigned) clause->id) & (capacity - 1);
+    while (slots[at].id != 0 && slots[at].id != (unsigned) clause->id)
+      at = (at + 1) & (capacity - 1);
+    if (slots[at].id != 0)
+      fatal_error("proof_clause_level: duplicate clause ID");
+    slots[at].id = (unsigned) clause->id;
+    slots[at].level = max + 1;
+    if (clause == target || clause->id == target->id)
+      result = max + 1;
+  }
+  safe_free(slots);
+  if (result == INT_MIN)
+    fatal_error("proof_clause_level: target is not in proof");
+  return result;
+}
 
 /* DOCUMENTATION
 Return the level of a clause.  Input clauses have level=0, and

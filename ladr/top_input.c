@@ -877,6 +877,24 @@ void read_from_file(FILE *fin, FILE *fout, BOOL echo, int unknown_action)
 		  type == FORMULAS ? "formulas" : "terms");
 	}
       }
+      /* Logical-only checked recipe replay never consults hints.  If the
+         replay prelude appears before a large hints list, release each list
+         immediately instead of retaining all formulas until clausification.
+         The prover repeats this cleanup after input parsing as a fallback
+         when the replay option appears later in the input. */
+      if (type == FORMULAS && str_ident(name, "hints")) {
+        int guidance = str_to_stringparm_id("proof_parent_guidance");
+        int audit = str_to_flag_id("proof_recipe_hint_audit");
+        if (guidance >= 0 && audit >= 0 &&
+            str_ident(stringparm1(guidance), "recipe_replay") &&
+            !flag(audit)) {
+          Plist p;
+          for (p = objects; p != NULL; p = p->next)
+            zap_formula((Formula) p->v);
+          zap_plist(objects);
+          objects = NULL;
+        }
+      }
       /* Find the correct list, and append the objects to it. */
       
       {
