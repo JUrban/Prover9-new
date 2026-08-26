@@ -24,6 +24,7 @@
 #include "hash_target_index.h"
 #include "hash_target_inference.h"
 #include "proof_parent_guide.h"
+#include "proof_recipe_replay.h"
 #include "../ladr/ac_redun.h"
 #include "../ladr/std_options.h"
 #include "../ladr/memory.h"
@@ -75,6 +76,27 @@ static Compact_term_pool Compact_terms = NULL;
 static Hash_target_index Hash_targets = NULL;
 static Hash_target_inference Hash_target_planner = NULL;
 static Proof_parent_guide Proof_parent = NULL;
+
+struct proof_recipe_search_stats {
+  BOOL enabled;
+  unsigned target_nodes;
+  unsigned verified_nodes;
+  unsigned anchored_assumptions;
+  unsigned anchored_goals;
+  unsigned anchored_denials;
+  unsigned primary[PROOF_RECIPE_RESOLVE + 1];
+  unsigned long long rewrites;
+  unsigned long long flips;
+  unsigned long long source_givens;
+  unsigned long long hint_queries;
+  unsigned long long hint_matches;
+  unsigned long long hint_required_failures;
+  unsigned long long digest;
+  unsigned long long verified_body_bytes;
+  double start_seconds;
+};
+
+static struct proof_recipe_search_stats Proof_recipe_stats;
 static BOOL Hash_target_current_pair_covered = FALSE;
 static unsigned long long Compact_term_next_reclaim_serialization = 0;
 static unsigned long long Compact_term_reclaim_cooldown_skips = 0;
@@ -364,8 +386,16 @@ static enum proof_parent_guide_mode proof_parent_guidance_mode(void)
     return PROOF_PARENT_GUIDE_OFF;
   else if (str_ident(stringparm1(Opt->proof_parent_guidance), "shadow"))
     return PROOF_PARENT_GUIDE_SHADOW;
+  else if (str_ident(stringparm1(Opt->proof_parent_guidance),
+                     "recipe_replay"))
+    return PROOF_PARENT_GUIDE_RECIPE_REPLAY;
   else
     return PROOF_PARENT_GUIDE_AUTHORITATIVE;
+}
+
+static BOOL proof_recipe_replay_mode(void)
+{
+  return proof_parent_guidance_mode() == PROOF_PARENT_GUIDE_RECIPE_REPLAY;
 }
 
 static void build_hash_target_planner(void);
@@ -2323,6 +2353,10 @@ Prover_options init_prover_options(void)
   p->back_demod_hints       = init_flag("back_demod_hints",        TRUE);
   p->collect_hint_labels    = init_flag("collect_hint_labels",    FALSE);
   p->hint_match_stats       = init_flag("hint_match_stats",       FALSE);
+  p->proof_recipe_hint_audit =
+    init_flag("proof_recipe_hint_audit", FALSE);
+  p->proof_recipe_require_hint =
+    init_flag("proof_recipe_require_hint", FALSE);
   p->hint_compiled_census   = init_flag("hint_compiled_census",   FALSE);
   p->hint_match_once        = init_flag("hint_match_once",        FALSE);
   p->hint_trace             = init_flag("hint_trace",             FALSE);
@@ -2497,6 +2531,8 @@ Prover_options init_prover_options(void)
   p->demod_step_limit = init_parm("demod_step_limit",   1000,     -1,INT_MAX);
   p->demod_increase_limit = init_parm("demod_increase_limit",1000,-1,INT_MAX);
   p->max_nohints  = init_parm("max_nohints",   -1, -1, INT_MAX);
+  p->proof_recipe_max_nodes =
+    init_parm("proof_recipe_max_nodes", -1, -1, INT_MAX);
   p->degrade_limit = init_parm("degrade_limit",  0, -1, INT_MAX);
   p->para_restr_beg = init_parm("para_restr_beg", INT_MAX, -1, INT_MAX);
   p->para_restr_end = init_parm("para_restr_end",      -1, -1, INT_MAX);
@@ -2723,10 +2759,11 @@ Prover_options init_prover_options(void)
     "fair_unit_paramod");
 
   p->proof_parent_guidance = init_stringparm(
-    "proof_parent_guidance", 3,
+    "proof_parent_guidance", 4,
     "off",
     "shadow",
-    "authoritative");
+    "authoritative",
+    "recipe_replay");
 
   p->inference_frontier = init_stringparm("inference_frontier", 2,
 					  "clauses",
@@ -3393,8 +3430,10 @@ void update_stats(void)
   }
   Stats.disabled_size += Disabled_checkpoint_omitted;
   Stats.hints_size = Glob.hints ? Glob.hints->length : 0;
-  Stats.active_indexed_clauses = Stats.usable_size;
-  Stats.passive_indexed_clauses = discount_mode() ? 0 : Stats.sos_size;
+  Stats.active_indexed_clauses = proof_recipe_replay_mode() ? 0 :
+                                 Stats.usable_size;
+  Stats.passive_indexed_clauses = proof_recipe_replay_mode() ? 0 :
+                                  discount_mode() ? 0 : Stats.sos_size;
   Stats.delayed_demodulators = delayed_demodulator_count();
   Stats.rewrite_debt_current = eager_interreduced_demod_mode() ?
     dense_passive_rewrite_debt() : 0;
@@ -4369,6 +4408,48 @@ static void fprint_hash_inference_gate_stats(FILE *fp)
           construction_estimate, consumer_estimate);
 }
 
+static void fprint_proof_recipe_replay_stats(FILE *fp)
+{
+  double elapsed, rate;
+  if (!Proof_recipe_stats.enabled)
+    return;
+  elapsed = user_seconds() - Proof_recipe_stats.start_seconds;
+  rate = elapsed <= 0.0 ? 0.0 :
+         Proof_recipe_stats.verified_nodes / elapsed;
+  fprintf(fp, "\nChecked proof-recipe replay:\n");
+  fprintf(fp,
+          "  target_nodes=%u, verified_nodes=%u, "
+          "assumptions=%u, goals=%u, denials=%u\n",
+          Proof_recipe_stats.target_nodes,
+          Proof_recipe_stats.verified_nodes,
+          Proof_recipe_stats.anchored_assumptions,
+          Proof_recipe_stats.anchored_goals,
+          Proof_recipe_stats.anchored_denials);
+  fprintf(fp,
+          "  ordinary_search_indexes=not_built, hint_index=not_built\n");
+  fprintf(fp,
+          "  copy=%u, back_rewrite=%u, paramod=%u, hyper=%u, "
+          "resolve=%u, rewrites=%llu, flips=%llu\n",
+          Proof_recipe_stats.primary[PROOF_RECIPE_COPY],
+          Proof_recipe_stats.primary[PROOF_RECIPE_BACK_REWRITE],
+          Proof_recipe_stats.primary[PROOF_RECIPE_PARAMOD],
+          Proof_recipe_stats.primary[PROOF_RECIPE_HYPER],
+          Proof_recipe_stats.primary[PROOF_RECIPE_RESOLVE],
+          Proof_recipe_stats.rewrites, Proof_recipe_stats.flips);
+  fprintf(fp,
+          "  source_givens=%llu, verified_body_bytes=%llu, "
+          "elapsed_seconds=%.3f, nodes_per_second=%.1f\n",
+          Proof_recipe_stats.source_givens,
+          Proof_recipe_stats.verified_body_bytes, elapsed, rate);
+  fprintf(fp,
+          "  hint_queries=%llu, hint_matches=%llu, "
+          "hint_required_failures=%llu, digest=%016llx\n",
+          Proof_recipe_stats.hint_queries,
+          Proof_recipe_stats.hint_matches,
+          Proof_recipe_stats.hint_required_failures,
+          Proof_recipe_stats.digest);
+}
+
 /* PUBLIC */
 void fprint_all_stats(FILE *fp, char *stats_level)
 {
@@ -4402,6 +4483,7 @@ void fprint_all_stats(FILE *fp, char *stats_level)
             Hint_id_lookup_linear_steps, Hint_id_lookup_packed_id_sum);
 
   fprint_hash_inference_gate_stats(fp);
+  fprint_proof_recipe_replay_stats(fp);
   fprint_proof_parent_guide_stats(fp, Proof_parent);
 
   if (str_ident(stats_level, "all")) {
@@ -8147,6 +8229,308 @@ static void finish_terminal_proof_at_safe_point(void)
   Terminal_proof_finalizing = TRUE;
   handle_proof_and_maybe_exit(snapshot_empty);  /* does not return */
   fatal_error("terminal proof finalizer returned");
+}
+
+static Topform proof_recipe_find_assumption_in(Clist list,
+                                                Proof_parent_guide guide,
+                                                unsigned node)
+{
+  Clist_pos p;
+  if (list == NULL)
+    return NULL;
+  for (p = list->first; p != NULL; p = p->next)
+    if (!p->c->is_formula && has_input_just(p->c) &&
+        proof_recipe_replay_anchor_matches(guide, node, p->c))
+      return p->c;
+  return NULL;
+}
+
+static Topform proof_recipe_find_assumption(Proof_parent_guide guide,
+                                             unsigned node)
+{
+  Topform result = proof_recipe_find_assumption_in(
+    Glob.usable, guide, node);
+  if (result == NULL)
+    result = proof_recipe_find_assumption_in(Glob.sos, guide, node);
+  if (result == NULL)
+    result = proof_recipe_find_assumption_in(Glob.demods, guide, node);
+  return result;
+}
+
+static Topform proof_recipe_goal_from_denial(Topform denial)
+{
+  Just justification;
+  if (denial == NULL || denial->is_formula)
+    return NULL;
+  for (justification = denial->justification; justification != NULL;
+       justification = justification->next)
+    if (justification->type == DENY_JUST)
+      return find_clause_by_id((unsigned) justification->u.id);
+  return NULL;
+}
+
+static Topform proof_recipe_find_goal_in(Clist list,
+                                         Proof_parent_guide guide,
+                                         unsigned node)
+{
+  Clist_pos p;
+  if (list == NULL)
+    return NULL;
+  for (p = list->first; p != NULL; p = p->next) {
+    Topform goal = proof_recipe_goal_from_denial(p->c);
+    if (goal != NULL && has_goal_just(goal) &&
+        proof_recipe_replay_goal_anchor_matches(guide, node, goal))
+      return goal;
+  }
+  return NULL;
+}
+
+static Topform proof_recipe_find_goal(Proof_parent_guide guide,
+                                      unsigned node)
+{
+  Topform result = proof_recipe_find_goal_in(Glob.sos, guide, node);
+  if (result == NULL)
+    result = proof_recipe_find_goal_in(Glob.usable, guide, node);
+  return result;
+}
+
+static Topform proof_recipe_find_denial_in(Clist list,
+                                           Proof_parent_guide guide,
+                                           unsigned node, Topform goal)
+{
+  Clist_pos p;
+  if (list == NULL)
+    return NULL;
+  for (p = list->first; p != NULL; p = p->next)
+    if (proof_recipe_goal_from_denial(p->c) == goal &&
+        proof_recipe_replay_anchor_matches(guide, node, p->c))
+      return p->c;
+  return NULL;
+}
+
+static Topform proof_recipe_find_denial(Proof_parent_guide guide,
+                                        unsigned node, Topform goal)
+{
+  Topform result = proof_recipe_find_denial_in(
+    Glob.sos, guide, node, goal);
+  if (result == NULL)
+    result = proof_recipe_find_denial_in(
+      Glob.usable, guide, node, goal);
+  return result;
+}
+
+static unsigned long long proof_recipe_digest_term(
+  unsigned long long hash, Term term)
+{
+  int i;
+  unsigned value = VARIABLE(term) ? (unsigned) VARNUM(term) :
+                                    (unsigned) SYMNUM(term);
+  hash ^= VARIABLE(term) ? UINT64_C(0xff) : UINT64_C(0x01);
+  hash *= UINT64_C(1099511628211);
+  hash ^= value;
+  hash *= UINT64_C(1099511628211);
+  hash ^= (unsigned) ARITY(term);
+  hash *= UINT64_C(1099511628211);
+  for (i = 0; i < ARITY(term); i++)
+    hash = proof_recipe_digest_term(hash, ARG(term, i));
+  return hash;
+}
+
+static unsigned long long proof_recipe_digest_clause(
+  unsigned long long hash, Topform clause)
+{
+  Literals literal;
+  for (literal = clause->literals; literal != NULL;
+       literal = literal->next) {
+    hash ^= literal->sign ? UINT64_C(0x2b) : UINT64_C(0x2d);
+    hash *= UINT64_C(1099511628211);
+    hash = proof_recipe_digest_term(hash, literal->atom);
+  }
+  hash ^= UINT64_C(0xfe);
+  return hash * UINT64_C(1099511628211);
+}
+
+static const char *proof_recipe_stage_name(
+  enum proof_recipe_replay_stage stage)
+{
+  switch (stage) {
+  case PROOF_REPLAY_STAGE_DECODE:  return "decode";
+  case PROOF_REPLAY_STAGE_PARENT:  return "parent";
+  case PROOF_REPLAY_STAGE_PRIMARY: return "primary";
+  case PROOF_REPLAY_STAGE_REWRITE: return "rewrite";
+  case PROOF_REPLAY_STAGE_FLIP:    return "flip";
+  case PROOF_REPLAY_STAGE_BODY:    return "body";
+  default:                         return "unknown";
+  }
+}
+
+/* Execute an already loaded proof DAG without admitting any node to the
+   ordinary search pipeline.  In particular, there is no second round of
+   forward demodulation and no inference/passive/hint index is constructed. */
+static void run_proof_recipe_replay(void)
+{
+  unsigned total = proof_parent_guide_node_count(Proof_parent);
+  int configured_limit = parm(Opt->proof_recipe_max_nodes);
+  unsigned target = configured_limit < 0 ? total :
+                    (unsigned) configured_limit < total ?
+                      (unsigned) configured_limit : total;
+  Topform *verified;
+  unsigned node;
+
+  if (!proof_parent_guide_has_complete_recipes(Proof_parent))
+    fatal_error("recipe_replay requires a recipe on every guide node");
+  if (target == 0) {
+    printf("\n%% Proof recipe prefix completed: 0 of %u nodes verified; "
+           "the terminal empty clause was not requested.\n", total);
+    done_with_search(SOS_EMPTY_EXIT);
+  }
+
+  memset(&Proof_recipe_stats, 0, sizeof(Proof_recipe_stats));
+  Proof_recipe_stats.enabled = TRUE;
+  Proof_recipe_stats.target_nodes = target;
+  Proof_recipe_stats.digest = UINT64_C(1469598103934665603);
+  Proof_recipe_stats.start_seconds = user_seconds();
+  verified = safe_calloc(target, sizeof(*verified));
+
+  if (!flag(Opt->quiet))
+    printf("\n%% Starting checked proof-recipe replay: %u of %u nodes.\n",
+           target, total);
+
+  for (node = 1; node <= target; node++) {
+    enum proof_recipe_rule rule;
+    BOOL source_given;
+    unsigned rewrites, flips;
+    Topform result = NULL;
+
+    if (!proof_parent_guide_recipe_info(
+          Proof_parent, node, &rule, &source_given, &rewrites, &flips)) {
+      safe_free(verified);
+      fatal_error("cannot inspect proof recipe metadata");
+    }
+
+    if (rule == PROOF_RECIPE_ASSUMPTION) {
+      result = proof_recipe_find_assumption(Proof_parent, node);
+      if (result == NULL) {
+        fprintf(stderr,
+                "Proof recipe node %u: no exact assumption exists in the "
+                "actual input.\n", node);
+        safe_free(verified);
+        fatal_error("proof recipe root anchoring failed");
+      }
+      if (result->id == 0)
+        assign_clause_id(result);
+      Proof_recipe_stats.anchored_assumptions++;
+    }
+    else if (rule == PROOF_RECIPE_GOAL) {
+      result = proof_recipe_find_goal(Proof_parent, node);
+      if (result == NULL) {
+        fprintf(stderr,
+                "Proof recipe node %u: no exact clausal goal exists in the "
+                "actual input.\n", node);
+        safe_free(verified);
+        fatal_error("proof recipe goal anchoring failed");
+      }
+      Proof_recipe_stats.anchored_goals++;
+    }
+    else if (rule == PROOF_RECIPE_DENY) {
+      struct proof_recipe_decoded recipe;
+      const char *error = NULL;
+      if (!proof_parent_guide_decode_recipe(
+            Proof_parent, node, &recipe, &error)) {
+        fprintf(stderr, "Proof recipe node %u: %s.\n", node,
+                error == NULL ? "cannot decode denial" : error);
+        safe_free(verified);
+        fatal_error("proof recipe denial decoding failed");
+      }
+      result = proof_recipe_find_denial(
+        Proof_parent, node, verified[recipe.unary_parent - 1]);
+      proof_recipe_decoded_destroy(&recipe);
+      if (result == NULL) {
+        fprintf(stderr,
+                "Proof recipe node %u: the recorded denial is not an exact "
+                "denial generated from the anchored goal.\n", node);
+        safe_free(verified);
+        fatal_error("proof recipe denial anchoring failed");
+      }
+      if (result->id == 0)
+        assign_clause_id(result);
+      Proof_recipe_stats.anchored_denials++;
+    }
+    else {
+      struct proof_recipe_replay_diagnostic diagnostic;
+      enum proof_recipe_replay_result replay = proof_recipe_replay_compute(
+        Proof_parent, node, verified, &result, &diagnostic);
+      if (replay != PROOF_REPLAY_VERIFIED || result == NULL) {
+        if (diagnostic.secondary == 0)
+          fprintf(stderr,
+                  "Proof recipe node %u failed at %s: %s.\n",
+                  node, proof_recipe_stage_name(diagnostic.stage),
+                  diagnostic.message == NULL ? "replay mismatch" :
+                                               diagnostic.message);
+        else
+          fprintf(stderr,
+                  "Proof recipe node %u failed at %s secondary #%u: %s.\n",
+                  node, proof_recipe_stage_name(diagnostic.stage),
+                  diagnostic.secondary,
+                  diagnostic.message == NULL ? "replay mismatch" :
+                                               diagnostic.message);
+        safe_free(verified);
+        fatal_error("checked proof recipe diverged");
+      }
+      if (node != target || number_of_literals(result->literals) != 0) {
+        assign_clause_id(result);
+        clause_store_append(Glob.disabled, result);
+      }
+    }
+
+    verified[node - 1] = result;
+    Proof_recipe_stats.verified_nodes++;
+    Proof_recipe_stats.primary[rule]++;
+    Proof_recipe_stats.rewrites += rewrites;
+    Proof_recipe_stats.flips += flips;
+    if (source_given)
+      Proof_recipe_stats.source_givens++;
+    Proof_recipe_stats.verified_body_bytes +=
+      clause_body_storage_bytes(proof_parent_guide_node_body(
+        Proof_parent, node));
+    Proof_recipe_stats.digest = proof_recipe_digest_clause(
+      Proof_recipe_stats.digest,
+      proof_parent_guide_node_body(Proof_parent, node));
+
+    if (!flag(Opt->quiet) && node % 10000 == 0) {
+      double elapsed = user_seconds() - Proof_recipe_stats.start_seconds;
+      printf("%% Proof recipe progress: %u/%u nodes, %.1f nodes/sec.\n",
+             node, target, elapsed <= 0.0 ? 0.0 : node / elapsed);
+      fflush(stdout);
+    }
+  }
+
+  if (target < total) {
+    printf("\n%% Proof recipe prefix completed: %u of %u nodes verified; "
+           "the terminal empty clause was not requested.\n", target, total);
+    safe_free(verified);
+    done_with_search(SOS_EMPTY_EXIT);
+  }
+
+  if (number_of_literals(verified[target - 1]->literals) != 0) {
+    safe_free(verified);
+    fatal_error("complete proof recipe does not end with an empty clause");
+  }
+
+  {
+    Topform empty = verified[target - 1];
+    safe_free(verified);
+    /* Recipe replay has no large live search indexes to release before proof
+       printing.  Emit the stable report directly instead of staging it in
+       tmpfile(); this also keeps the verifier usable when /tmp is full. */
+    fprint_all_stats(stdout, Opt ? stringparm1(Opt->stats) : "lots");
+    Terminal_stats_frozen = TRUE;
+    /* No hint index was built in logical-only replay.  The proof snapshot
+       must therefore not try to release one as part of terminal handling. */
+    Terminal_hint_index_released = TRUE;
+    (void) handle_proof_and_maybe_exit(empty);
+    finish_terminal_proof_at_safe_point();  /* does not return */
+  }
 }
 
 /*************
@@ -17435,6 +17819,7 @@ Prover_results search(Prover_input p)
     Current_inference_source = INFER_SOURCE_OTHER;
     memset(&Hash_gate_stats, 0, sizeof(Hash_gate_stats));
     memset(&Hash_gate_prediction, 0, sizeof(Hash_gate_prediction));
+    memset(&Proof_recipe_stats, 0, sizeof(Proof_recipe_stats));
     reset_paramodulation_candidate_stats();
     set_paramodulation_candidate_proc(NULL, 0);
     set_paramodulation_materialized_proc(NULL);
@@ -17508,9 +17893,10 @@ Prover_results search(Prover_input p)
     if (proof_parent_guidance_mode() != PROOF_PARENT_GUIDE_OFF) {
       if (p->proof_parent_guide == NULL)
         fatal_error("proof_parent_guidance requires formulas(proof_parent_guide)");
-      if (discount_mode())
+      if (!proof_recipe_replay_mode() && discount_mode())
         fatal_error("proof_parent_guidance currently requires search_loop=otter");
-      if (!str_ident(stringparm1(Opt->inference_frontier), "clauses"))
+      if (!proof_recipe_replay_mode() &&
+          !str_ident(stringparm1(Opt->inference_frontier), "clauses"))
         fatal_error("proof_parent_guidance currently requires inference_frontier=clauses");
       if (p->resume_dir != NULL)
         fatal_error("proof_parent_guidance does not yet support checkpoint resume");
@@ -17523,6 +17909,19 @@ Prover_results search(Prover_input p)
                 "intentionally incomplete proof-confirmation mode; "
                 "unrecorded paramodulation and hyperresolution parent "
                 "combinations are omitted.\n");
+      if (proof_recipe_replay_mode()) {
+        if (parm(Opt->cores) != 0)
+          fatal_error("proof_parent_guidance=recipe_replay requires assign(cores,0)");
+        if (flag(Opt->proof_recipe_require_hint) &&
+            !flag(Opt->proof_recipe_hint_audit))
+          fatal_error("proof_recipe_require_hint requires proof_recipe_hint_audit");
+        if (flag(Opt->proof_recipe_hint_audit))
+          fatal_error("proof_recipe_hint_audit is not enabled in this implementation checkpoint");
+        if (!flag(Opt->quiet))
+          fprintf(stderr,
+                  "NOTE: recipe_replay bypasses the ordinary search loop, "
+                  "passive stores, and compact inference indexes.\n");
+      }
     }
     if (flag(Opt->collective_promising_scheduler) &&
         !str_ident(stringparm1(Opt->inference_frontier), "collective"))
@@ -17863,7 +18262,8 @@ Prover_results search(Prover_input p)
                           progress_count(Stats.usable_size),
                           (int) megs_malloced());
 
-      if (flag(p->options->predicate_elim) && clist_empty(Glob.usable)) {
+      if (!proof_recipe_replay_mode() &&
+          flag(p->options->predicate_elim) && clist_empty(Glob.usable)) {
         if (flag(Opt->fast_pred_elim))
           set_pred_elim_timeout(3);  /* 3s limit */
         if (!flag(Opt->quiet))
@@ -17899,6 +18299,9 @@ Prover_results search(Prover_input p)
 
       Proof_parent = proof_parent_guide_build(
         p->proof_parent_guide, proof_parent_guidance_mode());
+
+      if (proof_recipe_replay_mode())
+        run_proof_recipe_replay();  /* returns only by longjmp */
 
       if (Progress_callback)
         Progress_callback(STAGE_INDEX_INITIAL, progress_count(Stats.given),

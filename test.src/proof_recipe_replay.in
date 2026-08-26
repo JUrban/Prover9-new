@@ -1,0 +1,51 @@
+clear(auto).
+clear(auto_setup).
+clear(auto_limits).
+clear(auto_denials).
+clear(auto_inference).
+clear(auto_process).
+
+assign(max_seconds,10).
+assign(max_proofs,1).
+assign(stats,all).
+assign(proof_parent_guidance,recipe_replay).
+assign(proof_recipe_max_nodes,-1).
+clear(proof_recipe_hint_audit).
+clear(proof_recipe_require_hint).
+
+clear(predicate_elim).
+clear(back_demod).
+clear(back_subsume).
+clear(unit_deletion).
+clear(print_initial_clauses).
+clear(echo_input).
+
+formulas(proof_parent_guide).
+  (a = b)
+    # proof_parent_node(1)
+    # proof_parent_recipe("AQEAAA").
+  (p(a))
+    # proof_parent_node(2)
+    # proof_parent_recipe("AQEAAA").
+  (p(b))
+    # proof_parent_node(3)
+    # proof_parent_recipe("AQIAAA").
+  (-p(b))
+    # proof_parent_node(4)
+    # proof_parent_recipe("AQMAAwA").
+  (p(b))
+    # proof_parent_node(5)
+    # proof_parent_recipe("AQYAAQICAgICAgIA").
+  ($F)
+    # proof_parent_node(6)
+    # proof_parent_recipe("AQgABQECBAIA").
+end_of_list.
+
+formulas(assumptions).
+  a = b.
+  p(a).
+end_of_list.
+
+formulas(goals).
+  p(b).
+end_of_list.

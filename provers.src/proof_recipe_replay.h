@@ -43,4 +43,11 @@ enum proof_recipe_replay_result proof_recipe_replay_compute(
 BOOL proof_recipe_replay_anchor_matches(Proof_parent_guide guide,
                                         unsigned node, Topform actual);
 
+/* GOAL is the original, positively stated problem goal retained by the
+   clause-ID table.  The first implementation intentionally accepts only a
+   clausal goal: nonclausal roots need a versioned formula representation in
+   the guide rather than trusting a clausified guide body. */
+BOOL proof_recipe_replay_goal_anchor_matches(Proof_parent_guide guide,
+                                             unsigned node, Topform goal);
+
 #endif

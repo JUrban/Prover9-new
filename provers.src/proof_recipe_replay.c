@@ -1,6 +1,7 @@
 #include "proof_recipe_replay.h"
 
 #include "../ladr/clause_misc.h"
+#include "../ladr/clausify.h"
 #include "../ladr/demod.h"
 #include "../ladr/just.h"
 #include "../ladr/paramod.h"
@@ -399,5 +400,22 @@ BOOL proof_recipe_replay_anchor_matches(Proof_parent_guide guide,
   renumber_variables(copy, MAX_VARS);
   matches = clause_ident(expected->literals, copy->literals);
   delete_clause(copy);
+  return matches;
+}
+
+BOOL proof_recipe_replay_goal_anchor_matches(Proof_parent_guide guide,
+                                             unsigned node, Topform goal)
+{
+  Topform clause;
+  BOOL matches;
+  if (goal == NULL || !goal->is_formula || goal->formula == NULL ||
+      !clausal_formula(goal->formula))
+    return FALSE;
+  clause = get_topform();
+  clause->literals = formula_to_literals(goal->formula);
+  upward_clause_links(clause);
+  clause_set_variables(clause, MAX_VARS);
+  matches = proof_recipe_replay_anchor_matches(guide, node, clause);
+  delete_clause(clause);
   return matches;
 }

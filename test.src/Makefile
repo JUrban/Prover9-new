@@ -226,6 +226,7 @@ proof-parent-guide-test: proof_parent_guide_test proof_recipe_replay_test
 	./proof_parent_guide_test
 	./proof_recipe_replay_test
 	./proof_parent_guidance_test.sh
+	sh ./proof_recipe_replay_integration_test.sh
 
 ancestor-store-scale: ancestor_store_scale_test
 	./ancestor_store_scale_test

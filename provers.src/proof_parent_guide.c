@@ -17,6 +17,8 @@ struct guide_node {
   enum proof_recipe_rule recipe_rule;
   BOOL source_given;
   BOOL has_recipe;
+  unsigned rewrite_count;
+  unsigned flip_count;
   unsigned *paramod_neighbors;
   unsigned paramod_count;
   unsigned paramod_capacity;
@@ -581,10 +583,11 @@ static void load_node_recipe(Proof_parent_guide guide, unsigned node,
 {
   char *encoded = get_string_attribute(
     clause->attributes, recipe_attribute, 1);
+  char *unquoted = NULL;
   char *duplicate = get_string_attribute(
     clause->attributes, recipe_attribute, 2);
   unsigned char *decoded = NULL;
-  unsigned decoded_size = 0;
+  unsigned decoded_size = 0, i;
   struct proof_recipe_decoded recipe;
   const char *error = NULL;
   struct guide_node *guide_node = &guide->nodes[node];
@@ -594,11 +597,21 @@ static void load_node_recipe(Proof_parent_guide guide, unsigned node,
     fatal_error("proof-parent guide node has multiple recipe attributes");
   if (guide_node->source_id != (uint64_t) node + 1)
     fatal_error("proof recipe nodes must use dense ordered IDs");
+  {
+    size_t length = strlen(encoded);
+    if (length >= 2 && encoded[0] == '"' && encoded[length - 1] == '"') {
+      unquoted = safe_malloc(length - 1);
+      memcpy(unquoted, encoded + 1, length - 2);
+      unquoted[length - 2] = '\0';
+      encoded = unquoted;
+    }
+  }
   if (!decode_recipe_base64(encoded, &decoded, &decoded_size, &error) ||
       !decode_recipe_data(decoded, decoded_size, &recipe, &error) ||
       !validate_recipe_dependencies(&recipe, node, &error)) {
     fprintf(stderr, "Proof recipe node %u: %s\n", node + 1,
             error == NULL ? "malformed recipe" : error);
+    safe_free(unquoted);
     safe_free(decoded);
     fatal_error("invalid proof recipe");
   }
@@ -613,12 +626,26 @@ static void load_node_recipe(Proof_parent_guide guide, unsigned node,
   guide_node->recipe_rule = recipe.rule;
   guide_node->source_given = recipe.source_given;
   guide_node->has_recipe = TRUE;
+  for (i = 0; i < recipe.secondary_count; i++) {
+    if (recipe.secondary[i].rule == PROOF_RECIPE_REWRITE)
+      guide_node->rewrite_count++;
+    else if (recipe.secondary[i].rule == PROOF_RECIPE_FLIP)
+      guide_node->flip_count++;
+  }
+  if (guide->mode == PROOF_PARENT_GUIDE_RECIPE_REPLAY) {
+    if (recipe.rule == PROOF_RECIPE_PARAMOD)
+      guide->stats.paramod_steps++;
+    else if (recipe.rule == PROOF_RECIPE_HYPER)
+      guide->stats.hyper_steps++;
+    guide->stats.rewrite_references += guide_node->rewrite_count;
+  }
   memcpy(guide->recipe_arena + guide->recipe_arena_size,
          decoded, decoded_size);
   guide->recipe_arena_size += decoded_size;
   guide->stats.recipe_nodes++;
   guide->stats.recipe_bytes += decoded_size;
   proof_recipe_decoded_destroy(&recipe);
+  safe_free(unquoted);
   safe_free(decoded);
 }
 
@@ -776,14 +803,16 @@ Proof_parent_guide proof_parent_guide_build(
     (unsigned long long) guide->node_count * 2);
   guide->body_buckets = safe_calloc(
     guide->body_bucket_count, sizeof(*guide->body_buckets));
-  guide->source_capacity = next_power_of_two(
-    (unsigned long long) guide->node_count * 2);
-  guide->source_slots = safe_calloc(
-    guide->source_capacity, sizeof(*guide->source_slots));
-  guide->runtime_capacity = next_power_of_two(
-    (unsigned long long) guide->node_count * 2);
-  guide->runtime_buckets = safe_calloc(
-    guide->runtime_capacity, sizeof(*guide->runtime_buckets));
+  guide->source_capacity = mode == PROOF_PARENT_GUIDE_RECIPE_REPLAY ? 0 :
+    next_power_of_two((unsigned long long) guide->node_count * 2);
+  if (mode != PROOF_PARENT_GUIDE_RECIPE_REPLAY) {
+    guide->source_slots = safe_calloc(
+      guide->source_capacity, sizeof(*guide->source_slots));
+    guide->runtime_capacity = next_power_of_two(
+      (unsigned long long) guide->node_count * 2);
+    guide->runtime_buckets = safe_calloc(
+      guide->runtime_capacity, sizeof(*guide->runtime_buckets));
+  }
 
   for (p = clauses; p != NULL; p = p->next, at++) {
     Topform clause = p->v;
@@ -800,7 +829,8 @@ Proof_parent_guide proof_parent_guide_build(
         get_int_attribute(clause->attributes, node_attribute, 2) != INT_MAX)
       fatal_error("proof-parent guide clause must have one positive node ID");
     guide->nodes[at].source_id = (uint64_t) node_id;
-    source_insert(guide, guide->nodes[at].source_id, at);
+    if (mode != PROOF_PARENT_GUIDE_RECIPE_REPLAY)
+      source_insert(guide, guide->nodes[at].source_id, at);
     load_node_recipe(guide, at, clause, recipe_attribute);
     renumber_variables(clause, MAX_VARS);
     guide->stats.guide_body_bytes += clause_body_storage_bytes(clause);
@@ -809,13 +839,16 @@ Proof_parent_guide proof_parent_guide_build(
     if (group == UINT_MAX)
       group = add_body_group(guide, clause, hash);
     guide->nodes[at].body_group = group;
-    append_unsigned(at, &guide->groups[group].nodes,
-                    &guide->groups[group].node_count,
-                    &guide->groups[group].node_capacity);
+    if (mode != PROOF_PARENT_GUIDE_RECIPE_REPLAY)
+      append_unsigned(at, &guide->groups[group].nodes,
+                      &guide->groups[group].node_count,
+                      &guide->groups[group].node_capacity);
   }
 
   at = 0;
-  for (p = clauses; p != NULL; p = p->next, at++) {
+  for (p = clauses;
+       mode != PROOF_PARENT_GUIDE_RECIPE_REPLAY && p != NULL;
+       p = p->next, at++) {
     Topform clause = p->v;
     BOOL para = exists_attribute(clause->attributes, para_attribute);
     BOOL hyper = exists_attribute(clause->attributes, hyper_attribute);
@@ -841,7 +874,8 @@ Proof_parent_guide proof_parent_guide_build(
     }
   }
 
-  for (i = 0; i < guide->node_count; i++) {
+  for (i = 0; mode != PROOF_PARENT_GUIDE_RECIPE_REPLAY &&
+              i < guide->node_count; i++) {
     struct guide_node *node = &guide->nodes[i];
     node->paramod_count = sort_unique_unsigned(
       node->paramod_neighbors, node->paramod_count);
@@ -1086,7 +1120,8 @@ void fprint_proof_parent_guide_stats(FILE *fp, Proof_parent_guide guide)
   refresh_resident_bytes(guide);
   s = &guide->stats;
   mode = guide->mode == PROOF_PARENT_GUIDE_SHADOW ? "shadow" :
-         "authoritative";
+         guide->mode == PROOF_PARENT_GUIDE_RECIPE_REPLAY ?
+           "recipe_replay" : "authoritative";
   fprintf(fp, "\nProof-parent guidance:\n");
   fprintf(fp, "  mode=%s, nodes=%u, unique_bodies=%u, build_seconds=%.2f\n",
           mode, s->nodes, s->body_groups, s->build_seconds);
@@ -1164,6 +1199,29 @@ BOOL proof_parent_guide_decode_recipe(Proof_parent_guide guide,
   return decode_recipe_data(
     guide->recipe_arena + guide_node->recipe_offset,
     guide_node->recipe_size, recipe, error);
+}
+
+BOOL proof_parent_guide_recipe_info(Proof_parent_guide guide, unsigned node,
+                                    enum proof_recipe_rule *rule,
+                                    BOOL *source_given,
+                                    unsigned *rewrites,
+                                    unsigned *flips)
+{
+  struct guide_node *guide_node;
+  if (guide == NULL || node == 0 || node > guide->node_count)
+    return FALSE;
+  guide_node = &guide->nodes[node - 1];
+  if (!guide_node->has_recipe)
+    return FALSE;
+  if (rule != NULL)
+    *rule = guide_node->recipe_rule;
+  if (source_given != NULL)
+    *source_given = guide_node->source_given;
+  if (rewrites != NULL)
+    *rewrites = guide_node->rewrite_count;
+  if (flips != NULL)
+    *flips = guide_node->flip_count;
+  return TRUE;
 }
 
 void proof_parent_guide_destroy(Proof_parent_guide guide)

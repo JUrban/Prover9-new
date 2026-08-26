@@ -89,6 +89,8 @@ struct prover_options {
     back_demod_hints,
     collect_hint_labels,
     hint_match_stats,        // print hint match count stats at end of search
+    proof_recipe_hint_audit, // match verified recipe nodes against current hints
+    proof_recipe_require_hint, // reject nonroot recipe nodes without a hint
     hint_compiled_census,    // profile exact packed-fast candidate rejection
     hint_match_once,         // unindex hint immediately after first match
     hint_trace,              // exact committed-candidate hint tuple
@@ -228,6 +230,7 @@ struct prover_options {
     demod_step_limit,
     demod_increase_limit,
     max_nohints,             // exit after N consecutive givens w/o hint match
+    proof_recipe_max_nodes,  // bounded checked-replay prefix (-1=all)
     degrade_limit,           // hint matcher only if degradation_count <= N
     para_restr_beg,          // restricted paramod: skip if both IDs in range
     para_restr_end,
@@ -329,7 +332,7 @@ struct prover_options {
     hint_index,          // fpa, compact, shallow, packed/hybrid, packed_legacy
     hash_inference_gate, // off, shadow, safe, hit_only
     hash_targeted_inference, // off, shadow_unit_paramod, targeted_only_unit_paramod
-    proof_parent_guidance, // off, shadow, authoritative
+    proof_parent_guidance, // off, shadow, authoritative, recipe_replay
     inference_frontier,  // clauses, collective
     collective_scheduler, // legacy, balanced_hint
     ancestor_store,      // off, memory, mmap, file

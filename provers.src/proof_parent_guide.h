@@ -10,7 +10,8 @@ typedef struct proof_parent_guide *Proof_parent_guide;
 enum proof_parent_guide_mode {
   PROOF_PARENT_GUIDE_OFF,
   PROOF_PARENT_GUIDE_SHADOW,
-  PROOF_PARENT_GUIDE_AUTHORITATIVE
+  PROOF_PARENT_GUIDE_AUTHORITATIVE,
+  PROOF_PARENT_GUIDE_RECIPE_REPLAY
 };
 
 enum proof_parent_rule {
@@ -102,6 +103,12 @@ BOOL proof_parent_guide_decode_recipe(Proof_parent_guide guide,
                                       unsigned node,
                                       struct proof_recipe_decoded *recipe,
                                       const char **error);
+
+BOOL proof_parent_guide_recipe_info(Proof_parent_guide guide, unsigned node,
+                                    enum proof_recipe_rule *rule,
+                                    BOOL *source_given,
+                                    unsigned *rewrites,
+                                    unsigned *flips);
 
 void proof_recipe_decoded_destroy(struct proof_recipe_decoded *recipe);
 
