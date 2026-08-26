@@ -2,6 +2,7 @@
 """Unit tests for utilities/extract_proof_parent_guide.py."""
 
 import importlib.util
+import base64
 import io
 import os
 import sys
@@ -23,7 +24,7 @@ SAMPLE = """\
 1 a = a # label(old_display_label).  [assumption].
 2 b = b.  [assumption].
 3 a = b.  [para(1(a,1),2(a,1,1)),rewrite([1(2)])].
-4 b = a.  [hyper(3,a,2,a,b),rewrite([1(1),2(2)])].
+4 b = a.  [hyper(3,a,2,a),rewrite([1(1),2(2)])].
 ============================== end of proof ==========================
 """
 
@@ -46,6 +47,19 @@ class ExtractProofParentGuideTest(unittest.TestCase):
         self.assertEqual(records[2].rewrite_parents, (1,))
         self.assertEqual(records[3].parents, (3, 2))
         self.assertEqual(records[3].rewrite_parents, (1, 2))
+        self.assertEqual(
+            records[2].primary_data,
+            (
+                MODULE.PositionedParent(1, (1, 1)),
+                MODULE.PositionedParent(2, (1, 1, 1)),
+            ),
+        )
+        self.assertEqual(
+            records[3].primary_data,
+            MODULE.ResolutionRecipe(
+                3, (MODULE.ResolutionClash(1, 2, 1),),
+            ),
+        )
 
     def test_back_rewrite_is_not_mistaken_for_rewrite_list(self):
         record = MODULE.parse_record(
@@ -53,6 +67,13 @@ class ExtractProofParentGuideTest(unittest.TestCase):
         self.assertEqual(record.rule, "back_rewrite")
         self.assertEqual(record.parents, (7,))
         self.assertEqual(record.rewrite_parents, ())
+        self.assertEqual(record.secondary_steps, (MODULE.FlipStep(1),))
+
+    def test_deny_call_is_a_checked_unary_root_step(self):
+        record = MODULE.parse_record("9 -p.  [deny(7)].")
+        self.assertEqual(record.rule, "deny")
+        self.assertEqual(record.parents, (7,))
+        self.assertEqual(record.primary_data, 7)
 
     def test_emits_auxiliary_formula_list_and_labels(self):
         output = io.StringIO()
@@ -65,7 +86,21 @@ class ExtractProofParentGuideTest(unittest.TestCase):
         self.assertIn("proof_parent_para(1)", text)
         self.assertIn("proof_parent_para(2)", text)
         self.assertIn("proof_parent_rewrite(1)", text)
+        recipes = [
+            line.split('"')[1] for line in text.splitlines()
+            if "proof_parent_recipe" in line
+        ]
+        self.assertEqual(len(recipes), 4)
+        raw = base64.urlsafe_b64decode(recipes[2] + "==")
+        self.assertEqual(
+            list(raw),
+            [1, 6, 0, 1, 2, 2, 2, 2, 3, 2, 2, 2, 1, 1, 1, 2, 1],
+        )
         self.assertTrue(text.endswith("end_of_list.\n"))
+
+    def test_rejects_malformed_hyper_recipe(self):
+        with self.assertRaisesRegex(MODULE.GuideError, "must contain a nucleus"):
+            MODULE.parse_record("9 p.  [hyper(3,a,2,a,b)].")
 
     def test_rejects_forward_reference(self):
         broken = SAMPLE.replace("para(1(a,1),2(a,1,1))",

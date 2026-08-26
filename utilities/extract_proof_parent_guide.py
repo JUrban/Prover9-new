@@ -9,6 +9,7 @@ to the logical theory.
 from __future__ import annotations
 
 import argparse
+import base64
 import gzip
 import io
 import os
@@ -21,10 +22,59 @@ from typing import Iterable, TextIO
 PROOF_START = "============================== PROOF "
 PROOF_END = "============================== end of proof"
 CLAUSE_START = re.compile(r"^(\d+)\s+(.*)$")
+GIVEN_CLAUSE = re.compile(r"^given\s+#\d+\s+.*?:\s+(\d+)\s")
 
 
 class GuideError(RuntimeError):
     pass
+
+
+RECIPE_VERSION = 1
+
+RULE_CODES = {
+    "assumption": 1,
+    "goal": 2,
+    "deny": 3,
+    "copy": 4,
+    "back_rewrite": 5,
+    "para": 6,
+    "hyper": 7,
+    "resolve": 8,
+}
+
+SECONDARY_REWRITE = 1
+SECONDARY_FLIP = 2
+
+
+@dataclass(frozen=True)
+class PositionedParent:
+    source_id: int
+    position: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class ResolutionClash:
+    nucleus_literal: int
+    satellite_id: int
+    satellite_literal: int
+
+
+@dataclass(frozen=True)
+class ResolutionRecipe:
+    nucleus_id: int
+    clashes: tuple[ResolutionClash, ...]
+
+
+@dataclass(frozen=True)
+class RewriteStep:
+    source_id: int
+    target: int
+    direction: int
+
+
+@dataclass(frozen=True)
+class FlipStep:
+    literal: int
 
 
 @dataclass
@@ -35,6 +85,9 @@ class ProofRecord:
     rule: str
     parents: tuple[int, ...]
     rewrite_parents: tuple[int, ...]
+    primary_data: object | None
+    secondary_steps: tuple[RewriteStep | FlipStep, ...]
+    source_given: bool = False
 
 
 def open_input(path: str) -> TextIO:
@@ -112,62 +165,132 @@ def leading_id(field: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def parse_primary(justification: str) -> tuple[str, tuple[int, ...]]:
-    for name in ("para", "hyper", "resolve", "back_rewrite", "copy"):
-        args = extract_call(justification, name)
+def parse_literal_designator(field: str) -> int:
+    """Translate Prover9's a/b/... and a(flip) literal notation."""
+    field = field.strip()
+    match = re.fullmatch(r"([A-Za-z]+)(?:\(flip\))?", field)
+    if match is None:
+        raise GuideError(f"malformed literal designator {field!r}")
+    letters = match.group(1).lower()
+    value = 0
+    for letter in letters:
+        if not "a" <= letter <= "z":
+            raise GuideError(f"malformed literal designator {field!r}")
+        value = value * 26 + ord(letter) - ord("a") + 1
+    return -value if field.endswith("(flip)") else value
+
+
+def parse_positioned_parent(field: str) -> PositionedParent:
+    match = re.fullmatch(r"(\d+)\((.*)\)", field.strip())
+    if match is None:
+        raise GuideError(f"malformed positioned proof parent {field!r}")
+    position_fields = split_top_level(match.group(2))
+    if not position_fields:
+        raise GuideError(f"empty proof position in {field!r}")
+    position = [parse_literal_designator(position_fields[0])]
+    for item in position_fields[1:]:
+        if not re.fullmatch(r"\d+", item):
+            raise GuideError(f"malformed proof position component {item!r}")
+        value = int(item)
+        if value <= 0:
+            raise GuideError(f"nonpositive proof position component {item!r}")
+        position.append(value)
+    return PositionedParent(int(match.group(1)), tuple(position))
+
+
+def parse_resolution(name: str, args: str) -> ResolutionRecipe:
+    fields = split_top_level(args)
+    if len(fields) < 4 or (len(fields) - 1) % 3 != 0:
+        raise GuideError(
+            f"{name} must contain a nucleus followed by literal/"
+            f"satellite/literal triples: {args}"
+        )
+    if not re.fullmatch(r"\d+", fields[0]):
+        raise GuideError(f"{name} has a malformed nucleus ID: {fields[0]!r}")
+    clashes: list[ResolutionClash] = []
+    for at in range(1, len(fields), 3):
+        if not re.fullmatch(r"\d+", fields[at + 1]):
+            raise GuideError(
+                f"{name} has a malformed satellite ID: {fields[at + 1]!r}"
+            )
+        clashes.append(ResolutionClash(
+            parse_literal_designator(fields[at]),
+            int(fields[at + 1]),
+            parse_literal_designator(fields[at + 2]),
+        ))
+    return ResolutionRecipe(int(fields[0]), tuple(clashes))
+
+
+def parse_primary(
+    justification: str,
+) -> tuple[str, tuple[int, ...], object | None]:
+    fields = split_top_level(justification)
+    if not fields:
+        return "other", (), None
+    primary = fields[0]
+
+    for name in ("para", "hyper", "resolve", "back_rewrite", "copy", "deny"):
+        args = extract_call(primary, name)
         if args is None:
             continue
-        fields = split_top_level(args)
         if name == "para":
-            parents = tuple(
-                parent for parent in (leading_id(field) for field in fields)
-                if parent is not None
-            )
-            if len(parents) != 2:
+            parent_fields = split_top_level(args)
+            if len(parent_fields) != 2:
                 raise GuideError(
                     f"paramodulation does not have two parents: {justification}"
                 )
-        elif name in ("hyper", "resolve"):
-            # Hyper/resolve output alternates source clause IDs with literal
-            # designators.  Only fields that are plain decimal integers are
-            # proof parents.
-            parents = tuple(
-                int(field) for field in fields if re.fullmatch(r"\d+", field)
+            positioned = tuple(
+                parse_positioned_parent(field) for field in parent_fields
             )
-            if len(parents) < 2:
-                raise GuideError(
-                    f"{name} does not have at least two parents: {justification}"
-                )
-        else:
-            parent = leading_id(fields[0]) if fields else None
-            if parent is None:
-                raise GuideError(f"{name} has no parent: {justification}")
-            parents = (parent,)
-        return name, parents
-
-    for name in ("assumption", "goal", "deny"):
-        if re.search(r"(?:^|,)\s*" + re.escape(name) + r"(?:\]|,|$)",
-                     justification):
-            return name, ()
-    return "other", ()
-
-
-def parse_rewrites(justification: str) -> tuple[int, ...]:
-    args = extract_call(justification, "rewrite")
-    if args is None:
-        return ()
-    args = args.strip()
-    if not (args.startswith("[") and args.endswith("]")):
-        raise GuideError(f"malformed rewrite list: {justification}")
-    parents: list[int] = []
-    for field in split_top_level(args[1:-1]):
-        if not field:
-            continue
-        parent = leading_id(field)
+            return name, tuple(parent.source_id for parent in positioned), positioned
+        if name in ("hyper", "resolve"):
+            resolution = parse_resolution(name, args)
+            parents = (resolution.nucleus_id,) + tuple(
+                clash.satellite_id for clash in resolution.clashes
+            )
+            return name, parents, resolution
+        parent_fields = split_top_level(args)
+        parent = leading_id(parent_fields[0]) if parent_fields else None
         if parent is None:
-            raise GuideError(f"malformed rewrite parent {field!r}")
-        parents.append(parent)
-    return tuple(parents)
+            raise GuideError(f"{name} has no parent: {justification}")
+        return name, (parent,), parent
+
+    for name in ("assumption", "goal"):
+        if primary.strip() == name:
+            return name, (), None
+    return "other", (), None
+
+
+def parse_secondary(justification: str) -> tuple[RewriteStep | FlipStep, ...]:
+    fields = split_top_level(justification)
+    steps: list[RewriteStep | FlipStep] = []
+    for field in fields[1:]:
+        rewrite_args = extract_call(field, "rewrite")
+        if rewrite_args is not None:
+            rewrite_args = rewrite_args.strip()
+            if not (rewrite_args.startswith("[") and
+                    rewrite_args.endswith("]")):
+                raise GuideError(f"malformed rewrite list: {justification}")
+            for item in split_top_level(rewrite_args[1:-1]):
+                if not item:
+                    continue
+                match = re.fullmatch(
+                    r"(\d+)(?:\((\d+)(?:,(R))?\))?", item.strip()
+                )
+                if match is None:
+                    raise GuideError(f"malformed rewrite step {item!r}")
+                target = int(match.group(2)) if match.group(2) else 0
+                steps.append(RewriteStep(
+                    int(match.group(1)), target,
+                    2 if match.group(3) else 1,
+                ))
+            continue
+        flip_args = extract_call(field, "flip")
+        if flip_args is not None:
+            steps.append(FlipStep(parse_literal_designator(flip_args)))
+            continue
+        raise GuideError(f"unsupported secondary justification {field!r}")
+    return tuple(steps)
 
 
 def parse_record(text: str) -> ProofRecord:
@@ -181,17 +304,29 @@ def parse_record(text: str) -> ProofRecord:
         raise GuideError(f"cannot separate clause and justification at {source_id}")
     body = rest[:split].strip()
     justification = rest[split + 4:-2].strip()
-    rule, parents = parse_primary(justification)
-    rewrites = parse_rewrites(justification)
-    return ProofRecord(source_id, body, justification, rule, parents, rewrites)
+    rule, parents, primary_data = parse_primary(justification)
+    secondary = parse_secondary(justification)
+    rewrites = tuple(
+        step.source_id for step in secondary if isinstance(step, RewriteStep)
+    )
+    return ProofRecord(
+        source_id, body, justification, rule, parents, rewrites,
+        primary_data, secondary,
+    )
 
 
-def proof_statements(lines: Iterable[str]) -> Iterable[str]:
+def proof_statements(
+    lines: Iterable[str], given_ids: set[int] | None = None,
+) -> Iterable[str]:
     in_proof = False
     current: list[str] = []
     found = False
     for raw_line in lines:
         line = raw_line.rstrip("\r\n")
+        if not in_proof and given_ids is not None:
+            given_match = GIVEN_CLAUSE.match(line)
+            if given_match is not None:
+                given_ids.add(int(given_match.group(1)))
         if line.startswith(PROOF_START):
             if in_proof:
                 raise GuideError("nested PROOF section")
@@ -219,8 +354,12 @@ def proof_statements(lines: Iterable[str]) -> Iterable[str]:
 
 
 def read_records(path: str) -> list[ProofRecord]:
+    given_ids: set[int] = set()
     with open_input(path) as stream:
-        records = [parse_record(statement) for statement in proof_statements(stream)]
+        records = [
+            parse_record(statement)
+            for statement in proof_statements(stream, given_ids)
+        ]
     if not records:
         raise GuideError("the PROOF section contains no clauses")
 
@@ -230,6 +369,7 @@ def read_records(path: str) -> list[ProofRecord]:
             raise GuideError(f"duplicate proof clause ID {record.source_id}")
         indexes[record.source_id] = index
     for index, record in enumerate(records):
+        record.source_given = record.source_id in given_ids
         for parent in record.parents + record.rewrite_parents:
             parent_at = indexes.get(parent)
             if parent_at is None:
@@ -284,6 +424,70 @@ def strip_top_level_attributes(body: str) -> str:
     return body
 
 
+def append_uvarint(output: bytearray, value: int) -> None:
+    if value < 0:
+        raise GuideError(f"cannot encode negative unsigned recipe value {value}")
+    while value >= 0x80:
+        output.append((value & 0x7f) | 0x80)
+        value >>= 7
+    output.append(value)
+
+
+def append_svarint(output: bytearray, value: int) -> None:
+    append_uvarint(output, value * 2 if value >= 0 else (-value * 2) - 1)
+
+
+def append_position(output: bytearray, position: tuple[int, ...]) -> None:
+    append_uvarint(output, len(position))
+    for value in position:
+        append_svarint(output, value)
+
+
+def encode_recipe(record: ProofRecord, dense_id: dict[int, int]) -> str:
+    code = RULE_CODES.get(record.rule)
+    if code is None:
+        raise GuideError(
+            f"proof clause {record.source_id} has unsupported primary rule "
+            f"{record.rule!r}: {record.justification}"
+        )
+    encoded = bytearray((RECIPE_VERSION, code, 1 if record.source_given else 0))
+
+    if record.rule in ("deny", "copy", "back_rewrite"):
+        assert isinstance(record.primary_data, int)
+        append_uvarint(encoded, dense_id[record.primary_data])
+    elif record.rule == "para":
+        assert isinstance(record.primary_data, tuple)
+        if len(record.primary_data) != 2:
+            raise GuideError("internal paramodulation recipe arity error")
+        for parent in record.primary_data:
+            assert isinstance(parent, PositionedParent)
+            append_uvarint(encoded, dense_id[parent.source_id])
+            append_position(encoded, parent.position)
+    elif record.rule in ("hyper", "resolve"):
+        resolution = record.primary_data
+        assert isinstance(resolution, ResolutionRecipe)
+        append_uvarint(encoded, dense_id[resolution.nucleus_id])
+        append_uvarint(encoded, len(resolution.clashes))
+        for clash in resolution.clashes:
+            append_svarint(encoded, clash.nucleus_literal)
+            append_uvarint(encoded, dense_id[clash.satellite_id])
+            append_svarint(encoded, clash.satellite_literal)
+
+    append_uvarint(encoded, len(record.secondary_steps))
+    for step in record.secondary_steps:
+        if isinstance(step, RewriteStep):
+            append_uvarint(encoded, SECONDARY_REWRITE)
+            append_uvarint(encoded, dense_id[step.source_id])
+            append_uvarint(encoded, step.target)
+            append_uvarint(encoded, step.direction)
+        elif isinstance(step, FlipStep):
+            append_uvarint(encoded, SECONDARY_FLIP)
+            append_svarint(encoded, step.literal)
+        else:
+            raise GuideError(f"unknown secondary recipe step {step!r}")
+    return base64.urlsafe_b64encode(encoded).decode("ascii").rstrip("=")
+
+
 def write_guide(records: list[ProofRecord], output: TextIO, source: str) -> None:
     result = counts(records)
     dense_id = {
@@ -299,6 +503,9 @@ def write_guide(records: list[ProofRecord], output: TextIO, source: str) -> None
         # the whole formula and is not moved to the resulting Topform.
         output.write(f"  ({strip_top_level_attributes(record.body)})\n")
         output.write(f"    # proof_parent_node({index + 1})\n")
+        output.write(
+            f'    # proof_parent_recipe("{encode_recipe(record, dense_id)}")\n'
+        )
         # Unary copy/back-rewrite steps need no partner search, and ordinary
         # binary resolution remains deliberately unguided in this first
         # implementation.  Emit only the two expensive guided rule families.
