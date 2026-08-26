@@ -8,6 +8,8 @@ clear(auto_process).
 assign(max_seconds,10).
 assign(max_proofs,1).
 assign(stats,all).
+assign(hint_index,packed_fast).
+assign(hint_conjunction_kb,0).
 assign(proof_parent_guidance,recipe_replay).
 assign(proof_recipe_max_nodes,-1).
 clear(proof_recipe_hint_audit).
