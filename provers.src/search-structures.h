@@ -36,7 +36,8 @@ struct prover_attributes {
     proof_parent_node,
     proof_parent_para,
     proof_parent_hyper,
-    proof_parent_rewrite;
+    proof_parent_rewrite,
+    proof_parent_recipe;
 };
 
 // Options

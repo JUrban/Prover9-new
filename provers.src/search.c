@@ -2976,6 +2976,8 @@ void init_prover_attributes(void)
     "proof_parent_hyper", INT_ATTRIBUTE);
   Att.proof_parent_rewrite = register_attribute(
     "proof_parent_rewrite", INT_ATTRIBUTE);
+  Att.proof_parent_recipe = register_attribute(
+    "proof_parent_recipe", STRING_ATTRIBUTE);
 
   declare_term_attribute_inheritable(Att.answer);
   declare_term_attribute_inheritable(Att.action2);
@@ -3011,6 +3013,8 @@ int get_attrib_id(char *str)
     return Att.proof_parent_hyper;
   else if (str_ident(str, "proof_parent_rewrite"))
     return Att.proof_parent_rewrite;
+  else if (str_ident(str, "proof_parent_recipe"))
+    return Att.proof_parent_recipe;
   else {
     fatal_error("get_attrib_id, unknown attribute string");
     return -1;

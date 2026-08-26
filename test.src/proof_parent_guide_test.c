@@ -7,6 +7,7 @@ static int Node_attribute;
 static int Para_attribute;
 static int Hyper_attribute;
 static int Rewrite_attribute;
+static int Recipe_attribute;
 
 #define CHECK(test, message) do {                                    \
   if (!(test)) {                                                     \
@@ -16,7 +17,8 @@ static int Rewrite_attribute;
 } while (0)
 
 static Topform labeled_clause(const char *body, int node,
-                              int primary_attribute, int first, int second)
+                              int primary_attribute, int first, int second,
+                              const char *recipe)
 {
   Topform clause = parse_clause_from_string((char *) body);
   clause->attributes = set_int_attribute(
@@ -27,6 +29,9 @@ static Topform labeled_clause(const char *body, int node,
     clause->attributes = set_int_attribute(
       clause->attributes, primary_attribute, second);
   }
+  if (recipe != NULL)
+    clause->attributes = set_string_attribute(
+      clause->attributes, Recipe_attribute, (char *) recipe);
   return clause;
 }
 
@@ -52,21 +57,56 @@ int main(void)
   Para_attribute = register_attribute("proof_parent_para", INT_ATTRIBUTE);
   Hyper_attribute = register_attribute("proof_parent_hyper", INT_ATTRIBUTE);
   Rewrite_attribute = register_attribute("proof_parent_rewrite", INT_ATTRIBUTE);
+  Recipe_attribute = register_attribute(
+    "proof_parent_recipe", STRING_ATTRIBUTE);
   (void) Rewrite_attribute;
   clauses = plist_append(clauses, labeled_clause(
-    "p(x).", 1, -1, 0, 0));
+    "p(x).", 1, -1, 0, 0, "AQEAAA"));
   clauses = plist_append(clauses, labeled_clause(
-    "q(x).", 2, -1, 0, 0));
+    "q(x).", 2, -1, 0, 0, "AQEAAA"));
   clauses = plist_append(clauses, labeled_clause(
-    "result(x).", 3, Para_attribute, 1, 2));
+    "result(x).", 3, Para_attribute, 1, 2,
+    "AQYAAQICAgIDAgICAA"));
   /* A repeated body must share its exact-body directory entry. */
   clauses = plist_append(clauses, labeled_clause(
-    "p(y).", 4, -1, 0, 0));
+    "p(y).", 4, -1, 0, 0, "AQEAAA"));
   clauses = plist_append(clauses, labeled_clause(
-    "hyper_result(x).", 5, Hyper_attribute, 2, 3));
+    "hyper_result(x).", 5, Hyper_attribute, 2, 3,
+    "AQcAAgECAwIA"));
+  clauses = plist_append(clauses, labeled_clause(
+    "rewritten(x) = x.", 6, -1, 0, 0,
+    "AQQABAIBAQICAgI"));
 
   guide = proof_parent_guide_build(
     clauses, PROOF_PARENT_GUIDE_AUTHORITATIVE);
+  CHECK(proof_parent_guide_has_complete_recipes(guide),
+        "all guide recipes are decoded");
+  {
+    struct proof_recipe_decoded recipe;
+    const char *error = NULL;
+    CHECK(proof_parent_guide_decode_recipe(guide, 3, &recipe, &error),
+          "paramodulation recipe can be decoded on demand");
+    CHECK(error == NULL && recipe.rule == PROOF_RECIPE_PARAMOD,
+          "decoded recipe preserves its primary rule");
+    CHECK(recipe.paramod[0].node == 1 &&
+          recipe.paramod[0].position.count == 2 &&
+          recipe.paramod[1].node == 2 &&
+          recipe.paramod[1].position.count == 3,
+          "decoded recipe preserves parents and exact positions");
+    proof_recipe_decoded_destroy(&recipe);
+    CHECK(proof_parent_guide_decode_recipe(guide, 6, &recipe, &error),
+          "copy/rewrite/flip recipe can be decoded on demand");
+    CHECK(recipe.rule == PROOF_RECIPE_COPY && recipe.unary_parent == 4 &&
+          recipe.secondary_count == 2 &&
+          recipe.secondary[0].rule == PROOF_RECIPE_REWRITE &&
+          recipe.secondary[0].parent_node == 1 &&
+          recipe.secondary[0].target == 2 &&
+          recipe.secondary[0].direction == 2 &&
+          recipe.secondary[1].rule == PROOF_RECIPE_FLIP &&
+          recipe.secondary[1].literal == 1,
+          "decoded recipe preserves ordered secondary operations");
+    proof_recipe_decoded_destroy(&recipe);
+  }
   a = runtime_clause("p(z).", 10);
   b1 = runtime_clause("q(z).", 11);
   b2 = runtime_clause("q(w).", 14);

@@ -12,6 +12,11 @@
 struct guide_node {
   uint64_t source_id;
   unsigned body_group;
+  unsigned recipe_offset;
+  unsigned recipe_size;
+  enum proof_recipe_rule recipe_rule;
+  BOOL source_given;
+  BOOL has_recipe;
   unsigned *paramod_neighbors;
   unsigned paramod_count;
   unsigned paramod_capacity;
@@ -53,6 +58,8 @@ struct proof_parent_guide_stats {
   unsigned long long paramod_steps;
   unsigned long long hyper_steps;
   unsigned long long rewrite_references;
+  unsigned long long recipe_nodes;
+  unsigned long long recipe_bytes;
   unsigned long long guide_body_bytes;
   unsigned long long paramod_relations;
   unsigned long long hyper_relations;
@@ -96,6 +103,9 @@ struct proof_parent_guide {
   struct runtime_clause *runtime_all;
   Topform *partner_workspace;
   unsigned partner_capacity;
+  unsigned char *recipe_arena;
+  unsigned recipe_arena_size;
+  unsigned recipe_arena_capacity;
   struct proof_parent_guide_stats stats;
 };
 
@@ -151,6 +161,296 @@ static unsigned next_power_of_two(unsigned long long needed)
     capacity *= 2;
   }
   return capacity;
+}
+
+struct recipe_reader {
+  const unsigned char *data;
+  unsigned size;
+  unsigned at;
+  const char *error;
+};
+
+static BOOL recipe_read_byte(struct recipe_reader *reader, unsigned *value)
+{
+  if (reader->at >= reader->size) {
+    reader->error = "truncated recipe";
+    return FALSE;
+  }
+  *value = reader->data[reader->at++];
+  return TRUE;
+}
+
+static BOOL recipe_read_uvarint(struct recipe_reader *reader, unsigned *value)
+{
+  unsigned result = 0, shift = 0, byte;
+  while (shift < 35) {
+    if (!recipe_read_byte(reader, &byte))
+      return FALSE;
+    if (shift == 28 && (byte & 0xf0U) != 0) {
+      reader->error = "recipe integer overflow";
+      return FALSE;
+    }
+    result |= (byte & 0x7fU) << shift;
+    if ((byte & 0x80U) == 0) {
+      *value = result;
+      return TRUE;
+    }
+    shift += 7;
+  }
+  reader->error = "recipe varint is too long";
+  return FALSE;
+}
+
+static BOOL recipe_read_svarint(struct recipe_reader *reader, int *value)
+{
+  unsigned encoded, magnitude;
+  if (!recipe_read_uvarint(reader, &encoded))
+    return FALSE;
+  magnitude = encoded >> 1;
+  if ((encoded & 1U) == 0) {
+    if (magnitude > INT_MAX) {
+      reader->error = "positive recipe integer overflow";
+      return FALSE;
+    }
+    *value = (int) magnitude;
+  }
+  else {
+    if (magnitude >= (unsigned) INT_MAX) {
+      reader->error = "negative recipe integer overflow";
+      return FALSE;
+    }
+    *value = -(int) magnitude - 1;
+  }
+  return TRUE;
+}
+
+void proof_recipe_decoded_destroy(struct proof_recipe_decoded *recipe)
+{
+  unsigned i;
+  if (recipe == NULL)
+    return;
+  for (i = 0; i < 2; i++)
+    safe_free(recipe->paramod[i].position.items);
+  safe_free(recipe->clashes);
+  safe_free(recipe->secondary);
+  memset(recipe, 0, sizeof(*recipe));
+}
+
+static BOOL recipe_read_position(struct recipe_reader *reader,
+                                 struct proof_recipe_position *position)
+{
+  unsigned count, i;
+  if (!recipe_read_uvarint(reader, &count))
+    return FALSE;
+  if (count < 2 || count > reader->size - reader->at) {
+    reader->error = "invalid recipe position length";
+    return FALSE;
+  }
+  position->items = safe_calloc(count, sizeof(*position->items));
+  position->count = count;
+  for (i = 0; i < count; i++) {
+    if (!recipe_read_svarint(reader, &position->items[i]))
+      return FALSE;
+    if (position->items[i] <= 0) {
+      reader->error = "recipe position contains a nonpositive component";
+      return FALSE;
+    }
+  }
+  return TRUE;
+}
+
+static BOOL decode_recipe_data(const unsigned char *data, unsigned size,
+                               struct proof_recipe_decoded *recipe,
+                               const char **error)
+{
+  struct recipe_reader reader = {data, size, 0, NULL};
+  unsigned version = 0, rule = 0, source_given = 0, secondary_count, i;
+  memset(recipe, 0, sizeof(*recipe));
+  if (!recipe_read_byte(&reader, &version))
+    goto failed;
+  if (version != 1) {
+    reader.error = "unsupported recipe version";
+    goto failed;
+  }
+  if (!recipe_read_byte(&reader, &rule) ||
+      rule < PROOF_RECIPE_ASSUMPTION || rule > PROOF_RECIPE_RESOLVE) {
+    reader.error = "unknown recipe primary rule";
+    goto failed;
+  }
+  if (!recipe_read_byte(&reader, &source_given) || source_given > 1) {
+    reader.error = "invalid recipe source-given flag";
+    goto failed;
+  }
+  recipe->rule = (enum proof_recipe_rule) rule;
+  recipe->source_given = source_given != 0;
+
+  switch (recipe->rule) {
+  case PROOF_RECIPE_ASSUMPTION:
+  case PROOF_RECIPE_GOAL:
+    break;
+  case PROOF_RECIPE_DENY:
+  case PROOF_RECIPE_COPY:
+  case PROOF_RECIPE_BACK_REWRITE:
+    if (!recipe_read_uvarint(&reader, &recipe->unary_parent))
+      goto failed;
+    break;
+  case PROOF_RECIPE_PARAMOD:
+    for (i = 0; i < 2; i++)
+      if (!recipe_read_uvarint(&reader, &recipe->paramod[i].node) ||
+          !recipe_read_position(&reader, &recipe->paramod[i].position))
+        goto failed;
+    break;
+  case PROOF_RECIPE_HYPER:
+  case PROOF_RECIPE_RESOLVE:
+    if (!recipe_read_uvarint(&reader, &recipe->nucleus_node) ||
+        !recipe_read_uvarint(&reader, &recipe->clash_count))
+      goto failed;
+    if (recipe->clash_count == 0 ||
+        recipe->clash_count > (reader.size - reader.at) / 3) {
+      reader.error = "invalid recipe resolution arity";
+      goto failed;
+    }
+    recipe->clashes = safe_calloc(
+      recipe->clash_count, sizeof(*recipe->clashes));
+    for (i = 0; i < recipe->clash_count; i++) {
+      if (!recipe_read_svarint(
+            &reader, &recipe->clashes[i].nucleus_literal) ||
+          !recipe_read_uvarint(
+            &reader, &recipe->clashes[i].satellite_node) ||
+          !recipe_read_svarint(
+            &reader, &recipe->clashes[i].satellite_literal))
+        goto failed;
+      if (recipe->clashes[i].nucleus_literal <= 0 ||
+          recipe->clashes[i].satellite_literal == 0) {
+        reader.error = "invalid recipe resolution literal";
+        goto failed;
+      }
+    }
+    break;
+  default:
+    reader.error = "unknown recipe rule";
+    goto failed;
+  }
+
+  if (!recipe_read_uvarint(&reader, &secondary_count))
+    goto failed;
+  if (secondary_count > reader.size - reader.at) {
+    reader.error = "invalid recipe secondary count";
+    goto failed;
+  }
+  recipe->secondary_count = secondary_count;
+  if (secondary_count != 0)
+    recipe->secondary = safe_calloc(
+      secondary_count, sizeof(*recipe->secondary));
+  for (i = 0; i < secondary_count; i++) {
+    unsigned secondary_rule;
+    if (!recipe_read_uvarint(&reader, &secondary_rule))
+      goto failed;
+    if (secondary_rule == PROOF_RECIPE_REWRITE) {
+      struct proof_recipe_secondary *step = &recipe->secondary[i];
+      step->rule = PROOF_RECIPE_REWRITE;
+      if (!recipe_read_uvarint(&reader, &step->parent_node) ||
+          !recipe_read_uvarint(&reader, &step->target) ||
+          !recipe_read_uvarint(&reader, &step->direction))
+        goto failed;
+      if (step->target == 0 ||
+          (step->direction != 1 && step->direction != 2)) {
+        reader.error = "invalid recipe rewrite target or direction";
+        goto failed;
+      }
+    }
+    else if (secondary_rule == PROOF_RECIPE_FLIP) {
+      struct proof_recipe_secondary *step = &recipe->secondary[i];
+      step->rule = PROOF_RECIPE_FLIP;
+      if (!recipe_read_svarint(&reader, &step->literal))
+        goto failed;
+      if (step->literal <= 0) {
+        reader.error = "invalid recipe flip literal";
+        goto failed;
+      }
+    }
+    else {
+      reader.error = "unknown recipe secondary rule";
+      goto failed;
+    }
+  }
+  if (reader.at != reader.size) {
+    reader.error = "trailing bytes in recipe";
+    goto failed;
+  }
+  if (error != NULL)
+    *error = NULL;
+  return TRUE;
+
+failed:
+  if (error != NULL)
+    *error = reader.error == NULL ? "malformed recipe" : reader.error;
+  proof_recipe_decoded_destroy(recipe);
+  return FALSE;
+}
+
+static int recipe_base64_value(char c)
+{
+  if (c >= 'A' && c <= 'Z') return c - 'A';
+  if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+  if (c >= '0' && c <= '9') return c - '0' + 52;
+  if (c == '-') return 62;
+  if (c == '_') return 63;
+  return -1;
+}
+
+static BOOL decode_recipe_base64(const char *text, unsigned char **data,
+                                 unsigned *size, const char **error)
+{
+  size_t length = strlen(text), i;
+  unsigned capacity, out = 0, bits = 0, accumulator = 0;
+  unsigned char *decoded;
+  if (length == 0 || length > UINT_MAX) {
+    *error = "empty or oversized recipe string";
+    return FALSE;
+  }
+  capacity = (unsigned) ((length * 6 + 7) / 8);
+  decoded = safe_malloc(capacity);
+  for (i = 0; i < length; i++) {
+    int value = recipe_base64_value(text[i]);
+    if (value < 0) {
+      safe_free(decoded);
+      *error = "invalid URL-safe base64 recipe character";
+      return FALSE;
+    }
+    accumulator = (accumulator << 6) | (unsigned) value;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      decoded[out++] = (unsigned char) ((accumulator >> bits) & 0xffU);
+    }
+  }
+  if (bits != 0 && (accumulator & ((1U << bits) - 1U)) != 0) {
+    safe_free(decoded);
+    *error = "nonzero recipe base64 padding bits";
+    return FALSE;
+  }
+  *data = decoded;
+  *size = out;
+  *error = NULL;
+  return TRUE;
+}
+
+static void reserve_recipe_arena(Proof_parent_guide guide, unsigned needed)
+{
+  unsigned capacity;
+  if (needed <= guide->recipe_arena_capacity)
+    return;
+  capacity = guide->recipe_arena_capacity == 0 ? 4096 :
+             guide->recipe_arena_capacity;
+  while (capacity < needed) {
+    unsigned next = capacity + (capacity + 1) / 2;
+    if (next <= capacity)
+      fatal_error("proof recipe arena overflow");
+    capacity = next;
+  }
+  guide->recipe_arena = safe_realloc(guide->recipe_arena, capacity);
+  guide->recipe_arena_capacity = capacity;
 }
 
 static unsigned read_parent_attributes(Topform clause, int attribute,
@@ -229,6 +529,97 @@ static unsigned source_lookup(Proof_parent_guide guide, uint64_t id)
   }
   fatal_error("proof-parent guide references a missing parent node");
   return 0;
+}
+
+static BOOL recipe_parent_is_prior(unsigned parent, unsigned node)
+{
+  /* NODE is zero-based and recipe parents are one-based. */
+  return parent != 0 && parent <= node;
+}
+
+static BOOL validate_recipe_dependencies(const struct proof_recipe_decoded *r,
+                                         unsigned node, const char **error)
+{
+  unsigned i;
+  if ((r->rule == PROOF_RECIPE_DENY ||
+       r->rule == PROOF_RECIPE_COPY ||
+       r->rule == PROOF_RECIPE_BACK_REWRITE) &&
+      !recipe_parent_is_prior(r->unary_parent, node)) {
+    *error = "recipe has a non-prior unary parent";
+    return FALSE;
+  }
+  if (r->rule == PROOF_RECIPE_PARAMOD)
+    for (i = 0; i < 2; i++)
+      if (!recipe_parent_is_prior(r->paramod[i].node, node)) {
+        *error = "recipe has a non-prior paramodulation parent";
+        return FALSE;
+      }
+  if (r->rule == PROOF_RECIPE_HYPER ||
+      r->rule == PROOF_RECIPE_RESOLVE) {
+    if (!recipe_parent_is_prior(r->nucleus_node, node)) {
+      *error = "recipe has a non-prior resolution nucleus";
+      return FALSE;
+    }
+    for (i = 0; i < r->clash_count; i++)
+      if (!recipe_parent_is_prior(r->clashes[i].satellite_node, node)) {
+        *error = "recipe has a non-prior resolution satellite";
+        return FALSE;
+      }
+  }
+  for (i = 0; i < r->secondary_count; i++)
+    if (r->secondary[i].rule == PROOF_RECIPE_REWRITE &&
+        !recipe_parent_is_prior(r->secondary[i].parent_node, node)) {
+      *error = "recipe has a non-prior rewrite parent";
+      return FALSE;
+    }
+  *error = NULL;
+  return TRUE;
+}
+
+static void load_node_recipe(Proof_parent_guide guide, unsigned node,
+                             Topform clause, int recipe_attribute)
+{
+  char *encoded = get_string_attribute(
+    clause->attributes, recipe_attribute, 1);
+  char *duplicate = get_string_attribute(
+    clause->attributes, recipe_attribute, 2);
+  unsigned char *decoded = NULL;
+  unsigned decoded_size = 0;
+  struct proof_recipe_decoded recipe;
+  const char *error = NULL;
+  struct guide_node *guide_node = &guide->nodes[node];
+  if (encoded == NULL)
+    return;
+  if (duplicate != NULL)
+    fatal_error("proof-parent guide node has multiple recipe attributes");
+  if (guide_node->source_id != (uint64_t) node + 1)
+    fatal_error("proof recipe nodes must use dense ordered IDs");
+  if (!decode_recipe_base64(encoded, &decoded, &decoded_size, &error) ||
+      !decode_recipe_data(decoded, decoded_size, &recipe, &error) ||
+      !validate_recipe_dependencies(&recipe, node, &error)) {
+    fprintf(stderr, "Proof recipe node %u: %s\n", node + 1,
+            error == NULL ? "malformed recipe" : error);
+    safe_free(decoded);
+    fatal_error("invalid proof recipe");
+  }
+  if (guide->recipe_arena_size > UINT_MAX - decoded_size) {
+    proof_recipe_decoded_destroy(&recipe);
+    safe_free(decoded);
+    fatal_error("proof recipe arena size overflow");
+  }
+  reserve_recipe_arena(guide, guide->recipe_arena_size + decoded_size);
+  guide_node->recipe_offset = guide->recipe_arena_size;
+  guide_node->recipe_size = decoded_size;
+  guide_node->recipe_rule = recipe.rule;
+  guide_node->source_given = recipe.source_given;
+  guide_node->has_recipe = TRUE;
+  memcpy(guide->recipe_arena + guide->recipe_arena_size,
+         decoded, decoded_size);
+  guide->recipe_arena_size += decoded_size;
+  guide->stats.recipe_nodes++;
+  guide->stats.recipe_bytes += decoded_size;
+  proof_recipe_decoded_destroy(&recipe);
+  safe_free(decoded);
 }
 
 static unsigned find_body_group(Proof_parent_guide guide, Topform clause,
@@ -339,7 +730,8 @@ static void refresh_resident_bytes(Proof_parent_guide guide)
     (unsigned long long) guide->runtime_capacity *
       sizeof(*guide->runtime_buckets) +
     (unsigned long long) guide->partner_capacity *
-      sizeof(*guide->partner_workspace);
+      sizeof(*guide->partner_workspace) +
+    (unsigned long long) guide->recipe_arena_capacity;
   struct runtime_clause *runtime;
   for (i = 0; i < guide->node_count; i++)
     bytes += (unsigned long long) guide->nodes[i].paramod_capacity *
@@ -367,6 +759,7 @@ Proof_parent_guide proof_parent_guide_build(
   int para_attribute = attribute_name_to_id("proof_parent_para");
   int hyper_attribute = attribute_name_to_id("proof_parent_hyper");
   int rewrite_attribute = attribute_name_to_id("proof_parent_rewrite");
+  int recipe_attribute = attribute_name_to_id("proof_parent_recipe");
   double started = user_seconds();
   if (mode == PROOF_PARENT_GUIDE_OFF)
     return NULL;
@@ -376,7 +769,7 @@ Proof_parent_guide proof_parent_guide_build(
   if (guide->node_count == 0)
     fatal_error("proof_parent_guidance requires a proof_parent_guide list");
   if (node_attribute < 0 || para_attribute < 0 || hyper_attribute < 0 ||
-      rewrite_attribute < 0)
+      rewrite_attribute < 0 || recipe_attribute < 0)
     fatal_error("proof-parent guide attributes were not registered");
   guide->nodes = safe_calloc(guide->node_count, sizeof(*guide->nodes));
   guide->body_bucket_count = next_power_of_two(
@@ -408,6 +801,7 @@ Proof_parent_guide proof_parent_guide_build(
       fatal_error("proof-parent guide clause must have one positive node ID");
     guide->nodes[at].source_id = (uint64_t) node_id;
     source_insert(guide, guide->nodes[at].source_id, at);
+    load_node_recipe(guide, at, clause, recipe_attribute);
     renumber_variables(clause, MAX_VARS);
     guide->stats.guide_body_bytes += clause_body_storage_bytes(clause);
     hash = clause_hash(clause);
@@ -468,6 +862,8 @@ Proof_parent_guide proof_parent_guide_build(
       clause->attributes, hyper_attribute);
     clause->attributes = delete_attributes(
       clause->attributes, rewrite_attribute);
+    clause->attributes = delete_attributes(
+      clause->attributes, recipe_attribute);
   }
   guide->stats.nodes = guide->node_count;
   guide->stats.body_groups = guide->group_count;
@@ -699,6 +1095,9 @@ void fprint_proof_parent_guide_stats(FILE *fp, Proof_parent_guide guide)
           s->guide_body_bytes, s->resident_bytes, s->resident_peak_bytes);
   fprintf(fp, "  para_steps=%llu, hyper_steps=%llu, rewrite_refs=%llu\n",
           s->paramod_steps, s->hyper_steps, s->rewrite_references);
+  fprintf(fp, "  recipe_nodes=%llu, recipe_bytes=%llu, complete=%s\n",
+          s->recipe_nodes, s->recipe_bytes,
+          s->recipe_nodes == s->nodes ? "yes" : "no");
   fprintf(fp, "  directed_para_relations=%llu, directed_hyper_relations=%llu\n",
           s->paramod_relations, s->hyper_relations);
   fprintf(fp, "  activations=%llu (mapped=%llu, unmapped=%llu), "
@@ -722,6 +1121,51 @@ void fprint_proof_parent_guide_stats(FILE *fp, Proof_parent_guide guide)
           s->authoritative_max_partners);
 }
 
+unsigned proof_parent_guide_node_count(Proof_parent_guide guide)
+{
+  return guide == NULL ? 0 : guide->node_count;
+}
+
+Topform proof_parent_guide_node_body(Proof_parent_guide guide, unsigned node)
+{
+  if (guide == NULL || node == 0 || node > guide->node_count)
+    return NULL;
+  return guide->groups[guide->nodes[node - 1].body_group].pattern;
+}
+
+BOOL proof_parent_guide_has_complete_recipes(Proof_parent_guide guide)
+{
+  return guide != NULL && guide->stats.recipe_nodes == guide->node_count;
+}
+
+BOOL proof_parent_guide_decode_recipe(Proof_parent_guide guide,
+                                      unsigned node,
+                                      struct proof_recipe_decoded *recipe,
+                                      const char **error)
+{
+  struct guide_node *guide_node;
+  if (recipe == NULL) {
+    if (error != NULL)
+      *error = "NULL decoded recipe output";
+    return FALSE;
+  }
+  memset(recipe, 0, sizeof(*recipe));
+  if (guide == NULL || node == 0 || node > guide->node_count) {
+    if (error != NULL)
+      *error = "proof recipe node is out of range";
+    return FALSE;
+  }
+  guide_node = &guide->nodes[node - 1];
+  if (!guide_node->has_recipe) {
+    if (error != NULL)
+      *error = "proof guide node has no recipe";
+    return FALSE;
+  }
+  return decode_recipe_data(
+    guide->recipe_arena + guide_node->recipe_offset,
+    guide_node->recipe_size, recipe, error);
+}
+
 void proof_parent_guide_destroy(Proof_parent_guide guide)
 {
   struct runtime_clause *runtime;
@@ -741,6 +1185,7 @@ void proof_parent_guide_destroy(Proof_parent_guide guide)
     runtime = next;
   }
   safe_free(guide->partner_workspace);
+  safe_free(guide->recipe_arena);
   safe_free(guide->runtime_buckets);
   safe_free(guide->source_slots);
   safe_free(guide->body_buckets);
